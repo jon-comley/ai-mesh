@@ -45,3 +45,12 @@ sanity:
     echo "=== Cleaning up ==="
     kill $COORD_PID $AGENT_PID 2>/dev/null || true
     echo "Sanity check complete."
+
+build-pi:
+    cargo build --release --target aarch64-unknown-linux-gnu -p agent
+
+sanity-pi:
+    @echo "=== Checking Multi-Node Mesh State ==="
+    cargo run -p cli -- nodes
+    @echo "=== Active Diagnostic Monitoring ==="
+    cargo run -p cli -- watch

@@ -5,17 +5,22 @@ use shared::hardware::NodeRole;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tracing::info;
 
 #[tokio::main]
 async fn main() {
-    println!("Agent starting…");
+    tracing_subscriber::fmt().init();
 
     let role = read_role_from_env();
+    let addr = read_coordinator_addr();
 
-    let mut stream = match TcpStream::connect("127.0.0.1:9000").await {
+    info!("Agent starting");
+    info!("Connecting to coordinator at {}", addr);
+
+    let mut stream = match TcpStream::connect(&addr).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Failed to connect to coordinator: {}", e);
+            eprintln!("Failed to connect to coordinator at {}: {}", addr, e);
             return;
         }
     };
@@ -53,4 +58,10 @@ fn read_role_from_env() -> NodeRole {
         Ok("controller") => NodeRole::Controller,
         _ => NodeRole::Compute,
     }
+}
+
+fn read_coordinator_addr() -> String {
+    let ip = std::env::var("COORDINATOR_IP").unwrap_or_else(|_| "127.0.0.1".into());
+    let port = std::env::var("COORDINATOR_PORT").unwrap_or_else(|_| "9000".into());
+    format!("{}:{}", ip, port)
 }
