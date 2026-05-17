@@ -98,3 +98,37 @@ sanity-all:
 
     # Cleanup
     kill $COORD_PID $AGENT_PID || true
+
+# Full cluster sanity test including Pi (coordinator + controller + Pi + nodes check)
+sanity-full:
+    #!/usr/bin/env bash
+    set -e
+
+    # Kill any stale coordinator holding port 9000
+    pkill -f "target/debug/coordinator" || true
+    sleep 0.5
+
+    # Start coordinator
+    cargo run -p coordinator &
+    COORD_PID=$!
+    sleep 1
+
+    # Reset registry
+    just reset || true
+
+    # Start controller agent
+    AGENT_ROLE=controller cargo run -p agent &
+    AGENT_PID=$!
+    sleep 1
+
+    # Ensure SSH is ready then start Pi agent
+    ssh {{pi_user}}@{{pi_host}} "echo Connected to Pi OK"
+    ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent" &
+    sleep 3
+
+    # Validate full cluster
+    cargo run -p cli -- nodes
+
+    # Cleanup
+    kill $COORD_PID $AGENT_PID || true
+    ssh {{pi_user}}@{{pi_host}} "pkill -f agent" || true

@@ -89,7 +89,8 @@ And validates the mesh state.
 | `just run-coordinator` | Start coordinator on port 9000 |
 | `just run-controller` | Start controller agent |
 | `just reset` | Clear all nodes from the live coordinator |
-| `just sanity-all` | Full local cluster validation (recommended) |
+| `just sanity-all` | Local cluster validation (coordinator + controller) |
+| `just sanity-full` | Full cluster validation including Pi (recommended) |
 | `just build-pi` | Cross-compile agent for ARM64 |
 | `just deploy-pi` | Deploy binary to Pi |
 | `just run-pi` | Start compute agent on Pi via SSH |
