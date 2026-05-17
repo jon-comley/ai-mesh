@@ -59,6 +59,26 @@ impl Registry {
         }
     }
 
+    pub fn update_model_status(
+        &mut self,
+        id: &str,
+        model_name: &str,
+        size_mb: u64,
+        state: ModelLifecycleState,
+    ) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.models.insert(
+                model_name.to_string(),
+                ModelAllocation {
+                    model_name: model_name.to_string(),
+                    size_mb,
+                    state,
+                    last_updated: Instant::now(),
+                },
+            );
+        }
+    }
+
     pub fn get(&self, id: &str) -> Option<&NodeRecord> {
         self.nodes.get(id)
     }
@@ -359,5 +379,23 @@ mod tests {
     fn get_node_full_missing_returns_none() {
         let reg = Registry::new();
         assert!(reg.get_node_full("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn update_model_status_tracks_allocations() {
+        let mut reg = Registry::new();
+        let node_id = "node-1";
+        reg.update_heartbeat(make_identity(node_id));
+
+        reg.update_model_status(node_id, "qwen2.5-7b", 4200, ModelLifecycleState::Loading);
+
+        let alloc = reg
+            .nodes
+            .get(node_id)
+            .and_then(|n| n.models.get("qwen2.5-7b"))
+            .expect("model allocation should exist");
+
+        assert_eq!(alloc.size_mb, 4200);
+        assert_eq!(alloc.state, ModelLifecycleState::Loading);
     }
 }
