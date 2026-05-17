@@ -17,6 +17,11 @@ enum Commands {
     Watch,
     Info { id: String },
     ResetRegistry,
+    Load {
+        node_id: String,
+        model_name: String,
+        size_mb: u64,
+    },
 }
 
 #[tokio::main]
@@ -30,5 +35,10 @@ async fn main() {
         Commands::Watch => commands::watch::run().await,
         Commands::Info { id } => commands::info::run(id).await,
         Commands::ResetRegistry => commands::reset::run(base_addr).await,
+        Commands::Load {
+            node_id,
+            model_name,
+            size_mb,
+        } => commands::load::run(node_id, model_name, size_mb).await,
     }
 }
