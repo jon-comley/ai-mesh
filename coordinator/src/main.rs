@@ -2,9 +2,9 @@ use coordinator::coordinator::Coordinator;
 
 #[tokio::main]
 async fn main() {
-    println!("Starting AI Mesh Coordinator on 127.0.0.1:9000...");
+    println!("Starting AI Mesh Coordinator on 0.0.0.0:9000...");
 
-    let coord = Coordinator::new("127.0.0.1:9000");
+    let coord = Coordinator::new("0.0.0.0:9000");
     let _handle = coord.start().await;
 
     println!("Coordinator is running. Press Ctrl+C to stop.");
