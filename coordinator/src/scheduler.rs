@@ -144,4 +144,43 @@ mod tests {
 
         assert!(selected.is_none());
     }
+
+    #[test]
+    fn scheduler_accounts_for_existing_allocations() {
+        let mut registry = Registry::new();
+        let compute = make_identity("compute-1", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+
+        registry.update_capabilities(
+            &compute.id,
+            NodeCapabilities {
+                max_model_size_gb: 2.0, // 2048 MB total capacity
+                ..NodeCapabilities::default()
+            },
+        );
+
+        // Allocate a 1500 MB model already loading or ready
+        registry.update_model_status(&compute.id, "qwen-7b", 1500, ModelLifecycleState::Ready);
+
+        {
+            let scheduler = Scheduler::new(&registry);
+            let selected_large = scheduler.select_node_for_model(1024);
+            assert!(selected_large.is_none(), "Should not fit model exceeding remaining space");
+
+            let selected_small = scheduler.select_node_for_model(512);
+            assert!(selected_small.is_some(), "Should fit within remaining space");
+            assert_eq!(selected_small.unwrap().id, compute.id);
+        }
+
+        // If the model changes to Unloaded, that memory footprint should free right back up
+        registry.update_model_status(&compute.id, "qwen-7b", 1500, ModelLifecycleState::Unloaded);
+
+        let scheduler = Scheduler::new(&registry);
+        let selected_after_unload = scheduler.select_node_for_model(1024);
+        assert!(
+            selected_after_unload.is_some(),
+            "Should fit large model easily after previous model is unloaded"
+        );
+        assert_eq!(selected_after_unload.unwrap().id, compute.id);
+    }
 }
