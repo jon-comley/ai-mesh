@@ -1,8 +1,17 @@
 use shared::{
-    HardwareSpec, NodeCapabilities, NodeIdentity, NodeRecordFull, NodeRecordLite, NodeRole,
+    HardwareSpec, ModelLifecycleState, NodeCapabilities, NodeIdentity, NodeRecordFull,
+    NodeRecordLite, NodeRole,
 };
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+#[derive(Debug, Clone)]
+pub struct ModelAllocation {
+    pub model_name: String,
+    pub size_mb: u64,
+    pub state: ModelLifecycleState,
+    pub last_updated: Instant,
+}
 
 #[derive(Debug, Clone)]
 pub struct NodeRecord {
@@ -10,6 +19,7 @@ pub struct NodeRecord {
     pub hardware: Option<HardwareSpec>,
     pub capabilities: Option<NodeCapabilities>,
     pub last_heartbeat: SystemTime,
+    pub models: HashMap<String, ModelAllocation>,
 }
 
 #[derive(Debug, Default)]
@@ -30,6 +40,7 @@ impl Registry {
             hardware: None,
             capabilities: None,
             last_heartbeat: SystemTime::now(),
+            models: HashMap::new(),
         });
 
         entry.identity = identity;
