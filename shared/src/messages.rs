@@ -1,4 +1,6 @@
-use crate::{HardwareSpec, ModelLifecycleState, NodeCapabilities, NodeIdentity, NodeRole, VersionInfo};
+use crate::{
+    HardwareSpec, ModelLifecycleState, NodeCapabilities, NodeIdentity, NodeRole, VersionInfo,
+};
 use serde::{Deserialize, Serialize};
 
 pub const WIRE_VERSION: u32 = 1;
@@ -306,7 +308,10 @@ mod tests {
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert_eq!(serde_json::from_str::<InferenceRequest>(&json).unwrap(), req);
+        assert_eq!(
+            serde_json::from_str::<InferenceRequest>(&json).unwrap(),
+            req
+        );
     }
 
     #[test]
@@ -335,7 +340,10 @@ mod tests {
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert_eq!(serde_json::from_str::<ModelLoadRequest>(&json).unwrap(), req);
+        assert_eq!(
+            serde_json::from_str::<ModelLoadRequest>(&json).unwrap(),
+            req
+        );
     }
 
     #[test]
@@ -347,7 +355,10 @@ mod tests {
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert_eq!(serde_json::from_str::<ModelUnloadRequest>(&json).unwrap(), req);
+        assert_eq!(
+            serde_json::from_str::<ModelUnloadRequest>(&json).unwrap(),
+            req
+        );
     }
 
     #[test]
@@ -360,6 +371,9 @@ mod tests {
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&rep).unwrap();
-        assert_eq!(serde_json::from_str::<ModelStatusReport>(&json).unwrap(), rep);
+        assert_eq!(
+            serde_json::from_str::<ModelStatusReport>(&json).unwrap(),
+            rep
+        );
     }
 }

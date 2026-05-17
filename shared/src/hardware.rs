@@ -95,7 +95,9 @@ mod tests {
             ModelLifecycleState::Unloaded,
             ModelLifecycleState::Loading,
             ModelLifecycleState::Ready,
-            ModelLifecycleState::Failed { reason: "oom".into() },
+            ModelLifecycleState::Failed {
+                reason: "oom".into(),
+            },
         ];
         for state in cases {
             let json = serde_json::to_string(&state).unwrap();
