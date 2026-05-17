@@ -49,6 +49,15 @@ sanity:
 build-pi:
     cargo build --release --target aarch64-unknown-linux-gnu -p agent
 
+deploy-pi: build-pi
+    scp target/aarch64-unknown-linux-gnu/release/agent pi@192.168.1.11:/home/pi/agent
+
+run-pi:
+    ssh pi@192.168.1.11 "COORDINATOR_IP=192.168.1.12 AGENT_ROLE=compute /home/pi/agent"
+
+run-controller:
+    AGENT_ROLE=controller cargo run -p agent
+
 sanity-pi:
     @echo "=== Checking Multi-Node Mesh State ==="
     cargo run -p cli -- nodes
