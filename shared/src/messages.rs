@@ -76,6 +76,13 @@ pub struct NodeRecordLite {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelAllocationFull {
+    pub model_name: String,
+    pub size_mb: u64,
+    pub state: ModelLifecycleState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeRecordFull {
     pub id: String,
     pub hostname: String,
@@ -84,6 +91,7 @@ pub struct NodeRecordFull {
     pub last_heartbeat_ms: u128,
     pub hardware: Option<HardwareSpec>,
     pub capabilities: Option<NodeCapabilities>,
+    pub models: Vec<ModelAllocationFull>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -162,6 +170,7 @@ mod tests {
             last_heartbeat_ms: 100,
             hardware: None,
             capabilities: None,
+            models: vec![],
         };
 
         let json = serde_json::to_string(&record).unwrap();
@@ -189,6 +198,7 @@ mod tests {
             last_heartbeat_ms: 200,
             hardware: None,
             capabilities: None,
+            models: vec![],
         };
 
         let msg = MeshMessage::NodeInfo(record.clone());
@@ -244,6 +254,7 @@ mod tests {
             last_heartbeat_ms: 500,
             hardware: Some(hw),
             capabilities: Some(caps),
+            models: vec![],
         };
 
         let json = serde_json::to_string(&rec).unwrap();
@@ -281,6 +292,7 @@ mod tests {
             last_heartbeat_ms: 500,
             hardware: None,
             capabilities: None,
+            models: vec![],
         };
 
         let msg = MeshMessage::NodeInfo(rec);

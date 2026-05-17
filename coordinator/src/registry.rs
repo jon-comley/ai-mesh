@@ -1,6 +1,6 @@
 use shared::{
-    HardwareSpec, ModelLifecycleState, NodeCapabilities, NodeIdentity, NodeRecordFull,
-    NodeRecordLite, NodeRole,
+    HardwareSpec, ModelAllocationFull, ModelLifecycleState, NodeCapabilities, NodeIdentity,
+    NodeRecordFull, NodeRecordLite, NodeRole,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
@@ -151,6 +151,15 @@ impl Registry {
             last_heartbeat_ms: age,
             hardware: rec.hardware.clone(),
             capabilities: rec.capabilities.clone(),
+            models: rec
+                .models
+                .values()
+                .map(|m| ModelAllocationFull {
+                    model_name: m.model_name.clone(),
+                    size_mb: m.size_mb,
+                    state: m.state.clone(),
+                })
+                .collect(),
         })
     }
 }

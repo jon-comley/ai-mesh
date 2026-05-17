@@ -96,6 +96,7 @@ pub async fn handle_connection(
                         last_heartbeat_ms: 0,
                         hardware: None,
                         capabilities: None,
+                        models: vec![],
                     }))
                 }
                 // ── Phase 6 model scheduling ──────────────────────────────────────
