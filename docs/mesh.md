@@ -8,7 +8,7 @@ minimal `just` targets required for day‑to‑day development.
 
 The mesh supports heterogeneous nodes, including ARM64 devices such as the
 Raspberry Pi. A Pi runs the same agent binary as other nodes, compiled for
-`aarch64-unknown-linux-gnu`.
+`aarch64-unknown-linux-gnu` and deployed to the Pi user account (`jonno`).
 
 ### Workflow
 
@@ -19,12 +19,12 @@ Raspberry Pi. A Pi runs the same agent binary as other nodes, compiled for
 
 2. **Deploy the agent to the Pi**
    ```
-   just deploy-pi
+   just deploy-pi   # uses pi_user and pi_host variables
    ```
 
 3. **Run the agent on the Pi**
    ```
-   just run-pi
+   just run-pi      # runs /home/jonno/agent with correct COORDINATOR_IP
    ```
 
 4. **Verify the Pi is registered**
@@ -73,7 +73,8 @@ Each node in the mesh runs the agent binary. On startup it:
 5. Enters a periodic heartbeat loop.
 
 The agent binary is compiled for the target platform. For ARM64 devices it is
-cross-compiled on the developer machine and deployed via `just deploy-pi`.
+cross-compiled on the developer machine and deployed via `just deploy-pi`,
+which now uses configurable variables (`pi_user`, `pi_host`).
 
 ### Node Roles
 
@@ -84,6 +85,17 @@ Roles are set via the `AGENT_ROLE` environment variable.
 | `compute` (default) | Full hardware + capability reporting; eligible for inference |
 | `controller` | Sends heartbeats only; manages mesh; never used for inference |
 
+### Pi Deployment Notes (New)
+
+The Pi user account is `jonno`, not `pi`.  
+The agent binary is deployed to:
+
+```
+/home/jonno/agent
+```
+
+SSH access is required for `sanity-all` and `run-pi`.
+
 ## Controller Agent
 
 The controller agent runs on the developer machine and is responsible for
@@ -92,18 +104,24 @@ orchestrating tasks, dispatching work, and interacting with the coordinator.
 ## Minimal Justfile Targets
 
 The project includes a minimal set of `just` targets to support development
-without unnecessary complexity. These targets provide the essential workflow
-for building, deploying, and running agents.
+without unnecessary complexity. These now include configurable variables:
+
+```
+pi_host := "192.168.1.11"
+pi_user := "jonno"
+coordinator_ip := "192.168.1.12"
+coordinator_port := "9000"
+```
 
 ```
 build-pi:
     cargo build --release --target aarch64-unknown-linux-gnu -p agent
 
 deploy-pi: build-pi
-    scp target/aarch64-unknown-linux-gnu/release/agent pi@192.168.1.11:/home/pi/agent
+    scp target/aarch64-unknown-linux-gnu/release/agent {{pi_user}}@{{pi_host}}:/home/{{pi_user}}/agent
 
 run-pi:
-    ssh pi@192.168.1.11 "COORDINATOR_IP=192.168.1.12 AGENT_ROLE=compute /home/pi/agent"
+    ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent"
 
 sanity-pi:
     cargo run -p cli -- nodes
@@ -117,3 +135,21 @@ run-controller:
 
 These targets intentionally avoid orchestration or automation beyond what is
 required for a fast development loop.
+
+## Full Cluster Validation (New)
+
+A new `sanity-all` command has been added to validate the entire cluster:
+
+```
+just sanity-all
+```
+
+This command:
+- Starts the coordinator
+- Starts the controller agent
+- Prompts for Pi SSH password once
+- Starts the Pi compute agent
+- Runs `mesh nodes` to confirm cluster health
+- Cleans up all processes
+
+This is the recommended pre‑Phase‑6 validation workflow.

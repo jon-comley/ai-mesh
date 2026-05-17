@@ -111,6 +111,10 @@ Provides shortcuts for:
 - lint
 - run-agent
 - run-coordinator
+- deploy-pi
+- run-pi
+- sanity-pi
+- sanity-all (full cluster validation)
 
 ---
 

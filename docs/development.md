@@ -38,3 +38,20 @@ These will validate:
 
 The universal `just sanity` test will remain the baseline for verifying that
 the core coordinator/agent/CLI stack is healthy regardless of cluster size.
+
+### Full Cluster Sanity Test (New)
+
+A new command has been added:
+
+```
+just sanity-all
+```
+
+This performs a full multi-node validation:
+- Coordinator startup
+- Controller agent startup
+- Pi compute agent startup (via SSH)
+- Node table validation
+- Automatic cleanup
+
+This is the recommended workflow before Phase 6 scheduler development.

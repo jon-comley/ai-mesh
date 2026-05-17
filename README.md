@@ -64,6 +64,19 @@ just sanity-pi
 
 This prints the current node table via the CLI.
 
+### Full Cluster Validation
+
+```
+just sanity-all
+```
+
+This starts:
+- Coordinator
+- Controller agent
+- Pi compute agent
+
+And validates the mesh state.
+
 ---
 
 ## Minimal Justfile Reference
