@@ -1,4 +1,5 @@
 use crate::registry::Registry;
+use shared::ModelLifecycleState;
 use shared::messages::NodeRecordFull;
 
 pub struct Scheduler<'a> {
@@ -16,11 +17,26 @@ impl<'a> Scheduler<'a> {
             .registry
             .eligible_compute_nodes()
             .into_iter()
-            .filter(|n| {
-                n.capabilities
-                    .as_ref()
-                    .map(|c| (c.max_model_size_gb * 1024.0) as u64 >= model_size_mb)
-                    .unwrap_or(false)
+            .filter(|lite| {
+                self.registry.get(&lite.id).is_some_and(|node| {
+                    if let Some(caps) = &node.capabilities {
+                        let max_capacity_mb = (caps.max_model_size_gb * 1024.0) as u64;
+
+                        let allocated_mb: u64 = node
+                            .models
+                            .values()
+                            .filter(|m| {
+                                m.state == ModelLifecycleState::Ready
+                                    || m.state == ModelLifecycleState::Loading
+                            })
+                            .map(|m| m.size_mb)
+                            .sum();
+
+                        allocated_mb + model_size_mb <= max_capacity_mb
+                    } else {
+                        false
+                    }
+                })
             })
             .collect();
 
@@ -33,6 +49,7 @@ impl<'a> Scheduler<'a> {
 mod tests {
     use super::*;
     use crate::registry::Registry;
+    use shared::ModelLifecycleState;
     use shared::hardware::{NodeCapabilities, NodeIdentity, NodeRole};
 
     fn make_identity(id: &str, role: NodeRole) -> NodeIdentity {
@@ -77,6 +94,34 @@ mod tests {
         let selected = scheduler.select_node_for_model(128);
 
         assert!(selected.is_none());
+    }
+
+    #[test]
+    fn scheduler_accounts_for_allocated_model_memory() {
+        let mut registry = Registry::new();
+
+        let compute = make_identity("compute", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+
+        // 4 GB total capacity
+        registry.update_capabilities(
+            &compute.id,
+            NodeCapabilities {
+                max_model_size_gb: 4.0,
+                ..NodeCapabilities::default()
+            },
+        );
+
+        // 3 GB already allocated (Loading state counts)
+        registry.update_model_status(&compute.id, "llama3-8b", 3072, ModelLifecycleState::Loading);
+
+        let scheduler = Scheduler::new(&registry);
+
+        // 1.5 GB request — would need 3072 + 1536 = 4608 MB, exceeds 4096 MB capacity
+        assert!(scheduler.select_node_for_model(1536).is_none());
+
+        // 512 MB request — 3072 + 512 = 3584 MB, fits within 4096 MB
+        assert!(scheduler.select_node_for_model(512).is_some());
     }
 
     #[test]
