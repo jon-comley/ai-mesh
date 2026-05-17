@@ -61,6 +61,7 @@ pub struct ModelUnloadRequest {
 pub struct ModelStatusReport {
     pub node_id: String,
     pub model_name: String,
+    pub size_mb: u64,
     pub state: ModelLifecycleState,
     #[serde(default = "default_wire_version")]
     pub wire_version: u32,
@@ -395,6 +396,7 @@ mod tests {
         let rep = ModelStatusReport {
             node_id: "node-1".into(),
             model_name: "llama3".into(),
+            size_mb: 4096,
             state: ModelLifecycleState::Ready,
             wire_version: WIRE_VERSION,
         };

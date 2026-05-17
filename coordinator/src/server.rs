@@ -134,12 +134,18 @@ pub async fn handle_connection(
                     );
                     MeshMessage::Acknowledge
                 }
-                MeshMessage::ModelStatus(rep) => {
+                MeshMessage::ModelStatus(report) => {
                     info!(
-                        node_id    = %rep.node_id,
-                        model_name = %rep.model_name,
-                        state      = ?rep.state,
+                        node_id    = %report.node_id,
+                        model_name = %report.model_name,
+                        state      = ?report.state,
                         "model status update received"
+                    );
+                    reg.update_model_status(
+                        &report.node_id,
+                        &report.model_name,
+                        report.size_mb,
+                        report.state,
                     );
                     MeshMessage::Acknowledge
                 }
