@@ -99,6 +99,10 @@ impl Registry {
             .collect()
     }
 
+    pub fn clear_all(&mut self) {
+        self.nodes.clear();
+    }
+
     pub fn get_node_full(&self, id: &str) -> Option<NodeRecordFull> {
         let now = SystemTime::now();
         let rec = self.nodes.get(id)?;

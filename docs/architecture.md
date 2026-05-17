@@ -64,6 +64,7 @@ This workflow ensures correctness, clarity, and rapid iteration.
 Documentation is created incrementally alongside code. The docs folder will contain:
 
 - architecture.md (this file)
+- commands.md (just target reference)
 - shared.md
 - agent.md
 - coordinator.md

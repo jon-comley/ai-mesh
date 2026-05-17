@@ -1,5 +1,5 @@
 use crate::registry::Registry;
-use shared::{MeshMessage, NodeRecordFull, NodeRole};
+use shared::{AdminMessage, MeshMessage, NodeRecordFull, NodeRole};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -142,6 +142,13 @@ pub async fn handle_connection(
                     );
                     MeshMessage::Acknowledge
                 }
+                MeshMessage::Admin(admin) => match admin {
+                    AdminMessage::ResetRegistry => {
+                        reg.clear_all();
+                        tracing::warn!("Registry cleared via AdminMessage::ResetRegistry");
+                        MeshMessage::Acknowledge
+                    }
+                },
                 _ => MeshMessage::Acknowledge,
             }
         };

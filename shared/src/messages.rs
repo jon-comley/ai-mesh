@@ -105,6 +105,14 @@ pub enum MeshMessage {
     ModelLoad(ModelLoadRequest),
     ModelUnload(ModelUnloadRequest),
     ModelStatus(ModelStatusReport),
+    // Admin messages (Phase 6+)
+    Admin(AdminMessage),
+}
+
+/// Structured admin messages for coordinator control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum AdminMessage {
+    ResetRegistry,
 }
 
 #[cfg(test)]
@@ -287,6 +295,14 @@ mod tests {
             }
             other => panic!("Unexpected variant: {:?}", other),
         }
+    }
+
+    #[test]
+    fn admin_reset_registry_roundtrip() {
+        let msg = MeshMessage::Admin(AdminMessage::ResetRegistry);
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: MeshMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
     }
 
     #[test]

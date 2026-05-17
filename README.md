@@ -79,29 +79,23 @@ And validates the mesh state.
 
 ---
 
-## Minimal Justfile Reference
+## Justfile Reference
 
-These are the only commands required for normal development:
+| Command | Description |
+|---------|-------------|
+| `just build` | Build all crates |
+| `just test` | Run all tests |
+| `just lint` | fmt + clippy |
+| `just run-coordinator` | Start coordinator on port 9000 |
+| `just run-controller` | Start controller agent |
+| `just reset` | Clear all nodes from the live coordinator |
+| `just sanity-all` | Full local cluster validation (recommended) |
+| `just build-pi` | Cross-compile agent for ARM64 |
+| `just deploy-pi` | Deploy binary to Pi |
+| `just run-pi` | Start compute agent on Pi via SSH |
+| `just sanity-pi` | Check node table |
 
-```
-build-pi:
-    cargo build --release --target aarch64-unknown-linux-gnu -p agent
-
-deploy-pi: build-pi
-    scp target/aarch64-unknown-linux-gnu/release/agent pi@192.168.1.11:/home/pi/agent
-
-run-pi:
-    ssh pi@192.168.1.11 "COORDINATOR_IP=192.168.1.12 AGENT_ROLE=compute /home/pi/agent"
-
-sanity-pi:
-    cargo run -p cli -- nodes
-
-run-coordinator:
-    cargo run -p coordinator
-
-run-controller:
-    AGENT_ROLE=controller cargo run -p agent
-```
+See `docs/commands.md` for full reference.
 
 ---
 

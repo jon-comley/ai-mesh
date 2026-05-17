@@ -63,6 +63,9 @@ run-pi:
 run-controller:
     AGENT_ROLE=controller cargo run -p agent
 
+reset:
+    cargo run -p cli -- reset-registry
+
 sanity-pi:
     @echo "=== Checking Multi-Node Mesh State ==="
     cargo run -p cli -- nodes
@@ -74,25 +77,24 @@ sanity-all:
     #!/usr/bin/env bash
     set -e
 
+    # Kill any stale coordinator holding port 9000
+    pkill -f "target/debug/coordinator" || true
+    sleep 0.5
+
     # Start coordinator
     cargo run -p coordinator &
     COORD_PID=$!
-    until nc -z {{coordinator_ip}} {{coordinator_port}} 2>/dev/null; do sleep 0.5; done
+    sleep 1
+
+    # Reset registry now that coordinator is live
+    just reset || true
 
     # Start controller agent
     AGENT_ROLE=controller cargo run -p agent &
     AGENT_PID=$!
-    sleep 1
 
-    # Ensure SSH password is entered BEFORE backgrounding
-    ssh {{pi_user}}@{{pi_host}} "echo Connected to Pi OK"
-
-    # Start Pi agent in background
-    ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent" &
-    sleep 2
-
-    # Validate mesh state
+    # Run CLI nodes
     cargo run -p cli -- nodes
 
     # Cleanup
-    kill $COORD_PID $AGENT_PID 2>/dev/null || true
+    kill $COORD_PID $AGENT_PID || true
