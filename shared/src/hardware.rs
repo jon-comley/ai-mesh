@@ -65,6 +65,18 @@ pub struct UpdateManifest {
     pub checksum: String,
 }
 
+/// Runtime serialisable model lifecycle state.
+/// Used by the registry and wire protocol. The compile-time typestate
+/// (`ModelHandle<S>`) lives in coordinator and is not serialised.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelLifecycleState {
+    Unloaded,
+    Loading,
+    Ready,
+    Failed { reason: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +87,21 @@ mod tests {
         let json = serde_json::to_string(&role).unwrap();
         let back: NodeRole = serde_json::from_str(&json).unwrap();
         assert_eq!(role, back);
+    }
+
+    #[test]
+    fn model_lifecycle_state_roundtrip() {
+        let cases = [
+            ModelLifecycleState::Unloaded,
+            ModelLifecycleState::Loading,
+            ModelLifecycleState::Ready,
+            ModelLifecycleState::Failed { reason: "oom".into() },
+        ];
+        for state in cases {
+            let json = serde_json::to_string(&state).unwrap();
+            let back: ModelLifecycleState = serde_json::from_str(&json).unwrap();
+            assert_eq!(state, back);
+        }
     }
 
     #[test]

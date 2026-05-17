@@ -1,5 +1,68 @@
-use crate::{HardwareSpec, NodeCapabilities, NodeIdentity, NodeRole, VersionInfo};
+use crate::{HardwareSpec, ModelLifecycleState, NodeCapabilities, NodeIdentity, NodeRole, VersionInfo};
 use serde::{Deserialize, Serialize};
+
+pub const WIRE_VERSION: u32 = 1;
+
+fn default_wire_version() -> u32 {
+    WIRE_VERSION
+}
+
+/// Sent by the coordinator to a Compute node to run inference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InferenceRequest {
+    pub request_id: String,
+    pub node_id: String,
+    pub model_name: String,
+    pub prompt: String,
+    pub max_tokens: u32,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u32,
+}
+
+/// Returned by a Compute node after completing (or failing) inference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InferenceResult {
+    pub request_id: String,
+    pub node_id: String,
+    pub model_name: String,
+    pub output: String,
+    pub tokens_generated: u32,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u32,
+}
+
+/// Coordinator instructs a node to load a model into memory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelLoadRequest {
+    pub request_id: String,
+    pub node_id: String,
+    pub model_name: String,
+    pub model_size_mb: u64,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u32,
+}
+
+/// Coordinator instructs a node to evict a model from memory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelUnloadRequest {
+    pub request_id: String,
+    pub node_id: String,
+    pub model_name: String,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u32,
+}
+
+/// Agent reports current model lifecycle state to the coordinator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelStatusReport {
+    pub node_id: String,
+    pub model_name: String,
+    pub state: ModelLifecycleState,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u32,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeRecordLite {
@@ -34,6 +97,12 @@ pub enum MeshMessage {
     NodeList(Vec<NodeRecordLite>),
     RequestNodeInfo(String),
     NodeInfo(NodeRecordFull),
+    // Phase 6 — model scheduling
+    RequestModelInference(InferenceRequest),
+    ModelInferenceResult(InferenceResult),
+    ModelLoad(ModelLoadRequest),
+    ModelUnload(ModelUnloadRequest),
+    ModelStatus(ModelStatusReport),
 }
 
 #[cfg(test)]
@@ -216,5 +285,81 @@ mod tests {
             }
             other => panic!("Unexpected variant: {:?}", other),
         }
+    }
+
+    #[test]
+    fn wire_version_defaults_when_field_absent() {
+        // Simulate an older agent that sends InferenceRequest without wire_version.
+        let json = r#"{"request_id":"r1","node_id":"n1","model_name":"llama","prompt":"hi","max_tokens":64}"#;
+        let req: InferenceRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.wire_version, WIRE_VERSION);
+    }
+
+    #[test]
+    fn inference_request_roundtrip() {
+        let req = InferenceRequest {
+            request_id: "req-1".into(),
+            node_id: "node-1".into(),
+            model_name: "llama3".into(),
+            prompt: "hello".into(),
+            max_tokens: 128,
+            wire_version: WIRE_VERSION,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(serde_json::from_str::<InferenceRequest>(&json).unwrap(), req);
+    }
+
+    #[test]
+    fn inference_result_roundtrip() {
+        let res = InferenceResult {
+            request_id: "req-1".into(),
+            node_id: "node-1".into(),
+            model_name: "llama3".into(),
+            output: "world".into(),
+            tokens_generated: 1,
+            duration_ms: 42,
+            error: None,
+            wire_version: WIRE_VERSION,
+        };
+        let json = serde_json::to_string(&res).unwrap();
+        assert_eq!(serde_json::from_str::<InferenceResult>(&json).unwrap(), res);
+    }
+
+    #[test]
+    fn model_load_request_roundtrip() {
+        let req = ModelLoadRequest {
+            request_id: "req-2".into(),
+            node_id: "node-1".into(),
+            model_name: "llama3".into(),
+            model_size_mb: 4096,
+            wire_version: WIRE_VERSION,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(serde_json::from_str::<ModelLoadRequest>(&json).unwrap(), req);
+    }
+
+    #[test]
+    fn model_unload_request_roundtrip() {
+        let req = ModelUnloadRequest {
+            request_id: "req-3".into(),
+            node_id: "node-1".into(),
+            model_name: "llama3".into(),
+            wire_version: WIRE_VERSION,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(serde_json::from_str::<ModelUnloadRequest>(&json).unwrap(), req);
+    }
+
+    #[test]
+    fn model_status_report_roundtrip() {
+        use crate::ModelLifecycleState;
+        let rep = ModelStatusReport {
+            node_id: "node-1".into(),
+            model_name: "llama3".into(),
+            state: ModelLifecycleState::Ready,
+            wire_version: WIRE_VERSION,
+        };
+        let json = serde_json::to_string(&rep).unwrap();
+        assert_eq!(serde_json::from_str::<ModelStatusReport>(&json).unwrap(), rep);
     }
 }

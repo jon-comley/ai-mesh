@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -96,6 +97,50 @@ pub async fn handle_connection(
                         hardware: None,
                         capabilities: None,
                     }))
+                }
+                // ── Phase 6 model scheduling ──────────────────────────────────────
+                //
+                // These arms are intentionally synchronous stubs.
+                // Migration path for async dispatch (Phase 6):
+                //   1. Extract each arm into `async fn handle_*(req) -> MeshMessage`.
+                //   2. Release the registry lock before calling the handler.
+                //   3. Call `handle_*(req).instrument(span).await` at the call site.
+                MeshMessage::RequestModelInference(req) => {
+                    let span = info_span!(
+                        "model_inference",
+                        node_id    = %req.node_id,
+                        model_name = %req.model_name,
+                        request_id = %req.request_id,
+                    );
+                    let _enter = span.enter();
+                    info!("inference request received; dispatch pending Phase 6");
+                    MeshMessage::Acknowledge
+                }
+                MeshMessage::ModelLoad(req) => {
+                    info!(
+                        node_id    = %req.node_id,
+                        model_name = %req.model_name,
+                        size_mb    = req.model_size_mb,
+                        "model load requested"
+                    );
+                    MeshMessage::Acknowledge
+                }
+                MeshMessage::ModelUnload(req) => {
+                    info!(
+                        node_id    = %req.node_id,
+                        model_name = %req.model_name,
+                        "model unload requested"
+                    );
+                    MeshMessage::Acknowledge
+                }
+                MeshMessage::ModelStatus(rep) => {
+                    info!(
+                        node_id    = %rep.node_id,
+                        model_name = %rep.model_name,
+                        state      = ?rep.state,
+                        "model status update received"
+                    );
+                    MeshMessage::Acknowledge
                 }
                 _ => MeshMessage::Acknowledge,
             }
