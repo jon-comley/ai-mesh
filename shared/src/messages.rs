@@ -13,7 +13,9 @@ fn default_wire_version() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InferenceRequest {
     pub request_id: String,
-    pub node_id: String,
+    /// Caller-supplied target node. `None` means "let the scheduler decide".
+    #[serde(default)]
+    pub node_id: Option<String>,
     pub model_name: String,
     pub prompt: String,
     pub max_tokens: u32,
@@ -116,6 +118,8 @@ pub enum MeshMessage {
     ModelStatus(ModelStatusReport),
     // Admin messages (Phase 6+)
     Admin(AdminMessage),
+    // Coordinator → caller: generic error response
+    Error(String),
 }
 
 /// Structured admin messages for coordinator control.
@@ -311,6 +315,14 @@ mod tests {
     }
 
     #[test]
+    fn error_roundtrip() {
+        let msg = MeshMessage::Error("no node ready".into());
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: MeshMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, MeshMessage::Error("no node ready".into()));
+    }
+
+    #[test]
     fn admin_reset_registry_roundtrip() {
         let msg = MeshMessage::Admin(AdminMessage::ResetRegistry);
         let json = serde_json::to_string(&msg).unwrap();
@@ -330,7 +342,7 @@ mod tests {
     fn inference_request_roundtrip() {
         let req = InferenceRequest {
             request_id: "req-1".into(),
-            node_id: "node-1".into(),
+            node_id: Some("node-1".into()),
             model_name: "llama3".into(),
             prompt: "hello".into(),
             max_tokens: 128,

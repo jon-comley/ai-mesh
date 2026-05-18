@@ -11,6 +11,23 @@ impl<'a> Scheduler<'a> {
         Self { registry }
     }
 
+    /// Select a Compute node that has the given model loaded and in Ready state.
+    pub fn select_node_for_inference(&self, model_name: &str) -> Option<NodeRecordFull> {
+        let mut candidates: Vec<_> = self
+            .registry
+            .eligible_compute_nodes()
+            .into_iter()
+            .filter(|node| {
+                node.models.iter().any(|m| {
+                    m.model_name == model_name && m.state == ModelLifecycleState::Ready
+                })
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+        candidates.into_iter().next()
+    }
+
     /// Select the best Compute node that can fit the given model size (in MB).
     pub fn select_node_for_model(&self, model_size_mb: u64) -> Option<NodeRecordFull> {
         let mut candidates: Vec<_> = self
@@ -59,6 +76,70 @@ mod tests {
             ip: "127.0.0.1".to_string(),
             role,
         }
+    }
+
+    #[test]
+    fn select_node_for_inference_returns_node_with_ready_model() {
+        let mut registry = Registry::new();
+        let compute = make_identity("compute", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+        registry.update_capabilities(
+            &compute.id,
+            NodeCapabilities { max_model_size_gb: 4.0, ..NodeCapabilities::default() },
+        );
+        registry.update_model_status(&compute.id, "llama3", 4096, ModelLifecycleState::Ready);
+
+        let scheduler = Scheduler::new(&registry);
+        let selected = scheduler.select_node_for_inference("llama3");
+
+        assert!(selected.is_some());
+        assert_eq!(selected.unwrap().id, compute.id);
+    }
+
+    #[test]
+    fn select_node_for_inference_ignores_loading_model() {
+        let mut registry = Registry::new();
+        let compute = make_identity("compute", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+        registry.update_capabilities(
+            &compute.id,
+            NodeCapabilities { max_model_size_gb: 4.0, ..NodeCapabilities::default() },
+        );
+        registry.update_model_status(&compute.id, "llama3", 4096, ModelLifecycleState::Loading);
+
+        let scheduler = Scheduler::new(&registry);
+        let selected = scheduler.select_node_for_inference("llama3");
+
+        assert!(selected.is_none(), "Loading model must not be selected for inference");
+    }
+
+    #[test]
+    fn select_node_for_inference_returns_none_when_model_absent() {
+        let mut registry = Registry::new();
+        let compute = make_identity("compute", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+        registry.update_capabilities(
+            &compute.id,
+            NodeCapabilities { max_model_size_gb: 4.0, ..NodeCapabilities::default() },
+        );
+
+        let scheduler = Scheduler::new(&registry);
+        let selected = scheduler.select_node_for_inference("llama3");
+
+        assert!(selected.is_none(), "No model loaded — must return None");
+    }
+
+    #[test]
+    fn select_node_for_inference_excludes_controller_nodes() {
+        let mut registry = Registry::new();
+        let controller = make_identity("controller", NodeRole::Controller);
+        registry.update_heartbeat(controller.clone());
+        registry.update_model_status(&controller.id, "llama3", 4096, ModelLifecycleState::Ready);
+
+        let scheduler = Scheduler::new(&registry);
+        let selected = scheduler.select_node_for_inference("llama3");
+
+        assert!(selected.is_none(), "Controller nodes must never be selected for inference");
     }
 
     #[test]

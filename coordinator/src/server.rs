@@ -1,4 +1,5 @@
 use crate::registry::Registry;
+use crate::scheduler::Scheduler;
 use shared::{AdminMessage, MeshMessage, NodeRecordFull, NodeRole};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -6,7 +7,7 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use tracing::{info, info_span, warn};
+use tracing::{info, warn};
 
 type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
 
@@ -153,15 +154,32 @@ async fn process_message(
             }))
         }
         MeshMessage::RequestModelInference(req) => {
-            let span = info_span!(
-                "model_inference",
-                node_id    = %req.node_id,
-                model_name = %req.model_name,
-                request_id = %req.request_id,
-            );
-            let _enter = span.enter();
-            info!("inference request received; dispatch pending");
-            MeshMessage::Acknowledge
+            let selected = {
+                let reg = registry.lock().unwrap();
+                Scheduler::new(&reg).select_node_for_inference(&req.model_name)
+            };
+            match selected {
+                Some(node) => {
+                    info!(
+                        node_id    = %node.id,
+                        model_name = %req.model_name,
+                        request_id = %req.request_id,
+                        "Scheduler selected node {} for inference", node.id
+                    );
+                    MeshMessage::Acknowledge
+                }
+                None => {
+                    warn!(
+                        model_name = %req.model_name,
+                        request_id = %req.request_id,
+                        "no node ready to serve inference request"
+                    );
+                    MeshMessage::Error(format!(
+                        "no node has model '{}' in Ready state",
+                        req.model_name
+                    ))
+                }
+            }
         }
         MeshMessage::ModelLoad(req) => {
             let agent_tx = connections.lock().unwrap().get(&req.node_id).cloned();

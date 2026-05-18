@@ -144,7 +144,7 @@ mod tests {
             .mark_ready();
         let req = InferenceRequest {
             request_id: "r1".into(),
-            node_id: "node-1".into(),
+            node_id: Some("node-1".into()),
             model_name: "llama3".into(),
             prompt: "hello".into(),
             max_tokens: 64,
