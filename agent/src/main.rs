@@ -1,12 +1,12 @@
 use agent::agent::Agent;
 use agent::config::AgentConfig;
+use agent::ollama;
 use shared::hardware::NodeRole;
 use shared::{InferenceResult, MeshMessage, ModelLifecycleState, ModelStatusReport, WIRE_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, sleep};
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() {
@@ -77,19 +77,28 @@ async fn main() {
                         }))
                         .await;
 
-                    // Background task: simulate load delay then report Ready.
+                    // Pull the model from Ollama, then report Ready or Failed.
                     let tx2 = tx_in.clone();
                     let nid = node_id.clone();
                     let mname = req.model_name.clone();
                     let size = req.model_size_mb;
                     tokio::spawn(async move {
-                        sleep(Duration::from_secs(2)).await;
+                        let state = match ollama::pull_model(&mname).await {
+                            Ok(()) => {
+                                info!(model = %mname, "ollama pull complete");
+                                ModelLifecycleState::Ready
+                            }
+                            Err(e) => {
+                                warn!(model = %mname, error = %e, "ollama pull failed");
+                                ModelLifecycleState::Failed { reason: e }
+                            }
+                        };
                         let _ = tx2
                             .send(MeshMessage::ModelStatus(ModelStatusReport {
                                 node_id: nid,
                                 model_name: mname,
                                 size_mb: size,
-                                state: ModelLifecycleState::Ready,
+                                state,
                                 wire_version: WIRE_VERSION,
                             }))
                             .await;
@@ -97,22 +106,36 @@ async fn main() {
                 }
                 MeshMessage::RequestModelInference(req) => {
                     info!(
-                        "Received inference request {} for model {}",
-                        req.request_id, req.model_name
+                        request_id = %req.request_id,
+                        model = %req.model_name,
+                        "received inference request"
                     );
-                    let output = format!("Simulated response for prompt: {}", req.prompt);
-                    let _ = tx_in
-                        .send(MeshMessage::ModelInferenceResult(InferenceResult {
+                    let result = match ollama::generate(&req.model_name, &req.prompt).await {
+                        Ok((output, tokens, duration_ms)) => InferenceResult {
                             request_id: req.request_id,
                             node_id: node_id.clone(),
                             model_name: req.model_name,
                             output,
-                            tokens_generated: 42,
-                            duration_ms: 100,
+                            tokens_generated: tokens,
+                            duration_ms,
                             error: None,
                             wire_version: WIRE_VERSION,
-                        }))
-                        .await;
+                        },
+                        Err(e) => {
+                            warn!(error = %e, "ollama generate failed");
+                            InferenceResult {
+                                request_id: req.request_id,
+                                node_id: node_id.clone(),
+                                model_name: req.model_name,
+                                output: String::new(),
+                                tokens_generated: 0,
+                                duration_ms: 0,
+                                error: Some(e),
+                                wire_version: WIRE_VERSION,
+                            }
+                        }
+                    };
+                    let _ = tx_in.send(MeshMessage::ModelInferenceResult(result)).await;
                 }
                 MeshMessage::ModelUnload(req) => {
                     info!("Received command to unload model {}", req.model_name);

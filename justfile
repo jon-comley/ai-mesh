@@ -55,6 +55,16 @@ build-pi:
     cargo build --release --target aarch64-unknown-linux-gnu -p agent
 
 deploy-pi: build-pi
+    @echo "=== Checking Ollama installation on target compute node ==="
+    ssh -t {{pi_user}}@{{pi_host}} "command -v ollama >/dev/null 2>&1 || (echo 'Ollama missing! Installing natively now...' && curl -fsSL https://ollama.com/install.sh | sh)"
+
+    @echo "=== Ensuring Ollama daemon service is active ==="
+    ssh -t {{pi_user}}@{{pi_host}} "sudo systemctl daemon-reload && sudo systemctl enable --now ollama"
+
+    @echo "=== Pre-caching model weights on target hardware ==="
+    ssh {{pi_user}}@{{pi_host}} "ollama pull qwen2.5:1.5b"
+
+    @echo "=== Shipping compiled agent binary to remote filesystem ==="
     scp target/aarch64-unknown-linux-gnu/release/agent {{pi_user}}@{{pi_host}}:/home/{{pi_user}}/agent
 
 run-pi:
@@ -176,7 +186,7 @@ test-inference:
     echo "Found Compute node ID: ${NODE_ID}"
 
     echo "=== Step 3: Triggering model load on target node ==="
-    cargo run -q -p cli -- load "${NODE_ID}" qwen2.5-7b 4200
+    cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:1.5b 4200
 
     echo "=== Step 4: Waiting for model state transition to Ready ==="
     sleep 3
@@ -185,4 +195,4 @@ test-inference:
     cargo run -q -p cli -- nodes
 
     echo "=== Step 6: Dispatching load-balanced inference prompt ==="
-    cargo run -p cli -- infer qwen2.5-7b "Why does the Itchen Bridge have a toll?"
+    cargo run -p cli -- infer 'qwen2.5:1.5b' 'Context: The Itchen Bridge is a high-level bridge in Southampton, England. Why does it have a toll?'
