@@ -13,12 +13,25 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
+    /// In-memory registry — suitable for tests.
     pub fn new(listen_addr: impl Into<String>) -> Self {
         Self {
             config: CoordinatorConfig {
                 listen_addr: listen_addr.into(),
             },
             registry: Arc::new(Mutex::new(Registry::new())),
+        }
+    }
+
+    /// SQLite-backed registry — loads existing state on startup.
+    pub fn new_persistent(listen_addr: impl Into<String>, db_path: &str) -> Self {
+        let registry = Registry::open(db_path)
+            .unwrap_or_else(|e| panic!("failed to open registry DB at {db_path}: {e}"));
+        Self {
+            config: CoordinatorConfig {
+                listen_addr: listen_addr.into(),
+            },
+            registry: Arc::new(Mutex::new(registry)),
         }
     }
 

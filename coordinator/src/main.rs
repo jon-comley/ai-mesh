@@ -4,7 +4,7 @@ use coordinator::coordinator::Coordinator;
 async fn main() {
     println!("Starting AI Mesh Coordinator on 0.0.0.0:9000...");
 
-    let coord = Coordinator::new("0.0.0.0:9000");
+    let coord = Coordinator::new_persistent("0.0.0.0:9000", "ai_mesh.db");
     let _handle = coord.start().await;
 
     println!("Coordinator is running. Press Ctrl+C to stop.");

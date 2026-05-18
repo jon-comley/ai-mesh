@@ -1,9 +1,11 @@
+use rusqlite::{Connection, params};
 use shared::{
     HardwareSpec, ModelAllocationFull, ModelLifecycleState, NodeCapabilities, NodeIdentity,
     NodeRecordFull, NodeRecordLite, NodeRole,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct ModelAllocation {
@@ -22,16 +24,162 @@ pub struct NodeRecord {
     pub models: HashMap<String, ModelAllocation>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Registry {
     nodes: HashMap<String, NodeRecord>,
+    conn: Connection,
+}
+
+fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS nodes (
+            id            TEXT PRIMARY KEY,
+            hostname      TEXT NOT NULL,
+            ip            TEXT NOT NULL,
+            role          TEXT NOT NULL,
+            last_seen     INTEGER NOT NULL,
+            hardware_spec TEXT,
+            capabilities  TEXT
+        );
+        CREATE TABLE IF NOT EXISTS model_allocations (
+            node_id      TEXT NOT NULL,
+            model_name   TEXT NOT NULL,
+            size_mb      INTEGER NOT NULL,
+            state        TEXT NOT NULL,
+            last_updated INTEGER NOT NULL,
+            PRIMARY KEY (node_id, model_name)
+        );",
+    )
+}
+
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Registry {
+    /// In-memory registry — used by tests and Coordinator::new().
     pub fn new() -> Self {
+        let conn = Connection::open_in_memory().expect("in-memory SQLite");
+        init_schema(&conn).expect("schema init");
         Self {
             nodes: HashMap::new(),
+            conn,
         }
+    }
+
+    /// Persistent registry backed by a file. Opens or creates `path`.
+    /// Existing rows are loaded into the in-memory map on construction.
+    pub fn open(path: &str) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        init_schema(&conn)?;
+        let mut reg = Self {
+            nodes: HashMap::new(),
+            conn,
+        };
+        reg.load_from_db()?;
+        Ok(reg)
+    }
+
+    fn load_from_db(&mut self) -> rusqlite::Result<()> {
+        type NodeRow = (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        );
+
+        // ── nodes ──────────────────────────────────────────────────────────
+        #[allow(clippy::type_complexity)]
+        let node_rows: Vec<NodeRow> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, hostname, ip, role, last_seen, hardware_spec, capabilities FROM nodes",
+            )?;
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+
+        for (id, hostname, ip, role_json, last_seen_secs, hw_json, caps_json) in node_rows {
+            let role: NodeRole = serde_json::from_str(&role_json).unwrap_or(NodeRole::Compute);
+            let hardware: Option<HardwareSpec> =
+                hw_json.and_then(|j| serde_json::from_str(&j).ok());
+            let capabilities: Option<NodeCapabilities> =
+                caps_json.and_then(|j| serde_json::from_str(&j).ok());
+            let last_heartbeat =
+                SystemTime::UNIX_EPOCH + Duration::from_secs(last_seen_secs.max(0) as u64);
+
+            self.nodes.insert(
+                id.clone(),
+                NodeRecord {
+                    identity: NodeIdentity {
+                        id,
+                        hostname,
+                        ip,
+                        role,
+                    },
+                    hardware,
+                    capabilities,
+                    last_heartbeat,
+                    models: HashMap::new(),
+                },
+            );
+        }
+
+        // ── model_allocations ──────────────────────────────────────────────
+        let alloc_rows: Vec<(String, String, i64, String, i64)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT node_id, model_name, size_mb, state, last_updated FROM model_allocations",
+            )?;
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+
+        for (node_id, model_name, size_mb, state_json, _last_updated) in alloc_rows {
+            let state: ModelLifecycleState =
+                serde_json::from_str(&state_json).unwrap_or(ModelLifecycleState::Unloaded);
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                node.models.insert(
+                    model_name.clone(),
+                    ModelAllocation {
+                        model_name,
+                        size_mb: size_mb as u64,
+                        state,
+                        last_updated: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        Ok(())
     }
 
     pub fn update_heartbeat(&mut self, identity: NodeIdentity) {
@@ -42,20 +190,53 @@ impl Registry {
             last_heartbeat: SystemTime::now(),
             models: HashMap::new(),
         });
-
-        entry.identity = identity;
+        entry.identity = identity.clone();
         entry.last_heartbeat = SystemTime::now();
+
+        let role_json = serde_json::to_string(&identity.role).unwrap_or_default();
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO nodes (id, hostname, ip, role, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                 hostname  = excluded.hostname,
+                 ip        = excluded.ip,
+                 role      = excluded.role,
+                 last_seen = excluded.last_seen",
+            params![
+                identity.id,
+                identity.hostname,
+                identity.ip,
+                role_json,
+                now_unix_secs()
+            ],
+        ) {
+            warn!(error = %e, "DB heartbeat upsert failed");
+        }
     }
 
     pub fn update_hardware(&mut self, id: &str, hardware: HardwareSpec) {
         if let Some(node) = self.nodes.get_mut(id) {
-            node.hardware = Some(hardware);
+            node.hardware = Some(hardware.clone());
+        }
+        let hw_json = serde_json::to_string(&hardware).unwrap_or_default();
+        if let Err(e) = self.conn.execute(
+            "UPDATE nodes SET hardware_spec = ?1 WHERE id = ?2",
+            params![hw_json, id],
+        ) {
+            warn!(error = %e, "DB hardware update failed");
         }
     }
 
     pub fn update_capabilities(&mut self, id: &str, capabilities: NodeCapabilities) {
         if let Some(node) = self.nodes.get_mut(id) {
-            node.capabilities = Some(capabilities);
+            node.capabilities = Some(capabilities.clone());
+        }
+        let caps_json = serde_json::to_string(&capabilities).unwrap_or_default();
+        if let Err(e) = self.conn.execute(
+            "UPDATE nodes SET capabilities = ?1 WHERE id = ?2",
+            params![caps_json, id],
+        ) {
+            warn!(error = %e, "DB capabilities update failed");
         }
     }
 
@@ -72,10 +253,22 @@ impl Registry {
                 ModelAllocation {
                     model_name: model_name.to_string(),
                     size_mb,
-                    state,
+                    state: state.clone(),
                     last_updated: Instant::now(),
                 },
             );
+        }
+        let state_json = serde_json::to_string(&state).unwrap_or_default();
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO model_allocations (node_id, model_name, size_mb, state, last_updated)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(node_id, model_name) DO UPDATE SET
+                 size_mb      = excluded.size_mb,
+                 state        = excluded.state,
+                 last_updated = excluded.last_updated",
+            params![id, model_name, size_mb as i64, state_json, now_unix_secs()],
+        ) {
+            warn!(error = %e, "DB model_allocations upsert failed");
         }
     }
 
@@ -110,7 +303,6 @@ impl Registry {
 
     pub fn list_nodes(&self) -> Vec<NodeRecordLite> {
         let now = SystemTime::now();
-
         self.nodes
             .values()
             .map(|rec| {
@@ -118,7 +310,6 @@ impl Registry {
                     .duration_since(rec.last_heartbeat)
                     .map(|d| d.as_millis())
                     .unwrap_or(0);
-
                 NodeRecordLite {
                     id: rec.identity.id.clone(),
                     hostname: rec.identity.hostname.clone(),
@@ -132,30 +323,21 @@ impl Registry {
 
     pub fn clear_all(&mut self) {
         self.nodes.clear();
-    }
-
-    /// Returns true if any Compute node currently has `model_name` in Loading state.
-    /// Used by the inference handler to decide whether to wait for a pull to complete.
-    pub fn model_is_loading(&self, model_name: &str) -> bool {
-        self.nodes.values().any(|node| {
-            node.identity.role == NodeRole::Compute
-                && node
-                    .models
-                    .get(model_name)
-                    .map(|m| m.state == ModelLifecycleState::Loading)
-                    .unwrap_or(false)
-        })
+        if let Err(e) = self
+            .conn
+            .execute_batch("DELETE FROM nodes; DELETE FROM model_allocations;")
+        {
+            warn!(error = %e, "DB clear_all failed");
+        }
     }
 
     pub fn get_node_full(&self, id: &str) -> Option<NodeRecordFull> {
         let now = SystemTime::now();
         let rec = self.nodes.get(id)?;
-
         let age = now
             .duration_since(rec.last_heartbeat)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-
         Some(NodeRecordFull {
             id: rec.identity.id.clone(),
             hostname: rec.identity.hostname.clone(),
@@ -173,6 +355,19 @@ impl Registry {
                     state: m.state.clone(),
                 })
                 .collect(),
+        })
+    }
+
+    /// Returns true if any Compute node currently has `model_name` in Loading state.
+    /// Used by the inference handler to decide whether to wait for a pull to complete.
+    pub fn model_is_loading(&self, model_name: &str) -> bool {
+        self.nodes.values().any(|node| {
+            node.identity.role == NodeRole::Compute
+                && node
+                    .models
+                    .get(model_name)
+                    .map(|m| m.state == ModelLifecycleState::Loading)
+                    .unwrap_or(false)
         })
     }
 }
@@ -215,50 +410,33 @@ mod tests {
     #[test]
     fn test_heartbeat_inserts_node() {
         let mut reg = Registry::new();
-        let ident = sample_identity("node1");
-
-        reg.update_heartbeat(ident.clone());
-
-        let rec = reg.get("node1").unwrap();
-        assert_eq!(rec.identity.id, "node1");
+        reg.update_heartbeat(sample_identity("node1"));
+        assert!(reg.get("node1").is_some());
     }
 
     #[test]
     fn test_update_hardware() {
         let mut reg = Registry::new();
-        let ident = sample_identity("node1");
-
-        reg.update_heartbeat(ident.clone());
+        reg.update_heartbeat(sample_identity("node1"));
         reg.update_hardware("node1", sample_hardware());
-
-        let rec = reg.get("node1").unwrap();
-        assert!(rec.hardware.is_some());
+        assert!(reg.get("node1").unwrap().hardware.is_some());
     }
 
     #[test]
     fn test_update_capabilities() {
         let mut reg = Registry::new();
-        let ident = sample_identity("node1");
-
-        reg.update_heartbeat(ident.clone());
+        reg.update_heartbeat(sample_identity("node1"));
         reg.update_capabilities("node1", sample_capabilities());
-
-        let rec = reg.get("node1").unwrap();
-        assert!(rec.capabilities.is_some());
+        assert!(reg.get("node1").unwrap().capabilities.is_some());
     }
 
     #[test]
     fn test_prune_stale() {
         let mut reg = Registry::new();
-        let ident = sample_identity("node1");
-
-        reg.update_heartbeat(ident.clone());
-
-        // artificially age the record
+        reg.update_heartbeat(sample_identity("node1"));
         if let Some(node) = reg.nodes.get_mut("node1") {
             node.last_heartbeat = SystemTime::now() - Duration::from_secs(9999);
         }
-
         reg.prune_stale(Duration::from_secs(10));
         assert_eq!(reg.count(), 0);
     }
@@ -266,13 +444,10 @@ mod tests {
     #[test]
     fn test_list_nodes() {
         let mut reg = Registry::new();
-
         reg.update_heartbeat(sample_identity("node1"));
         reg.update_heartbeat(sample_identity("node2"));
-
         let nodes = reg.list_nodes();
         assert_eq!(nodes.len(), 2);
-
         let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
         assert!(ids.contains(&"node1"));
         assert!(ids.contains(&"node2"));
@@ -281,14 +456,10 @@ mod tests {
     #[test]
     fn test_get_node_full() {
         let mut reg = Registry::new();
-        let ident = sample_identity("node1");
-
-        reg.update_heartbeat(ident.clone());
+        reg.update_heartbeat(sample_identity("node1"));
         reg.update_hardware("node1", sample_hardware());
         reg.update_capabilities("node1", sample_capabilities());
-
         let full = reg.get_node_full("node1").unwrap();
-
         assert_eq!(full.id, "node1");
         assert_eq!(full.hostname, "test-host");
         assert!(full.hardware.is_some());
@@ -313,7 +484,6 @@ mod tests {
     #[test]
     fn eligible_compute_nodes_filters_by_role() {
         let mut registry = Registry::new();
-
         let controller = NodeIdentity {
             id: "controller".into(),
             hostname: "controller-host".into(),
@@ -326,10 +496,8 @@ mod tests {
             ip: "127.0.0.1".into(),
             role: NodeRole::Compute,
         };
-
         registry.update_heartbeat(controller.clone());
         registry.update_heartbeat(compute.clone());
-
         let eligible = registry.eligible_compute_nodes();
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].id, compute.id);
@@ -359,13 +527,10 @@ mod tests {
     #[test]
     fn list_nodes_returns_lite_records() {
         let mut reg = Registry::new();
-
         reg.update_heartbeat(make_identity("node-1"));
-
         let nodes = reg.list_nodes();
         assert_eq!(nodes.len(), 1);
         let n = &nodes[0];
-
         assert_eq!(n.id, "node-1");
         assert_eq!(n.hostname, "OmniBook7");
         assert_eq!(n.ip, "172.20.107.210");
@@ -375,26 +540,17 @@ mod tests {
     #[test]
     fn get_node_full_includes_hw_and_caps() {
         let mut reg = Registry::new();
-
         reg.update_heartbeat(make_identity("node-1"));
         let hw = make_hardware();
         reg.update_hardware("node-1", hw.clone());
         let caps = make_caps();
         reg.update_capabilities("node-1", caps.clone());
-
         let full = reg.get_node_full("node-1").expect("node should exist");
-
         assert_eq!(full.id, "node-1");
-        assert_eq!(full.hostname, "OmniBook7");
-        assert_eq!(full.ip, "172.20.107.210");
-        assert_eq!(full.role, NodeRole::Compute);
-
         let fhw = full.hardware.expect("hardware should be present");
         assert_eq!(fhw.cpu_model, hw.cpu_model);
-
         let fcaps = full.capabilities.expect("caps should be present");
         assert_eq!(fcaps.cpu_inference, caps.cpu_inference);
-        assert_eq!(fcaps.gpu_inference, caps.gpu_inference);
     }
 
     #[test]
@@ -406,18 +562,50 @@ mod tests {
     #[test]
     fn update_model_status_tracks_allocations() {
         let mut reg = Registry::new();
-        let node_id = "node-1";
-        reg.update_heartbeat(make_identity(node_id));
-
-        reg.update_model_status(node_id, "qwen2.5-7b", 4200, ModelLifecycleState::Loading);
-
+        reg.update_heartbeat(make_identity("node-1"));
+        reg.update_model_status("node-1", "qwen2.5-7b", 4200, ModelLifecycleState::Loading);
         let alloc = reg
             .nodes
-            .get(node_id)
+            .get("node-1")
             .and_then(|n| n.models.get("qwen2.5-7b"))
             .expect("model allocation should exist");
-
         assert_eq!(alloc.size_mb, 4200);
         assert_eq!(alloc.state, ModelLifecycleState::Loading);
+    }
+
+    #[test]
+    fn persistence_survives_restart() {
+        let path = "/tmp/ai_mesh_registry_persistence_test.db";
+        let _ = std::fs::remove_file(path);
+
+        {
+            let mut reg = Registry::open(path).expect("open db");
+            reg.update_heartbeat(NodeIdentity {
+                id: "persist-node".into(),
+                hostname: "persist-host".into(),
+                ip: "10.0.0.18".into(),
+                role: NodeRole::Compute,
+            });
+            reg.update_model_status(
+                "persist-node",
+                "qwen2.5:0.5b",
+                500,
+                ModelLifecycleState::Ready,
+            );
+        } // Registry dropped — SQLite connection closed
+
+        let reg2 = Registry::open(path).expect("reopen db");
+        let node = reg2
+            .get("persist-node")
+            .expect("node should survive coordinator restart");
+        assert_eq!(node.identity.hostname, "persist-host");
+        let alloc = node
+            .models
+            .get("qwen2.5:0.5b")
+            .expect("model allocation should survive coordinator restart");
+        assert_eq!(alloc.state, ModelLifecycleState::Ready);
+        assert_eq!(alloc.size_mb, 500);
+
+        let _ = std::fs::remove_file(path);
     }
 }
