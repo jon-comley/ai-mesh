@@ -71,7 +71,10 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
     )
     .await;
     // Acknowledge confirms the connections map entry is committed before we proceed.
-    assert_eq!(read_frame(&mut agent_stream).await, MeshMessage::Acknowledge);
+    assert_eq!(
+        read_frame(&mut agent_stream).await,
+        MeshMessage::Acknowledge
+    );
 
     // Step 2 — Agent reports capabilities so it is eligible for scheduling.
     write_frame(
@@ -84,7 +87,10 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
         }),
     )
     .await;
-    assert_eq!(read_frame(&mut agent_stream).await, MeshMessage::Acknowledge);
+    assert_eq!(
+        read_frame(&mut agent_stream).await,
+        MeshMessage::Acknowledge
+    );
 
     // Step 3 — Agent reports model as Ready; coordinator updates registry.
     write_frame(
@@ -99,7 +105,10 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
     )
     .await;
     // Acknowledge confirms registry.update_model_status() has run before CLI sends request.
-    assert_eq!(read_frame(&mut agent_stream).await, MeshMessage::Acknowledge);
+    assert_eq!(
+        read_frame(&mut agent_stream).await,
+        MeshMessage::Acknowledge
+    );
 
     // Step 4 — CLI sends RequestModelInference; scheduler picks the agent.
     let mut cli_stream = TcpStream::connect(cli_addr).await.unwrap();
