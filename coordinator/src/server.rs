@@ -1,10 +1,14 @@
 use crate::registry::Registry;
 use shared::{AdminMessage, MeshMessage, NodeRecordFull, NodeRole};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, info_span};
+use tokio::sync::mpsc;
+use tracing::{info, info_span, warn};
+
+type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -18,6 +22,7 @@ pub enum ServerError {
 pub struct Server {
     pub addr: String,
     pub registry: Arc<Mutex<Registry>>,
+    connections: Connections,
 }
 
 impl Server {
@@ -25,6 +30,7 @@ impl Server {
         Self {
             addr: addr.into(),
             registry,
+            connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -34,137 +40,184 @@ impl Server {
         loop {
             let (socket, _) = listener.accept().await?;
             let registry = self.registry.clone();
+            let connections = self.connections.clone();
 
             tokio::spawn(async move {
-                let _ = handle_connection(socket, registry).await;
+                let _ = handle_connection(socket, registry, connections).await;
             });
         }
     }
 }
 
 pub async fn handle_connection(
-    mut socket: TcpStream,
+    socket: TcpStream,
     registry: Arc<Mutex<Registry>>,
+    connections: Connections,
 ) -> Result<(), ServerError> {
-    loop {
-        // Read message length (u32)
-        let mut len_buf = [0u8; 4];
-        if socket.read_exact(&mut len_buf).await.is_err() {
-            return Ok(()); // connection closed
-        }
+    let (mut reader, mut writer) = socket.into_split();
+    let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
 
-        let msg_len = u32::from_le_bytes(len_buf) as usize;
+    // Tracks the node ID once a Heartbeat has been received, for cleanup on disconnect.
+    let mut node_id: Option<String> = None;
 
-        // Read message body
-        let mut buf = vec![0u8; msg_len];
-        socket.read_exact(&mut buf).await?;
-
-        let msg: MeshMessage = serde_json::from_slice(&buf)?;
-
-        // Process message (no awaits inside)
-        let reply = {
-            let mut reg = registry.lock().unwrap();
-
-            match msg {
-                MeshMessage::Heartbeat(identity) => {
-                    reg.update_heartbeat(identity);
-                    MeshMessage::Acknowledge
-                }
-                MeshMessage::HardwareReport(hw) => {
-                    if let Some(id) = reg.first_node_id() {
-                        reg.update_hardware(&id, hw);
-                    }
-                    MeshMessage::Acknowledge
-                }
-                MeshMessage::Capabilities(caps) => {
-                    if let Some(id) = reg.first_node_id() {
-                        reg.update_capabilities(&id, caps);
-                    }
-                    MeshMessage::Acknowledge
-                }
-                MeshMessage::RequestNodes => {
-                    let nodes = reg.list_nodes();
-                    MeshMessage::NodeList(nodes)
-                }
-                MeshMessage::RequestNodeInfo(id) => {
-                    let full = reg.get_node_full(&id);
-                    MeshMessage::NodeInfo(full.unwrap_or_else(|| NodeRecordFull {
-                        id,
-                        hostname: "unknown".into(),
-                        ip: "unknown".into(),
-                        role: NodeRole::Compute,
-                        last_heartbeat_ms: 0,
-                        hardware: None,
-                        capabilities: None,
-                        models: vec![],
-                    }))
-                }
-                // ── Phase 6 model scheduling ──────────────────────────────────────
-                //
-                // These arms are intentionally synchronous stubs.
-                // Migration path for async dispatch (Phase 6):
-                //   1. Extract each arm into `async fn handle_*(req) -> MeshMessage`.
-                //   2. Release the registry lock before calling the handler.
-                //   3. Call `handle_*(req).instrument(span).await` at the call site.
-                MeshMessage::RequestModelInference(req) => {
-                    let span = info_span!(
-                        "model_inference",
-                        node_id    = %req.node_id,
-                        model_name = %req.model_name,
-                        request_id = %req.request_id,
-                    );
-                    let _enter = span.enter();
-                    info!("inference request received; dispatch pending Phase 6");
-                    MeshMessage::Acknowledge
-                }
-                MeshMessage::ModelLoad(req) => {
-                    info!(
-                        node_id    = %req.node_id,
-                        model_name = %req.model_name,
-                        size_mb    = req.model_size_mb,
-                        "model load requested"
-                    );
-                    MeshMessage::Acknowledge
-                }
-                MeshMessage::ModelUnload(req) => {
-                    info!(
-                        node_id    = %req.node_id,
-                        model_name = %req.model_name,
-                        "model unload requested"
-                    );
-                    MeshMessage::Acknowledge
-                }
-                MeshMessage::ModelStatus(report) => {
-                    info!(
-                        node_id    = %report.node_id,
-                        model_name = %report.model_name,
-                        state      = ?report.state,
-                        "model status update received"
-                    );
-                    reg.update_model_status(
-                        &report.node_id,
-                        &report.model_name,
-                        report.size_mb,
-                        report.state,
-                    );
-                    MeshMessage::Acknowledge
-                }
-                MeshMessage::Admin(admin) => match admin {
-                    AdminMessage::ResetRegistry => {
-                        reg.clear_all();
-                        tracing::warn!("Registry cleared via AdminMessage::ResetRegistry");
-                        MeshMessage::Acknowledge
-                    }
-                },
-                _ => MeshMessage::Acknowledge,
+    // Writer task: drain the outbound channel onto the TCP write half.
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            let data = match serde_json::to_vec(&msg) {
+                Ok(d) => d,
+                Err(_) => break,
+            };
+            let len = (data.len() as u32).to_le_bytes();
+            if writer.write_all(&len).await.is_err() {
+                break;
             }
+            if writer.write_all(&data).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    loop {
+        let mut len_buf = [0u8; 4];
+        if reader.read_exact(&mut len_buf).await.is_err() {
+            break;
+        }
+        let msg_len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; msg_len];
+        if reader.read_exact(&mut buf).await.is_err() {
+            break;
+        }
+        let msg: MeshMessage = match serde_json::from_slice(&buf) {
+            Ok(m) => m,
+            Err(e) => return Err(ServerError::Json(e)),
         };
 
-        // Now send reply (after lock is dropped)
-        let data = serde_json::to_vec(&reply)?;
-        let len = (data.len() as u32).to_le_bytes();
-        socket.write_all(&len).await?;
-        socket.write_all(&data).await?;
+        let reply =
+            process_message(msg, &registry, &connections, &tx, &mut node_id).await;
+
+        if tx.send(reply).await.is_err() {
+            break;
+        }
+    }
+
+    // Remove this connection's routing channel when the connection closes.
+    if let Some(id) = node_id {
+        info!(node_id = %id, "connection closed, removing from connection map");
+        connections.lock().unwrap().remove(&id);
+    }
+
+    Ok(())
+}
+
+async fn process_message(
+    msg: MeshMessage,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    tx: &mpsc::Sender<MeshMessage>,
+    node_id: &mut Option<String>,
+) -> MeshMessage {
+    match msg {
+        MeshMessage::Heartbeat(identity) => {
+            info!(node_id = %identity.id, hostname = %identity.hostname, "heartbeat");
+            *node_id = Some(identity.id.clone());
+            registry.lock().unwrap().update_heartbeat(identity.clone());
+            connections
+                .lock()
+                .unwrap()
+                .insert(identity.id, tx.clone());
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::HardwareReport(hw) => {
+            if let Some(id) = node_id.as_deref() {
+                registry.lock().unwrap().update_hardware(id, hw);
+            }
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::Capabilities(caps) => {
+            if let Some(id) = node_id.as_deref() {
+                registry.lock().unwrap().update_capabilities(id, caps);
+            }
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::RequestNodes => {
+            let nodes = registry.lock().unwrap().list_nodes();
+            MeshMessage::NodeList(nodes)
+        }
+        MeshMessage::RequestNodeInfo(id) => {
+            let full = registry.lock().unwrap().get_node_full(&id);
+            MeshMessage::NodeInfo(full.unwrap_or_else(|| NodeRecordFull {
+                id,
+                hostname: "unknown".into(),
+                ip: "unknown".into(),
+                role: NodeRole::Compute,
+                last_heartbeat_ms: 0,
+                hardware: None,
+                capabilities: None,
+                models: vec![],
+            }))
+        }
+        MeshMessage::RequestModelInference(req) => {
+            let span = info_span!(
+                "model_inference",
+                node_id    = %req.node_id,
+                model_name = %req.model_name,
+                request_id = %req.request_id,
+            );
+            let _enter = span.enter();
+            info!("inference request received; dispatch pending");
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::ModelLoad(req) => {
+            let agent_tx = connections.lock().unwrap().get(&req.node_id).cloned();
+            match agent_tx {
+                Some(agent_tx) => {
+                    info!(
+                        node_id    = %req.node_id,
+                        model_name = %req.model_name,
+                        "forwarding ModelLoad to agent"
+                    );
+                    let _ = agent_tx.send(MeshMessage::ModelLoad(req)).await;
+                }
+                None => {
+                    warn!(
+                        node_id = %req.node_id,
+                        "ModelLoad target node not connected"
+                    );
+                }
+            }
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::ModelUnload(req) => {
+            info!(
+                node_id    = %req.node_id,
+                model_name = %req.model_name,
+                "model unload requested"
+            );
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::ModelStatus(report) => {
+            info!(
+                node_id    = %report.node_id,
+                model_name = %report.model_name,
+                state      = ?report.state,
+                "model status update received"
+            );
+            registry.lock().unwrap().update_model_status(
+                &report.node_id,
+                &report.model_name,
+                report.size_mb,
+                report.state,
+            );
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::Admin(admin) => match admin {
+            AdminMessage::ResetRegistry => {
+                registry.lock().unwrap().clear_all();
+                tracing::warn!("Registry cleared via AdminMessage::ResetRegistry");
+                MeshMessage::Acknowledge
+            }
+        },
+        _ => MeshMessage::Acknowledge,
     }
 }
 
@@ -183,7 +236,6 @@ mod tests {
         stream.write_all(&len).await.unwrap();
         stream.write_all(&data).await.unwrap();
 
-        // Read ack
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await.unwrap();
         let msg_len = u32::from_le_bytes(len_buf) as usize;

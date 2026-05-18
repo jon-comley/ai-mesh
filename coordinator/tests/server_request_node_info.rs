@@ -1,5 +1,6 @@
 use coordinator::registry::Registry;
 use shared::{MeshMessage, NodeIdentity, NodeRole};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -13,7 +14,8 @@ async fn server_handles_request_node_info() {
 
     tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
-        coordinator::server::handle_connection(socket, reg_clone)
+        let connections = Arc::new(Mutex::new(HashMap::new()));
+        coordinator::server::handle_connection(socket, reg_clone, connections)
             .await
             .unwrap();
     });
