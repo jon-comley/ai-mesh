@@ -132,3 +132,57 @@ sanity-full:
     # Cleanup
     kill $COORD_PID $AGENT_PID || true
     ssh {{pi_user}}@{{pi_host}} "pkill -f agent" || true
+
+# Run an end-to-end live inference loop across the whole cluster automatically
+test-inference:
+    #!/usr/bin/env bash
+    set -e
+
+    cleanup() {
+        echo "=== Cleaning up cluster ==="
+        kill $COORD_PID $AGENT_PID 2>/dev/null || true
+        ssh {{pi_user}}@{{pi_host}} "pkill -f agent" 2>/dev/null || true
+    }
+    trap cleanup EXIT
+
+    echo "=== Step 1: Cleaning workspace and starting cluster fresh ==="
+    pkill -f "target/debug/coordinator" || true
+    pkill -f "target/debug/agent" || true
+    sleep 0.5
+
+    cargo run -p coordinator &
+    COORD_PID=$!
+    sleep 1
+
+    just reset || true
+
+    AGENT_ROLE=controller cargo run -p agent &
+    AGENT_PID=$!
+    sleep 1
+
+    ssh {{pi_user}}@{{pi_host}} "echo Connected to Pi OK"
+    ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent" &
+
+    # Give the cluster a moment to stabilize heartbeats and populate the registry
+    sleep 3
+
+    echo "=== Step 2: Fetching the dynamic Compute node ID ==="
+    NODE_ID=$(cargo run -q -p cli -- nodes | grep -E "Compute" | head -n 1 | awk -F'|' '{print $2}' | xargs)
+
+    if [ -z "$NODE_ID" ]; then
+        echo "Error: Could not find an active Compute node in the registry!"
+        exit 1
+    fi
+    echo "Found Compute node ID: ${NODE_ID}"
+
+    echo "=== Step 3: Triggering model load on target node ==="
+    cargo run -q -p cli -- load "${NODE_ID}" qwen2.5-7b 4200
+
+    echo "=== Step 4: Waiting for model state transition to Ready ==="
+    sleep 3
+
+    echo "=== Step 5: Verifying model status in cluster table ==="
+    cargo run -q -p cli -- nodes
+
+    echo "=== Step 6: Dispatching load-balanced inference prompt ==="
+    cargo run -p cli -- infer qwen2.5-7b "Why does the Itchen Bridge have a toll?"

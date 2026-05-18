@@ -1,6 +1,5 @@
 use agent::agent::Agent;
 use agent::config::AgentConfig;
-use agent::identity::detect_identity;
 use shared::hardware::NodeRole;
 use shared::{MeshMessage, ModelLifecycleState, ModelStatusReport, WIRE_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,16 +29,14 @@ async fn main() {
     let (mut reader, mut writer) = stream.into_split();
     let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
 
-    // Detect identity once so the reader task can stamp outbound ModelStatus messages.
-    let node_id = detect_identity(role.clone())
-        .map(|id| id.id)
-        .unwrap_or_else(|_| "unknown".into());
-
     let config = AgentConfig {
         role,
         heartbeat_interval_secs: 5,
     };
     let agent = Agent::new_with_config(config, tx.clone());
+    // Reuse the node_id the agent stamped onto its Heartbeat so ModelStatus messages
+    // match the registry entry.
+    let node_id = agent.node_id().to_string();
     tokio::spawn(async move {
         let _ = agent.run().await;
     });

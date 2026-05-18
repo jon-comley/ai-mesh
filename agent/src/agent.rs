@@ -2,7 +2,7 @@ use crate::capabilities::detect_capabilities;
 use crate::config::AgentConfig;
 use crate::hardware::detect_hardware;
 use crate::identity::detect_identity;
-use shared::{MeshMessage, NodeRole};
+use shared::{MeshMessage, NodeIdentity, NodeRole};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, sleep};
 
@@ -20,30 +20,39 @@ pub enum AgentError {
 
 pub struct Agent {
     config: AgentConfig,
+    // Identity is detected once at construction so the same node_id is used
+    // for Heartbeats and for any outbound ModelStatus messages stamped by main.rs.
+    identity: NodeIdentity,
     tx: Sender<MeshMessage>,
 }
 
 impl Agent {
     pub fn new(heartbeat_interval_secs: u64, tx: Sender<MeshMessage>) -> Self {
-        Self {
-            config: AgentConfig {
-                role: NodeRole::Compute,
-                heartbeat_interval_secs,
-            },
-            tx,
-        }
+        let config = AgentConfig {
+            role: NodeRole::Compute,
+            heartbeat_interval_secs,
+        };
+        Self::new_with_config(config, tx)
     }
 
     pub fn new_with_config(config: AgentConfig, tx: Sender<MeshMessage>) -> Self {
-        Self { config, tx }
+        let identity = detect_identity(config.role.clone()).unwrap_or_else(|_| NodeIdentity {
+            id: "unknown".into(),
+            hostname: "unknown".into(),
+            ip: "unknown".into(),
+            role: config.role.clone(),
+        });
+        Self { config, identity, tx }
+    }
+
+    pub fn node_id(&self) -> &str {
+        &self.identity.id
     }
 
     /// Send one startup burst (heartbeat + optional hardware/capabilities), no loop.
     pub async fn start_once(&self) -> Result<(), AgentError> {
-        let identity = detect_identity(self.config.role.clone())?;
-
         self.tx
-            .send(MeshMessage::Heartbeat(identity))
+            .send(MeshMessage::Heartbeat(self.identity.clone()))
             .await
             .unwrap();
 
@@ -66,11 +75,10 @@ impl Agent {
     pub async fn run(&self) -> Result<(), AgentError> {
         self.start_once().await?;
 
-        let identity = detect_identity(self.config.role.clone())?;
         loop {
             sleep(Duration::from_secs(self.config.heartbeat_interval_secs)).await;
             self.tx
-                .send(MeshMessage::Heartbeat(identity.clone()))
+                .send(MeshMessage::Heartbeat(self.identity.clone()))
                 .await
                 .unwrap();
         }
