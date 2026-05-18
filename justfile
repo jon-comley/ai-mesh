@@ -186,7 +186,7 @@ test-inference:
     echo "Found Compute node ID: ${NODE_ID}"
 
     echo "=== Step 3: Triggering model load on target node ==="
-    cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:1.5b 4200
+    cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:0.5b 4200
 
     echo "=== Step 4: Waiting for model state transition to Ready ==="
     sleep 3
@@ -195,4 +195,4 @@ test-inference:
     cargo run -q -p cli -- nodes
 
     echo "=== Step 6: Dispatching load-balanced inference prompt ==="
-    cargo run -p cli -- infer 'qwen2.5:1.5b' 'Context: The Itchen Bridge is a high-level bridge in Southampton, England. Why does it have a toll?'
+    cargo run -p cli -- infer 'qwen2.5:0.5b' 'Context: The Itchen Bridge is a high-level bridge in Southampton, England. Why does it have a toll?'

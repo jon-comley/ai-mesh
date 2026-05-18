@@ -169,10 +169,42 @@ async fn process_message(
             }))
         }
         MeshMessage::RequestModelInference(req) => {
-            let selected = {
-                let reg = registry.lock().unwrap();
-                Scheduler::new(&reg).select_node_for_inference(&req.model_name)
+            // Phase 1 — pull wait: if the model is still being pulled on a Compute node,
+            // poll the registry until it becomes Ready or the pull deadline expires.
+            // This decouples the pull duration from the generation timeout.
+            const PULL_TIMEOUT_SECS: u64 = 300;
+            const GENERATE_TIMEOUT_SECS: u64 = 120;
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(PULL_TIMEOUT_SECS);
+            let mut pull_timed_out = false;
+
+            let selected = loop {
+                let (ready_node, is_loading) = {
+                    let reg = registry.lock().unwrap();
+                    let ready = Scheduler::new(&reg).select_node_for_inference(&req.model_name);
+                    let loading = ready.is_none() && reg.model_is_loading(&req.model_name);
+                    (ready, loading)
+                };
+
+                if let Some(node) = ready_node {
+                    break Some(node);
+                }
+                if !is_loading {
+                    // Model not present or in Failed state — no point waiting.
+                    break None;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    pull_timed_out = true;
+                    break None;
+                }
+                info!(
+                    model_name = %req.model_name,
+                    request_id = %req.request_id,
+                    "model still loading, waiting for Ready state"
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
             };
+
             match selected {
                 Some(node) => {
                     let agent_tx = connections.lock().unwrap().get(&node.id).cloned();
@@ -191,8 +223,8 @@ async fn process_message(
                                 "forwarding inference request to agent"
                             );
                             let _ = agent_tx.send(MeshMessage::RequestModelInference(req)).await;
-                            // Block until the agent returns a result or the timeout fires.
-                            match timeout(Duration::from_secs(30), orx).await {
+                            // Phase 2 — generation timeout: separate, shorter window.
+                            match timeout(Duration::from_secs(GENERATE_TIMEOUT_SECS), orx).await {
                                 Ok(Ok(result)) => result,
                                 Ok(Err(_)) => {
                                     pending_inferences.lock().unwrap().remove(&request_id);
@@ -202,7 +234,10 @@ async fn process_message(
                                 }
                                 Err(_) => {
                                     pending_inferences.lock().unwrap().remove(&request_id);
-                                    MeshMessage::Error("inference request timed out".into())
+                                    MeshMessage::Error(format!(
+                                        "inference generation timed out after {}s",
+                                        GENERATE_TIMEOUT_SECS
+                                    ))
                                 }
                             }
                         }
@@ -221,15 +256,28 @@ async fn process_message(
                     }
                 }
                 None => {
-                    warn!(
-                        model_name = %req.model_name,
-                        request_id = %req.request_id,
-                        "no node ready to serve inference request"
-                    );
-                    MeshMessage::Error(format!(
-                        "no node has model '{}' in Ready state",
-                        req.model_name
-                    ))
+                    if pull_timed_out {
+                        warn!(
+                            model_name = %req.model_name,
+                            request_id = %req.request_id,
+                            "model pull did not complete within {}s",
+                            PULL_TIMEOUT_SECS
+                        );
+                        MeshMessage::Error(format!(
+                            "model '{}' pull did not complete within {}s",
+                            req.model_name, PULL_TIMEOUT_SECS
+                        ))
+                    } else {
+                        warn!(
+                            model_name = %req.model_name,
+                            request_id = %req.request_id,
+                            "no node ready to serve inference request"
+                        );
+                        MeshMessage::Error(format!(
+                            "no node has model '{}' in Ready state",
+                            req.model_name
+                        ))
+                    }
                 }
             }
         }

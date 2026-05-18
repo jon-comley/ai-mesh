@@ -134,6 +134,19 @@ impl Registry {
         self.nodes.clear();
     }
 
+    /// Returns true if any Compute node currently has `model_name` in Loading state.
+    /// Used by the inference handler to decide whether to wait for a pull to complete.
+    pub fn model_is_loading(&self, model_name: &str) -> bool {
+        self.nodes.values().any(|node| {
+            node.identity.role == NodeRole::Compute
+                && node
+                    .models
+                    .get(model_name)
+                    .map(|m| m.state == ModelLifecycleState::Loading)
+                    .unwrap_or(false)
+        })
+    }
+
     pub fn get_node_full(&self, id: &str) -> Option<NodeRecordFull> {
         let now = SystemTime::now();
         let rec = self.nodes.get(id)?;
