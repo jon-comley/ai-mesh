@@ -18,9 +18,9 @@ impl<'a> Scheduler<'a> {
             .eligible_compute_nodes()
             .into_iter()
             .filter(|node| {
-                node.models.iter().any(|m| {
-                    m.model_name == model_name && m.state == ModelLifecycleState::Ready
-                })
+                node.models
+                    .iter()
+                    .any(|m| m.model_name == model_name && m.state == ModelLifecycleState::Ready)
             })
             .collect();
 
@@ -85,7 +85,10 @@ mod tests {
         registry.update_heartbeat(compute.clone());
         registry.update_capabilities(
             &compute.id,
-            NodeCapabilities { max_model_size_gb: 4.0, ..NodeCapabilities::default() },
+            NodeCapabilities {
+                max_model_size_gb: 4.0,
+                ..NodeCapabilities::default()
+            },
         );
         registry.update_model_status(&compute.id, "llama3", 4096, ModelLifecycleState::Ready);
 
@@ -103,14 +106,20 @@ mod tests {
         registry.update_heartbeat(compute.clone());
         registry.update_capabilities(
             &compute.id,
-            NodeCapabilities { max_model_size_gb: 4.0, ..NodeCapabilities::default() },
+            NodeCapabilities {
+                max_model_size_gb: 4.0,
+                ..NodeCapabilities::default()
+            },
         );
         registry.update_model_status(&compute.id, "llama3", 4096, ModelLifecycleState::Loading);
 
         let scheduler = Scheduler::new(&registry);
         let selected = scheduler.select_node_for_inference("llama3");
 
-        assert!(selected.is_none(), "Loading model must not be selected for inference");
+        assert!(
+            selected.is_none(),
+            "Loading model must not be selected for inference"
+        );
     }
 
     #[test]
@@ -120,7 +129,10 @@ mod tests {
         registry.update_heartbeat(compute.clone());
         registry.update_capabilities(
             &compute.id,
-            NodeCapabilities { max_model_size_gb: 4.0, ..NodeCapabilities::default() },
+            NodeCapabilities {
+                max_model_size_gb: 4.0,
+                ..NodeCapabilities::default()
+            },
         );
 
         let scheduler = Scheduler::new(&registry);
@@ -139,7 +151,10 @@ mod tests {
         let scheduler = Scheduler::new(&registry);
         let selected = scheduler.select_node_for_inference("llama3");
 
-        assert!(selected.is_none(), "Controller nodes must never be selected for inference");
+        assert!(
+            selected.is_none(),
+            "Controller nodes must never be selected for inference"
+        );
     }
 
     #[test]
