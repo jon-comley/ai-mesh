@@ -14,10 +14,18 @@
 Each agent connection registers its outbound `mpsc::Sender<MeshMessage>` in a shared `Arc<Mutex<HashMap<String, mpsc::Sender>>>` keyed by node ID. This enables the coordinator to push commands (e.g. `ModelLoad`) down to a specific agent's live TCP connection. Entries are removed when the socket drops.
 
 ### Scheduler
-`coordinator::Scheduler` selects the best compute node for a model load request using `select_node_for_model(size_mb: u64)`. It filters by:
+`coordinator::Scheduler` has two selection methods:
+
+**`select_node_for_model(size_mb: u64)`** — finds a Compute node with enough remaining capacity to load a new model:
 - Role must be `Compute`
 - Remaining capacity: `max_model_size_gb * 1024 - allocated_mb >= size_mb`
 - `Ready` and `Loading` allocations count against capacity; `Unloaded` and `Failed` do not
+
+**`select_node_for_inference(model_name: &str)`** — finds a Compute node that already has the named model in `Ready` state:
+- Role must be `Compute`
+- `models` must contain an entry for `model_name` with `state == Ready`
+- `Loading`, `Unloaded`, and `Failed` states are excluded
+- Used by the `RequestModelInference` handler in `server.rs`
 
 ## Message Handling
 
@@ -31,7 +39,7 @@ Each agent connection registers its outbound `mpsc::Sender<MeshMessage>` in a sh
 | `ModelLoad` | Looks up target agent tx in connections map; forwards command |
 | `ModelStatus` | Calls `registry.update_model_status()`; updates allocation state |
 | `ModelUnload` | Logged; forwarding to agent not yet implemented |
-| `RequestModelInference` | Logged; scheduler dispatch not yet implemented |
+| `RequestModelInference` | Calls `select_node_for_inference`; logs selected node or returns `Error` if none ready |
 | `Admin(ResetRegistry)` | Clears all nodes from the registry |
 
 ## Registry Methods

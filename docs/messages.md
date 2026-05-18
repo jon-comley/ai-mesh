@@ -114,12 +114,12 @@ This ensures **cross-platform compatibility** between:
 Older agents that do not send `wire_version` will still deserialize safely.
 
 ### `RequestModelInference`
-Coordinator → Compute node  
-Requests execution of a model against a prompt.
+CLI → Coordinator  
+Requests inference for a named model. The coordinator uses the scheduler to select a ready node.
 
 Fields:
 - `request_id: String`
-- `node_id: String`
+- `node_id: Option<String>` — caller-supplied pin; `null`/absent means "let the scheduler decide" (`#[serde(default)]`)
 - `model_name: String`
 - `prompt: String`
 - `max_tokens: u32`
@@ -170,6 +170,13 @@ Fields:
 - `state: ModelLifecycleState`  
   (`Unloaded`, `Loading`, `Ready`, `Failed { reason }`)
 - `wire_version: u32`
+
+### `Error`
+Coordinator → caller  
+Generic error response when a request cannot be fulfilled.
+
+Fields:
+- `0: String` — human-readable reason (e.g. `"no node has model 'llama3' in Ready state"`)
 
 ---
 ## Versioning and Compatibility
