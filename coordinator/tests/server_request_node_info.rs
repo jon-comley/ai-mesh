@@ -15,7 +15,8 @@ async fn server_handles_request_node_info() {
     tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let connections = Arc::new(Mutex::new(HashMap::new()));
-        coordinator::server::handle_connection(socket, reg_clone, connections)
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        coordinator::server::handle_connection(socket, reg_clone, connections, pending)
             .await
             .unwrap();
     });

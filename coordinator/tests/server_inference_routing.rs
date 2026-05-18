@@ -1,7 +1,7 @@
 use coordinator::registry::Registry;
 use shared::{
-    InferenceRequest, MeshMessage, ModelLifecycleState, ModelStatusReport, NodeCapabilities,
-    NodeIdentity, NodeRole, WIRE_VERSION,
+    InferenceRequest, InferenceResult, MeshMessage, ModelLifecycleState, ModelStatusReport,
+    NodeCapabilities, NodeIdentity, NodeRole, WIRE_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,9 +26,11 @@ async fn write_frame(stream: &mut TcpStream, msg: &MeshMessage) {
 
 #[tokio::test]
 async fn test_coordinator_forwards_inference_request_to_agent() {
-    // Shared state — both connections use the same registry and connections map.
+    // Shared state — both connections use the same registry, connections map, and
+    // pending_inferences tracker so the oneshot channel bridges the two handlers.
     let registry = Arc::new(Mutex::new(Registry::new()));
     let connections = Arc::new(Mutex::new(HashMap::new()));
+    let pending_inferences = Arc::new(Mutex::new(HashMap::new()));
 
     // Agent listener
     let agent_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -36,9 +38,10 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
     {
         let reg = registry.clone();
         let conns = connections.clone();
+        let pend = pending_inferences.clone();
         tokio::spawn(async move {
             if let Ok((socket, _)) = agent_listener.accept().await {
-                let _ = coordinator::server::handle_connection(socket, reg, conns).await;
+                let _ = coordinator::server::handle_connection(socket, reg, conns, pend).await;
             }
         });
     }
@@ -49,9 +52,10 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
     {
         let reg = registry.clone();
         let conns = connections.clone();
+        let pend = pending_inferences.clone();
         tokio::spawn(async move {
             if let Ok((socket, _)) = cli_listener.accept().await {
-                let _ = coordinator::server::handle_connection(socket, reg, conns).await;
+                let _ = coordinator::server::handle_connection(socket, reg, conns, pend).await;
             }
         });
     }
@@ -110,24 +114,68 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
         MeshMessage::Acknowledge
     );
 
-    // Step 4 — CLI sends RequestModelInference; scheduler picks the agent.
+    // Step 4 & 5 — CLI sends RequestModelInference and agent responds concurrently.
+    //
+    // The coordinator blocks the CLI handler on a oneshot receiver after forwarding the
+    // request to the agent. The agent side must run concurrently to send the result back
+    // and unblock the oneshot, which is why tokio::join! is required here.
     let mut cli_stream = TcpStream::connect(cli_addr).await.unwrap();
-    write_frame(
-        &mut cli_stream,
-        &MeshMessage::RequestModelInference(InferenceRequest {
-            request_id: "infer-req-001".into(),
-            node_id: None,
-            model_name: "llama3".into(),
-            prompt: "hello world".into(),
-            max_tokens: 64,
-            wire_version: WIRE_VERSION,
-        }),
-    )
-    .await;
-    assert_eq!(read_frame(&mut cli_stream).await, MeshMessage::Acknowledge);
+    let node_id_clone = node_id.clone();
 
-    // Step 5 — Agent stream receives the forwarded inference request.
-    match read_frame(&mut agent_stream).await {
+    let (cli_result, forwarded_req) = tokio::join!(
+        // CLI side: send RequestModelInference, await ModelInferenceResult.
+        async {
+            write_frame(
+                &mut cli_stream,
+                &MeshMessage::RequestModelInference(InferenceRequest {
+                    request_id: "infer-req-001".into(),
+                    node_id: None,
+                    model_name: "llama3".into(),
+                    prompt: "hello world".into(),
+                    max_tokens: 64,
+                    wire_version: WIRE_VERSION,
+                }),
+            )
+            .await;
+            read_frame(&mut cli_stream).await
+        },
+        // Agent side: receive forwarded request, send ModelInferenceResult back.
+        async {
+            let req = read_frame(&mut agent_stream).await;
+            if let MeshMessage::RequestModelInference(ref r) = req {
+                write_frame(
+                    &mut agent_stream,
+                    &MeshMessage::ModelInferenceResult(InferenceResult {
+                        request_id: r.request_id.clone(),
+                        node_id: node_id_clone,
+                        model_name: r.model_name.clone(),
+                        output: "Simulated answer".into(),
+                        tokens_generated: 10,
+                        duration_ms: 50,
+                        error: None,
+                        wire_version: WIRE_VERSION,
+                    }),
+                )
+                .await;
+            }
+            req
+        }
+    );
+
+    // Verify CLI received ModelInferenceResult with the correct fields.
+    match cli_result {
+        MeshMessage::ModelInferenceResult(res) => {
+            assert_eq!(res.request_id, "infer-req-001");
+            assert_eq!(res.model_name, "llama3");
+            assert_eq!(res.output, "Simulated answer");
+            assert_eq!(res.tokens_generated, 10);
+            assert!(res.error.is_none());
+        }
+        other => panic!("Expected ModelInferenceResult, got {:?}", other),
+    }
+
+    // Verify the agent received the correctly forwarded RequestModelInference.
+    match forwarded_req {
         MeshMessage::RequestModelInference(req) => {
             assert_eq!(req.request_id, "infer-req-001");
             assert_eq!(req.model_name, "llama3");

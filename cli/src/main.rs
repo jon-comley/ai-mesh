@@ -24,6 +24,10 @@ enum Commands {
         model_name: String,
         size_mb: u64,
     },
+    Infer {
+        model_name: String,
+        prompt: String,
+    },
 }
 
 #[tokio::main]
@@ -42,5 +46,6 @@ async fn main() {
             model_name,
             size_mb,
         } => commands::load::run(node_id, model_name, size_mb).await,
+        Commands::Infer { model_name, prompt } => commands::infer::run(model_name, prompt).await,
     }
 }

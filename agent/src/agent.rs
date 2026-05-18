@@ -42,7 +42,11 @@ impl Agent {
             ip: "unknown".into(),
             role: config.role.clone(),
         });
-        Self { config, identity, tx }
+        Self {
+            config,
+            identity,
+            tx,
+        }
     }
 
     pub fn node_id(&self) -> &str {

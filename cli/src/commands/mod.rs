@@ -1,3 +1,4 @@
+pub mod infer;
 pub mod info;
 pub mod load;
 pub mod nodes;

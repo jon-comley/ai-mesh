@@ -1,7 +1,7 @@
 use agent::agent::Agent;
 use agent::config::AgentConfig;
 use shared::hardware::NodeRole;
-use shared::{MeshMessage, ModelLifecycleState, ModelStatusReport, WIRE_VERSION};
+use shared::{InferenceResult, MeshMessage, ModelLifecycleState, ModelStatusReport, WIRE_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -59,40 +59,62 @@ async fn main() {
                 Err(_) => continue,
             };
 
-            if let MeshMessage::ModelLoad(req) = msg {
-                info!(
-                    "Received command to load model {} ({} MB)",
-                    req.model_name, req.model_size_mb
-                );
+            match msg {
+                MeshMessage::ModelLoad(req) => {
+                    info!(
+                        "Received command to load model {} ({} MB)",
+                        req.model_name, req.model_size_mb
+                    );
 
-                // Immediately report Loading state.
-                let _ = tx_in
-                    .send(MeshMessage::ModelStatus(ModelStatusReport {
-                        node_id: node_id.clone(),
-                        model_name: req.model_name.clone(),
-                        size_mb: req.model_size_mb,
-                        state: ModelLifecycleState::Loading,
-                        wire_version: WIRE_VERSION,
-                    }))
-                    .await;
-
-                // Background task: simulate load delay then report Ready.
-                let tx2 = tx_in.clone();
-                let nid = node_id.clone();
-                let mname = req.model_name.clone();
-                let size = req.model_size_mb;
-                tokio::spawn(async move {
-                    sleep(Duration::from_secs(2)).await;
-                    let _ = tx2
+                    // Immediately report Loading state.
+                    let _ = tx_in
                         .send(MeshMessage::ModelStatus(ModelStatusReport {
-                            node_id: nid,
-                            model_name: mname,
-                            size_mb: size,
-                            state: ModelLifecycleState::Ready,
+                            node_id: node_id.clone(),
+                            model_name: req.model_name.clone(),
+                            size_mb: req.model_size_mb,
+                            state: ModelLifecycleState::Loading,
                             wire_version: WIRE_VERSION,
                         }))
                         .await;
-                });
+
+                    // Background task: simulate load delay then report Ready.
+                    let tx2 = tx_in.clone();
+                    let nid = node_id.clone();
+                    let mname = req.model_name.clone();
+                    let size = req.model_size_mb;
+                    tokio::spawn(async move {
+                        sleep(Duration::from_secs(2)).await;
+                        let _ = tx2
+                            .send(MeshMessage::ModelStatus(ModelStatusReport {
+                                node_id: nid,
+                                model_name: mname,
+                                size_mb: size,
+                                state: ModelLifecycleState::Ready,
+                                wire_version: WIRE_VERSION,
+                            }))
+                            .await;
+                    });
+                }
+                MeshMessage::RequestModelInference(req) => {
+                    info!(
+                        "Received inference request {} for model {}",
+                        req.request_id, req.model_name
+                    );
+                    let output = format!("Simulated response for prompt: {}", req.prompt);
+                    let _ = tx_in
+                        .send(MeshMessage::ModelInferenceResult(InferenceResult {
+                            request_id: req.request_id,
+                            node_id: node_id.clone(),
+                            model_name: req.model_name,
+                            output,
+                            tokens_generated: 42,
+                            duration_ms: 100,
+                            error: None,
+                            wire_version: WIRE_VERSION,
+                        }))
+                        .await;
+                }
+                _ => {}
             }
         }
     });

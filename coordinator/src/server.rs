@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
+pub type PendingInferences = Arc<Mutex<HashMap<String, oneshot::Sender<MeshMessage>>>>;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -24,6 +26,7 @@ pub struct Server {
     pub addr: String,
     pub registry: Arc<Mutex<Registry>>,
     connections: Connections,
+    pending_inferences: PendingInferences,
 }
 
 impl Server {
@@ -32,6 +35,7 @@ impl Server {
             addr: addr.into(),
             registry,
             connections: Arc::new(Mutex::new(HashMap::new())),
+            pending_inferences: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -42,9 +46,10 @@ impl Server {
             let (socket, _) = listener.accept().await?;
             let registry = self.registry.clone();
             let connections = self.connections.clone();
+            let pending_inferences = self.pending_inferences.clone();
 
             tokio::spawn(async move {
-                let _ = handle_connection(socket, registry, connections).await;
+                let _ = handle_connection(socket, registry, connections, pending_inferences).await;
             });
         }
     }
@@ -54,6 +59,7 @@ pub async fn handle_connection(
     socket: TcpStream,
     registry: Arc<Mutex<Registry>>,
     connections: Connections,
+    pending_inferences: PendingInferences,
 ) -> Result<(), ServerError> {
     let (mut reader, mut writer) = socket.into_split();
     let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
@@ -93,7 +99,15 @@ pub async fn handle_connection(
             Err(e) => return Err(ServerError::Json(e)),
         };
 
-        let reply = process_message(msg, &registry, &connections, &tx, &mut node_id).await;
+        let reply = process_message(
+            msg,
+            &registry,
+            &connections,
+            &pending_inferences,
+            &tx,
+            &mut node_id,
+        )
+        .await;
 
         if tx.send(reply).await.is_err() {
             break;
@@ -113,6 +127,7 @@ async fn process_message(
     msg: MeshMessage,
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
+    pending_inferences: &PendingInferences,
     tx: &mpsc::Sender<MeshMessage>,
     node_id: &mut Option<String>,
 ) -> MeshMessage {
@@ -163,6 +178,12 @@ async fn process_message(
                     let agent_tx = connections.lock().unwrap().get(&node.id).cloned();
                     match agent_tx {
                         Some(agent_tx) => {
+                            let (otx, orx) = oneshot::channel();
+                            let request_id = req.request_id.clone();
+                            pending_inferences
+                                .lock()
+                                .unwrap()
+                                .insert(request_id.clone(), otx);
                             info!(
                                 node_id    = %node.id,
                                 model_name = %req.model_name,
@@ -170,7 +191,20 @@ async fn process_message(
                                 "forwarding inference request to agent"
                             );
                             let _ = agent_tx.send(MeshMessage::RequestModelInference(req)).await;
-                            MeshMessage::Acknowledge
+                            // Block until the agent returns a result or the timeout fires.
+                            match timeout(Duration::from_secs(30), orx).await {
+                                Ok(Ok(result)) => result,
+                                Ok(Err(_)) => {
+                                    pending_inferences.lock().unwrap().remove(&request_id);
+                                    MeshMessage::Error(
+                                        "inference channel closed unexpectedly".into(),
+                                    )
+                                }
+                                Err(_) => {
+                                    pending_inferences.lock().unwrap().remove(&request_id);
+                                    MeshMessage::Error("inference request timed out".into())
+                                }
+                            }
                         }
                         None => {
                             warn!(
@@ -198,6 +232,18 @@ async fn process_message(
                     ))
                 }
             }
+        }
+        MeshMessage::ModelInferenceResult(res) => {
+            info!(
+                request_id = %res.request_id,
+                node_id    = %res.node_id,
+                "model inference result received from agent"
+            );
+            let otx = pending_inferences.lock().unwrap().remove(&res.request_id);
+            if let Some(otx) = otx {
+                let _ = otx.send(MeshMessage::ModelInferenceResult(res));
+            }
+            MeshMessage::Acknowledge
         }
         MeshMessage::ModelLoad(req) => {
             let agent_tx = connections.lock().unwrap().get(&req.node_id).cloned();
