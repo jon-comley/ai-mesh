@@ -14,7 +14,7 @@ The CLI crate provides a user-facing interface to the ai-mesh system. It communi
 
 ---
 
-## 2. Planned Commands
+## 2. Commands
 
 ### mesh status
 Check if the coordinator is reachable and responding.
@@ -24,15 +24,21 @@ List all nodes with:
 - ID
 - Hostname
 - IP
-- Last heartbeat
-- Hardware summary
-- Capability summary
+- Role
+- Last heartbeat (ms)
+- Models (live allocation state)
 
 ### mesh info <node-id>
-Show detailed information about a specific node.
+Show detailed information about a specific node, including hardware spec, capabilities, and loaded models.
 
 ### mesh watch
-Stream live updates from the coordinator.
+Stream live updates from the coordinator. Redraws the node table every second.
+
+### mesh load <node-id> <model-name> <size-mb>
+Send a `ModelLoad` request to the coordinator targeting the specified node. The coordinator forwards the command to the agent, which responds with `ModelStatus(Loading)` then `ModelStatus(Ready)`.
+
+### mesh reset-registry
+Send `AdminMessage::ResetRegistry` to the coordinator. Clears all registered nodes without restarting.
 
 ### mesh updates
 Manage update channels (future).
@@ -58,11 +64,10 @@ The CLI communicates with the coordinator using:
 
 ## 5. Next Steps
 
-- Implement CLI crate structure
-- Implement `mesh status`
-- Implement `mesh nodes`
-- Implement `mesh watch`
-- Add update management
+- `mesh infer <model-name> <prompt>` — send `RequestModelInference` and display result
+- `mesh models` — list models currently loaded across all nodes
+- `mesh deploy <model>` — trigger scheduler-selected placement
+- Update management
 
 ---
 

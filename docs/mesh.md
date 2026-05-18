@@ -51,11 +51,16 @@ network interfaces, including remote nodes such as Raspberry Pi compute nodes.
 
 | Message | Action |
 |---------|--------|
-| `Heartbeat` | Updates last-seen timestamp |
+| `Heartbeat` | Updates last-seen timestamp; registers agent tx in connections map |
 | `HardwareReport` | Stores hardware specification |
 | `Capabilities` | Stores capability information |
 | `RequestNodes` | Returns `NodeList(Vec<NodeRecordLite>)` |
-| `RequestNodeInfo(id)` | Returns `NodeInfo(NodeRecordFull)` |
+| `RequestNodeInfo(id)` | Returns `NodeInfo(NodeRecordFull)` including model allocations |
+| `ModelLoad` | Forwards to target agent via connections map |
+| `ModelStatus` | Updates model allocation state in registry |
+| `ModelUnload` | Logged; forwarding pending |
+| `RequestModelInference` | Logged; scheduler dispatch pending |
+| `Admin(ResetRegistry)` | Clears all nodes from registry |
 
 ### Concurrency Model
 
@@ -152,4 +157,4 @@ This command:
 - Runs `mesh nodes` to confirm cluster health
 - Cleans up all processes
 
-This is the recommended pre‑Phase‑6 validation workflow.
+This is the recommended local cluster validation workflow.

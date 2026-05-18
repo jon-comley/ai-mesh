@@ -1,57 +1,43 @@
 # ai-mesh Roadmap
 
-This document outlines the next phases of development.
+This document outlines the phases of development.
 
 ---
 
-# Phase 6 — Model Scheduling (Next)
+# Phase 6 — Model Scheduling ✓ Complete
+
+## Delivered
+
+- **Model registry** — `ModelAllocation` + `update_model_status` in coordinator registry
+- **Wire protocol messages** — `ModelLoad`, `ModelUnload`, `ModelStatus`, `RequestModelInference`, `ModelInferenceResult` with `wire_version` compatibility
+- **Allocation-aware scheduler** — `Scheduler::select_node_for_model(mb)`: filters by role, remaining capacity; `Ready` + `Loading` states count against capacity, `Unloaded` / `Failed` do not
+- **Connection routing map** — per-connection `mpsc::Sender` registered on `Heartbeat`, purged on disconnect; enables coordinator → agent command forwarding
+- **ModelLoad forwarding** — coordinator looks up target agent tx and forwards; warns if not connected
+- **Agent command handling** — bidirectional TCP: reader task handles `ModelLoad` from coordinator; replies `ModelStatus(Loading)` immediately, `ModelStatus(Ready)` after 2s background task (simulated)
+- **CLI `mesh load`** — `mesh load <node-id> <model-name> <size-mb>` sends `ModelLoad` to coordinator
+- **Models column** — `mesh nodes` fetches `NodeRecordFull` per node and renders live model lifecycle state
+- **54 tests** across all four crates; integration test validates end-to-end `ModelLoad` forwarding
+
+## Remaining / not yet wired
+
+- `ModelUnload` forwarding (server logs it; not yet forwarded to agent)
+- `RequestModelInference` dispatch (server logs "pending"; scheduler not yet invoked)
+- `mesh infer` CLI command
+- Real model integration (ollama / llama.cpp)
+
+---
+
+# Phase 7 — Inference Routing (Next)
 
 ## Goals
-- Allow agents to advertise supported model sizes and capabilities
-- Allow coordinator to select the best node for a given inference request
-- Add CLI commands for model deployment and inference
+- Route `RequestModelInference` through the scheduler to the selected agent
+- Forward `InferenceRequest` down the agent connection; agent returns `InferenceResult`
+- Add `mesh infer <model-name> <prompt>` CLI command
+- Wire up `ModelUnload` forwarding and agent-side `Unloaded` reporting
 
 ---
 
-## Planned Features
-
-### 1. Model Registry
-- List of available models
-- Metadata: size, quantization, architecture
-- Stored in coordinator
-
-### 2. Model Placement Rules
-- Nodes declare max model size
-- Nodes declare inference backends (CPU/GPU/ANE)
-- Coordinator selects best node based on:
-  - model size
-  - hardware acceleration
-  - current load (future)
-  - node availability
-
-### 3. New Messages
-- `RequestModelInference`
-- `ModelInferenceResult`
-- `ModelLoad`
-- `ModelUnload`
-- `ModelStatus`
-
-### 4. CLI Commands
-- `mesh models`
-- `mesh deploy <model>`
-- `mesh infer <model> <input>`
-- `mesh node-models <id>`
-
-### 5. Future Extensions
-- Distributed inference
-- Multi-node sharding
-- Model caching
-- Load balancing
-- GPU/ANE-aware scheduling
-
----
-
-# Phase 7 — Security & Auth
+# Phase 8 — Security & Auth
 - TLS
 - Node authentication
 - Signed messages

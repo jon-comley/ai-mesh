@@ -36,7 +36,7 @@ All commands are run via `just <target>` from the workspace root.
 
 ### sanity-all detail
 
-`just sanity-all` is the recommended pre-Phase-6 validation workflow:
+`just sanity-all` is the recommended local validation workflow:
 
 1. Kills any stale coordinator process holding port 9000
 2. Starts a fresh coordinator
