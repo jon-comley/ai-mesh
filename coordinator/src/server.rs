@@ -266,11 +266,23 @@ async fn process_message(
             MeshMessage::Acknowledge
         }
         MeshMessage::ModelUnload(req) => {
-            info!(
-                node_id    = %req.node_id,
-                model_name = %req.model_name,
-                "model unload requested"
-            );
+            let agent_tx = connections.lock().unwrap().get(&req.node_id).cloned();
+            match agent_tx {
+                Some(agent_tx) => {
+                    info!(
+                        node_id    = %req.node_id,
+                        model_name = %req.model_name,
+                        "forwarding ModelUnload to agent"
+                    );
+                    let _ = agent_tx.send(MeshMessage::ModelUnload(req)).await;
+                }
+                None => {
+                    warn!(
+                        node_id = %req.node_id,
+                        "ModelUnload target node not connected"
+                    );
+                }
+            }
             MeshMessage::Acknowledge
         }
         MeshMessage::ModelStatus(report) => {

@@ -114,6 +114,18 @@ async fn main() {
                         }))
                         .await;
                 }
+                MeshMessage::ModelUnload(req) => {
+                    info!("Received command to unload model {}", req.model_name);
+                    let _ = tx_in
+                        .send(MeshMessage::ModelStatus(ModelStatusReport {
+                            node_id: node_id.clone(),
+                            model_name: req.model_name,
+                            size_mb: 0,
+                            state: ModelLifecycleState::Unloaded,
+                            wire_version: WIRE_VERSION,
+                        }))
+                        .await;
+                }
                 _ => {}
             }
         }
