@@ -5,7 +5,7 @@
 - Maintain an in-memory registry of nodes
 - Track heartbeats and last-seen timestamps
 - Store hardware and capability reports
-- Route model load commands to the correct agent
+- Route model load and inference commands to the correct agent
 - Respond to CLI queries
 
 ## Architecture
@@ -39,7 +39,7 @@ Each agent connection registers its outbound `mpsc::Sender<MeshMessage>` in a sh
 | `ModelLoad` | Looks up target agent tx in connections map; forwards command |
 | `ModelStatus` | Calls `registry.update_model_status()`; updates allocation state |
 | `ModelUnload` | Logged; forwarding to agent not yet implemented |
-| `RequestModelInference` | Calls `select_node_for_inference`; logs selected node or returns `Error` if none ready |
+| `RequestModelInference` | Runs `select_node_for_inference`; looks up agent tx; forwards request down socket; returns `Acknowledge` or `Error` |
 | `Admin(ResetRegistry)` | Clears all nodes from the registry |
 
 ## Registry Methods
