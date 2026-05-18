@@ -1,5 +1,9 @@
 pi_host := "192.168.1.11"
 pi_user := "jonno"
+
+beelink_host := "192.168.1.14"
+beelink_user := "jonno"
+
 coordinator_ip := "192.168.1.12"
 coordinator_port := "9000"
 
@@ -69,6 +73,69 @@ deploy-pi: build-pi
 
 run-pi:
     ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent"
+
+# ============================================================
+# Beelink SER8 — Full Auto-Provisioning
+# ============================================================
+
+build-beelink:
+    cargo build --release -p agent
+
+deploy-beelink: build-beelink
+    @echo ">>> Uploading agent binary to Beelink..."
+    scp target/release/agent {{beelink_user}}@{{beelink_host}}:/home/{{beelink_user}}/agent
+
+    @echo ">>> Installing Ollama if missing..."
+    ssh {{beelink_user}}@{{beelink_host}} 'if ! command -v ollama >/dev/null 2>&1; then \
+        curl -fsSL https://ollama.com/install.sh | sh; \
+        sudo systemctl enable ollama; \
+        sudo systemctl start ollama; \
+    fi'
+
+    @echo ">>> Pre-caching qwen2.5:1.5b..."
+    ssh {{beelink_user}}@{{beelink_host}} 'ollama pull qwen2.5:1.5b'
+
+    @echo ">>> Uploading systemd service..."
+    scp docs/beelink-agent.service {{beelink_user}}@{{beelink_host}}:/home/{{beelink_user}}/beelink-agent.service
+
+    @echo ">>> Installing systemd service..."
+    ssh {{beelink_user}}@{{beelink_host}} 'sudo mv /home/{{beelink_user}}/beelink-agent.service /etc/systemd/system/agent.service && \
+        sudo systemctl daemon-reload && \
+        sudo systemctl enable agent && \
+        sudo systemctl restart agent'
+
+    @echo ">>> Beelink deployment complete."
+
+run-beelink:
+    ssh {{beelink_user}}@{{beelink_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{beelink_user}}/agent"
+
+# ============================================================
+# Sanity test for Beelink node
+# ============================================================
+
+sanity-beelink:
+    pkill -f "target/debug/coordinator" || true
+    sleep 0.5
+
+    echo ">>> Starting coordinator..."
+    cargo run -p coordinator &
+    COORD_PID=$!
+    sleep 2
+
+    echo ">>> Starting controller agent..."
+    AGENT_ROLE=controller cargo run -p agent &
+    AGENT_PID=$!
+    sleep 2
+
+    echo ">>> Starting Beelink compute agent..."
+    ssh {{beelink_user}}@{{beelink_host}} "sudo systemctl restart agent"
+    sleep 3
+
+    echo ">>> Node table:"
+    cargo run -p cli -- nodes
+
+    echo ">>> Cleaning up..."
+    kill $COORD_PID $AGENT_PID 2>/dev/null || true
 
 run-controller:
     AGENT_ROLE=controller cargo run -p agent
