@@ -160,13 +160,31 @@ async fn process_message(
             };
             match selected {
                 Some(node) => {
-                    info!(
-                        node_id    = %node.id,
-                        model_name = %req.model_name,
-                        request_id = %req.request_id,
-                        "Scheduler selected node {} for inference", node.id
-                    );
-                    MeshMessage::Acknowledge
+                    let agent_tx = connections.lock().unwrap().get(&node.id).cloned();
+                    match agent_tx {
+                        Some(agent_tx) => {
+                            info!(
+                                node_id    = %node.id,
+                                model_name = %req.model_name,
+                                request_id = %req.request_id,
+                                "forwarding inference request to agent"
+                            );
+                            let _ = agent_tx.send(MeshMessage::RequestModelInference(req)).await;
+                            MeshMessage::Acknowledge
+                        }
+                        None => {
+                            warn!(
+                                node_id    = %node.id,
+                                model_name = %req.model_name,
+                                request_id = %req.request_id,
+                                "scheduler selected node but agent is not connected"
+                            );
+                            MeshMessage::Error(format!(
+                                "compute node '{}' dropped from connections map",
+                                node.id
+                            ))
+                        }
+                    }
                 }
                 None => {
                     warn!(
