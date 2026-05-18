@@ -69,7 +69,10 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
     .await;
     // The Acknowledge is sent only after the connections map is updated, so by the
     // time we receive it the agent tx is guaranteed to be registered.
-    assert_eq!(read_frame(&mut agent_stream).await, MeshMessage::Acknowledge);
+    assert_eq!(
+        read_frame(&mut agent_stream).await,
+        MeshMessage::Acknowledge
+    );
 
     // Step 2 — CLI connects and sends ModelLoad targeting the agent.
     let mut cli_stream = TcpStream::connect(cli_addr).await.unwrap();

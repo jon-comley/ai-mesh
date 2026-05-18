@@ -165,10 +165,16 @@ mod tests {
         {
             let scheduler = Scheduler::new(&registry);
             let selected_large = scheduler.select_node_for_model(1024);
-            assert!(selected_large.is_none(), "Should not fit model exceeding remaining space");
+            assert!(
+                selected_large.is_none(),
+                "Should not fit model exceeding remaining space"
+            );
 
             let selected_small = scheduler.select_node_for_model(512);
-            assert!(selected_small.is_some(), "Should fit within remaining space");
+            assert!(
+                selected_small.is_some(),
+                "Should fit within remaining space"
+            );
             assert_eq!(selected_small.unwrap().id, compute.id);
         }
 

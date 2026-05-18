@@ -15,7 +15,9 @@ enum Commands {
     Status,
     Nodes,
     Watch,
-    Info { id: String },
+    Info {
+        id: String,
+    },
     ResetRegistry,
     Load {
         node_id: String,

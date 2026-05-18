@@ -54,7 +54,14 @@ fn format_models(node: &NodeRecordFull) -> String {
 
 fn print_table(nodes: Vec<NodeRecordFull>) {
     let mut table = Table::new();
-    table.add_row(row!["ID", "Hostname", "IP", "Role", "Last Seen (ms)", "Models"]);
+    table.add_row(row![
+        "ID",
+        "Hostname",
+        "IP",
+        "Role",
+        "Last Seen (ms)",
+        "Models"
+    ]);
 
     for n in &nodes {
         table.add_row(row![

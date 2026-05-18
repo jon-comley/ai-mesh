@@ -157,6 +157,7 @@ dependencies = [
  "shared",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

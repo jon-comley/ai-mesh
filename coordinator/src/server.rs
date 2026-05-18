@@ -92,8 +92,7 @@ pub async fn handle_connection(
             Err(e) => return Err(ServerError::Json(e)),
         };
 
-        let reply =
-            process_message(msg, &registry, &connections, &tx, &mut node_id).await;
+        let reply = process_message(msg, &registry, &connections, &tx, &mut node_id).await;
 
         if tx.send(reply).await.is_err() {
             break;
@@ -121,10 +120,7 @@ async fn process_message(
             info!(node_id = %identity.id, hostname = %identity.hostname, "heartbeat");
             *node_id = Some(identity.id.clone());
             registry.lock().unwrap().update_heartbeat(identity.clone());
-            connections
-                .lock()
-                .unwrap()
-                .insert(identity.id, tx.clone());
+            connections.lock().unwrap().insert(identity.id, tx.clone());
             MeshMessage::Acknowledge
         }
         MeshMessage::HardwareReport(hw) => {
