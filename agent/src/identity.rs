@@ -1,5 +1,4 @@
 use shared::{NodeIdentity, NodeRole};
-use std::fs;
 use std::net::{IpAddr, UdpSocket};
 use uuid::Uuid;
 
@@ -28,24 +27,27 @@ fn generate_node_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+#[cfg(target_os = "windows")]
 fn detect_hostname() -> Result<String, IdentityError> {
-    fs::read_to_string("/etc/hostname")
+    std::env::var("COMPUTERNAME").map_err(|_| IdentityError::HostnameError)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_hostname() -> Result<String, IdentityError> {
+    std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .map_err(|_| IdentityError::HostnameError)
 }
 
 fn detect_local_ip() -> Result<String, IdentityError> {
-    // Use a UDP socket trick to determine outbound IP
+    // UDP socket trick: connecting a UDP socket reveals the outbound IP without sending data.
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|_| IdentityError::IpDetectionError)?;
-
     socket
         .connect("8.8.8.8:80")
         .map_err(|_| IdentityError::IpDetectionError)?;
-
     let local_addr = socket
         .local_addr()
         .map_err(|_| IdentityError::IpDetectionError)?;
-
     match local_addr.ip() {
         IpAddr::V4(ip) => Ok(ip.to_string()),
         IpAddr::V6(ip) => Ok(ip.to_string()),
