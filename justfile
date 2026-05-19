@@ -3,6 +3,7 @@ pi_user := "jonno"
 
 beelink_host := "192.168.1.14"
 beelink_user := "jonno"
+beelink_path := "C:\\Users\\jonno\\ai-mesh"
 
 coordinator_ip := "192.168.1.12"
 coordinator_port := "9000"
@@ -22,7 +23,7 @@ lint:
 run-agent:
     cargo run -p agent
 
-run-coordinator:
+run-coordinator: update-portproxy
     cargo run -p coordinator
 
 sanity:
@@ -75,66 +76,113 @@ run-pi:
     ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent"
 
 # ============================================================
-# Beelink SER8 — Full Auto-Provisioning
+# Beelink1 (Windows 11) — Windows agent build + provisioning
 # ============================================================
 
-build-beelink:
-    cargo build --release -p agent
+# Build Windows agent (.exe) from WSL using MinGW GNU toolchain.
+# Prereqs (once):
+#   sudo apt install gcc-mingw-w64-x86-64
+#   rustup target add x86_64-pc-windows-gnu
+build-beelink-exe:
+    cargo build --release -p agent --target x86_64-pc-windows-gnu
 
-deploy-beelink: build-beelink
-    @echo ">>> Uploading agent binary to Beelink..."
-    scp target/release/agent {{beelink_user}}@{{beelink_host}}:/home/{{beelink_user}}/agent
+# First-time provisioning of Beelink1 as a Windows compute node.
+deploy-beelink-windows: build-beelink-exe
+    @echo ">>> Creating {{beelink_path}} on Beelink (if missing)..."
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"if (-not (Test-Path '{{beelink_path}}')) { New-Item -ItemType Directory -Path '{{beelink_path}}' | Out-Null }\""
 
-    @echo ">>> Installing Ollama if missing..."
-    ssh {{beelink_user}}@{{beelink_host}} 'if ! command -v ollama >/dev/null 2>&1; then \
-        curl -fsSL https://ollama.com/install.sh | sh; \
-        sudo systemctl enable ollama; \
-        sudo systemctl start ollama; \
-    fi'
+    @echo ">>> Uploading Windows agent.exe (via temp file to avoid lock)..."
+    scp target/x86_64-pc-windows-gnu/release/agent.exe {{beelink_user}}@{{beelink_host}}:"{{beelink_path}}\\agent_next.exe"
 
-    @echo ">>> Pre-caching qwen2.5:1.5b..."
-    ssh {{beelink_user}}@{{beelink_host}} 'ollama pull qwen2.5:1.5b'
+    @echo ">>> Uploading provision script..."
+    scp scripts/provision-beelink.ps1 {{beelink_user}}@{{beelink_host}}:"{{beelink_path}}\\provision-beelink.ps1"
 
-    @echo ">>> Uploading systemd service..."
-    scp docs/beelink-agent.service {{beelink_user}}@{{beelink_host}}:/home/{{beelink_user}}/beelink-agent.service
+    @echo ">>> Stopping service, swapping binary, running provision script..."
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -ExecutionPolicy Bypass -Command \"\
+        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+        Start-Sleep 2;\
+        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Start-Sleep 2;\
+        Move-Item -Force '{{beelink_path}}\\agent_next.exe' '{{beelink_path}}\\agent.exe';\
+        & '{{beelink_path}}\\provision-beelink.ps1' -CoordinatorIp '{{coordinator_ip}}'\
+    \""
 
-    @echo ">>> Installing systemd service..."
-    ssh {{beelink_user}}@{{beelink_host}} 'sudo mv /home/{{beelink_user}}/beelink-agent.service /etc/systemd/system/agent.service && \
-        sudo systemctl daemon-reload && \
-        sudo systemctl enable agent && \
-        sudo systemctl restart agent'
+    @echo ">>> Beelink Windows provisioning complete."
 
-    @echo ">>> Beelink deployment complete."
+# OTA-style update: rebuild agent.exe, push it, restart service.
+update-beelink: build-beelink-exe
+    @echo ">>> Uploading updated agent.exe (via temp file to avoid lock)..."
+    scp target/x86_64-pc-windows-gnu/release/agent.exe {{beelink_user}}@{{beelink_host}}:"{{beelink_path}}\\agent_next.exe"
 
-run-beelink:
-    ssh {{beelink_user}}@{{beelink_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{beelink_user}}/agent"
+    @echo ">>> Stopping service, swapping binary, restarting..."
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
+        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+        Start-Sleep 2;\
+        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Start-Sleep 2;\
+        Move-Item -Force '{{beelink_path}}\\agent_next.exe' '{{beelink_path}}\\agent.exe';\
+        sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
+        exit 0\
+    \""
 
-# ============================================================
-# Sanity test for Beelink node
-# ============================================================
+    @echo ">>> Beelink agent updated and restarted."
 
-sanity-beelink:
+logs-beelink:
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"Get-Content '{{beelink_path}}\\logs\\agent.log' -Tail 100 -Wait\""
+
+# Refresh the Windows portproxy rule to point at the current WSL2 IP.
+# WSL2 assigns a new IP on each restart; the portproxy goes stale without this.
+# No-op if the rule is already correct — no UAC prompt in that case.
+# Automatically runs as a dependency of any recipe that starts the coordinator.
+update-portproxy:
+    #!/usr/bin/env bash
+    set -e
+    WSL_IP=$(ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    CURRENT=$(netsh.exe interface portproxy show all | awk '/9000/{print $3}' | head -1)
+    if [ "$CURRENT" = "$WSL_IP" ]; then
+        echo ">>> Portproxy OK (0.0.0.0:9000 → ${WSL_IP}:9000)"
+        exit 0
+    fi
+    echo ">>> WSL IP changed: ${CURRENT:-none} → ${WSL_IP} — updating (UAC prompt will appear)..."
+    powershell.exe -Command "Start-Process powershell -ArgumentList \"-NoProfile -Command netsh interface portproxy delete v4tov4 listenport=9000 listenaddress=0.0.0.0; netsh interface portproxy add v4tov4 listenport=9000 listenaddress=0.0.0.0 connectport=9000 connectaddress=${WSL_IP}\" -Verb RunAs -Wait"
+    echo ">>> Portproxy updated: 0.0.0.0:9000 → ${WSL_IP}:9000"
+
+# Sanity check: coordinator + controller locally, Beelink via service restart.
+# Requires: deploy-beelink-windows already run and ai-mesh-agent service installed.
+sanity-beelink: update-portproxy
+    #!/usr/bin/env bash
+    set -e
+
     pkill -f "target/debug/coordinator" || true
     sleep 0.5
 
-    echo ">>> Starting coordinator..."
     cargo run -p coordinator &
     COORD_PID=$!
-    sleep 2
+    sleep 1
 
-    echo ">>> Starting controller agent..."
+    just reset || true
+
     AGENT_ROLE=controller cargo run -p agent &
     AGENT_PID=$!
-    sleep 2
+    sleep 1
 
-    echo ">>> Starting Beelink compute agent..."
-    ssh {{beelink_user}}@{{beelink_host}} "sudo systemctl restart agent"
-    sleep 3
+    echo ">>> Restarting Beelink agent service..."
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
+        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+        Start-Sleep 2;\
+        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Start-Sleep 2;\
+        sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
+        exit 0\
+    \""
+    sleep 12
 
     echo ">>> Node table:"
     cargo run -p cli -- nodes
 
-    echo ">>> Cleaning up..."
     kill $COORD_PID $AGENT_PID 2>/dev/null || true
 
 run-controller:
@@ -177,7 +225,7 @@ sanity-all:
     kill $COORD_PID $AGENT_PID || true
 
 # Full cluster sanity test including Pi (coordinator + controller + Pi + nodes check)
-sanity-full:
+sanity-full: update-portproxy
     #!/usr/bin/env bash
     set -e
 
@@ -211,7 +259,7 @@ sanity-full:
     ssh {{pi_user}}@{{pi_host}} "pkill -f agent" || true
 
 # Run an end-to-end live inference loop across the whole cluster automatically
-test-inference:
+test-inference: update-portproxy
     #!/usr/bin/env bash
     set -e
 

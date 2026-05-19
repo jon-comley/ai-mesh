@@ -42,8 +42,8 @@ This mixed‑OS cluster is **intentional** and fully supported.
 
 Each compute node requires a platform‑specific agent binary:
 
-- **Windows:**  
-  `cargo build --release -p agent --target x86_64-pc-windows-msvc`
+- **Windows (cross-compiled from WSL/Linux via MinGW):**  
+  `cargo build --release -p agent --target x86_64-pc-windows-gnu`
 
 - **Linux x86_64:**  
   `cargo build --release -p agent`
@@ -89,9 +89,31 @@ ai‑mesh uses **per‑OS provisioning flows**:
 ### Windows Compute Nodes
 - Install Ollama for Windows  
 - Install Windows agent `.exe`  
-- Configure as a Windows service (NSSM or native)  
+- Configure as a Windows service (NSSM)  
 - Use PowerShell for automation  
 - No `/home/...`, no systemd
+
+See [windows-node-setup.md](windows-node-setup.md) for the full step-by-step guide including all known gotchas.
+
+#### SSH Elevation (one-time, required)
+
+Windows SSH sessions use a filtered (non-elevated) token by default, even
+for Administrator accounts. This prevents remote PowerShell from installing
+services or writing to `HKLM`. The provisioner fixes this automatically by
+setting:
+
+```
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+  LocalAccountTokenFilterPolicy = 1 (DWORD)
+```
+
+This is written by `provision-beelink.ps1` during first-time setup and
+persists across reboots. After it is set, `just update-beelink` and
+`just sanity-beelink` work fully from WSL with no manual steps on the node.
+
+**First-time only:** run `provision-beelink.ps1` from an elevated PowerShell
+on the Beelink itself (Start → PowerShell → Run as Administrator). All
+subsequent deploys go through `just update-beelink` from WSL.
 
 ### Linux Compute Nodes
 - Install Ollama via `install.sh`  
