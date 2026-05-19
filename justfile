@@ -226,6 +226,15 @@ dev: update-portproxy
     }
     trap cleanup EXIT
 
+    echo ">>> Stopping remote compute agents before coordinator starts..."
+    ssh -o ConnectTimeout=5 {{pi_user}}@{{pi_host}} "sudo systemctl stop ai-mesh-agent" 2>/dev/null || true
+    ssh -o ConnectTimeout=5 {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
+        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+        Start-Sleep 1;\
+        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        exit 0\"" 2>/dev/null || true
+
     echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
     cargo run -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
     COORD_PID=$!
@@ -246,16 +255,11 @@ dev: update-portproxy
         echo ">>>   Try: just update-portproxy   (UAC prompt will appear)"
     fi
 
-    echo ">>> Bouncing remote compute agents so they reconnect to the fresh coordinator..."
-    ssh {{pi_user}}@{{pi_host}} "sudo systemctl restart ai-mesh-agent" 2>/dev/null || echo ">>> Warning: could not restart Pi agent (offline?)"
-    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
-        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-        Start-Sleep 2;\
-        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
-        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
-        Start-Sleep 1;\
+    echo ">>> Starting remote compute agents..."
+    ssh -o ConnectTimeout=5 {{pi_user}}@{{pi_host}} "sudo systemctl start ai-mesh-agent" 2>/dev/null || echo ">>> Warning: could not start Pi agent (offline?)"
+    ssh -o ConnectTimeout=5 {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
         sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
-        exit 0\"" 2>/dev/null || echo ">>> Warning: could not restart Beelink agent (offline?)"
+        exit 0\"" 2>/dev/null || echo ">>> Warning: could not start Beelink agent (offline?)"
 
     echo ">>> Waiting for nodes to register..."
     sleep 10

@@ -32,7 +32,7 @@ List all nodes with:
 Show detailed information about a specific node, including hardware spec, capabilities, and loaded models.
 
 ### mesh watch
-Live-updating view of the mesh. Redraws the node table every second from the cursor position (preceding terminal output stays visible). Below the table, a timestamped event log records node joins/leaves and model state changes (up to 20 events).
+Full-screen TUI (ratatui, alternate screen). Redraws every second. Exit with `q`, `Esc`, or `Ctrl+C`. Below the node table an Events panel shows timestamped join/leave/model-state events (up to 20).
 
 ### mesh load <node-id> <model-name> <size-mb>
 Send a `ModelLoad` request to the coordinator targeting the specified node. The coordinator forwards the command to the agent, which responds with `ModelStatus(Loading)` then `ModelStatus(Ready)`.
@@ -99,28 +99,19 @@ MeshMessage::NodeInfo(NodeRecordFull)
 
 ## mesh watch
 
-Live-updating view of all nodes in the mesh.
-
-Refreshes every second and redraws the table without flicker.
+Full-screen TUI built with `ratatui` (crossterm alternate screen). Redraws every second. Exit with `q`, `Esc`, or `Ctrl+C`.
 
 ### Example
 ```
 mesh watch
 ```
 
-### Output
-A continuously updating table of:
-- Node ID
-- Hostname
-- IP
-- Role
-- Last Seen (ms)
-- Models (name + lifecycle state)
+### Layout
+- **Status bar** (top) — timestamp, node count, exit hint; turns red on coordinator error
+- **Nodes table** — ID, Hostname, IP, Role, Last Seen (ms), Models
+- **Events panel** (bottom, appears once first event fires) — timestamped `[+] joined`, `[-] left`, `[M] model state change / removed`; up to 20 entries
 
-Below the table: a timestamped event log showing `[+] joined`, `[-] left`, and `[M] model state change / removed` events.
-
-This command repeatedly sends:
-```
-MeshMessage::RequestNodes
-```
-and diffs successive `NodeList` responses to generate events.
+### Implementation notes
+- Uses `EnterAlternateScreen` on start and `LeaveAlternateScreen` on exit — the preceding terminal output (e.g. `just dev` preamble) is preserved in the scrollback and restored on exit
+- Raw mode disables SIGINT, so exit is handled via crossterm key-event polling in a `spawn_blocking` task
+- Fetches `MeshMessage::RequestNodes` then `MeshMessage::RequestNodeInfo` per node each tick; diffs successive snapshots to generate events
