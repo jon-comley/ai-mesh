@@ -31,7 +31,7 @@ pub fn detect_hardware() -> Result<HardwareSpec, HardwareError> {
         return Err(HardwareError::CpuParseError);
     }
 
-    let cpu_model = cpus[0].brand().to_string();
+    let cpu_model = cpus[0].brand().trim().to_string();
     let cpu_threads = cpus.len() as u32;
     // sysinfo doesn't directly expose physical core count; use thread count as fallback.
     let cpu_cores = cpu_threads;
@@ -88,11 +88,14 @@ fn detect_cpu_model() -> Result<String, HardwareError> {
     use std::fs;
     let cpuinfo =
         fs::read_to_string("/proc/cpuinfo").map_err(|_| HardwareError::CpuInfoReadError)?;
+    // x86: each core has "model name : Intel Core i7-..."
+    // ARM: no "model name"; board identity is in "Model : Raspberry Pi 5 ..."
     for line in cpuinfo.lines() {
-        if line.starts_with("model name")
-            && let Some(model) = line.split(':').nth(1)
-        {
-            return Ok(model.trim().to_string());
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim();
+            if key == "model name" || key == "Model" {
+                return Ok(value.trim().to_string());
+            }
         }
     }
     Err(HardwareError::CpuParseError)
@@ -160,5 +163,28 @@ mod tests {
         assert!(hw.ram_gb > 0.0);
         assert!(!hw.os.is_empty());
         assert!(!hw.arch.is_empty());
+    }
+
+    #[test]
+    fn test_cpu_model_no_trailing_whitespace() {
+        // sysinfo brand() strings from Windows often have trailing spaces.
+        let raw = "AMD Ryzen 7 8745HS w/ Radeon 780M Graphics     ";
+        assert_eq!(
+            raw.trim().to_string(),
+            "AMD Ryzen 7 8745HS w/ Radeon 780M Graphics"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_cpu_model_arm_fallback() {
+        // ARM /proc/cpuinfo has no "model name" — only "Model" (board identity).
+        let cpuinfo =
+            "processor\t: 0\nBogoMIPS\t: 108.00\nModel\t: Raspberry Pi 5 Model B Rev 1.1\n";
+        let result = cpuinfo.lines().find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            (k.trim() == "model name" || k.trim() == "Model").then(|| v.trim().to_string())
+        });
+        assert_eq!(result, Some("Raspberry Pi 5 Model B Rev 1.1".to_string()));
     }
 }

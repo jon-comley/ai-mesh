@@ -20,7 +20,7 @@ Detects:
 - Core/thread count
 - RAM
 - OS + architecture
-- GPU (NVIDIA via nvidia-smi; VGA via lspci on Linux)
+- GPU (NVIDIA via nvidia-smi; VGA via lspci on Linux; AMD iGPU on Windows not yet detected)
 
 Platform implementations are gated with `#[cfg]`:
 - **Windows** — uses the `sysinfo` crate (no child-process spawning; avoids NSSM STOP_PENDING deadlock)
@@ -80,8 +80,8 @@ As of this stage of development, the agent crate includes fully implemented and 
 - CPU model, cores, threads
 - RAM detection
 - OS and architecture
-- GPU detection (NVIDIA via nvidia-smi; VGA via lspci on Linux)
-- Cross-platform: Windows uses `sysinfo` crate; Linux/macOS use `/proc`
+- GPU detection (NVIDIA via nvidia-smi; VGA via lspci on Linux; AMD iGPU on Windows not yet detected)
+- Cross-platform: Windows uses `sysinfo` crate (brand strings are trimmed); Linux/macOS use `/proc`
 - Fully tested with round‑trip and basic invariants
 
 ### ✔ Identity Detection
