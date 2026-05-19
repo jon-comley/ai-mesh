@@ -5,6 +5,7 @@ use crate::identity::detect_identity;
 use shared::{MeshMessage, NodeIdentity, NodeRole};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, sleep};
+use tracing::{info, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -54,38 +55,65 @@ impl Agent {
     }
 
     /// Send one startup burst (heartbeat + optional hardware/capabilities), no loop.
-    pub async fn start_once(&self) -> Result<(), AgentError> {
-        self.tx
+    /// Returns Ok(false) if the outbound channel is closed (connection dropped).
+    pub async fn start_once(&self) -> Result<bool, AgentError> {
+        info!(node_id = %self.identity.id, "sending heartbeat");
+        if self
+            .tx
             .send(MeshMessage::Heartbeat(self.identity.clone()))
             .await
-            .unwrap();
-
-        if self.config.role == NodeRole::Compute {
-            let hardware = detect_hardware()?;
-            let capabilities = detect_capabilities()?;
-            self.tx
-                .send(MeshMessage::HardwareReport(hardware))
-                .await
-                .unwrap();
-            self.tx
-                .send(MeshMessage::Capabilities(capabilities))
-                .await
-                .unwrap();
+            .is_err()
+        {
+            return Ok(false); // channel closed — connection already gone
         }
 
-        Ok(())
+        if self.config.role == NodeRole::Compute {
+            info!("detecting hardware and capabilities");
+            let hardware = detect_hardware().map_err(|e| {
+                warn!(error = %e, "hardware detection failed");
+                e
+            })?;
+            let capabilities = detect_capabilities()?;
+            // If the channel closed while we were detecting hardware, exit cleanly.
+            if self
+                .tx
+                .send(MeshMessage::HardwareReport(hardware))
+                .await
+                .is_err()
+            {
+                return Ok(false);
+            }
+            if self
+                .tx
+                .send(MeshMessage::Capabilities(capabilities))
+                .await
+                .is_err()
+            {
+                return Ok(false);
+            }
+            info!("startup sequence complete");
+        }
+
+        Ok(true)
     }
 
     pub async fn run(&self) -> Result<(), AgentError> {
-        self.start_once().await?;
+        if !self.start_once().await? {
+            return Ok(()); // connection dropped before we could start
+        }
 
         loop {
             sleep(Duration::from_secs(self.config.heartbeat_interval_secs)).await;
-            self.tx
+            if self
+                .tx
                 .send(MeshMessage::Heartbeat(self.identity.clone()))
                 .await
-                .unwrap();
+                .is_err()
+            {
+                break; // channel closed — connection dropped
+            }
         }
+        Ok(())
     }
 }
 
@@ -103,7 +131,7 @@ mod tests {
         };
         let (tx, mut rx) = mpsc::channel(16);
         let agent = Agent::new_with_config(config, tx);
-        agent.start_once().await.unwrap();
+        assert!(agent.start_once().await.unwrap());
 
         let mut msgs = Vec::new();
         while let Ok(msg) = rx.try_recv() {
@@ -122,7 +150,7 @@ mod tests {
         };
         let (tx, mut rx) = mpsc::channel(16);
         let agent = Agent::new_with_config(config, tx);
-        agent.start_once().await.unwrap();
+        assert!(agent.start_once().await.unwrap());
 
         let mut msgs = Vec::new();
         while let Ok(msg) = rx.try_recv() {
