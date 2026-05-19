@@ -289,10 +289,25 @@ test-inference: update-portproxy
         echo "=== Cleaning up cluster ==="
         kill $COORD_PID $AGENT_PID 2>/dev/null || true
         ssh {{pi_user}}@{{pi_host}} "pkill -f agent" 2>/dev/null || true
+        ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
+            sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+            Start-Sleep 2;\
+            Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+            Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+            exit 0\
+        \"" 2>/dev/null || true
     }
     trap cleanup EXIT
 
-    echo "=== Step 1: Cleaning workspace and starting cluster fresh ==="
+    echo "=== Step 1: Stopping remote agents and starting cluster fresh ==="
+    ssh {{pi_user}}@{{pi_host}} "pkill -f agent || true" || true
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
+        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+        Start-Sleep 2;\
+        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        exit 0\
+    \"" || true
     pkill -f "target/debug/coordinator" || true
     pkill -f "target/debug/agent" || true
     sleep 0.5
@@ -309,27 +324,38 @@ test-inference: update-portproxy
 
     ssh {{pi_user}}@{{pi_host}} "echo Connected to Pi OK"
     ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent" &
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0\""
 
-    # Give the cluster a moment to stabilize heartbeats and populate the registry
-    sleep 3
+    # Give all nodes time to register
+    sleep 5
 
-    echo "=== Step 2: Fetching the dynamic Compute node ID ==="
-    NODE_ID=$(cargo run -q -p cli -- nodes | grep -E "Compute" | head -n 1 | awk -F'|' '{print $2}' | xargs)
-
-    if [ -z "$NODE_ID" ]; then
-        echo "Error: Could not find an active Compute node in the registry!"
-        exit 1
-    fi
-    echo "Found Compute node ID: ${NODE_ID}"
-
-    echo "=== Step 3: Triggering model load on target node ==="
-    cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:0.5b 4200
-
-    echo "=== Step 4: Waiting for model state transition to Ready ==="
-    sleep 3
-
-    echo "=== Step 5: Verifying model status in cluster table ==="
+    echo "=== Step 2: Verifying all compute nodes are registered ==="
     cargo run -q -p cli -- nodes
 
-    echo "=== Step 6: Dispatching load-balanced inference prompt ==="
-    cargo run -p cli -- infer 'qwen2.5:0.5b' 'Context: The Itchen Bridge is a high-level bridge in Southampton, England. Why does it have a toll?'
+    COMPUTE_NODES=$(cargo run -q -p cli -- nodes | grep -E "Compute")
+    COMPUTE_COUNT=$(echo "$COMPUTE_NODES" | grep -c "Compute" || true)
+    echo "Found ${COMPUTE_COUNT} compute node(s)"
+
+    echo "=== Step 3: Loading model on all compute nodes ==="
+    while IFS= read -r line; do
+        NODE_ID=$(echo "$line" | awk -F'|' '{print $2}' | xargs)
+        HOSTNAME=$(echo "$line" | awk -F'|' '{print $3}' | xargs)
+        if [ -n "$NODE_ID" ]; then
+            echo "  Loading qwen2.5:0.5b on ${HOSTNAME} (${NODE_ID})..."
+            cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:0.5b 4200
+        fi
+    done <<< "$COMPUTE_NODES"
+
+    echo "=== Step 4: Waiting for all nodes to reach Ready ==="
+    sleep 5
+    cargo run -q -p cli -- nodes
+
+    echo "=== Step 5: Firing 4 inference requests (expect load distribution) ==="
+    PROMPT='In one sentence, what is the Itchen Bridge toll for?'
+    for i in 1 2 3 4; do
+        echo "--- Request ${i} ---"
+        cargo run -q -p cli -- infer 'qwen2.5:0.5b' "${PROMPT}"
+    done
+
+    echo "=== Step 6: Final cluster state ==="
+    cargo run -q -p cli -- nodes
