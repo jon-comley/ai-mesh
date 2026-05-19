@@ -155,7 +155,17 @@ sanity-beelink: update-portproxy
     #!/usr/bin/env bash
     set -e
 
+    # Stop Beelink service first — prevents stale duplicate entries after registry reset
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
+        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+        Start-Sleep 2;\
+        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        exit 0\
+    \""
+
     pkill -f "target/debug/coordinator" || true
+    pkill -f "target/debug/agent" || true
     sleep 0.5
 
     cargo run -p coordinator &
@@ -168,16 +178,8 @@ sanity-beelink: update-portproxy
     AGENT_PID=$!
     sleep 1
 
-    echo ">>> Restarting Beelink agent service..."
-    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
-        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-        Start-Sleep 2;\
-        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
-        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
-        Start-Sleep 2;\
-        sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
-        exit 0\
-    \""
+    echo ">>> Starting Beelink agent service..."
+    ssh {{beelink_user}}@{{beelink_host}} "sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0"
     sleep 12
 
     echo ">>> Node table:"
@@ -202,8 +204,9 @@ sanity-all:
     #!/usr/bin/env bash
     set -e
 
-    # Kill any stale coordinator holding port 9000
+    # Kill any stale processes
     pkill -f "target/debug/coordinator" || true
+    pkill -f "target/debug/agent" || true
     sleep 0.5
 
     # Start coordinator
@@ -224,13 +227,26 @@ sanity-all:
     # Cleanup
     kill $COORD_PID $AGENT_PID || true
 
-# Full cluster sanity test including Pi (coordinator + controller + Pi + nodes check)
+# Full cluster sanity test (coordinator + controller + Pi + Beelink)
 sanity-full: update-portproxy
     #!/usr/bin/env bash
     set -e
 
-    # Kill any stale coordinator holding port 9000
+    # Stop all remote agents first — prevents them reconnecting to the new coordinator
+    # before the registry reset, which would create stale duplicate entries.
+    echo ">>> Stopping remote agents..."
+    ssh {{pi_user}}@{{pi_host}} "pkill -f agent || true" || true
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
+        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+        Start-Sleep 2;\
+        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        exit 0\
+    \"" || true
+
+    # Kill any stale local processes
     pkill -f "target/debug/coordinator" || true
+    pkill -f "target/debug/agent" || true
     sleep 0.5
 
     # Start coordinator
@@ -246,12 +262,18 @@ sanity-full: update-portproxy
     AGENT_PID=$!
     sleep 1
 
-    # Ensure SSH is ready then start Pi agent
+    # Start Pi compute agent
     ssh {{pi_user}}@{{pi_host}} "echo Connected to Pi OK"
     ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent" &
-    sleep 3
+
+    # Start Beelink agent service
+    echo ">>> Starting Beelink agent service..."
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0\""
+
+    sleep 12
 
     # Validate full cluster
+    echo ">>> Node table:"
     cargo run -p cli -- nodes
 
     # Cleanup

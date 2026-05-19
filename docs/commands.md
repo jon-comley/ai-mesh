@@ -31,7 +31,7 @@ All commands are run via `just <target>` from the workspace root.
 |---------|-------------|
 | `just sanity` | Local single-machine test: coordinator + controller agent + CLI node list |
 | `just sanity-all` | Local test: kills stale coordinators, starts fresh, resets, runs controller, prints node table |
-| `just sanity-full` | Full cluster test including Pi: coordinator + controller + Pi agent + node table |
+| `just sanity-full` | Full cluster test: coordinator + controller + Pi + Beelink; stops all remote agents first to prevent stale entries |
 | `just sanity-pi` | Print node table + open live watch view (requires coordinator already running) |
 
 ### sanity-all detail
