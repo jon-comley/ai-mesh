@@ -124,6 +124,30 @@ mod tests {
     use tokio::sync::mpsc;
 
     #[tokio::test]
+    async fn start_once_returns_false_on_closed_channel() {
+        let config = AgentConfig {
+            role: NodeRole::Controller,
+            heartbeat_interval_secs: 5,
+        };
+        let (tx, rx) = mpsc::channel(16);
+        drop(rx);
+        let agent = Agent::new_with_config(config, tx);
+        assert!(!agent.start_once().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_exits_cleanly_on_closed_channel() {
+        let config = AgentConfig {
+            role: NodeRole::Controller,
+            heartbeat_interval_secs: 5,
+        };
+        let (tx, rx) = mpsc::channel(16);
+        drop(rx);
+        let agent = Agent::new_with_config(config, tx);
+        assert!(agent.run().await.is_ok());
+    }
+
+    #[tokio::test]
     async fn controller_mode_sends_only_heartbeat() {
         let config = AgentConfig {
             role: NodeRole::Controller,

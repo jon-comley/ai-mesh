@@ -23,16 +23,27 @@ mod tests { ... }
 
 ---
 
-## 2. Integration Tests
+## 2. Agent Disconnect Tests
+
+`agent/src/agent.rs` includes tests for graceful channel closure — the failure mode that previously caused panics during reconnect cycles:
+
+- `start_once_returns_false_on_closed_channel` — drops the receiver before calling `start_once()`; asserts `Ok(false)` rather than a panic or error
+- `run_exits_cleanly_on_closed_channel` — same setup for `run()`; asserts `Ok(())` so the reconnect loop gets a clean exit
+
+These tests pin the contract: a closed channel is a normal condition (the TCP connection dropped), not an error.
+
+---
+
+## 3. Integration Tests
 
 Integration tests live in the `tests/` directory and verify:
 
 - Coordinator/agent interactions
 - Message passing
-- Update flows
-- Hardware detection behavior
+- End-to-end ModelLoad forwarding
+- End-to-end inference request routing and result return
 
-These tests run against the compiled binaries.
+These tests spin up an in-process coordinator and assert on the full message round-trip.
 
 ---
 
