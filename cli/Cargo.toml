@@ -12,4 +12,5 @@ shared = { path = "../shared" }
 prettytable = "0.10"
 thiserror = "1"
 crossterm = "0.27"
+chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }

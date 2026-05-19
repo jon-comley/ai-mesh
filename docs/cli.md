@@ -32,7 +32,7 @@ List all nodes with:
 Show detailed information about a specific node, including hardware spec, capabilities, and loaded models.
 
 ### mesh watch
-Stream live updates from the coordinator. Redraws the node table every second.
+Live-updating view of the mesh. Redraws the node table every second from the cursor position (preceding terminal output stays visible). Below the table, a timestamped event log records node joins/leaves and model state changes (up to 20 events).
 
 ### mesh load <node-id> <model-name> <size-mb>
 Send a `ModelLoad` request to the coordinator targeting the specified node. The coordinator forwards the command to the agent, which responds with `ModelStatus(Loading)` then `ModelStatus(Ready)`.
@@ -113,10 +113,14 @@ A continuously updating table of:
 - Node ID
 - Hostname
 - IP
+- Role
 - Last Seen (ms)
+- Models (name + lifecycle state)
+
+Below the table: a timestamped event log showing `[+] joined`, `[-] left`, and `[M] model state change / removed` events.
 
 This command repeatedly sends:
 ```
 MeshMessage::RequestNodes
 ```
-and displays the returned `NodeList`.
+and diffs successive `NodeList` responses to generate events.

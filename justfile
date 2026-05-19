@@ -29,6 +29,7 @@ run-coordinator: update-portproxy
 sanity:
     #!/usr/bin/env bash
     set -e
+    trap 'kill $COORD_PID $AGENT_PID 2>/dev/null || true' EXIT
     echo "=== Starting coordinator ==="
     cargo run -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
     COORD_PID=$!
@@ -42,19 +43,13 @@ sanity:
     echo "=== Checking node list ==="
     cargo run -p cli -- nodes || true
 
-    echo "=== Skipping Phase 6 message injection ==="
-    echo "Note: ai-mesh uses a 4-byte little-endian length prefix for all wire messages."
-    echo "Raw nc cannot be used. A framed test client will be added in Phase 6 proper."
-
     echo "=== Coordinator log tail ==="
     tail -n 20 /tmp/mesh-coordinator.log
 
     echo "=== Agent log tail ==="
     tail -n 20 /tmp/mesh-agent.log
 
-    echo "=== Cleaning up ==="
-    kill $COORD_PID $AGENT_PID 2>/dev/null || true
-    echo "Sanity check complete."
+    echo "=== Sanity check complete ==="
 
 build-pi:
     cargo build --release --target aarch64-unknown-linux-gnu -p agent
@@ -70,10 +65,34 @@ deploy-pi: build-pi
     ssh {{pi_user}}@{{pi_host}} "ollama pull qwen2.5:1.5b"
 
     @echo "=== Shipping compiled agent binary to remote filesystem ==="
+    ssh {{pi_user}}@{{pi_host}} "sudo systemctl stop ai-mesh-agent 2>/dev/null || true"
     scp target/aarch64-unknown-linux-gnu/release/agent {{pi_user}}@{{pi_host}}:/home/{{pi_user}}/agent
+    just run-pi
 
+# Install (or update) the ai-mesh-agent systemd service on the Pi and start it.
 run-pi:
-    ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent"
+    #!/usr/bin/env bash
+    set -e
+    echo "=== Installing ai-mesh-agent systemd service on Pi ==="
+    TMPFILE=$(mktemp)
+    printf '[Unit]\nDescription=ai-mesh compute agent\nAfter=network-online.target ollama.service\nWants=network-online.target\n\n[Service]\nExecStart=/home/{{pi_user}}/agent\nEnvironment=COORDINATOR_IP={{coordinator_ip}}\nEnvironment=AGENT_ROLE=compute\nRestart=always\nRestartSec=5\nUser={{pi_user}}\nStandardOutput=journal\nStandardError=journal\n\n[Install]\nWantedBy=multi-user.target\n' > "$TMPFILE"
+    echo ">>> Uploading service file..."
+    scp -q "$TMPFILE" {{pi_user}}@{{pi_host}}:/tmp/ai-mesh-agent.service
+    rm "$TMPFILE"
+    echo ">>> Installing and starting service..."
+    ssh {{pi_user}}@{{pi_host}} "sudo mv /tmp/ai-mesh-agent.service /etc/systemd/system/ai-mesh-agent.service && sudo systemctl daemon-reload && sudo systemctl enable --now ai-mesh-agent 2>/dev/null; systemctl is-active ai-mesh-agent"
+    echo "=== Done ==="
+
+# Tail all mesh logs simultaneously: coordinator, controller, Pi, Beelink.
+logs:
+    #!/usr/bin/env bash
+    trap 'kill $(jobs -p) 2>/dev/null; wait' EXIT
+    echo ">>> Tailing all mesh logs (Ctrl+C to stop)..."
+    tail -f /tmp/mesh-coordinator.log 2>/dev/null | sed 's/^/[coordinator] /' &
+    tail -f /tmp/mesh-agent.log       2>/dev/null | sed 's/^/[controller]  /' &
+    ssh {{pi_user}}@{{pi_host}} "journalctl -u ai-mesh-agent -f --no-pager" 2>/dev/null | sed 's/^/[pi]          /' &
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"Get-Content '{{beelink_path}}\\logs\\agent.log' -Tail 20 -Wait\"" 2>/dev/null | sed 's/^/[beelink]     /' &
+    wait
 
 # ============================================================
 # Beelink1 (Windows 11) — Windows agent build + provisioning
@@ -128,9 +147,6 @@ update-beelink: build-beelink-exe
     \""
 
     @echo ">>> Beelink agent updated and restarted."
-
-logs-beelink:
-    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"Get-Content '{{beelink_path}}\\logs\\agent.log' -Tail 100 -Wait\""
 
 # Refresh the Windows portproxy rule to point at the current WSL2 IP.
 # WSL2 assigns a new IP on each restart; the portproxy goes stale without this.
@@ -190,6 +206,63 @@ sanity-beelink: update-portproxy
 run-controller:
     AGENT_ROLE=controller cargo run -p agent
 
+# Start the coordinator and local controller agent on this machine.
+# Pi and Beelink compute nodes are persistent services — they reconnect automatically.
+# Ctrl+C stops the local coordinator and controller only; remote nodes keep running.
+dev: update-portproxy
+    #!/usr/bin/env bash
+    set -e
+
+    echo ">>> Stopping any stale local processes..."
+    pkill -f "target/debug/coordinator" || true
+    pkill -f "target/debug/agent" || true
+    sleep 0.5
+
+    cleanup() {
+        echo ""
+        echo ">>> Stopping local coordinator and controller..."
+        kill $COORD_PID $AGENT_PID 2>/dev/null || true
+        echo ">>> Done."
+    }
+    trap cleanup EXIT
+
+    echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
+    cargo run -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
+    COORD_PID=$!
+    sleep 1
+
+    just reset || true
+
+    echo ">>> Starting local controller agent (log: /tmp/mesh-agent.log)..."
+    AGENT_ROLE=controller cargo run -p agent > /tmp/mesh-agent.log 2>&1 &
+    AGENT_PID=$!
+
+    echo ">>> Verifying portproxy (remote nodes connect via {{coordinator_ip}}:{{coordinator_port}})..."
+    if timeout 3 bash -c "echo > /dev/tcp/{{coordinator_ip}}/{{coordinator_port}}" 2>/dev/null; then
+        echo ">>> Portproxy OK — {{coordinator_ip}}:{{coordinator_port}} is reachable"
+    else
+        echo ">>> WARNING: {{coordinator_ip}}:{{coordinator_port}} not reachable from WSL"
+        echo ">>>   Remote nodes (Pi, Beelink) will not be able to connect."
+        echo ">>>   Try: just update-portproxy   (UAC prompt will appear)"
+    fi
+
+    echo ">>> Bouncing remote compute agents so they reconnect to the fresh coordinator..."
+    ssh {{pi_user}}@{{pi_host}} "sudo systemctl restart ai-mesh-agent" 2>/dev/null || echo ">>> Warning: could not restart Pi agent (offline?)"
+    ssh {{beelink_user}}@{{beelink_host}} "powershell -Command \"\
+        sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+        Start-Sleep 2;\
+        Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Get-Process nssm -ErrorAction SilentlyContinue | Stop-Process -Force;\
+        Start-Sleep 1;\
+        sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
+        exit 0\"" 2>/dev/null || echo ">>> Warning: could not restart Beelink agent (offline?)"
+
+    echo ">>> Waiting for nodes to register..."
+    sleep 10
+
+    echo ">>> Live watch (Ctrl+C to stop local coordinator + controller)..."
+    cargo run -p cli -- watch
+
 reset:
     cargo run -p cli -- reset-registry
 
@@ -203,6 +276,7 @@ sanity-pi:
 sanity-all:
     #!/usr/bin/env bash
     set -e
+    trap 'kill $COORD_PID $AGENT_PID 2>/dev/null || true' EXIT
 
     # Kill any stale processes
     pkill -f "target/debug/coordinator" || true
@@ -220,17 +294,21 @@ sanity-all:
     # Start controller agent
     AGENT_ROLE=controller cargo run -p agent &
     AGENT_PID=$!
+    sleep 2
 
     # Run CLI nodes
     cargo run -p cli -- nodes
-
-    # Cleanup
-    kill $COORD_PID $AGENT_PID || true
 
 # Full cluster sanity test (coordinator + controller + Pi + Beelink)
 sanity-full: update-portproxy
     #!/usr/bin/env bash
     set -e
+
+    cleanup() {
+        kill $COORD_PID $AGENT_PID 2>/dev/null || true
+        ssh {{pi_user}}@{{pi_host}} "pkill -f agent" 2>/dev/null || true
+    }
+    trap cleanup EXIT
 
     # Stop all remote agents first — prevents them reconnecting to the new coordinator
     # before the registry reset, which would create stale duplicate entries.
@@ -275,10 +353,6 @@ sanity-full: update-portproxy
     # Validate full cluster
     echo ">>> Node table:"
     cargo run -p cli -- nodes
-
-    # Cleanup
-    kill $COORD_PID $AGENT_PID || true
-    ssh {{pi_user}}@{{pi_host}} "pkill -f agent" || true
 
 # Run an end-to-end live inference loop across the whole cluster automatically
 test-inference: update-portproxy

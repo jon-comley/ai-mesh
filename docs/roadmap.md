@@ -38,7 +38,7 @@
 
 ## Phase 9 — Remaining Cluster Nodes (In Progress)
 
-- **Mac mini M4** — cross-compile for `aarch64-apple-darwin`, provision as compute node, add `just deploy-macmini` / `just sanity-macmini`
+- **Mac mini M4** ⚠️ _hardware not available until ~end of July 2026_ — cross-compile for `aarch64-apple-darwin`, provision as compute node, add `just deploy-macmini` / `just sanity-macmini`
 - **Multi-node load balancing validation** — run `test-inference` with 2+ compute nodes, verify scheduler distributes load correctly across Pi and Beelink
 - **AMD integrated GPU detection** — Beelink BEELINK1 has a Radeon 780M iGPU but `gpu: None`; Windows path only probes `nvidia-smi`; needs AMD detection (e.g. `wmic path win32_VideoController` or `dxdiag` parsing)
 
