@@ -2,6 +2,7 @@ use coordinator::coordinator::Coordinator;
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt().init();
     println!("Starting AI Mesh Coordinator on 0.0.0.0:9000...");
 
     let coord = Coordinator::new_persistent("0.0.0.0:9000", "ai_mesh.db");

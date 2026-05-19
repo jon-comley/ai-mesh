@@ -222,7 +222,26 @@ async fn process_message(
                                 request_id = %req.request_id,
                                 "forwarding inference request to agent"
                             );
-                            let _ = agent_tx.send(MeshMessage::RequestModelInference(req)).await;
+                            if agent_tx
+                                .send(MeshMessage::RequestModelInference(req))
+                                .await
+                                .is_err()
+                            {
+                                // Writer task exited — clean up immediately rather than
+                                // waiting the full generation timeout for a response that
+                                // will never arrive.
+                                pending_inferences.lock().unwrap().remove(&request_id);
+                                connections.lock().unwrap().remove(&node.id);
+                                warn!(
+                                    node_id    = %node.id,
+                                    request_id = %request_id,
+                                    "inference send failed: agent channel closed"
+                                );
+                                return MeshMessage::Error(format!(
+                                    "compute node '{}' dropped from connections map",
+                                    node.id
+                                ));
+                            }
                             // Phase 2 — generation timeout: separate, shorter window.
                             match timeout(Duration::from_secs(GENERATE_TIMEOUT_SECS), orx).await {
                                 Ok(Ok(result)) => result,
