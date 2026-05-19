@@ -1,63 +1,73 @@
 # ai-mesh Roadmap
 
-This document outlines the phases of development.
+---
+
+## Phase 6 — Model Scheduling ✓ Complete
+
+- Model registry (`ModelAllocation` + `update_model_status`)
+- Wire protocol messages (`ModelLoad`, `ModelUnload`, `ModelStatus`, `RequestModelInference`, `ModelInferenceResult`) with `wire_version` compatibility
+- Allocation-aware scheduler: `select_node_for_model(mb)` (capacity) + `select_node_for_inference(name)` (Ready model)
+- Connection routing map — per-connection `mpsc::Sender` registered on `Heartbeat`, purged on disconnect
+- ModelLoad forwarding and agent-side `ModelStatus` replies
+- CLI `mesh load`, `mesh nodes` Models column
+- 54 tests across all four crates
 
 ---
 
-# Phase 6 — Model Scheduling ✓ Complete
+## Phase 7 — Inference Routing ✓ Complete
 
-## Delivered
-
-- **Model registry** — `ModelAllocation` + `update_model_status` in coordinator registry
-- **Wire protocol messages** — `ModelLoad`, `ModelUnload`, `ModelStatus`, `RequestModelInference`, `ModelInferenceResult` with `wire_version` compatibility
-- **Allocation-aware scheduler** — `Scheduler::select_node_for_model(mb)`: filters by role, remaining capacity; `Ready` + `Loading` states count against capacity, `Unloaded` / `Failed` do not
-- **Connection routing map** — per-connection `mpsc::Sender` registered on `Heartbeat`, purged on disconnect; enables coordinator → agent command forwarding
-- **ModelLoad forwarding** — coordinator looks up target agent tx and forwards; warns if not connected
-- **Agent command handling** — bidirectional TCP: reader task handles `ModelLoad` from coordinator; replies `ModelStatus(Loading)` immediately, `ModelStatus(Ready)` after 2s background task (simulated)
-- **CLI `mesh load`** — `mesh load <node-id> <model-name> <size-mb>` sends `ModelLoad` to coordinator
-- **Models column** — `mesh nodes` fetches `NodeRecordFull` per node and renders live model lifecycle state
-- **54 tests** across all four crates; integration test validates end-to-end `ModelLoad` forwarding
-
-## Remaining / not yet wired
-
-- `ModelUnload` forwarding (server logs it; not yet forwarded to agent)
-- `RequestModelInference` dispatch (server logs "pending"; scheduler not yet invoked)
-- `mesh infer` CLI command
-- Real model integration (ollama / llama.cpp)
+- `RequestModelInference` routed through scheduler to selected agent
+- Agent calls `ollama::generate` (`POST /api/generate`, `stream: false`); returns real output, token count, duration
+- `mesh infer <model-name> <prompt>` CLI command
+- `ModelUnload` forwarding; agent reports `Unloaded`
+- Oneshot channel per inference request; coordinator waits up to 120s for result
+- `model_is_loading` registry query; coordinator polls for up to 300s before dispatching inference
 
 ---
 
-# Phase 7 — Inference Routing (Next)
+## Phase 8 — Production Hardening ✓ Complete
 
-## Goals
-- Route `RequestModelInference` through the scheduler to the selected agent
-- Forward `InferenceRequest` down the agent connection; agent returns `InferenceResult`
-- Add `mesh infer <model-name> <prompt>` CLI command
-- Wire up `ModelUnload` forwarding and agent-side `Unloaded` reporting
-
----
-
-# Phase 8 — Security & Auth
-- TLS
-- Node authentication
-- Signed messages
+- **Inference timeout tuning** — split into 300s pull-wait (Phase 1) + 120s generate (Phase 2); distinct error strings per phase
+- **SQLite persistent registry** — `rusqlite` (bundled); `Registry::open(path)` for prod, `Registry::new()` (in-memory) for tests; state survives coordinator restarts
+- **Pi (ARM64) compute node** — cross-compiled with `rustls-tls`; `just deploy-pi` fully self-provisioning
+- **Beelink SER8 (Windows 11) compute node** — cross-compiled (`x86_64-pc-windows-gnu`); NSSM service; `sysinfo` crate for hardware detection (no child-process spawning); `just update-beelink` for OTA updates
+- **Agent reconnect loop** — graceful channel handling; retries TCP connection every 5s on disconnect
+- **Cross-platform agent** — conditional compilation for hardware detection (Windows: `sysinfo`; Linux/macOS: `/proc`); hostname detection (Windows: `COMPUTERNAME`; Linux: `/etc/hostname`)
 
 ---
 
-# Phase 8 — Web Dashboard
+## Phase 9 — Remaining Cluster Nodes (In Progress)
+
+- **Mac mini M4** — cross-compile for `aarch64-apple-darwin`, provision as compute node, add `just deploy-macmini` / `just sanity-macmini`
+- **Multi-node load balancing validation** — run `test-inference` with 2+ compute nodes, verify scheduler distributes load correctly across Pi and Beelink
+
+---
+
+## Phase 10 — Security & Auth
+
+- TLS on coordinator TCP listener
+- Node authentication (shared secret or certificates)
+- Signed wire messages
+
+---
+
+## Phase 11 — Web Dashboard
+
 - Live mesh view
-- Node health
+- Node health monitoring
 - Model deployment UI
 
 ---
 
-# Phase 9 — Distributed Execution
+## Phase 12 — Distributed Execution
+
 - Multi-node inference
 - Pipeline parallelism
 - Tensor parallelism
 
 ---
 
-# Phase 10 — Auto-scaling
+## Phase 13 — Auto-scaling
+
 - Dynamic node joining
 - Cloud integration

@@ -21,37 +21,36 @@ wire protocol uses a 4-byte little-endian length prefix. Raw TCP tools such
 as `nc` cannot be used without a framing helper. A framed test client will be
 added during Phase 6.
 
-### Future Sanity Tests
+### Per-Node Sanity Tests
 
-As additional compute nodes come online (Pi 5, Beelink SER8, Mac mini M4),
-device-specific sanity tests will be added:
-- `just sanity-pi`
-- `just sanity-beelink`
-- `just sanity-macmini`
-- `just sanity-full` (entire cluster)
+Each compute node has a dedicated sanity recipe:
 
-These will validate:
-- HardwareReport correctness
-- Capabilities reporting
-- Model lifecycle reporting
-- Scheduler placement decisions (Phase 6+)
+| Command | What it validates |
+|---------|------------------|
+| `just sanity-all` | Local only — coordinator + controller; no remote nodes |
+| `just sanity-pi` | Check node table while coordinator is already running |
+| `just sanity-beelink` | Coordinator + controller locally; restarts NSSM service on Beelink; checks node table |
+| `just sanity-full` | Full cluster including Pi |
+| `just test-inference` | End-to-end inference pipeline (requires Pi with Ollama) |
 
-The universal `just sanity` test will remain the baseline for verifying that
-the core coordinator/agent/CLI stack is healthy regardless of cluster size.
+`just sanity-beelink` is the canonical test for Windows compute node bring-up.
+It uses a force-kill stop pattern (stop → kill agent/nssm → start) to avoid
+the NSSM STOP_PENDING deadlock that occurs with plain `sc.exe stop`.
 
-### Full Cluster Sanity Test (New)
+### Cross-Platform Agent Builds
 
-A new command has been added:
+The agent supports Windows, Linux x86_64, and Linux ARM64. Cross-compilation
+is done from WSL:
 
+```bash
+# Windows (Beelink SER8)
+sudo apt install gcc-mingw-w64-x86-64
+rustup target add x86_64-pc-windows-gnu
+just build-beelink-exe   # → target/x86_64-pc-windows-gnu/release/agent.exe
+
+# Linux ARM64 (Raspberry Pi)
+rustup target add aarch64-unknown-linux-gnu
+just build-pi            # → target/aarch64-unknown-linux-gnu/release/agent
 ```
-just sanity-all
-```
 
-This performs a full multi-node validation:
-- Coordinator startup
-- Controller agent startup
-- Pi compute agent startup (via SSH)
-- Node table validation
-- Automatic cleanup
-
-This is the recommended workflow before Phase 6 scheduler development.
+See `docs/windows-node-setup.md` for the full Windows provisioning guide.

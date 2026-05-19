@@ -20,14 +20,17 @@ Detects:
 - Core/thread count
 - RAM
 - OS + architecture
-- GPU (NVIDIA/AMD/Intel)
-- ANE (stubbed on Linux)
+- GPU (NVIDIA via nvidia-smi; VGA via lspci on Linux)
+
+Platform implementations are gated with `#[cfg]`:
+- **Windows** — uses the `sysinfo` crate (no child-process spawning; avoids NSSM STOP_PENDING deadlock)
+- **Linux / macOS** — reads `/proc/cpuinfo` and `/proc/meminfo` directly
 
 ### identity.rs
 Provides:
-- Node ID generation
-- Hostname detection
-- Local IP detection
+- Node ID generation (UUID v4)
+- Hostname detection — Windows reads `COMPUTERNAME` env var; Linux reads `/etc/hostname`
+- Local IP detection via UDP socket trick (cross-platform)
 
 ### capabilities.rs
 Determines:
@@ -77,14 +80,14 @@ As of this stage of development, the agent crate includes fully implemented and 
 - CPU model, cores, threads
 - RAM detection
 - OS and architecture
-- GPU detection (NVIDIA, AMD, Intel)
-- ANE detection stub (Linux)
+- GPU detection (NVIDIA via nvidia-smi; VGA via lspci on Linux)
+- Cross-platform: Windows uses `sysinfo` crate; Linux/macOS use `/proc`
 - Fully tested with round‑trip and basic invariants
 
 ### ✔ Identity Detection
 - Node ID generation (UUID v4)
-- Hostname detection
-- Local IP detection via UDP socket trick
+- Hostname detection — Windows reads `COMPUTERNAME`; Linux reads `/etc/hostname`
+- Local IP detection via UDP socket trick (cross-platform)
 - Fully tested
 
 ### ✔ Capability Detection
