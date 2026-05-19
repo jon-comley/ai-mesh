@@ -1,6 +1,9 @@
 use crate::registry::Registry;
 use shared::ModelLifecycleState;
 use shared::messages::NodeRecordFull;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Scheduler<'a> {
     registry: &'a Registry,
@@ -12,6 +15,7 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Select a Compute node that has the given model loaded and in Ready state.
+    /// Picks randomly among all eligible nodes so requests spread across the cluster.
     pub fn select_node_for_inference(&self, model_name: &str) -> Option<NodeRecordFull> {
         let mut candidates: Vec<_> = self
             .registry
@@ -24,42 +28,58 @@ impl<'a> Scheduler<'a> {
             })
             .collect();
 
-        candidates.sort_by(|a, b| a.hostname.cmp(&b.hostname));
-        candidates.into_iter().next()
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let idx = nanos_hash() % candidates.len();
+        Some(candidates.swap_remove(idx))
     }
 
     /// Select the best Compute node that can fit the given model size (in MB).
+    /// Prefers the node with the most remaining capacity so placements spread evenly.
     pub fn select_node_for_model(&self, model_size_mb: u64) -> Option<NodeRecordFull> {
         let mut candidates: Vec<_> = self
             .registry
             .eligible_compute_nodes()
             .into_iter()
-            .filter(|lite| {
-                self.registry.get(&lite.id).is_some_and(|node| {
-                    if let Some(caps) = &node.capabilities {
-                        let max_capacity_mb = (caps.max_model_size_gb * 1024.0) as u64;
-
-                        let allocated_mb: u64 = node
-                            .models
-                            .values()
-                            .filter(|m| {
-                                m.state == ModelLifecycleState::Ready
-                                    || m.state == ModelLifecycleState::Loading
-                            })
-                            .map(|m| m.size_mb)
-                            .sum();
-
-                        allocated_mb + model_size_mb <= max_capacity_mb
+            .filter_map(|lite| {
+                self.registry.get(&lite.id).and_then(|node| {
+                    let caps = node.capabilities.as_ref()?;
+                    let max_mb = (caps.max_model_size_gb * 1024.0) as u64;
+                    let allocated_mb: u64 = node
+                        .models
+                        .values()
+                        .filter(|m| {
+                            m.state == ModelLifecycleState::Ready
+                                || m.state == ModelLifecycleState::Loading
+                        })
+                        .map(|m| m.size_mb)
+                        .sum();
+                    let remaining = max_mb.saturating_sub(allocated_mb);
+                    if remaining >= model_size_mb {
+                        Some((lite, remaining))
                     } else {
-                        false
+                        None
                     }
                 })
             })
             .collect();
 
-        candidates.sort_by(|a, b| a.hostname.cmp(&b.hostname));
-        candidates.into_iter().next()
+        // Most headroom first so placements spread across nodes.
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
+        candidates.into_iter().next().map(|(node, _)| node)
     }
+}
+
+fn nanos_hash() -> usize {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let mut h = DefaultHasher::new();
+    nanos.hash(&mut h);
+    h.finish() as usize
 }
 
 #[cfg(test)]
@@ -284,5 +304,70 @@ mod tests {
             "Should fit large model easily after previous model is unloaded"
         );
         assert_eq!(selected_after_unload.unwrap().id, compute.id);
+    }
+
+    #[test]
+    fn select_node_for_inference_distributes_across_nodes() {
+        let mut registry = Registry::new();
+
+        for name in ["alpha", "beta"] {
+            let node = make_identity(name, NodeRole::Compute);
+            registry.update_heartbeat(node.clone());
+            registry.update_capabilities(
+                &node.id,
+                NodeCapabilities {
+                    max_model_size_gb: 4.0,
+                    ..NodeCapabilities::default()
+                },
+            );
+            registry.update_model_status(&node.id, "qwen", 1024, ModelLifecycleState::Ready);
+        }
+
+        let scheduler = Scheduler::new(&registry);
+        let selections: std::collections::HashSet<String> = (0..40)
+            .filter_map(|_| scheduler.select_node_for_inference("qwen"))
+            .map(|n| n.id)
+            .collect();
+
+        assert_eq!(
+            selections.len(),
+            2,
+            "both nodes should be selected across 40 calls"
+        );
+    }
+
+    #[test]
+    fn select_node_for_model_prefers_most_headroom() {
+        let mut registry = Registry::new();
+
+        // node-a: 8 GB capacity, 1 GB allocated → 7 GB free
+        let a = make_identity("node-a", NodeRole::Compute);
+        registry.update_heartbeat(a.clone());
+        registry.update_capabilities(
+            &a.id,
+            NodeCapabilities {
+                max_model_size_gb: 8.0,
+                ..NodeCapabilities::default()
+            },
+        );
+        registry.update_model_status(&a.id, "small", 1024, ModelLifecycleState::Ready);
+
+        // node-b: 8 GB capacity, nothing allocated → 8 GB free
+        let b = make_identity("node-b", NodeRole::Compute);
+        registry.update_heartbeat(b.clone());
+        registry.update_capabilities(
+            &b.id,
+            NodeCapabilities {
+                max_model_size_gb: 8.0,
+                ..NodeCapabilities::default()
+            },
+        );
+
+        let scheduler = Scheduler::new(&registry);
+        let selected = scheduler.select_node_for_model(2048).unwrap();
+        assert_eq!(
+            selected.id, b.id,
+            "node-b has more headroom and should be preferred"
+        );
     }
 }
