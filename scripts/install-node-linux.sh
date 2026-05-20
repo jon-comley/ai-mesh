@@ -13,6 +13,52 @@ if [ -z "$COORDINATOR_IP" ] || [ -z "$AGENT_USER" ]; then
     exit 1
 fi
 
+# Select the best model based on available GPU VRAM (AMD/Nvidia) or system RAM.
+detect_default_model() {
+    local mem_mb=0 gpu=0
+
+    # AMD GPU via ROCm sysfs
+    for f in /sys/class/drm/card*/device/mem_info_vram_total; do
+        [ -f "$f" ] || continue
+        local v
+        v=$(( $(cat "$f") / 1048576 ))
+        [ "$v" -gt "$mem_mb" ] && mem_mb="$v" && gpu=1
+    done
+
+    # Nvidia GPU
+    if [ "$gpu" -eq 0 ] && command -v nvidia-smi &>/dev/null; then
+        local v
+        v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null \
+            | head -1 | tr -d ' ')
+        [ -n "$v" ] && [ "$v" -gt 0 ] && mem_mb="$v" && gpu=1
+    fi
+
+    # Fall back to system RAM
+    if [ "$gpu" -eq 0 ]; then
+        mem_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+    fi
+
+    if [ "$gpu" -eq 1 ]; then
+        if   [ "$mem_mb" -ge 22000 ]; then echo "qwen2.5:32b"
+        elif [ "$mem_mb" -ge 9000  ]; then echo "qwen2.5:14b"
+        elif [ "$mem_mb" -ge 4000  ]; then echo "qwen2.5:7b"
+        elif [ "$mem_mb" -ge 1000  ]; then echo "qwen2.5:1.5b"
+        else                               echo "qwen2.5:0.5b"
+        fi
+    else
+        if   [ "$mem_mb" -ge 44000 ]; then echo "qwen2.5:32b"
+        elif [ "$mem_mb" -ge 18000 ]; then echo "qwen2.5:14b"
+        elif [ "$mem_mb" -ge 10000 ]; then echo "qwen2.5:7b"
+        elif [ "$mem_mb" -ge 3000  ]; then echo "qwen2.5:1.5b"
+        else                               echo "qwen2.5:0.5b"
+        fi
+    fi
+}
+
+DEFAULT_MODEL="$(detect_default_model)"
+echo ">>> Detected hardware → default model: ${DEFAULT_MODEL}"
+echo ">>> To load it after provisioning: just auto-load-model <node-name>"
+
 echo ">>> Installing llama-server (llama.cpp latest release)..."
 if ! LLAMA_VERSION="$(curl -fsSL --connect-timeout 5 \
         https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
@@ -52,6 +98,7 @@ Environment=LLAMA_MODEL_DIR=/home/${AGENT_USER}/.ai-mesh/models
 Environment=LLAMA_SERVER_BIN=/opt/llama.cpp/llama-server
 Environment=LD_LIBRARY_PATH=/opt/llama.cpp
 Environment=LLAMA_GPU_LAYERS=0
+Environment=DEFAULT_MODEL=${DEFAULT_MODEL}
 Restart=always
 RestartSec=5
 User=${AGENT_USER}

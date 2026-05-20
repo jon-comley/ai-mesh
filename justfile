@@ -405,11 +405,12 @@ load-model node model:
     source nodes/{{node}}.env
     MODEL="{{model}}"
     case "$MODEL" in
+        qwen2.5:0.5b)  SIZE_MB=512 ;;
         qwen2.5:1.5b)  SIZE_MB=1024 ;;
         qwen2.5:7b)    SIZE_MB=4096 ;;
         qwen2.5:14b)   SIZE_MB=8192 ;;
         qwen2.5:32b)   SIZE_MB=20480 ;;
-        *) echo "Unknown model: $MODEL (supported: qwen2.5:1.5b 7b 14b 32b)"; exit 1 ;;
+        *) echo "Unknown model: $MODEL (supported: qwen2.5:0.5b 1.5b 7b 14b 32b)"; exit 1 ;;
     esac
     NODE_ID=$(cargo run -q -p cli -- nodes 2>/dev/null \
         | awk -F'|' -v host="${NODE_HOST}" '$4 ~ host {print $2}' \
@@ -418,8 +419,124 @@ load-model node model:
         echo "Error: node ${NODE_HOST} not found in coordinator registry. Is the agent running?"
         exit 1
     fi
+
+    # Detect hardware to determine this node's capability ceiling.
+    # Outputs mb:gpu_flag (gpu_flag=1 when VRAM detected, 0 for CPU/unified RAM).
+    case "$NODE_OS" in
+      linux)
+        HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} '
+            mem=0; gpu=0
+            for f in /sys/class/drm/card*/device/mem_info_vram_total; do
+                [ -f "$f" ] || continue
+                v=$(( $(cat "$f") / 1048576 ))
+                [ "$v" -gt "$mem" ] && mem="$v" && gpu=1
+            done
+            if [ "$gpu" -eq 0 ] && command -v nvidia-smi &>/dev/null; then
+                v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d " ")
+                [ -n "$v" ] && [ "$v" -gt 0 ] && mem="$v" && gpu=1
+            fi
+            [ "$gpu" -eq 0 ] && mem=$(awk "/MemTotal/{print int(\$2/1024)}" /proc/meminfo)
+            echo "${mem}:${gpu}"
+        ' 2>/dev/null || echo "0:0")
+        ;;
+      windows)
+        HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$m=8192}else{$m=[int]($g.AdapterRAM/1MB)};$gpu=1};if($m -eq 0){$m=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB)};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
+        ;;
+      *) HW_INFO="0:0" ;;
+    esac
+    HW_MB=$(echo "$HW_INFO" | cut -d: -f1 | tr -d '[:space:]'); HW_MB="${HW_MB:-0}"
+    HW_GPU=$(echo "$HW_INFO" | cut -d: -f2 | tr -d '[:space:]'); HW_GPU="${HW_GPU:-0}"
+
+    # Map hardware to a ceiling rank using separate GPU-VRAM and CPU/unified thresholds.
+    # CPU thresholds are conservative — models compete with OS memory.
+    if [ "$HW_GPU" = "1" ]; then
+        if   [ "$HW_MB" -ge 22000 ]; then HW_MAX=4
+        elif [ "$HW_MB" -ge 9000  ]; then HW_MAX=3
+        elif [ "$HW_MB" -ge 4000  ]; then HW_MAX=2
+        elif [ "$HW_MB" -ge 1000  ]; then HW_MAX=1
+        else                               HW_MAX=0
+        fi
+    else
+        if   [ "$HW_MB" -ge 44000 ]; then HW_MAX=4
+        elif [ "$HW_MB" -ge 18000 ]; then HW_MAX=3
+        elif [ "$HW_MB" -ge 10000 ]; then HW_MAX=2
+        elif [ "$HW_MB" -ge 3000  ]; then HW_MAX=1
+        else                               HW_MAX=0
+        fi
+    fi
+
+    # Model rank table (ascending by size).
+    MODEL_NAMES=("qwen2.5:0.5b" "qwen2.5:1.5b" "qwen2.5:7b" "qwen2.5:14b" "qwen2.5:32b")
+    case "$MODEL" in
+        qwen2.5:0.5b) MODEL_RANK=0 ;;
+        qwen2.5:1.5b) MODEL_RANK=1 ;;
+        qwen2.5:7b)   MODEL_RANK=2 ;;
+        qwen2.5:14b)  MODEL_RANK=3 ;;
+        qwen2.5:32b)  MODEL_RANK=4 ;;
+    esac
+
+    # Ceiling = strictly below both the model being loaded and the hardware max.
+    CEILING=$(( (MODEL_RANK - 1) < HW_MAX ? (MODEL_RANK - 1) : HW_MAX ))
+
     echo ">>> Loading ${MODEL} (${SIZE_MB} MB) on {{node}} (${NODE_ID})..."
+    if [ "$CEILING" -ge 0 ]; then
+        echo ">>> NOTE: if this model fails, available fallbacks (within this node's hardware):"
+        for (( i=CEILING; i>=0; i-- )); do
+            echo ">>>   just load-model {{node}} ${MODEL_NAMES[$i]}"
+        done
+    fi
     cargo run -q -p cli -- load "${NODE_ID}" "${MODEL}" "${SIZE_MB}"
+
+# Detect hardware on a node and load the best-fit model automatically.
+# Usage: just auto-load-model pi1
+#        just auto-load-model beelink1
+auto-load-model node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    case "$NODE_OS" in
+      linux)
+        HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} '
+            mem=0; gpu=0
+            for f in /sys/class/drm/card*/device/mem_info_vram_total; do
+                [ -f "$f" ] || continue
+                v=$(( $(cat "$f") / 1048576 ))
+                [ "$v" -gt "$mem" ] && mem="$v" && gpu=1
+            done
+            if [ "$gpu" -eq 0 ] && command -v nvidia-smi &>/dev/null; then
+                v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d " ")
+                [ -n "$v" ] && [ "$v" -gt 0 ] && mem="$v" && gpu=1
+            fi
+            [ "$gpu" -eq 0 ] && mem=$(awk "/MemTotal/{print int(\$2/1024)}" /proc/meminfo)
+            echo "${mem}:${gpu}"
+        ')
+        ;;
+      windows)
+        HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$m=8192}else{$m=[int]($g.AdapterRAM/1MB)};$gpu=1};if($m -eq 0){$m=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB)};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
+        ;;
+      *)
+        echo "Unknown NODE_OS: $NODE_OS"; exit 1 ;;
+    esac
+    HW_MB=$(echo "$HW_INFO" | cut -d: -f1 | tr -d '[:space:]'); HW_MB="${HW_MB:-0}"
+    HW_GPU=$(echo "$HW_INFO" | cut -d: -f2 | tr -d '[:space:]'); HW_GPU="${HW_GPU:-0}"
+
+    if [ "$HW_GPU" = "1" ]; then
+        if   [ "$HW_MB" -ge 22000 ]; then MODEL="qwen2.5:32b"
+        elif [ "$HW_MB" -ge 9000  ]; then MODEL="qwen2.5:14b"
+        elif [ "$HW_MB" -ge 4000  ]; then MODEL="qwen2.5:7b"
+        elif [ "$HW_MB" -ge 1000  ]; then MODEL="qwen2.5:1.5b"
+        else                               MODEL="qwen2.5:0.5b"
+        fi
+    else
+        if   [ "$HW_MB" -ge 44000 ]; then MODEL="qwen2.5:32b"
+        elif [ "$HW_MB" -ge 18000 ]; then MODEL="qwen2.5:14b"
+        elif [ "$HW_MB" -ge 10000 ]; then MODEL="qwen2.5:7b"
+        elif [ "$HW_MB" -ge 3000  ]; then MODEL="qwen2.5:1.5b"
+        else                               MODEL="qwen2.5:0.5b"
+        fi
+    fi
+    echo ">>> {{node}}: detected ${HW_MB} MB ($([ "$HW_GPU" = "1" ] && echo GPU || echo CPU)) → selecting ${MODEL}"
+    just load-model {{node}} ${MODEL}
 
 # Tail live logs from a node.
 # Usage: just logs-node pi1

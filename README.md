@@ -68,6 +68,18 @@ and drops into live `mesh watch`. Ctrl+C stops local processes only.
 
 ---
 
+## Cluster Nodes
+
+| Node | OS | Hardware | Model |
+|------|----|----------|-------|
+| Pi | Linux (ARM64) | ~4 GB RAM | `qwen2.5:1.5b` (fallback: `qwen2.5:0.5b`) |
+| Beelink SER8 | Windows 11 | AMD Radeon 780M, 8 GB VRAM | `qwen2.5:7b` |
+| Mac mini M4 | macOS (ARM64) | 48 GB unified, 16 CPU / 20 GPU cores | `qwen2.5:32b` |
+
+The coordinator schedules inference requests to whichever node has the requested model loaded and ready. Automatic placement (picking the best node for a model based on hardware capacity) is planned for Phase 9.
+
+---
+
 ## Justfile Reference
 
 | Command | Description |
@@ -81,7 +93,8 @@ and drops into live `mesh watch`. Ctrl+C stops local processes only.
 | `just dev` | Start full cluster in dev mode |
 | `just deploy-node <node>` | First-time provision or re-provision a node |
 | `just update-node <node>` | OTA binary update only (no reprovisioning) |
-| `just load-model <node> <model>` | Load a model on a node (e.g. `qwen2.5:7b`) |
+| `just load-model <node> <model>` | Load a specific model on a node (e.g. `qwen2.5:7b`) |
+| `just auto-load-model <node>` | Detect node hardware and load the best-fit model automatically |
 | `just uninstall-node <node>` | Remove agent service from a node |
 | `just sanity-node <node>` | Check service state + node table |
 | `just sanity-full` | Full cluster validation (all nodes) |

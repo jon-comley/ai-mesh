@@ -121,7 +121,7 @@ The provision script does:
 - Sets `COORDINATOR_IP`, `AGENT_ROLE`, `LLAMA_MODEL_DIR`, `LLAMA_SERVER_BIN`, `LLAMA_GPU_LAYERS=99`, and `LLAMA_FLASH_ATTN=1` as service environment vars
 - Configures log rotation (10 MB per file) and restart throttle (5 s delay)
 
-Models are downloaded on first `just load-model` — nothing is pre-cached during provisioning.
+Models are downloaded on first load — nothing is pre-cached during provisioning. The install script detects the GPU and logs the recommended model; use `just auto-load-model beelink1` to load it automatically after provisioning.
 
 ---
 
@@ -139,7 +139,13 @@ The node table should show the Windows machine as a Compute node:
 | BEELINK1 | 192.168.1.14 | Compute | 1200 | - |
 ```
 
-Then load a model:
+Then load the hardware-selected model:
+
+```bash
+just auto-load-model beelink1
+```
+
+Or load a specific model manually:
 
 ```bash
 just load-model beelink1 qwen2.5:7b
@@ -152,7 +158,8 @@ just load-model beelink1 qwen2.5:7b
 | Task | Command |
 |------|---------|
 | Deploy updated agent | `just update-node beelink1` |
-| Load / change a model | `just load-model beelink1 qwen2.5:7b` |
+| Load hardware-selected model | `just auto-load-model beelink1` |
+| Load a specific model | `just load-model beelink1 qwen2.5:7b` |
 | Check agent logs (live tail) | `just logs-node beelink1` |
 | Full sanity check | `just sanity-node beelink1` |
 | Check service state | `ssh user@host "sc.exe query ai-mesh-agent"` |
@@ -191,7 +198,7 @@ With this in place, llama-server detects the AMD Radeon iGPU via Vulkan and offl
 | `qwen2.5:7b` | 29/29 | ~17.6 t/s | Spills into shared RAM; ~37% faster than CPU-only |
 | `qwen2.5:14b` | partial | ~CPU speed | Too large for iGPU to help significantly |
 
-The 780M has 3.9 GB dedicated VRAM. Models that fit entirely within dedicated VRAM see the biggest speedup. The 7b model (4.7 GB) slightly overflows into shared system RAM, so the speedup is more modest — but all 29 layers still run on the GPU with no crash.
+The 780M has ~4 GB dedicated VRAM. Models that fit entirely within dedicated VRAM see the biggest speedup. The 7b model (~4.7 GB including KV cache) slightly overflows into shared system RAM, so the speedup is more modest — but all 29 layers still run on the GPU with no crash.
 
 ### Manual verification
 

@@ -26,6 +26,45 @@ $llamaInstallDir = "$env:LOCALAPPDATA\Programs\llama.cpp"
 $llamaHost       = "http://127.0.0.1:8080"
 
 
+# Select the best model based on available GPU VRAM or system RAM.
+function Select-DefaultModel {
+    $memMb = 0
+    $gpu = $false
+
+    # GPU VRAM — handles 32-bit overflow (4294967295 = iGPU with >= 4 GB allocated)
+    $gpuObj = Get-WmiObject Win32_VideoController |
+        Where-Object { $_.AdapterRAM -gt 0 } |
+        Sort-Object AdapterRAM -Descending |
+        Select-Object -First 1
+    if ($gpuObj) {
+        if ($gpuObj.AdapterRAM -eq 4294967295) {
+            $memMb = 8192  # 32-bit overflow sentinel — GPU reports max uint32 when VRAM > 4 GB
+        } else {
+            $memMb = [int]($gpuObj.AdapterRAM / 1MB)
+        }
+        $gpu = $true
+    }
+
+    # Fall back to system RAM
+    if ($memMb -eq 0) {
+        $memMb = [int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory / 1MB)
+    }
+
+    if ($gpu) {
+        if     ($memMb -ge 22000) { "qwen2.5:32b" }
+        elseif ($memMb -ge 9000)  { "qwen2.5:14b" }
+        elseif ($memMb -ge 4000)  { "qwen2.5:7b" }
+        elseif ($memMb -ge 1000)  { "qwen2.5:1.5b" }
+        else                      { "qwen2.5:0.5b" }
+    } else {
+        if     ($memMb -ge 44000) { "qwen2.5:32b" }
+        elseif ($memMb -ge 18000) { "qwen2.5:14b" }
+        elseif ($memMb -ge 10000) { "qwen2.5:7b" }
+        elseif ($memMb -ge 3000)  { "qwen2.5:1.5b" }
+        else                      { "qwen2.5:0.5b" }
+    }
+}
+
 function Ensure-Directory {
     param([string]$Path)
     if (-not (Test-Path $Path)) {
@@ -126,7 +165,8 @@ function Ensure-AgentService {
         "LLAMA_MODEL_DIR=$env:USERPROFILE\.ai-mesh\models" `
         "LLAMA_SERVER_BIN=$(Join-Path $llamaInstallDir 'llama-server.exe')" `
         "LLAMA_GPU_LAYERS=99" `
-        "LLAMA_FLASH_ATTN=1"
+        "LLAMA_FLASH_ATTN=1" `
+        "DEFAULT_MODEL=$defaultModel"
     & $nssm set $agentService Start SERVICE_AUTO_START
     & $nssm set $agentService AppStdout $agentLog
     & $nssm set $agentService AppStderr $agentLog
@@ -144,6 +184,10 @@ function Ensure-AgentService {
 }
 
 # Main provisioning sequence
+
+$defaultModel = Select-DefaultModel
+Write-Host ">>> Detected hardware → default model: $defaultModel"
+Write-Host ">>> To load it after provisioning: just auto-load-model <node-name>"
 
 Ensure-Directory -Path $aiMeshRoot
 Ensure-Directory -Path $logDir

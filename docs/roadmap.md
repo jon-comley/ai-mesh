@@ -54,6 +54,7 @@
 - **Mac mini M4** ⚠️ _hardware not available until ~end of July 2026_ — cross-compile for `aarch64-apple-darwin`, provision as compute node, add `just deploy-node mac1`
 - **Multi-node load balancing validation** — run `test-inference` with 2+ compute nodes, verify scheduler distributes load correctly across Pi and Beelink
 - **`just start-cluster` recipe** — start coordinator + controller + all remote agents + load each node's preferred model, leaving the mesh in a ready-to-use inference state. Discuss model assignment strategy (per-node preferred model in `nodes/<name>.env`? explicit args? automatic by RAM?) before implementing
+- **Automatic model placement** — wire `select_node_for_model(mb)` into the coordinator's `ModelLoad` handler so the coordinator picks the best-fit node automatically instead of requiring the CLI caller to name one. The scheduler building block already exists; what's missing is the handler logic that calls it when `node_id` is absent from the `PullModel` request.
 
 ---
 

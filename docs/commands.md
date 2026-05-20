@@ -40,21 +40,25 @@ NODE_ROLE=compute    # or controller
 |---------|-------------|
 | `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs llama-server, and registers the agent service |
 | `just update-node <node>` | OTA binary update only — rebuild, upload, restart. No reprovisioning |
-| `just load-model <node> <model>` | Load a model on a live node (e.g. `just load-model pi1 qwen2.5:1.5b`) |
+| `just load-model <node> <model>` | Load a specific model on a live node (e.g. `just load-model pi1 qwen2.5:1.5b`). Prints hardware-filtered fallback options if the model fails to load |
+| `just auto-load-model <node>` | Detect node hardware and automatically load the best-fit model |
 | `just uninstall-node <node>` | Remove the `ai-mesh-agent` service from the node |
 | `just logs-node <node>` | Live tail of the agent log on the node |
 | `just sanity-node <node>` | Check service state on the node and print the node table |
 
 ### Supported models
 
-| Model | Size on disk | Use on |
-|-------|-------------|--------|
-| `qwen2.5:1.5b` | ~1 GB | pi1 (ARM64, 8 GB RAM) |
-| `qwen2.5:7b` | ~4 GB | beelink1 (x86_64, AMD GPU, 32 GB RAM) |
-| `qwen2.5:14b` | ~8 GB | high-RAM nodes |
-| `qwen2.5:32b` | ~20 GB | very high-RAM nodes |
+| Model | Size on disk | Minimum memory | Default node |
+|-------|-------------|----------------|--------------|
+| `qwen2.5:0.5b` | ~0.5 GB | 1 GB | fallback only |
+| `qwen2.5:1.5b` | ~1 GB | 2 GB | Pi (ARM64) |
+| `qwen2.5:7b` | ~4 GB | 4 GB VRAM / 10 GB CPU RAM | Beelink SER8 (AMD Radeon 780M, ~4 GB VRAM) |
+| `qwen2.5:14b` | ~8 GB | 9 GB | — |
+| `qwen2.5:32b` | ~20 GB | 22 GB | Mac mini M4 (48 GB unified) |
 
 Models are downloaded as GGUF shards from Hugging Face on first `load-model`. Nothing is pre-cached during provisioning.
+
+`just auto-load-model <node>` detects available GPU VRAM (or system RAM for CPU-only nodes) and selects the largest model that fits. The same thresholds are baked into the install scripts, which log the selected model and the `auto-load-model` command to run after provisioning.
 
 **Windows AMD GPU nodes:** GPU acceleration requires AMD Adrenalin driver 26.5.2+. The install script installs llama-server with the Vulkan backend automatically. The driver must be installed manually before running `just deploy-node`. See `docs/windows-node-setup.md` for details and measured performance figures.
 

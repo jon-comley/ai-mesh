@@ -67,6 +67,10 @@ struct GgufSpec {
 
 fn resolve_gguf(model_name: &str) -> Result<GgufSpec, String> {
     match model_name {
+        "qwen2.5:0.5b" => Ok(GgufSpec {
+            repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+            shards: &["qwen2.5-0.5b-instruct-q4_k_m.gguf"],
+        }),
         "qwen2.5:1.5b" => Ok(GgufSpec {
             repo: "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
             shards: &["qwen2.5-1.5b-instruct-q4_k_m.gguf"],
@@ -360,6 +364,14 @@ mod tests {
         let err = resolve_gguf("llama3:8b").unwrap_err();
         assert!(err.contains("unknown model"));
         assert!(err.contains("llama3:8b"));
+    }
+
+    #[test]
+    fn resolve_gguf_0_5b_single_shard() {
+        let spec = resolve_gguf("qwen2.5:0.5b").unwrap();
+        assert_eq!(spec.repo, "Qwen/Qwen2.5-0.5B-Instruct-GGUF");
+        assert_eq!(spec.shards.len(), 1);
+        assert_eq!(spec.shards[0], "qwen2.5-0.5b-instruct-q4_k_m.gguf");
     }
 
     #[test]
