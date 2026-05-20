@@ -173,7 +173,7 @@ async fn process_message(
             // poll the registry until it becomes Ready or the pull deadline expires.
             // This decouples the pull duration from the generation timeout.
             const PULL_TIMEOUT_SECS: u64 = 300;
-            const GENERATE_TIMEOUT_SECS: u64 = 120;
+            const GENERATE_TIMEOUT_SECS: u64 = 300;
 
             let deadline = tokio::time::Instant::now() + Duration::from_secs(PULL_TIMEOUT_SECS);
             let mut pull_timed_out = false;

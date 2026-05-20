@@ -24,7 +24,7 @@ node by creating a `nodes/<name>.env` file and running `just deploy-node <name>`
    ```
    just deploy-node mynode
    ```
-   This cross-compiles the correct binary, uploads it, installs Ollama, and
+   This cross-compiles the correct binary, uploads it, installs llama-server, and
    registers a persistent service.
 
 3. **Verify the node is registered**

@@ -104,34 +104,43 @@ sanity:
 # ── Generic node management ───────────────────────────────────────────────────
 # Node config lives in nodes/<name>.env  (NODE_HOST, NODE_USER, NODE_OS, NODE_ROLE)
 
-# First-time provision or re-provision a node.
-# Automatically selects the best Qwen2.5 model for the node's RAM unless overridden.
+# First-time provision or re-provision a single node.
 # Usage: just deploy-node pi1
 #        just deploy-node beelink1
-#        just deploy-node beelink1 qwen2.5:7b   # override model
-deploy-node node model="":
+deploy-node node:
     #!/usr/bin/env bash
     set -e
     source nodes/{{node}}.env
-    MODEL="{{model}}"
+
+    scp_dots() {
+        local label="$1"; shift
+        printf "%s" "$label"
+        "$@" &
+        local pid=$!
+        while kill -0 $pid 2>/dev/null; do printf "."; sleep 0.5; done
+        wait $pid; local rc=$?; echo ""; return $rc
+    }
 
     case "$NODE_OS" in
       linux)
-        echo ">>> Building Linux ARM64 agent..."
-        cargo build --release --target aarch64-unknown-linux-gnu -p agent
+        NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
+        if [ "$NODE_ARCH" = "x86_64" ]; then
+            echo ">>> Building Linux x86_64 agent..."
+            cargo build --release --target x86_64-unknown-linux-gnu -p agent
+            AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
+        else
+            echo ">>> Building Linux ARM64 agent..."
+            cargo build --release --target aarch64-unknown-linux-gnu -p agent
+            AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
+        fi
 
-        echo ">>> Checking Ollama on ${NODE_HOST}..."
-        ssh -t ${NODE_USER}@${NODE_HOST} \
-            "command -v ollama >/dev/null 2>&1 || (echo 'Installing Ollama...' && curl -fsSL https://ollama.com/install.sh | sh)"
-
-        echo ">>> Uploading agent binary..."
         ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent 2>/dev/null || true"
-        scp target/aarch64-unknown-linux-gnu/release/agent ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
-
-        echo ">>> Uploading install script..."
-        scp scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
+        scp_dots ">>> Uploading agent binary" \
+            scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
+        scp_dots ">>> Uploading install script" \
+            scp -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
         ssh -t ${NODE_USER}@${NODE_HOST} \
-            "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER} ${MODEL}"
+            "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER}"
         ;;
 
       windows)
@@ -143,26 +152,23 @@ deploy-node node model="":
         ssh ${NODE_USER}@${NODE_HOST} \
             "powershell -Command \"if (-not (Test-Path '${WIN_PATH}')) { New-Item -ItemType Directory -Path '${WIN_PATH}' | Out-Null }\""
 
-        echo ">>> Uploading agent.exe (via temp file to avoid lock)..."
-        scp target/x86_64-pc-windows-gnu/release/agent.exe \
-            ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"
-
-        echo ">>> Uploading install script..."
-        scp scripts/install-node-windows.ps1 \
-            ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
-
-        MODEL_ARG=""
-        [ -n "$MODEL" ] && MODEL_ARG="-Model '${MODEL}'"
+        scp_dots ">>> Uploading agent.exe" \
+            scp -q target/x86_64-pc-windows-gnu/release/agent.exe \
+                ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"
+        scp_dots ">>> Uploading install script" \
+            scp -q scripts/install-node-windows.ps1 \
+                ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
 
         echo ">>> Stopping service, swapping binary, provisioning..."
         ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
             sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
             Start-Sleep 2;\
+            \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
+            foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
             Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
-            Get-Process nssm  -ErrorAction SilentlyContinue | Stop-Process -Force;\
             Start-Sleep 2;\
-            Move-Item -Force '${WIN_PATH}\\agent_next.exe' '${WIN_PATH}\\agent.exe';\
-            & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}' ${MODEL_ARG}\
+            cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
+            & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}'\
         \""
         ;;
 
@@ -173,6 +179,115 @@ deploy-node node model="":
     esac
     echo ">>> Node {{node}} provisioned."
 
+# Build agent binaries for all platforms, then provision every node.
+# Usage: just provision-all
+provision-all:
+    #!/usr/bin/env bash
+    set -e
+
+    scp_dots() {
+        local label="$1"; shift
+        printf "%s" "$label"
+        "$@" &
+        local pid=$!
+        while kill -0 $pid 2>/dev/null; do printf "."; sleep 0.5; done
+        wait $pid; local rc=$?; echo ""; return $rc
+    }
+
+    echo ">>> Building Linux ARM64 agent..."
+    cargo build --release --target aarch64-unknown-linux-gnu -p agent
+
+    echo ">>> Building Linux x86_64 agent..."
+    cargo build --release --target x86_64-unknown-linux-gnu -p agent
+
+    echo ">>> Building Windows x86_64 agent..."
+    cargo build --release -p agent --target x86_64-pc-windows-gnu
+
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        echo ""
+        echo "=== Provisioning ${NODE_NAME} (${NODE_OS} / ${NODE_HOST}) ==="
+
+        case "$NODE_OS" in
+          linux)
+            NODE_ARCH=$(ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
+            AGENT_BIN=$([ "$NODE_ARCH" = "x86_64" ] && echo "target/x86_64-unknown-linux-gnu/release/agent" || echo "target/aarch64-unknown-linux-gnu/release/agent")
+
+            echo ">>> Stopping agent service..."
+            ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "
+                sudo systemctl stop ai-mesh-agent 2>/dev/null || true
+            " || true
+
+            scp_dots ">>> Uploading agent binary" \
+                scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
+            scp_dots ">>> Uploading install script" \
+                scp -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
+            ssh -t ${NODE_USER}@${NODE_HOST} \
+                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER}"
+            ;;
+
+          windows)
+            WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
+
+            echo ">>> Stopping agent service..."
+            ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+                sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+                Start-Sleep 2;\
+                \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
+                foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
+                Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+                exit 0\
+            \"" || true
+
+            echo ">>> Creating ${WIN_PATH} on ${NODE_HOST}..."
+            ssh ${NODE_USER}@${NODE_HOST} \
+                "powershell -Command \"if (-not (Test-Path '${WIN_PATH}')) { New-Item -ItemType Directory -Path '${WIN_PATH}' | Out-Null }\""
+
+            scp_dots ">>> Uploading agent.exe" \
+                scp -q target/x86_64-pc-windows-gnu/release/agent.exe \
+                    ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"
+            scp_dots ">>> Uploading install script" \
+                scp -q scripts/install-node-windows.ps1 \
+                    ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
+
+            echo ">>> Swapping binary and provisioning..."
+            ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
+                Start-Sleep 2;\
+                cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
+                & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}'\
+            \""
+            ;;
+        esac
+        echo ">>> ${NODE_NAME} done."
+    done
+    echo ""
+    echo "=== All nodes provisioned. ==="
+
+# Restart the ai-mesh-agent service on a node without touching the binary.
+# Usage: just restart-node pi1
+restart-node node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    case "$NODE_OS" in
+      linux)
+        ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl restart ai-mesh-agent"
+        ;;
+      windows)
+        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+            Start-Sleep 2;\
+            \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
+            foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
+            Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+            Start-Sleep 2;\
+            sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
+            exit 0\""
+        ;;
+    esac
+    echo ">>> Node {{node}} agent restarted."
+
 # OTA update: rebuild agent, upload, restart — no reprovisioning.
 # Usage: just update-node pi1
 update-node node:
@@ -182,10 +297,17 @@ update-node node:
 
     case "$NODE_OS" in
       linux)
-        cargo build --release --target aarch64-unknown-linux-gnu -p agent
+        NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
+        if [ "$NODE_ARCH" = "x86_64" ]; then
+            cargo build --release --target x86_64-unknown-linux-gnu -p agent
+            AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
+        else
+            cargo build --release --target aarch64-unknown-linux-gnu -p agent
+            AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
+        fi
         echo ">>> Uploading updated agent to ${NODE_HOST}..."
         ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent"
-        scp target/aarch64-unknown-linux-gnu/release/agent ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
+        scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
         ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
         ;;
 
@@ -193,15 +315,16 @@ update-node node:
         cargo build --release -p agent --target x86_64-pc-windows-gnu
         WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
         echo ">>> Uploading updated agent.exe to ${NODE_HOST}..."
-        scp target/x86_64-pc-windows-gnu/release/agent.exe \
+        scp -q target/x86_64-pc-windows-gnu/release/agent.exe \
             ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"
         ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
             sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
             Start-Sleep 2;\
+            \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
+            foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
             Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
-            Get-Process nssm  -ErrorAction SilentlyContinue | Stop-Process -Force;\
             Start-Sleep 2;\
-            Move-Item -Force '${WIN_PATH}\\agent_next.exe' '${WIN_PATH}\\agent.exe';\
+            cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
             sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
             exit 0\
         \""
@@ -235,64 +358,68 @@ uninstall-node node:
     esac
     echo ">>> Node {{node}} uninstalled."
 
-# Pull a Qwen2.5 model on a live node without reprovisioning.
-# Selects the best model for the node's RAM if no model is specified.
-# Usage: just change-model pi1                  # auto-select
-#        just change-model beelink1 qwen2.5:7b  # explicit (downgrade/upgrade)
-change-model node model="":
+# Update llama.cpp to the latest release on a node.
+# Usage: just update-llama <node>
+update-llama node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    LATEST=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
+        | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+    echo "Latest llama.cpp: $LATEST"
+    if [ "$NODE_OS" = "windows" ]; then
+        ZIP_URL="https://github.com/ggml-org/llama.cpp/releases/download/${LATEST}/llama-${LATEST}-bin-win-vulkan-x64.zip"
+        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            Invoke-WebRequest -Uri '${ZIP_URL}' -OutFile '\$env:TEMP\llama-update.zip' -UseBasicParsing; \
+            Expand-Archive -Path '\$env:TEMP\llama-update.zip' -DestinationPath '\$env:LOCALAPPDATA\Programs\llama.cpp' -Force; \
+            Remove-Item '\$env:TEMP\llama-update.zip' -Force\""
+    else
+        ssh ${NODE_USER}@${NODE_HOST} "
+            ARCH=\$(uname -m)
+            if [ \"\$ARCH\" = \"x86_64\" ]; then
+                ZIP_URL=\"https://github.com/ggml-org/llama.cpp/releases/download/${LATEST}/llama-${LATEST}-bin-ubuntu-x64.tar.gz\"
+            elif [ \"\$ARCH\" = \"aarch64\" ]; then
+                ZIP_URL=\"https://github.com/ggml-org/llama.cpp/releases/download/${LATEST}/llama-${LATEST}-bin-ubuntu-arm64.tar.gz\"
+            else
+                echo \"Unsupported Linux architecture: \$ARCH\"
+                exit 1
+            fi
+            echo \"Downloading \$ZIP_URL...\"
+            LLAMA_TMP=\$(mktemp -d)
+            curl -fsSL \"\$ZIP_URL\" -o \"\$LLAMA_TMP/llama.tar.gz\"
+            sudo install -d /opt/llama.cpp
+            sudo tar -xzf \"\$LLAMA_TMP/llama.tar.gz\" -C /opt/llama.cpp --strip-components=1
+            rm -rf \"\$LLAMA_TMP\"
+        "
+    fi
+    echo "Restarting agent on {{node}}..."
+    just restart-node {{node}}
+    echo "llama.cpp updated to $LATEST on {{node}}"
+
+# Load a model on a named node (looks up live node ID from coordinator).
+# Usage: just load-model pi1 qwen2.5:1.5b
+#        just load-model beelink1 qwen2.5:7b
+load-model node model:
     #!/usr/bin/env bash
     set -e
     source nodes/{{node}}.env
     MODEL="{{model}}"
-
-    # RAM-based auto-selection (mirrors install script logic)
-    select_model_linux() {
-        local ram_gb
-        ram_gb=$(ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "free -g | awk '/^Mem:/{print \$2}'")
-        if   [ "$ram_gb" -lt 6  ]; then echo "qwen2.5:1.5b"
-        elif [ "$ram_gb" -lt 12 ]; then echo "qwen2.5:7b"
-        elif [ "$ram_gb" -lt 32 ]; then echo "qwen2.5:14b"
-        else                             echo "qwen2.5:32b"
-        fi
-    }
-
-    select_model_windows() {
-        local ram_gb
-        ram_gb=$(ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
-            "powershell -Command \"[math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1073741824)\"" | tr -d '\r\n')
-        if   [ "$ram_gb" -lt 6  ]; then echo "qwen2.5:1.5b"
-        elif [ "$ram_gb" -lt 12 ]; then echo "qwen2.5:7b"
-        elif [ "$ram_gb" -lt 32 ]; then echo "qwen2.5:14b"
-        else                             echo "qwen2.5:32b"
-        fi
-    }
-
-    case "$NODE_OS" in
-      linux)
-        if [ -z "$MODEL" ]; then
-            MODEL=$(select_model_linux)
-            echo ">>> Auto-selected: $MODEL"
-        fi
-        echo ">>> Pulling $MODEL on ${NODE_HOST}..."
-        ssh ${NODE_USER}@${NODE_HOST} "ollama pull $MODEL"
-        echo ">>> Done. $MODEL is ready on {{node}}."
-        ;;
-
-      windows)
-        if [ -z "$MODEL" ]; then
-            MODEL=$(select_model_windows)
-            echo ">>> Auto-selected: $MODEL"
-        fi
-        echo ">>> Pulling $MODEL on ${NODE_HOST}..."
-        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"ollama pull $MODEL\""
-        echo ">>> Done. $MODEL is ready on {{node}}."
-        ;;
-
-      *)
-        echo "Unknown NODE_OS: $NODE_OS"
-        exit 1
-        ;;
+    case "$MODEL" in
+        qwen2.5:1.5b)  SIZE_MB=1024 ;;
+        qwen2.5:7b)    SIZE_MB=4096 ;;
+        qwen2.5:14b)   SIZE_MB=8192 ;;
+        qwen2.5:32b)   SIZE_MB=20480 ;;
+        *) echo "Unknown model: $MODEL (supported: qwen2.5:1.5b 7b 14b 32b)"; exit 1 ;;
     esac
+    NODE_ID=$(cargo run -q -p cli -- nodes 2>/dev/null \
+        | awk -F'|' -v host="${NODE_HOST}" '$4 ~ host {print $2}' \
+        | tr -d ' ' | head -1)
+    if [ -z "$NODE_ID" ]; then
+        echo "Error: node ${NODE_HOST} not found in coordinator registry. Is the agent running?"
+        exit 1
+    fi
+    echo ">>> Loading ${MODEL} (${SIZE_MB} MB) on {{node}} (${NODE_ID})..."
+    cargo run -q -p cli -- load "${NODE_ID}" "${MODEL}" "${SIZE_MB}"
 
 # Tail live logs from a node.
 # Usage: just logs-node pi1
@@ -646,8 +773,8 @@ test-inference: update-portproxy
         NODE_ID=$(echo "$line" | awk -F'|' '{print $2}' | xargs)
         HOSTNAME=$(echo "$line" | awk -F'|' '{print $3}' | xargs)
         if [ -n "$NODE_ID" ]; then
-            echo "  Loading qwen2.5:0.5b on ${HOSTNAME} (${NODE_ID})..."
-            cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:0.5b 4200
+            echo "  Loading qwen2.5:1.5b on ${HOSTNAME} (${NODE_ID})..."
+            cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:1.5b 1024
         fi
     done <<< "$COMPUTE_NODES"
 
@@ -659,7 +786,7 @@ test-inference: update-portproxy
     PROMPT='In one sentence, what is the Itchen Bridge toll for?'
     for i in 1 2 3 4; do
         echo "--- Request ${i} ---"
-        cargo run -q -p cli -- infer 'qwen2.5:0.5b' "${PROMPT}"
+        cargo run -q -p cli -- infer 'qwen2.5:1.5b' "${PROMPT}"
     done
 
     echo "=== Step 6: Final cluster state ==="

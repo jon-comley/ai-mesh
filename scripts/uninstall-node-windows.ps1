@@ -5,7 +5,6 @@ param(
 $ErrorActionPreference = "Stop"
 
 $agentService  = "ai-mesh-agent"
-$ollamaService = "ollama-serve"
 $aiMeshRoot    = "C:\Users\$env:USERNAME\ai-mesh"
 
 function Get-Nssm {

@@ -115,14 +115,13 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 The provision script does:
 - Creates `C:\Users\<user>\ai-mesh\` and `logs\` directories
 - Sets `LocalAccountTokenFilterPolicy = 1` (SSH elevation)
-- Installs **Ollama v0.30.0-rc21** from GitHub ZIP (not winget — winget is pinned to 0.24.0 which lacks AMD Vulkan support)
+- Downloads the latest **llama.cpp Vulkan release** ZIP from GitHub and extracts it to `%LOCALAPPDATA%\Programs\llama.cpp\`
 - Installs **NSSM** via winget
-- Registers `ollama-serve` as a Windows service with `OLLAMA_VULKAN=1` (enables AMD iGPU acceleration)
 - Registers `ai-mesh-agent` as a Windows service (auto-start)
-- Sets `COORDINATOR_IP` and `AGENT_ROLE=compute` as service environment vars
-- Configures log rotation (10 MB per file)
-- Configures restart throttle (5 s delay between restarts)
-- Auto-selects and pulls the best Qwen2.5 model for the node's RAM
+- Sets `COORDINATOR_IP`, `AGENT_ROLE`, `LLAMA_MODEL_DIR`, `LLAMA_SERVER_BIN`, `LLAMA_GPU_LAYERS=99`, and `LLAMA_FLASH_ATTN=1` as service environment vars
+- Configures log rotation (10 MB per file) and restart throttle (5 s delay)
+
+Models are downloaded on first `just load-model` — nothing is pre-cached during provisioning.
 
 ---
 
@@ -140,6 +139,12 @@ The node table should show the Windows machine as a Compute node:
 | BEELINK1 | 192.168.1.14 | Compute | 1200 | - |
 ```
 
+Then load a model:
+
+```bash
+just load-model beelink1 qwen2.5:7b
+```
+
 ---
 
 ## Ongoing Operations
@@ -147,24 +152,24 @@ The node table should show the Windows machine as a Compute node:
 | Task | Command |
 |------|---------|
 | Deploy updated agent | `just update-node beelink1` |
+| Load / change a model | `just load-model beelink1 qwen2.5:7b` |
 | Check agent logs (live tail) | `just logs-node beelink1` |
 | Full sanity check | `just sanity-node beelink1` |
 | Check service state | `ssh user@host "sc.exe query ai-mesh-agent"` |
 | Restart service | `ssh user@host "sc.exe stop ai-mesh-agent && sc.exe start ai-mesh-agent"` |
+| Update llama-server | `just update-llama beelink1` |
 
-`just update-node beelink1` rebuilds, uploads via temp file (to avoid file lock), stops the service, swaps the binary, and restarts — all from WSL.
-
----
+`just update-node beelink1` rebuilds, uploads via temp file (to avoid file lock), kills NSSM by PID, swaps the binary, and restarts — all from WSL.
 
 ---
 
 ## AMD GPU Acceleration
 
-Machines with an AMD Radeon iGPU (e.g. the Radeon 780M in the Beelink SER8) can run inference on the GPU via Ollama's Vulkan backend. This gives a meaningful speedup over CPU-only inference.
+Machines with an AMD Radeon iGPU (e.g. the Radeon 780M in the Beelink SER8) can run inference on the GPU via llama-server's Vulkan backend. This gives a meaningful speedup over CPU-only inference.
 
 ### Driver requirement — AMD Adrenalin 26.5.2+
 
-**This is mandatory.** Older AMD drivers have a bug (Windows C++ SEH exception `0xe06d7363`) that crashes Ollama whenever Vulkan compute accesses shared iGPU memory. The crash was fixed in Adrenalin 26.5.2 (May 2026).
+**This is mandatory.** Older AMD drivers have a bug (Windows C++ SEH exception `0xe06d7363`) that crashes the llama-server Vulkan runner whenever it accesses shared iGPU memory. The crash was fixed in Adrenalin 26.5.2 (May 2026).
 
 Install from: [https://www.amd.com/en/support/download/drivers.html](https://www.amd.com/en/support/download/drivers.html)
 
@@ -173,16 +178,15 @@ After installing the driver, reboot before running `just deploy-node`.
 ### How it works
 
 The `install-node-windows.ps1` script automatically:
-1. Installs Ollama 0.30.0+ from the GitHub release ZIP (winget is pinned to 0.24.0 which has no Vulkan support)
-2. Configures the `ollama-serve` NSSM service with `OLLAMA_VULKAN=1`
+1. Downloads the Vulkan-enabled llama.cpp release ZIP from GitHub
+2. Configures the agent service with `LLAMA_GPU_LAYERS=99` and `LLAMA_FLASH_ATTN=1`
 
-With this in place, Ollama detects the AMD Radeon iGPU via Vulkan and offloads as many model layers as possible onto it.
+With this in place, llama-server detects the AMD Radeon iGPU via Vulkan and offloads all model layers onto it.
 
 ### Measured performance on Beelink SER8 (Radeon 780M, 32 GB RAM)
 
 | Model | Layers on GPU | Generation speed | Notes |
 |-------|--------------|-----------------|-------|
-| `qwen2.5:0.5b` | 29/29 | ~153 t/s | Fully within dedicated VRAM (3.9 GB) |
 | `qwen2.5:1.5b` | 29/29 | ~97 t/s | Fully within dedicated VRAM |
 | `qwen2.5:7b` | 29/29 | ~17.6 t/s | Spills into shared RAM; ~37% faster than CPU-only |
 | `qwen2.5:14b` | partial | ~CPU speed | Too large for iGPU to help significantly |
@@ -191,47 +195,23 @@ The 780M has 3.9 GB dedicated VRAM. Models that fit entirely within dedicated VR
 
 ### Manual verification
 
-After provisioning, check that Vulkan is active:
+After provisioning, check that Vulkan is active by examining the llama-server startup log:
 
 ```bash
-# From WSL
-ssh jonno@192.168.1.14 'type "C:\Users\jonno\ai-mesh\logs\ollama.log" | findstr /i "vulkan\|Vulkan"'
+just logs-node beelink1
+# Look for: "llama_new_context_with_model: n_ctx_per_seq = ..." and
+#            GPU layer count lines confirming offload
 ```
 
-You should see a line like:
-```
-inference compute id=... library=Vulkan name=Vulkan0 description="AMD Radeon 780M Graphics" total="17.8 GiB"
-```
-
-If it shows `library=cpu`, either the driver is too old or `OLLAMA_VULKAN=1` is not set:
+Or check the NSSM service environment:
 ```bash
-ssh jonno@192.168.1.14 'nssm get ollama-serve AppEnvironmentExtra'
-# Should print: OLLAMA_VULKAN=1
+ssh jonno@192.168.1.14 'nssm get ai-mesh-agent AppEnvironmentExtra'
+# Should show LLAMA_GPU_LAYERS=99 LLAMA_FLASH_ATTN=1
 ```
 
-To fix manually:
-```bash
-ssh jonno@192.168.1.14 'nssm set ollama-serve AppEnvironmentExtra "OLLAMA_VULKAN=1" && nssm restart ollama-serve'
-```
+### Upgrading llama-server
 
-### Upgrading Ollama (ZIP method)
-
-The standard Ollama installer (`OllamaSetup.exe`) hangs silently when run over SSH because it requires a desktop session for UAC. Always use the ZIP method for remote upgrades:
-
-```bash
-# From WSL — example upgrade to a new version
-VERSION="v0.30.0-rc21"
-ssh jonno@192.168.1.14 "nssm stop ollama-serve"
-ssh jonno@192.168.1.14 "powershell -Command \"
-  \$zip = '\$env:TEMP\\ollama.zip'
-  Invoke-WebRequest 'https://github.com/ollama/ollama/releases/download/$VERSION/ollama-windows-amd64.zip' -OutFile \$zip -UseBasicParsing
-  Expand-Archive \$zip '\$env:LOCALAPPDATA\\Programs\\Ollama' -Force
-  Remove-Item \$zip
-\""
-ssh jonno@192.168.1.14 "nssm start ollama-serve"
-```
-
-The NSSM service log is at `C:\Users\<user>\ai-mesh\logs\ollama.log`.
+Use `just update-llama beelink1` to download the latest llama.cpp Vulkan release and restart the agent service — fully remote from WSL.
 
 ---
 
@@ -241,7 +221,7 @@ The NSSM service log is at `C:\Users\<user>\ai-mesh\logs\ollama.log`.
 
 Symptom: `sc.exe query ai-mesh-agent` shows `STATE: 3 STOP_PENDING` and never changes.
 
-Cause: NSSM sent a stop signal but is waiting for something that never clears (often the agent spawned a child process that outlived the parent). NSSM hangs waiting for the process tree to fully exit.
+Cause: NSSM sent a stop signal but is waiting for something that never clears (often the agent spawned a child process that outlived the parent, or NSSM's restart throttle kicked in after repeated crashes).
 
 Fix — find and kill the NSSM process directly:
 ```bash
@@ -252,7 +232,7 @@ ssh user@host "taskkill /F /PID <pid>"
 ssh user@host "sc.exe start ai-mesh-agent"
 ```
 
-Prevention: the agent must **not spawn child processes** during normal operation. Hardware and GPU detection use the `sysinfo` crate (no subprocess spawning) for exactly this reason. If you add any `Command::output()` calls to the agent, test that the service can be stopped cleanly.
+Prevention: the agent must **not spawn child processes** during normal operation. Hardware and GPU detection use the `sysinfo` crate (no subprocess spawning) for exactly this reason.
 
 ### Node not appearing in the node table
 
@@ -265,14 +245,16 @@ Check in order:
 
 ### SCP fails because agent.exe is locked
 
-The running service holds agent.exe open. Never upload directly to `agent.exe`:
-```bash
-# Upload as a temp file first, then move atomically
-scp agent.exe user@host:"C:\path\agent_next.exe"
-ssh user@host "Move-Item -Force C:\path\agent_next.exe C:\path\agent.exe"
-```
+The running service holds agent.exe open. Never upload directly to `agent.exe`. `just update-node <node>` always uploads as `agent_next.exe`, kills NSSM by PID, then uses `cmd /c copy /Y` to swap — this avoids the file lock completely.
 
-`just update-node beelink1` does this automatically.
+If you need to do it manually:
+```bash
+scp agent.exe user@host:"C:\path\agent_next.exe"
+ssh user@host "tasklist /FI \"IMAGENAME eq nssm.exe\""   # get NSSM PID
+ssh user@host "taskkill /F /PID <nssm-pid>"
+ssh user@host "cmd /c 'copy /Y C:\path\agent_next.exe C:\path\agent.exe'"
+ssh user@host "sc.exe start ai-mesh-agent"
+```
 
 ### SSH commands fail with access denied
 
@@ -320,23 +302,24 @@ REM RIGHT — quotes prevent trailing space
 set "COORDINATOR_IP=192.168.1.12" && agent.exe
 ```
 
-The coordinator address ends up as `192.168.1.12 :9000` which fails to parse. The agent trims these values, but the underlying issue is in how you set the variable.
+### AMD GPU not detected / llama-server crashes during inference
 
-### AMD GPU not detected / Ollama crashes during inference
+Symptoms: GPU layers show 0 in logs, or inference crashes with a Windows C++ exception.
 
-Symptoms: Ollama log shows `library=cpu` instead of `library=Vulkan`, or inference crashes with a Windows C++ exception.
-
-**Check 1:** Is `OLLAMA_VULKAN=1` set?
+**Check 1:** Is `LLAMA_GPU_LAYERS=99` set?
 ```bash
-ssh user@host 'nssm get ollama-serve AppEnvironmentExtra'
+ssh user@host 'nssm get ai-mesh-agent AppEnvironmentExtra'
 ```
-If not, set it: `nssm set ollama-serve AppEnvironmentExtra "OLLAMA_VULKAN=1"` then `nssm restart ollama-serve`.
+If not, re-run `just deploy-node beelink1` or set it manually and restart.
 
-**Check 2:** Is the AMD driver 26.5.2 or later?  
+**Check 2:** Is the AMD driver 26.5.2 or later?
 Older drivers crash with `Exception 0xe06d7363` when Vulkan compute tries to use shared iGPU memory. Update from https://www.amd.com/en/support/download/drivers.html then reboot.
 
-**Check 3:** Is Ollama 0.30.0 or later installed?  
-The winget package is pinned to 0.24.0 which has no Vulkan support. Re-run `just deploy-node <node>` to upgrade via ZIP.
+**Check 3:** Is the llama-server Vulkan build installed?
+The install script downloads the `-win-vulkan-x64.zip` variant. Verify:
+```bash
+ssh user@host 'dir "%LOCALAPPDATA%\Programs\llama.cpp\llama-server.exe"'
+```
 
 **Note on ROCm:** ROCm does not detect the 780M iGPU on Windows at all (it only sees discrete GPUs, and even then requires Linux for iGPU support). ROCm is not used — Vulkan is the correct backend for this hardware.
 
@@ -347,3 +330,11 @@ Do not use `wmic` for hardware detection. It is deprecated on Windows 11, may no
 ### PowerShell cold-start delay
 
 PowerShell takes 4–40 seconds to start cold, depending on system load. If the agent spawns PowerShell at startup (e.g. for hardware detection), the service will appear to hang during NSSM's startup window and may never reach RUNNING state before the stop signal arrives from a test recipe. Use `sysinfo` for all in-process system queries.
+
+### Windows sleep / hibernate
+
+Windows will turn off the machine if sleep is enabled. Disable it:
+```powershell
+powercfg /h off          # disable hibernate
+powercfg /change standby-timeout-ac 0   # disable sleep on AC power
+```

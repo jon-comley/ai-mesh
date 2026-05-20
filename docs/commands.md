@@ -38,27 +38,25 @@ NODE_ROLE=compute    # or controller
 
 | Command | Description |
 |---------|-------------|
-| `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs Ollama, and pre-caches the best Qwen2.5 model for the node's RAM |
-| `just deploy-node <node> <model>` | Same as above but override the model (e.g. `just deploy-node pi1 qwen2.5:1.5b`) |
-| `just change-model <node>` | Pull the best Qwen2.5 for the node's RAM without reprovisioning |
-| `just change-model <node> <model>` | Pull a specific model on a live node — use this to upgrade or downgrade |
+| `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs llama-server, and registers the agent service |
 | `just update-node <node>` | OTA binary update only — rebuild, upload, restart. No reprovisioning |
+| `just load-model <node> <model>` | Load a model on a live node (e.g. `just load-model pi1 qwen2.5:1.5b`) |
 | `just uninstall-node <node>` | Remove the `ai-mesh-agent` service from the node |
 | `just logs-node <node>` | Live tail of the agent log on the node |
 | `just sanity-node <node>` | Check service state on the node and print the node table |
 
-### Model selection rules
+### Supported models
 
-The install script picks the best pre-cached Qwen2.5 variant based on total node RAM:
+| Model | Size on disk | Use on |
+|-------|-------------|--------|
+| `qwen2.5:1.5b` | ~1 GB | pi1 (ARM64, 8 GB RAM) |
+| `qwen2.5:7b` | ~4 GB | beelink1 (x86_64, AMD GPU, 32 GB RAM) |
+| `qwen2.5:14b` | ~8 GB | high-RAM nodes |
+| `qwen2.5:32b` | ~20 GB | very high-RAM nodes |
 
-| Total RAM | Model |
-|-----------|-------|
-| < 6 GB | `qwen2.5:1.5b` |
-| 6 – 12 GB | `qwen2.5:7b` |
-| 12 – 32 GB | `qwen2.5:14b` |
-| 32 GB+ | `qwen2.5:32b` |
+Models are downloaded as GGUF shards from Hugging Face on first `load-model`. Nothing is pre-cached during provisioning.
 
-**Windows AMD GPU nodes:** GPU acceleration requires AMD Adrenalin driver 26.5.2+ and Ollama 0.30.0+. The install script handles the Ollama version automatically. The driver must be installed manually before running `just deploy-node`. See `docs/windows-node-setup.md` for details and measured performance figures.
+**Windows AMD GPU nodes:** GPU acceleration requires AMD Adrenalin driver 26.5.2+. The install script installs llama-server with the Vulkan backend automatically. The driver must be installed manually before running `just deploy-node`. See `docs/windows-node-setup.md` for details and measured performance figures.
 
 ### Adding a new node
 
@@ -113,9 +111,9 @@ The install script picks the best pre-cached Qwen2.5 variant based on total node
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/install-node-windows.ps1` | Windows node installer. Params: `-CoordinatorIp`, `-Role`. Uses `$env:USERNAME` for paths |
+| `scripts/install-node-windows.ps1` | Windows node installer. Params: `-CoordinatorIp`, `-Role`. Installs llama-server (Vulkan) via ZIP and registers the NSSM agent service |
 | `scripts/uninstall-node-windows.ps1` | Removes NSSM service. Flag: `-RemoveBinary` |
-| `scripts/install-node-linux.sh` | Linux node installer. Args: `<coordinator_ip> <role> <user>` |
+| `scripts/install-node-linux.sh` | Linux node installer. Args: `<coordinator_ip> <role> <user>`. Installs llama-server via tarball and registers a systemd service |
 | `scripts/uninstall-node-linux.sh` | Removes systemd service |
 
 These are uploaded and run remotely by the justfile recipes — you do not need to run them manually.
@@ -126,7 +124,7 @@ These are uploaded and run remotely by the justfile recipes — you do not need 
 
 | Command | Description |
 |---------|-------------|
-| `just test-inference` | End-to-end inference test: loads `qwen2.5:0.5b` on all compute nodes, fires 4 requests |
+| `just test-inference` | End-to-end inference test: loads `qwen2.5:1.5b` on all compute nodes, fires 4 requests |
 
 ---
 

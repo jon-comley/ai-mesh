@@ -42,8 +42,8 @@ Node config lives in `nodes/<name>.env`. Add an entry, then:
 just deploy-node <name>
 ```
 
-This builds the correct binary for the node's OS, uploads it, installs Ollama,
-and registers a persistent service (systemd on Linux, NSSM on Windows).
+This builds the correct binary for the node's OS, uploads it, installs
+llama-server, and registers a persistent service (systemd on Linux, NSSM on Windows).
 
 ### 4. Check Mesh State
 
@@ -81,6 +81,7 @@ and drops into live `mesh watch`. Ctrl+C stops local processes only.
 | `just dev` | Start full cluster in dev mode |
 | `just deploy-node <node>` | First-time provision or re-provision a node |
 | `just update-node <node>` | OTA binary update only (no reprovisioning) |
+| `just load-model <node> <model>` | Load a model on a node (e.g. `qwen2.5:7b`) |
 | `just uninstall-node <node>` | Remove agent service from a node |
 | `just sanity-node <node>` | Check service state + node table |
 | `just sanity-full` | Full cluster validation (all nodes) |

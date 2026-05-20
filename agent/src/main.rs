@@ -1,6 +1,6 @@
 use agent::agent::Agent;
 use agent::config::AgentConfig;
-use agent::ollama;
+use agent::llama;
 use shared::hardware::NodeRole;
 use shared::{InferenceResult, MeshMessage, ModelLifecycleState, ModelStatusReport, WIRE_VERSION};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -87,13 +87,13 @@ async fn main() {
                         let mname = req.model_name.clone();
                         let size = req.model_size_mb;
                         tokio::spawn(async move {
-                            let state = match ollama::pull_model(&mname).await {
+                            let state = match llama::pull_model(&mname).await {
                                 Ok(()) => {
-                                    info!(model = %mname, "ollama pull complete");
+                                    info!(model = %mname, "llama pull complete");
                                     ModelLifecycleState::Ready
                                 }
                                 Err(e) => {
-                                    warn!(model = %mname, error = %e, "ollama pull failed");
+                                    warn!(model = %mname, error = %e, "llama pull failed");
                                     ModelLifecycleState::Failed { reason: e }
                                 }
                             };
@@ -119,7 +119,7 @@ async fn main() {
                             warn!(request_id = %req.request_id, "inference aborted: channel closed");
                             continue;
                         }
-                        let result = match ollama::generate(&req.model_name, &req.prompt).await {
+                        let result = match llama::generate(&req.model_name, &req.prompt).await {
                             Ok((output, tokens, duration_ms)) => InferenceResult {
                                 request_id: req.request_id,
                                 node_id: node_id.clone(),
@@ -131,7 +131,7 @@ async fn main() {
                                 wire_version: WIRE_VERSION,
                             },
                             Err(e) => {
-                                warn!(error = %e, "ollama generate failed");
+                                warn!(error = %e, "llama generate failed");
                                 InferenceResult {
                                     request_id: req.request_id,
                                     node_id: node_id.clone(),
@@ -148,6 +148,12 @@ async fn main() {
                     }
                     MeshMessage::ModelUnload(req) => {
                         info!("Received command to unload model {}", req.model_name);
+                        match llama::unload_model().await {
+                            Ok(()) => info!(model = %req.model_name, "model unloaded"),
+                            Err(e) => {
+                                warn!(model = %req.model_name, error = %e, "failed to cleanly unload model")
+                            }
+                        }
                         let _ = tx_in
                             .send(MeshMessage::ModelStatus(ModelStatusReport {
                                 node_id: node_id.clone(),

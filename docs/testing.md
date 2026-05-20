@@ -21,6 +21,31 @@ Unit tests live inside the module using:
 mod tests { ... }
 ```
 
+### Agent — `llama.rs` — GGUF resolution and chat response parsing
+
+Tests the pure functions that map model names to GGUF file specs and the deserialization of llama-server `/v1/chat/completions` responses:
+
+| Test | What it pins |
+|------|-------------|
+| `resolve_gguf_unknown_model_returns_err` | Unsupported model name produces an error containing the name |
+| `resolve_gguf_1_5b_single_shard` | 1.5b resolves to correct repo and single-shard filename |
+| `resolve_gguf_7b_two_shards` | 7b resolves to correct repo and both shard filenames in order |
+| `resolve_gguf_14b_three_shards` | 14b resolves to three shards |
+| `resolve_gguf_32b_five_shards` | 32b resolves to five shards |
+| `resolve_gguf_multi_shard_models_start_with_shard_1` | First shard always contains `00001` (llama-server loads from first) |
+| `resolve_gguf_shards_agree_on_total_count` | All shards embed the same total count |
+| `llama_host_returns_http_url` | `LLAMA_HOST` env var produces an http:// URL |
+| `gpu_layers_defaults_to_zero_when_unset` | `LLAMA_GPU_LAYERS` unset → 0 |
+| `flash_attn_defaults_to_false_when_unset` | `LLAMA_FLASH_ATTN` unset → false |
+| `model_dir_ends_with_ai_mesh_models_when_unset` | Default model dir ends with `.ai-mesh/models` |
+| `chat_response_parses_full_response` | Full JSON with choices, usage, timings all deserialised correctly |
+| `chat_response_usage_and_timings_default_when_absent` | Missing usage/timings fields default to zero |
+| `chat_response_empty_choices_is_valid` | Empty choices array is valid |
+| `chat_response_timings_zero_triggers_wall_clock_fallback` | `predicted_ms = 0` causes wall-clock branch in `generate()` |
+| `unload_model_is_ok_with_no_process` | `unload_model()` is a no-op when no process is running |
+
+---
+
 ### CLI — `commands/watch.rs` — `diff` event detection
 
 Tests the pure `diff(prev, current)` function that generates event log entries for the TUI:
