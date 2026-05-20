@@ -207,6 +207,9 @@ async fn resolve_coordinator_addr() -> String {
         return addr;
     }
 
-    warn!("mDNS: no coordinator found; falling back to 127.0.0.1:{}", port);
+    warn!(
+        "mDNS: no coordinator found; falling back to 127.0.0.1:{}",
+        port
+    );
     format!("127.0.0.1:{}", port)
 }

@@ -123,7 +123,9 @@ mod tests {
 
         if let Some(addr) = result {
             // Verify the address is well-formed (ip:port).
-            let colon = addr.rfind(':').expect("discovered address should be ip:port");
+            let colon = addr
+                .rfind(':')
+                .expect("discovered address should be ip:port");
             let port: u16 = addr[colon + 1..].parse().expect("port should be numeric");
             assert!(port > 0, "port in '{}' should be non-zero", addr);
         }
