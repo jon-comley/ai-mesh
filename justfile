@@ -620,6 +620,55 @@ start-agents:
         esac
     done
 
+# Bring the full cluster up and load the best model on each compute node.
+# Leaves everything running — coordinator, controller, and remote agents stay up after the script exits.
+# Usage: just start-cluster
+start-cluster: update-portproxy
+    #!/usr/bin/env bash
+    set -e
+
+    echo ">>> Stopping any stale local processes..."
+    pkill -f "target/debug/coordinator" || true
+    pkill -f "target/debug/agent" || true
+    sleep 0.3
+
+    echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
+    MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
+
+    echo ">>> Waiting for coordinator to accept connections..."
+    for i in $(seq 1 30); do
+        sleep 1
+        if timeout 1 bash -c "echo > /dev/tcp/{{coordinator_ip}}/{{coordinator_port}}" 2>/dev/null; then
+            echo ">>> Coordinator ready."
+            break
+        fi
+        [ "$i" -eq 30 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
+    done
+
+    cargo run -q -p cli -- reset-registry > /dev/null || true
+
+    echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
+    AGENT_ROLE=controller cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
+
+    echo ">>> Starting remote compute agents..."
+    just start-agents
+
+    echo ">>> Waiting for nodes to register (15s)..."
+    sleep 15
+
+    echo ">>> Loading hardware-selected models on compute nodes..."
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        [ "${NODE_ROLE}" = "compute" ] || continue
+        just auto-load-model ${NODE_NAME} \
+            || echo ">>> Warning: could not load model on ${NODE_NAME} (skipping)"
+    done
+
+    echo ""
+    echo ">>> Cluster ready. Run inference with: mesh infer <model> <prompt>"
+    cargo run -q -p cli -- nodes
+
 # Start coordinator + controller locally, then start all remote nodes.
 # Ctrl+C stops only the local processes; remote services keep running.
 dev: update-portproxy

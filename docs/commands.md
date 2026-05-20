@@ -42,6 +42,7 @@ NODE_ROLE=compute    # or controller
 | `just update-node <node>` | OTA binary update only — rebuild, upload, restart. No reprovisioning |
 | `just load-model <node> <model>` | Load a specific model on a live node (e.g. `just load-model pi1 qwen2.5:1.5b`). Prints hardware-filtered fallback options if the model fails to load |
 | `just auto-load-model <node>` | Detect node hardware and automatically load the best-fit model |
+| `just start-cluster` | Bring the full cluster up: coordinator, controller, all remote agents, and hardware-selected models on every compute node. Leaves everything running after exit |
 | `just uninstall-node <node>` | Remove the `ai-mesh-agent` service from the node |
 | `just logs-node <node>` | Live tail of the agent log on the node |
 | `just sanity-node <node>` | Check service state on the node and print the node table |
