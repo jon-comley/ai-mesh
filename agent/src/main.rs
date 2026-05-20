@@ -13,9 +13,9 @@ async fn main() {
     tracing_subscriber::fmt().init();
 
     let role = read_role_from_env();
-    let addr = read_coordinator_addr();
+    let addr = resolve_coordinator_addr().await;
 
-    info!("Agent starting");
+    info!("Agent starting, coordinator: {}", addr);
 
     loop {
         info!("Connecting to coordinator at {}", addr);
@@ -192,8 +192,21 @@ fn read_role_from_env() -> NodeRole {
     }
 }
 
-fn read_coordinator_addr() -> String {
-    let ip = std::env::var("COORDINATOR_IP").unwrap_or_else(|_| "127.0.0.1".into());
+async fn resolve_coordinator_addr() -> String {
     let port = std::env::var("COORDINATOR_PORT").unwrap_or_else(|_| "9000".into());
-    format!("{}:{}", ip.trim(), port.trim())
+    let port = port.trim().to_string();
+
+    // Explicit COORDINATOR_IP always wins — skip discovery.
+    if let Ok(ip) = std::env::var("COORDINATOR_IP") {
+        return format!("{}:{}", ip.trim(), port);
+    }
+
+    if let Some(addr) =
+        agent::discovery::discover_coordinator(std::time::Duration::from_secs(5)).await
+    {
+        return addr;
+    }
+
+    warn!("mDNS: no coordinator found; falling back to 127.0.0.1:{}", port);
+    format!("127.0.0.1:{}", port)
 }

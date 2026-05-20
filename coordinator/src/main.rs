@@ -8,6 +8,8 @@ async fn main() {
     let coord = Coordinator::new_persistent("0.0.0.0:9000", "ai_mesh.db");
     let _handle = coord.start().await;
 
+    let _mdns = coordinator::mdns::advertise(9000);
+
     println!("Coordinator is running. Press Ctrl+C to stop.");
 
     // Keep the process alive forever

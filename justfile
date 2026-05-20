@@ -17,7 +17,7 @@ run-agent:
     cargo run -p agent
 
 run-coordinator: update-portproxy
-    cargo run -p coordinator
+    MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -p coordinator
 
 run-controller:
     AGENT_ROLE=controller cargo run -p agent
@@ -287,7 +287,7 @@ dev: update-portproxy
     done
 
     echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
-    cargo run -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
+    MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
     COORD_PID=$!
     sleep 1
 
