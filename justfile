@@ -3,6 +3,9 @@ coordinator_port := "9000"
 
 default: build
 
+install-hooks:
+    bash scripts/install-hooks.sh
+
 build:
     cargo build
 
