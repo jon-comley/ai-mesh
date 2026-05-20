@@ -10,16 +10,17 @@ pub enum CapabilityError {
 pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
     let hw = detect_hardware()?;
 
-    // CPU inference is always available
+    // CPU inference is always available.
     let cpu_inference = true;
 
-    // GPU inference available if GPU is detected
+    // GPU inference available if any GPU was detected.
     let gpu_inference = hw.gpu.is_some();
 
-    // ANE inference (Apple Neural Engine) — not available on Linux
-    let ane_inference = false;
+    // ANE (Apple Neural Engine) is present on all Apple Silicon (M-series) chips.
+    // Compile-time constant — the binary is always built for a specific target.
+    let ane_inference = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
-    // Max model size = 50% of RAM (simple heuristic)
+    // Max model size = 50% of RAM (simple heuristic).
     let max_model_size_gb = hw.ram_gb * 0.5;
 
     Ok(NodeCapabilities {
@@ -37,7 +38,22 @@ mod tests {
     #[test]
     fn test_detect_capabilities() {
         let caps = detect_capabilities().unwrap();
-        assert!(caps.max_model_size_gb > 0.0);
         assert!(caps.cpu_inference);
+        assert!(caps.max_model_size_gb > 0.0);
+    }
+
+    // ANE is only available on Apple Silicon macOS.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn ane_true_on_apple_silicon() {
+        let caps = detect_capabilities().unwrap();
+        assert!(caps.ane_inference);
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[test]
+    fn ane_false_on_non_apple_silicon() {
+        let caps = detect_capabilities().unwrap();
+        assert!(!caps.ane_inference);
     }
 }

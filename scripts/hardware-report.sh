@@ -54,6 +54,10 @@ while [ $SECONDS -lt $END ]; do
             divider
             printf "  Node registered: %s\n" "$id"
             divider
+            # Brief pause so the agent's hardware/capabilities messages
+            # arrive before we query — heartbeat registers first, hardware
+            # and capabilities follow within ~1s.
+            sleep 2
             $CLI --coordinator "$COORDINATOR" info "$id"
             echo ""
         fi
