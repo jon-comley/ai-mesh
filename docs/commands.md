@@ -60,6 +60,15 @@ NODE_ROLE=compute    # or controller
 
 ---
 
+## Diagnostics
+
+| Command | Description |
+|---------|-------------|
+| `just hardware-report` | Print hardware + capability summary for every registered node. Starts coordinator in the background if not running, starts remote agents, then streams each node's block as it registers over a 20 s scan window |
+| `just start-agents` | Start `ai-mesh-agent` on all remote nodes without touching the local coordinator. Safe to call when agents are already running (`systemctl start` is idempotent) |
+
+---
+
 ## Sanity Tests
 
 | Command | Description |
@@ -72,14 +81,15 @@ NODE_ROLE=compute    # or controller
 
 `just sanity-full` is the recommended full-cluster validation workflow:
 
-1. Stops all remote agent services
-2. Kills any stale local coordinator / agent processes
-3. Starts a fresh coordinator
-4. Resets the registry
-5. Starts a controller agent
-6. Starts all remote node services (via `nodes/*.env`)
-7. Waits 12 s for registration
-8. Prints the node table — expect one entry per node
+1. Refreshes the portproxy (WSL2 IP may have changed)
+2. Stops all remote agent services (SSH with `ConnectTimeout=5` — offline nodes warn and continue)
+3. Kills any stale local coordinator / agent processes
+4. Starts a fresh coordinator
+5. Resets the registry
+6. Starts a controller agent
+7. Starts all remote node services (via `nodes/*.env`)
+8. Waits 12 s for registration
+9. Prints the node table — expect one entry per node
 
 ---
 

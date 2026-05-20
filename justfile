@@ -7,8 +7,9 @@ install-hooks:
     bash scripts/install-hooks.sh
 
 # Dump hardware + capability summary for every registered node.
-# Starts the coordinator in the background if not already running, then starts
-# remote agents and waits for them to register. Usage: just hardware-report
+# Starts the coordinator if not running, resets the registry (removes stale
+# entries), starts remote agents, then streams each node as it registers.
+# Usage: just hardware-report
 hardware-report: update-portproxy
     #!/usr/bin/env bash
     set -e
@@ -39,6 +40,7 @@ hardware-report: update-portproxy
         echo ">>> Coordinator already running at $COORD"
     fi
 
+    cargo run -q -p cli -- reset-registry > /dev/null || true
     just start-agents
     bash scripts/hardware-report.sh "$COORD"
 
@@ -401,7 +403,7 @@ sanity-full: update-portproxy
         for f in nodes/*.env; do
             source "$f"
             [ "$NODE_OS" = "linux" ] && \
-                ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent" 2>/dev/null || true
+                ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent" 2>/dev/null || true
         done
     }
     trap cleanup EXIT
@@ -411,11 +413,11 @@ sanity-full: update-portproxy
         source "$f"
         case "$NODE_OS" in
           linux)
-            ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent 2>/dev/null || true" || true
+            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent 2>/dev/null || true" || true
             ;;
           windows)
             WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
-            ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
                 sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
                 Start-Sleep 2;\
                 Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
@@ -447,12 +449,14 @@ sanity-full: update-portproxy
         case "$NODE_OS" in
           linux)
             echo ">>> Starting agent service on ${NODE_NAME} (${NODE_HOST})..."
-            ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
+            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent" \
+                || echo ">>> Warning: could not reach ${NODE_NAME} (offline?)"
             ;;
           windows)
             echo ">>> Starting agent service on ${NODE_NAME} (${NODE_HOST})..."
-            ssh ${NODE_USER}@${NODE_HOST} \
-                "powershell -Command \"sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0\""
+            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
+                "powershell -Command \"sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0\"" \
+                || echo ">>> Warning: could not reach ${NODE_NAME} (offline?)"
             ;;
         esac
     done
