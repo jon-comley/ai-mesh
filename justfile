@@ -6,8 +6,41 @@ default: build
 install-hooks:
     bash scripts/install-hooks.sh
 
-hardware-report:
-    bash scripts/hardware-report.sh
+# Dump hardware + capability summary for every registered node.
+# Starts the coordinator in the background if not already running, then starts
+# remote agents and waits for them to register. Usage: just hardware-report
+hardware-report: update-portproxy
+    #!/usr/bin/env bash
+    set -e
+    COORD="{{coordinator_ip}}:{{coordinator_port}}"
+    COORD_PID=""
+
+    # Check 127.0.0.1, not the LAN IP — portproxy accepts TCP even when nothing is behind it.
+    if ! timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/{{coordinator_port}}" 2>/dev/null; then
+        echo ">>> Coordinator not running — starting in background..."
+        MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator \
+            > /tmp/mesh-coordinator.log 2>&1 &
+        COORD_PID=$!
+        trap '[ -n "$COORD_PID" ] && kill "$COORD_PID" 2>/dev/null || true' EXIT
+
+        echo ">>> Waiting for coordinator to accept connections..."
+        for i in $(seq 1 30); do
+            sleep 1
+            if timeout 1 bash -c "echo > /dev/tcp/{{coordinator_ip}}/{{coordinator_port}}" 2>/dev/null; then
+                echo ">>> Coordinator ready."
+                break
+            fi
+            if [ "$i" -eq 30 ]; then
+                echo ">>> ERROR: Coordinator did not start in time. Check: /tmp/mesh-coordinator.log"
+                exit 1
+            fi
+        done
+    else
+        echo ">>> Coordinator already running at $COORD"
+    fi
+
+    just start-agents
+    bash scripts/hardware-report.sh "$COORD"
 
 build:
     cargo build
@@ -252,6 +285,29 @@ update-portproxy:
     echo ">>> Portproxy updated: 0.0.0.0:9000 → ${WSL_IP}:9000"
 
 # ── Full cluster operations ───────────────────────────────────────────────────
+
+# Start the ai-mesh-agent service on all remote nodes without touching the local coordinator.
+# Safe to call when agents are already running (systemctl start is idempotent).
+start-agents:
+    #!/usr/bin/env bash
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        case "$NODE_OS" in
+          linux)
+            echo ">>> Starting agent on ${NODE_NAME} (${NODE_HOST})..."
+            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
+                "sudo systemctl start ai-mesh-agent" 2>/dev/null \
+                || echo ">>> Warning: could not reach ${NODE_NAME} (offline?)"
+            ;;
+          windows)
+            echo ">>> Starting agent on ${NODE_NAME} (${NODE_HOST})..."
+            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
+                "powershell -Command \"sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0\"" 2>/dev/null \
+                || echo ">>> Warning: could not reach ${NODE_NAME} (offline?)"
+            ;;
+        esac
+    done
 
 # Start coordinator + controller locally, then start all remote nodes.
 # Ctrl+C stops only the local processes; remote services keep running.

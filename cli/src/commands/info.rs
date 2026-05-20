@@ -36,21 +36,41 @@ async fn fetch_info(
 }
 
 fn print_info(n: NodeRecordFull) {
-    println!("Node ID: {}", n.id);
-    println!("Hostname: {}", n.hostname);
-    println!("IP: {}", n.ip);
-    println!("Role: {:?}", n.role);
-    println!("Last Heartbeat: {} ms ago", n.last_heartbeat_ms);
+    println!("  ID:             {}", n.id);
+    println!("  Hostname:       {}", n.hostname);
+    println!("  IP:             {}", n.ip);
+    println!("  Role:           {:?}", n.role);
+    println!("  Last heartbeat: {} ms ago", n.last_heartbeat_ms);
 
-    println!("\nHardware:");
+    println!("\n  Hardware:");
     match n.hardware {
-        Some(hw) => println!("{:#?}", hw),
-        None => println!("  (no hardware report)"),
+        Some(hw) => {
+            println!(
+                "    CPU:   {} ({} cores / {} threads)",
+                hw.cpu_model, hw.cpu_cores, hw.cpu_threads
+            );
+            println!("    RAM:   {:.1} GB", hw.ram_gb);
+            println!("    OS:    {} ({})", hw.os, hw.arch);
+            println!("    GPU:   {}", hw.gpu.unwrap_or_else(|| "none".into()));
+        }
+        None => println!("    (no hardware report)"),
     }
 
-    println!("\nCapabilities:");
+    println!("\n  Capabilities:");
     match n.capabilities {
-        Some(c) => println!("{:#?}", c),
-        None => println!("  (no capabilities report)"),
+        Some(c) => {
+            println!("    CPU inference:  {}", c.cpu_inference);
+            println!("    GPU inference:  {}", c.gpu_inference);
+            println!("    ANE inference:  {}", c.ane_inference);
+            println!("    Max model:      {:.1} GB", c.max_model_size_gb);
+        }
+        None => println!("    (no capabilities report)"),
+    }
+
+    if !n.models.is_empty() {
+        println!("\n  Models:");
+        for m in &n.models {
+            println!("    {} ({} MB) — {:?}", m.model_name, m.size_mb, m.state);
+        }
     }
 }
