@@ -38,11 +38,27 @@ NODE_ROLE=compute    # or controller
 
 | Command | Description |
 |---------|-------------|
-| `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs Ollama, registers a persistent service |
+| `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs Ollama, and pre-caches the best Qwen2.5 model for the node's RAM |
+| `just deploy-node <node> <model>` | Same as above but override the model (e.g. `just deploy-node pi1 qwen2.5:1.5b`) |
+| `just change-model <node>` | Pull the best Qwen2.5 for the node's RAM without reprovisioning |
+| `just change-model <node> <model>` | Pull a specific model on a live node — use this to upgrade or downgrade |
 | `just update-node <node>` | OTA binary update only — rebuild, upload, restart. No reprovisioning |
 | `just uninstall-node <node>` | Remove the `ai-mesh-agent` service from the node |
 | `just logs-node <node>` | Live tail of the agent log on the node |
 | `just sanity-node <node>` | Check service state on the node and print the node table |
+
+### Model selection rules
+
+The install script picks the best pre-cached Qwen2.5 variant based on total node RAM:
+
+| Total RAM | Model |
+|-----------|-------|
+| < 6 GB | `qwen2.5:1.5b` |
+| 6 – 12 GB | `qwen2.5:7b` |
+| 12 – 32 GB | `qwen2.5:14b` |
+| 32 GB+ | `qwen2.5:32b` |
+
+**Windows AMD GPU nodes:** GPU acceleration requires AMD Adrenalin driver 26.5.2+ and Ollama 0.30.0+. The install script handles the Ollama version automatically. The driver must be installed manually before running `just deploy-node`. See `docs/windows-node-setup.md` for details and measured performance figures.
 
 ### Adding a new node
 

@@ -2,7 +2,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$CoordinatorIp,
 
-    [string]$Role = "compute"
+    [string]$Role = "compute",
+
+    # Override the Qwen2.5 model to pre-cache. If empty, the best variant
+    # for this node's RAM is selected automatically.
+    [string]$Model = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,8 +16,34 @@ $agentPath       = Join-Path $aiMeshRoot "agent.exe"
 $logDir          = Join-Path $aiMeshRoot "logs"
 $agentService    = "ai-mesh-agent"
 $ollamaService   = "ollama-serve"
-$modelName       = "qwen2.5:0.5b"
 $ollamaApiUrl    = "http://127.0.0.1:11434"
+
+# Ollama is installed from GitHub ZIP rather than winget.
+# The winget package (Ollama.Ollama) is pinned to 0.24.0 which does not support
+# OLLAMA_VULKAN=1 and therefore cannot use AMD iGPUs via Vulkan.
+# NOTE: AMD Adrenalin driver 26.5.2+ must be installed on the host BEFORE
+# running this script for GPU acceleration to work. Download from:
+# https://www.amd.com/en/support/download/drivers.html
+$ollamaVersion    = "v0.30.0-rc21"
+$ollamaZipUrl     = "https://github.com/ollama/ollama/releases/download/$ollamaVersion/ollama-windows-amd64.zip"
+$ollamaInstallDir = "$env:LOCALAPPDATA\Programs\Ollama"
+
+function Select-ModelForRam {
+    $ramGb = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory / 1073741824)
+    if     ($ramGb -lt 6)  { return "qwen2.5:1.5b" }
+    elseif ($ramGb -lt 12) { return "qwen2.5:7b"   }
+    elseif ($ramGb -lt 32) { return "qwen2.5:14b"  }
+    else                   { return "qwen2.5:32b"  }
+}
+
+if ([string]::IsNullOrEmpty($Model)) {
+    $Model = Select-ModelForRam
+    $ramGb = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory / 1073741824)
+    Write-Host ">>> Auto-selected model for ${ramGb}GB RAM: $Model"
+} else {
+    Write-Host ">>> Using specified model: $Model"
+}
+$modelName = $Model
 
 function Ensure-Directory {
     param([string]$Path)
@@ -34,10 +64,35 @@ function Ensure-WingetPackage {
 }
 
 function Ensure-Ollama {
-    $ollama = Get-Command "ollama.exe" -ErrorAction SilentlyContinue
-    if (-not $ollama) {
-        Ensure-WingetPackage -Id "Ollama.Ollama" -Name "Ollama"
-    }
+    # The winget package is pinned to 0.24.0 which does not support OLLAMA_VULKAN.
+    # Install from GitHub release ZIP so AMD iGPU Vulkan acceleration works.
+    # Skip if a compatible version (0.30+) is already running.
+    try {
+        $resp = Invoke-RestMethod -Uri "$ollamaApiUrl/api/version" -TimeoutSec 3 -ErrorAction SilentlyContinue
+        if ($resp -and ($resp.version -like "0.3*" -or $resp.version -notlike "0.2*")) {
+            Write-Host ">>> Ollama $($resp.version) already installed — skipping download."
+            return
+        }
+    } catch {}
+
+    Write-Host ">>> Installing Ollama $ollamaVersion from ZIP (winget package lacks AMD Vulkan support)..."
+    Write-Host ">>>   REMINDER: AMD Adrenalin 26.5.2+ must be installed on this machine for GPU to work."
+
+    # Stop service and kill processes before overwriting the binary
+    & sc.exe stop $ollamaService 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+    Get-Process -Name "ollama" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 1
+
+    $zipPath = Join-Path $env:TEMP "ollama-windows-amd64.zip"
+    Write-Host ">>> Downloading $ollamaZipUrl..."
+    Invoke-WebRequest -Uri $ollamaZipUrl -OutFile $zipPath -UseBasicParsing
+
+    Ensure-Directory -Path $ollamaInstallDir
+    Write-Host ">>> Extracting to $ollamaInstallDir..."
+    Expand-Archive -Path $zipPath -DestinationPath $ollamaInstallDir -Force
+    Remove-Item $zipPath -ErrorAction SilentlyContinue
+    Write-Host ">>> Ollama $ollamaVersion installed at $ollamaInstallDir."
 }
 
 function Ensure-Nssm {
@@ -74,7 +129,10 @@ function Wait-OllamaApi {
 
 function Ensure-OllamaService {
     $nssm = Get-Nssm
-    $ollamaExe = Get-Command "ollama.exe" -ErrorAction Stop | Select-Object -ExpandProperty Source
+    $ollamaExe = Join-Path $ollamaInstallDir "ollama.exe"
+    if (-not (Test-Path $ollamaExe)) {
+        throw "ollama.exe not found at $ollamaInstallDir — Ensure-Ollama must run first."
+    }
     $ollamaLog = Join-Path $logDir "ollama.log"
 
     Write-Host ">>> Ensuring Ollama NSSM service ($ollamaService) using $ollamaExe..."
@@ -94,6 +152,10 @@ function Ensure-OllamaService {
     & $nssm set $ollamaService AppRotateFiles 1
     & $nssm set $ollamaService AppRotateBytes 10485760
     & $nssm set $ollamaService AppKillProcessTree 1
+    # OLLAMA_VULKAN=1: enables Vulkan backend, required for AMD iGPUs (e.g. Radeon 780M)
+    # which are not detected by ROCm but are Vulkan-capable. Without this Ollama
+    # reports 0 B VRAM and falls back to CPU-only inference.
+    & $nssm set $ollamaService AppEnvironmentExtra "OLLAMA_VULKAN=1"
 
     & sc.exe stop $ollamaService 2>&1 | Out-Null
     Start-Sleep -Seconds 2

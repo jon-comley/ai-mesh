@@ -105,12 +105,15 @@ sanity:
 # Node config lives in nodes/<name>.env  (NODE_HOST, NODE_USER, NODE_OS, NODE_ROLE)
 
 # First-time provision or re-provision a node.
+# Automatically selects the best Qwen2.5 model for the node's RAM unless overridden.
 # Usage: just deploy-node pi1
 #        just deploy-node beelink1
-deploy-node node:
+#        just deploy-node beelink1 qwen2.5:7b   # override model
+deploy-node node model="":
     #!/usr/bin/env bash
     set -e
     source nodes/{{node}}.env
+    MODEL="{{model}}"
 
     case "$NODE_OS" in
       linux)
@@ -128,7 +131,7 @@ deploy-node node:
         echo ">>> Uploading install script..."
         scp scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
         ssh -t ${NODE_USER}@${NODE_HOST} \
-            "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER}"
+            "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER} ${MODEL}"
         ;;
 
       windows)
@@ -148,6 +151,9 @@ deploy-node node:
         scp scripts/install-node-windows.ps1 \
             ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
 
+        MODEL_ARG=""
+        [ -n "$MODEL" ] && MODEL_ARG="-Model '${MODEL}'"
+
         echo ">>> Stopping service, swapping binary, provisioning..."
         ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
             sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
@@ -156,7 +162,7 @@ deploy-node node:
             Get-Process nssm  -ErrorAction SilentlyContinue | Stop-Process -Force;\
             Start-Sleep 2;\
             Move-Item -Force '${WIN_PATH}\\agent_next.exe' '${WIN_PATH}\\agent.exe';\
-            & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}'\
+            & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}' ${MODEL_ARG}\
         \""
         ;;
 
@@ -228,6 +234,65 @@ uninstall-node node:
         ;;
     esac
     echo ">>> Node {{node}} uninstalled."
+
+# Pull a Qwen2.5 model on a live node without reprovisioning.
+# Selects the best model for the node's RAM if no model is specified.
+# Usage: just change-model pi1                  # auto-select
+#        just change-model beelink1 qwen2.5:7b  # explicit (downgrade/upgrade)
+change-model node model="":
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    MODEL="{{model}}"
+
+    # RAM-based auto-selection (mirrors install script logic)
+    select_model_linux() {
+        local ram_gb
+        ram_gb=$(ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "free -g | awk '/^Mem:/{print \$2}'")
+        if   [ "$ram_gb" -lt 6  ]; then echo "qwen2.5:1.5b"
+        elif [ "$ram_gb" -lt 12 ]; then echo "qwen2.5:7b"
+        elif [ "$ram_gb" -lt 32 ]; then echo "qwen2.5:14b"
+        else                             echo "qwen2.5:32b"
+        fi
+    }
+
+    select_model_windows() {
+        local ram_gb
+        ram_gb=$(ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
+            "powershell -Command \"[math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1073741824)\"" | tr -d '\r\n')
+        if   [ "$ram_gb" -lt 6  ]; then echo "qwen2.5:1.5b"
+        elif [ "$ram_gb" -lt 12 ]; then echo "qwen2.5:7b"
+        elif [ "$ram_gb" -lt 32 ]; then echo "qwen2.5:14b"
+        else                             echo "qwen2.5:32b"
+        fi
+    }
+
+    case "$NODE_OS" in
+      linux)
+        if [ -z "$MODEL" ]; then
+            MODEL=$(select_model_linux)
+            echo ">>> Auto-selected: $MODEL"
+        fi
+        echo ">>> Pulling $MODEL on ${NODE_HOST}..."
+        ssh ${NODE_USER}@${NODE_HOST} "ollama pull $MODEL"
+        echo ">>> Done. $MODEL is ready on {{node}}."
+        ;;
+
+      windows)
+        if [ -z "$MODEL" ]; then
+            MODEL=$(select_model_windows)
+            echo ">>> Auto-selected: $MODEL"
+        fi
+        echo ">>> Pulling $MODEL on ${NODE_HOST}..."
+        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"ollama pull $MODEL\""
+        echo ">>> Done. $MODEL is ready on {{node}}."
+        ;;
+
+      *)
+        echo "Unknown NODE_OS: $NODE_OS"
+        exit 1
+        ;;
+    esac
 
 # Tail live logs from a node.
 # Usage: just logs-node pi1

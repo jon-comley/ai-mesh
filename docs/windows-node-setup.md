@@ -12,6 +12,7 @@ Step-by-step guide for adding a fresh Windows 11 machine to the ai-mesh cluster 
 - OpenSSH Server enabled and running
 - winget available (built-in on Windows 11)
 - PowerShell 5+
+- **AMD GPU only:** AMD Adrenalin driver 26.5.2 or later (see [AMD GPU Acceleration](#amd-gpu-acceleration) below)
 
 #### Enable OpenSSH Server (if not already)
 In an elevated PowerShell:
@@ -114,13 +115,14 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 The provision script does:
 - Creates `C:\Users\<user>\ai-mesh\` and `logs\` directories
 - Sets `LocalAccountTokenFilterPolicy = 1` (SSH elevation)
-- Installs **Ollama** via winget
+- Installs **Ollama v0.30.0-rc21** from GitHub ZIP (not winget — winget is pinned to 0.24.0 which lacks AMD Vulkan support)
 - Installs **NSSM** via winget
+- Registers `ollama-serve` as a Windows service with `OLLAMA_VULKAN=1` (enables AMD iGPU acceleration)
 - Registers `ai-mesh-agent` as a Windows service (auto-start)
 - Sets `COORDINATOR_IP` and `AGENT_ROLE=compute` as service environment vars
 - Configures log rotation (10 MB per file)
 - Configures restart throttle (5 s delay between restarts)
-- Pulls the `qwen2.5:1.5b` model via Ollama
+- Auto-selects and pulls the best Qwen2.5 model for the node's RAM
 
 ---
 
@@ -151,6 +153,85 @@ The node table should show the Windows machine as a Compute node:
 | Restart service | `ssh user@host "sc.exe stop ai-mesh-agent && sc.exe start ai-mesh-agent"` |
 
 `just update-node beelink1` rebuilds, uploads via temp file (to avoid file lock), stops the service, swaps the binary, and restarts — all from WSL.
+
+---
+
+---
+
+## AMD GPU Acceleration
+
+Machines with an AMD Radeon iGPU (e.g. the Radeon 780M in the Beelink SER8) can run inference on the GPU via Ollama's Vulkan backend. This gives a meaningful speedup over CPU-only inference.
+
+### Driver requirement — AMD Adrenalin 26.5.2+
+
+**This is mandatory.** Older AMD drivers have a bug (Windows C++ SEH exception `0xe06d7363`) that crashes Ollama whenever Vulkan compute accesses shared iGPU memory. The crash was fixed in Adrenalin 26.5.2 (May 2026).
+
+Install from: [https://www.amd.com/en/support/download/drivers.html](https://www.amd.com/en/support/download/drivers.html)
+
+After installing the driver, reboot before running `just deploy-node`.
+
+### How it works
+
+The `install-node-windows.ps1` script automatically:
+1. Installs Ollama 0.30.0+ from the GitHub release ZIP (winget is pinned to 0.24.0 which has no Vulkan support)
+2. Configures the `ollama-serve` NSSM service with `OLLAMA_VULKAN=1`
+
+With this in place, Ollama detects the AMD Radeon iGPU via Vulkan and offloads as many model layers as possible onto it.
+
+### Measured performance on Beelink SER8 (Radeon 780M, 32 GB RAM)
+
+| Model | Layers on GPU | Generation speed | Notes |
+|-------|--------------|-----------------|-------|
+| `qwen2.5:0.5b` | 29/29 | ~153 t/s | Fully within dedicated VRAM (3.9 GB) |
+| `qwen2.5:1.5b` | 29/29 | ~97 t/s | Fully within dedicated VRAM |
+| `qwen2.5:7b` | 29/29 | ~17.6 t/s | Spills into shared RAM; ~37% faster than CPU-only |
+| `qwen2.5:14b` | partial | ~CPU speed | Too large for iGPU to help significantly |
+
+The 780M has 3.9 GB dedicated VRAM. Models that fit entirely within dedicated VRAM see the biggest speedup. The 7b model (4.7 GB) slightly overflows into shared system RAM, so the speedup is more modest — but all 29 layers still run on the GPU with no crash.
+
+### Manual verification
+
+After provisioning, check that Vulkan is active:
+
+```bash
+# From WSL
+ssh jonno@192.168.1.14 'type "C:\Users\jonno\ai-mesh\logs\ollama.log" | findstr /i "vulkan\|Vulkan"'
+```
+
+You should see a line like:
+```
+inference compute id=... library=Vulkan name=Vulkan0 description="AMD Radeon 780M Graphics" total="17.8 GiB"
+```
+
+If it shows `library=cpu`, either the driver is too old or `OLLAMA_VULKAN=1` is not set:
+```bash
+ssh jonno@192.168.1.14 'nssm get ollama-serve AppEnvironmentExtra'
+# Should print: OLLAMA_VULKAN=1
+```
+
+To fix manually:
+```bash
+ssh jonno@192.168.1.14 'nssm set ollama-serve AppEnvironmentExtra "OLLAMA_VULKAN=1" && nssm restart ollama-serve'
+```
+
+### Upgrading Ollama (ZIP method)
+
+The standard Ollama installer (`OllamaSetup.exe`) hangs silently when run over SSH because it requires a desktop session for UAC. Always use the ZIP method for remote upgrades:
+
+```bash
+# From WSL — example upgrade to a new version
+VERSION="v0.30.0-rc21"
+ssh jonno@192.168.1.14 "nssm stop ollama-serve"
+ssh jonno@192.168.1.14 "powershell -Command \"
+  \$zip = '\$env:TEMP\\ollama.zip'
+  Invoke-WebRequest 'https://github.com/ollama/ollama/releases/download/$VERSION/ollama-windows-amd64.zip' -OutFile \$zip -UseBasicParsing
+  Expand-Archive \$zip '\$env:LOCALAPPDATA\\Programs\\Ollama' -Force
+  Remove-Item \$zip
+\""
+ssh jonno@192.168.1.14 "nssm start ollama-serve"
+```
+
+The NSSM service log is at `C:\Users\<user>\ai-mesh\logs\ollama.log`.
 
 ---
 
@@ -240,6 +321,24 @@ set "COORDINATOR_IP=192.168.1.12" && agent.exe
 ```
 
 The coordinator address ends up as `192.168.1.12 :9000` which fails to parse. The agent trims these values, but the underlying issue is in how you set the variable.
+
+### AMD GPU not detected / Ollama crashes during inference
+
+Symptoms: Ollama log shows `library=cpu` instead of `library=Vulkan`, or inference crashes with a Windows C++ exception.
+
+**Check 1:** Is `OLLAMA_VULKAN=1` set?
+```bash
+ssh user@host 'nssm get ollama-serve AppEnvironmentExtra'
+```
+If not, set it: `nssm set ollama-serve AppEnvironmentExtra "OLLAMA_VULKAN=1"` then `nssm restart ollama-serve`.
+
+**Check 2:** Is the AMD driver 26.5.2 or later?  
+Older drivers crash with `Exception 0xe06d7363` when Vulkan compute tries to use shared iGPU memory. Update from https://www.amd.com/en/support/download/drivers.html then reboot.
+
+**Check 3:** Is Ollama 0.30.0 or later installed?  
+The winget package is pinned to 0.24.0 which has no Vulkan support. Re-run `just deploy-node <node>` to upgrade via ZIP.
+
+**Note on ROCm:** ROCm does not detect the 780M iGPU on Windows at all (it only sees discrete GPUs, and even then requires Linux for iGPU support). ROCm is not used — Vulkan is the correct backend for this hardware.
 
 ### wmic — deprecated / encoding issues on Windows 11
 
