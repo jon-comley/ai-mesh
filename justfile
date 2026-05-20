@@ -6,6 +6,9 @@ default: build
 install-hooks:
     bash scripts/install-hooks.sh
 
+hardware-report:
+    bash scripts/hardware-report.sh
+
 build:
     cargo build
 
