@@ -3,10 +3,10 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub async fn run() {
+pub async fn run(coordinator: &str) {
     println!("Checking coordinator status...");
 
-    match try_status().await {
+    match try_status(coordinator).await {
         Ok(latency_ms) => {
             println!("✔ Coordinator is online");
             println!("  Latency: {} ms", latency_ms);
@@ -18,10 +18,10 @@ pub async fn run() {
     }
 }
 
-async fn try_status() -> Result<u128, Box<dyn std::error::Error>> {
+async fn try_status(coordinator: &str) -> Result<u128, Box<dyn std::error::Error>> {
     let start = Instant::now();
 
-    let mut stream = TcpStream::connect("127.0.0.1:9000").await?;
+    let mut stream = TcpStream::connect(coordinator).await?;
 
     let msg = MeshMessage::Ping;
     let data = serde_json::to_vec(&msg)?;

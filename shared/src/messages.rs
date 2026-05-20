@@ -217,8 +217,8 @@ mod tests {
     fn node_record_lite_roundtrip() {
         let rec = NodeRecordLite {
             id: "node-1".into(),
-            hostname: "OmniBook7".into(),
-            ip: "172.20.107.210".into(),
+            hostname: "test-node".into(),
+            ip: "10.0.0.1".into(),
             role: NodeRole::Compute,
             last_heartbeat_ms: 1234,
         };
@@ -253,8 +253,8 @@ mod tests {
 
         let rec = NodeRecordFull {
             id: "node-1".into(),
-            hostname: "OmniBook7".into(),
-            ip: "172.20.107.210".into(),
+            hostname: "test-node".into(),
+            ip: "10.0.0.1".into(),
             role: NodeRole::Compute,
             last_heartbeat_ms: 500,
             hardware: Some(hw),
@@ -291,8 +291,8 @@ mod tests {
     fn node_info_roundtrip() {
         let rec = NodeRecordFull {
             id: "node-1".into(),
-            hostname: "OmniBook7".into(),
-            ip: "172.20.107.210".into(),
+            hostname: "test-node".into(),
+            ip: "10.0.0.1".into(),
             role: NodeRole::Compute,
             last_heartbeat_ms: 500,
             hardware: None,
@@ -308,7 +308,7 @@ mod tests {
         match back {
             MeshMessage::NodeInfo(info) => {
                 assert_eq!(info.id, "node-1");
-                assert_eq!(info.hostname, "OmniBook7");
+                assert_eq!(info.hostname, "test-node");
             }
             other => panic!("Unexpected variant: {:?}", other),
         }

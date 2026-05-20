@@ -1,11 +1,13 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$CoordinatorIp
+    [string]$CoordinatorIp,
+
+    [string]$Role = "compute"
 )
 
 $ErrorActionPreference = "Stop"
 
-$aiMeshRoot      = "C:\Users\jonno\ai-mesh"
+$aiMeshRoot      = "C:\Users\$env:USERNAME\ai-mesh"
 $agentPath       = Join-Path $aiMeshRoot "agent.exe"
 $logDir          = Join-Path $aiMeshRoot "logs"
 $agentService    = "ai-mesh-agent"
@@ -71,9 +73,6 @@ function Wait-OllamaApi {
 }
 
 function Ensure-OllamaService {
-    # Register 'ollama serve' as a persistent NSSM service so it survives
-    # reboots and SSH session endings. This is separate from any Ollama tray
-    # app the installer may have added.
     $nssm = Get-Nssm
     $ollamaExe = Get-Command "ollama.exe" -ErrorAction Stop | Select-Object -ExpandProperty Source
     $ollamaLog = Join-Path $logDir "ollama.log"
@@ -96,7 +95,6 @@ function Ensure-OllamaService {
     & $nssm set $ollamaService AppRotateBytes 10485760
     & $nssm set $ollamaService AppKillProcessTree 1
 
-    # Stop then start so NSSM picks up any config changes.
     & sc.exe stop $ollamaService 2>&1 | Out-Null
     Start-Sleep -Seconds 2
     & sc.exe start $ollamaService 2>&1 | Out-Null
@@ -115,7 +113,6 @@ function Enable-SshElevation {
     # accounts to run with a full (elevated) token rather than the default
     # filtered token. Without this, remote PowerShell via SSH cannot install
     # services or write to HKLM - even when logged in as an Administrator.
-    # This is a one-time node configuration; it persists across reboots.
     $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
     $name = "LocalAccountTokenFilterPolicy"
 
@@ -145,7 +142,7 @@ function Ensure-AgentService {
         & $nssm install $agentService $agentPath
     }
     & $nssm set $agentService AppDirectory $aiMeshRoot
-    & $nssm set $agentService AppEnvironmentExtra "COORDINATOR_IP=$CoordinatorIp" "AGENT_ROLE=compute"
+    & $nssm set $agentService AppEnvironmentExtra "COORDINATOR_IP=$CoordinatorIp" "AGENT_ROLE=$Role"
     & $nssm set $agentService Start SERVICE_AUTO_START
     & $nssm set $agentService AppStdout $agentLog
     & $nssm set $agentService AppStderr $agentLog
@@ -167,8 +164,6 @@ function Ensure-ModelCached {
     Write-Host ">>> Pre-caching model $Model..."
     & ollama pull $Model
 
-    # Validate via the REST API rather than 'ollama list', which tries to start
-    # a tray-app instance in PowerShell SSH sessions and fails with an init error.
     try {
         $resp = Invoke-WebRequest -Uri "$ollamaApiUrl/api/tags" -UseBasicParsing -TimeoutSec 5
         if ($resp.Content -notmatch [regex]::Escape($Model.Split(":")[0])) {
@@ -197,4 +192,4 @@ Ensure-ModelCached -Model $modelName
 Ensure-AgentBinary
 Ensure-AgentService
 
-Write-Host ">>> Provisioning complete. BEELINK1 is ready as an ai-mesh compute node."
+Write-Host ">>> Provisioning complete. This node is ready as an ai-mesh $Role node."

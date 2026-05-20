@@ -2,15 +2,15 @@ use shared::{AdminMessage, MeshMessage};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub async fn run(base_addr: &str) {
-    match send_reset(base_addr).await {
+pub async fn run(coordinator: &str) {
+    match send_reset(coordinator).await {
         Ok(()) => println!("Registry reset OK"),
         Err(e) => println!("Error: {}", e),
     }
 }
 
-async fn send_reset(base_addr: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(&format!("{}:9000", base_addr)).await?;
+async fn send_reset(coordinator: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect(coordinator).await?;
 
     let msg = MeshMessage::Admin(AdminMessage::ResetRegistry);
     let data = serde_json::to_vec(&msg)?;

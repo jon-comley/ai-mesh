@@ -107,13 +107,13 @@ HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
   LocalAccountTokenFilterPolicy = 1 (DWORD)
 ```
 
-This is written by `provision-beelink.ps1` during first-time setup and
-persists across reboots. After it is set, `just update-beelink` and
-`just sanity-beelink` work fully from WSL with no manual steps on the node.
+This is written by `scripts/install-node-windows.ps1` during first-time setup
+and persists across reboots. After it is set, `just update-node <node>` and
+`just sanity-node <node>` work fully from WSL with no manual steps on the node.
 
-**First-time only:** run `provision-beelink.ps1` from an elevated PowerShell
-on the Beelink itself (Start → PowerShell → Run as Administrator). All
-subsequent deploys go through `just update-beelink` from WSL.
+**First-time only:** run `install-node-windows.ps1` from an elevated PowerShell
+on the Windows machine itself (Start → PowerShell → Run as Administrator). All
+subsequent deploys go through `just update-node <node>` from WSL.
 
 ### Linux Compute Nodes
 - Install Ollama via `install.sh`  

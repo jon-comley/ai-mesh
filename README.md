@@ -25,57 +25,46 @@ just run-coordinator
 
 This starts the TCP server on port 9000 and hosts the in-memory node registry.
 
-### 2. Run the Controller Agent (OmniBook)
+### 2. Run the Controller Agent (local machine)
 
 ```
 just run-controller
 ```
 
-This registers the OmniBook as a **Controller** node.  
+This registers the local machine as a **Controller** node.  
 Controllers never run inference.
 
-### 3. Build & Deploy the Agent to Raspberry Pi
+### 3. Provision a Compute Node
 
-Cross-compile for ARM64:
-
-```
-just build-pi
-```
-
-Deploy the binary to the Pi:
+Node config lives in `nodes/<name>.env`. Add an entry, then:
 
 ```
-just deploy-pi
+just deploy-node <name>
 ```
 
-### 4. Run the Pi Agent
+This builds the correct binary for the node's OS, uploads it, installs Ollama,
+and registers a persistent service (systemd on Linux, NSSM on Windows).
+
+### 4. Check Mesh State
 
 ```
-just run-pi
+just sanity-node <name>
 ```
 
-This registers the Pi as a **Compute** node.
-
-### 5. Check Mesh State
+Or for the full cluster:
 
 ```
-just sanity-pi
+just sanity-full
 ```
 
-This prints the current node table via the CLI.
-
-### Full Cluster Validation
+### 5. Day-to-day Development
 
 ```
-just sanity-all
+just dev
 ```
 
-This starts:
-- Coordinator
-- Controller agent
-- Pi compute agent
-
-And validates the mesh state.
+Starts coordinator + controller locally, bounces all remote node services,
+and drops into live `mesh watch`. Ctrl+C stops local processes only.
 
 ---
 
@@ -89,14 +78,32 @@ And validates the mesh state.
 | `just run-coordinator` | Start coordinator on port 9000 |
 | `just run-controller` | Start controller agent |
 | `just reset` | Clear all nodes from the live coordinator |
-| `just sanity-all` | Local cluster validation (coordinator + controller) |
-| `just sanity-full` | Full cluster validation including Pi (recommended) |
-| `just build-pi` | Cross-compile agent for ARM64 |
-| `just deploy-pi` | Deploy binary to Pi |
-| `just run-pi` | Start compute agent on Pi via SSH |
-| `just sanity-pi` | Check node table |
+| `just dev` | Start full cluster in dev mode |
+| `just deploy-node <node>` | First-time provision or re-provision a node |
+| `just update-node <node>` | OTA binary update only (no reprovisioning) |
+| `just uninstall-node <node>` | Remove agent service from a node |
+| `just sanity-node <node>` | Check service state + node table |
+| `just sanity-full` | Full cluster validation (all nodes) |
+| `just logs-node <node>` | Tail live agent logs from a node |
+| `just logs` | Tail all logs simultaneously |
 
 See `docs/commands.md` for full reference.
+
+---
+
+## Adding a New Node
+
+1. Create `nodes/<name>.env`:
+   ```bash
+   NODE_HOST=192.168.1.x
+   NODE_USER=youruser
+   NODE_OS=linux    # or windows
+   NODE_ROLE=compute
+   ```
+2. `just deploy-node <name>`
+3. `just sanity-node <name>`
+
+No other files need changing.
 
 ---
 

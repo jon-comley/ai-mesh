@@ -3,18 +3,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-pub async fn run(node_id: String, model_name: String) {
-    match send_unload(node_id, model_name).await {
+pub async fn run(coordinator: &str, node_id: String, model_name: String) {
+    match send_unload(coordinator, node_id, model_name).await {
         Ok(()) => println!("Unload request acknowledged"),
         Err(e) => println!("Error: {}", e),
     }
 }
 
 async fn send_unload(
+    coordinator: &str,
     node_id: String,
     model_name: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect("127.0.0.1:9000").await?;
+    let mut stream = TcpStream::connect(coordinator).await?;
 
     let msg = MeshMessage::ModelUnload(ModelUnloadRequest {
         request_id: Uuid::new_v4().to_string(),

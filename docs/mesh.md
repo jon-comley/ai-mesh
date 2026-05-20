@@ -1,38 +1,38 @@
 # AI Mesh
 
-This document describes the architecture and operation of the AI Mesh system.
-It has been updated to include support for Raspberry Pi compute nodes and the
-minimal `just` targets required for day‑to‑day development.
+This document describes the architecture and operation of the AI Mesh system,
+including support for heterogeneous compute nodes across Linux (ARM64, x86_64)
+and Windows.
 
-## Raspberry Pi Compute Node
+## Compute Nodes
 
-The mesh supports heterogeneous nodes, including ARM64 devices such as the
-Raspberry Pi. A Pi runs the same agent binary as other nodes, compiled for
-`aarch64-unknown-linux-gnu` and deployed to the Pi user account (`jonno`).
+The mesh supports heterogeneous nodes. Any machine can be added as a compute
+node by creating a `nodes/<name>.env` file and running `just deploy-node <name>`.
 
 ### Workflow
 
-1. **Cross‑compile the agent for ARM64**
-   ```
-   just build-pi
-   ```
-
-2. **Deploy the agent to the Pi**
-   ```
-   just deploy-pi   # uses pi_user and pi_host variables
-   ```
-
-3. **Run the agent on the Pi**
-   ```
-   just run-pi      # runs /home/jonno/agent with correct COORDINATOR_IP
+1. **Create a node config file**
+   ```bash
+   # nodes/mynode.env
+   NODE_HOST=192.168.1.x
+   NODE_USER=youruser
+   NODE_OS=linux      # or windows
+   NODE_ROLE=compute
    ```
 
-4. **Verify the Pi is registered**
+2. **Provision the node**
    ```
-   just sanity-pi
+   just deploy-node mynode
+   ```
+   This cross-compiles the correct binary, uploads it, installs Ollama, and
+   registers a persistent service.
+
+3. **Verify the node is registered**
+   ```
+   just sanity-node mynode
    ```
 
-The Pi will appear in the node table with role `Compute`.
+The node will appear in the node table with role `Compute`.
 
 ## Coordinator
 
@@ -45,7 +45,7 @@ The coordinator is the central hub of the mesh. It:
 - Responds to CLI queries
 
 The coordinator binds to `0.0.0.0:9000` to accept connections from all
-network interfaces, including remote nodes such as Raspberry Pi compute nodes.
+network interfaces, including remote compute nodes.
 
 ### Message Handling
 
@@ -77,84 +77,41 @@ Each node in the mesh runs the agent binary. On startup it:
 4. Sends a heartbeat and hardware/capability reports to the coordinator.
 5. Enters a periodic heartbeat loop.
 
-The agent binary is compiled for the target platform. For ARM64 devices it is
-cross-compiled on the developer machine and deployed via `just deploy-pi`,
-which now uses configurable variables (`pi_user`, `pi_host`).
+The agent binary is cross-compiled for each target platform from WSL and
+deployed via `just deploy-node`.
 
 ### Node Roles
 
-Roles are set via the `AGENT_ROLE` environment variable.
+Roles are set via the `AGENT_ROLE` environment variable (written into the
+service definition by the install scripts).
 
 | Role | Behaviour |
 |------|-----------|
 | `compute` (default) | Full hardware + capability reporting; eligible for inference |
 | `controller` | Sends heartbeats only; manages mesh; never used for inference |
 
-### Pi Deployment Notes (New)
+### Agent Binary Locations
 
-The Pi user account is `jonno`, not `pi`.  
-The agent binary is deployed to:
-
-```
-/home/jonno/agent
-```
-
-SSH access is required for `sanity-all` and `run-pi`.
+| OS | Path |
+|----|------|
+| Linux | `/home/<user>/agent` |
+| Windows | `C:\Users\<user>\ai-mesh\agent.exe` |
 
 ## Controller Agent
 
 The controller agent runs on the developer machine and is responsible for
 orchestrating tasks, dispatching work, and interacting with the coordinator.
 
-## Minimal Justfile Targets
+## Justfile Targets
 
-The project includes a minimal set of `just` targets to support development
-without unnecessary complexity. These now include configurable variables:
+| Command | Description |
+|---------|-------------|
+| `just deploy-node <node>` | Provision or re-provision a node |
+| `just update-node <node>` | OTA binary update |
+| `just uninstall-node <node>` | Remove agent service |
+| `just sanity-node <node>` | Service check + node table |
+| `just sanity-full` | Full cluster validation |
+| `just dev` | Dev loop: start cluster, watch |
 
-```
-pi_host := "192.168.1.11"
-pi_user := "jonno"
-coordinator_ip := "192.168.1.12"
-coordinator_port := "9000"
-```
-
-```
-build-pi:
-    cargo build --release --target aarch64-unknown-linux-gnu -p agent
-
-deploy-pi: build-pi
-    scp target/aarch64-unknown-linux-gnu/release/agent {{pi_user}}@{{pi_host}}:/home/{{pi_user}}/agent
-
-run-pi:
-    ssh {{pi_user}}@{{pi_host}} "COORDINATOR_IP={{coordinator_ip}} AGENT_ROLE=compute /home/{{pi_user}}/agent"
-
-sanity-pi:
-    cargo run -p cli -- nodes
-
-run-coordinator:
-    cargo run -p coordinator
-
-run-controller:
-    AGENT_ROLE=controller cargo run -p agent
-```
-
-These targets intentionally avoid orchestration or automation beyond what is
-required for a fast development loop.
-
-## Full Cluster Validation (New)
-
-A new `sanity-all` command has been added to validate the entire cluster:
-
-```
-just sanity-all
-```
-
-This command:
-- Starts the coordinator
-- Starts the controller agent
-- Prompts for Pi SSH password once
-- Starts the Pi compute agent
-- Runs `mesh nodes` to confirm cluster health
-- Cleans up all processes
-
-This is the recommended local cluster validation workflow.
+Per-node configuration (host, user, OS, role) lives in `nodes/<name>.env`.
+The justfile contains only coordinator-level variables (`coordinator_ip`, `coordinator_port`).

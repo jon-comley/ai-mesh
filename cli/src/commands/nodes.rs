@@ -3,15 +3,15 @@ use shared::{MeshMessage, NodeRecordFull, NodeRecordLite};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub async fn run() {
-    match fetch_nodes_full().await {
+pub async fn run(coordinator: &str) {
+    match fetch_nodes_full(coordinator).await {
         Ok(nodes) => print_table(nodes),
         Err(e) => println!("Error: {}", e),
     }
 }
 
-async fn send_recv(msg: &MeshMessage) -> Result<MeshMessage, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect("127.0.0.1:9000").await?;
+async fn send_recv(coordinator: &str, msg: &MeshMessage) -> Result<MeshMessage, Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect(coordinator).await?;
     let data = serde_json::to_vec(msg)?;
     let len = (data.len() as u32).to_le_bytes();
     stream.write_all(&len).await?;
@@ -25,15 +25,15 @@ async fn send_recv(msg: &MeshMessage) -> Result<MeshMessage, Box<dyn std::error:
     Ok(serde_json::from_slice(&buf)?)
 }
 
-async fn fetch_nodes_full() -> Result<Vec<NodeRecordFull>, Box<dyn std::error::Error>> {
-    let lite_list: Vec<NodeRecordLite> = match send_recv(&MeshMessage::RequestNodes).await? {
+async fn fetch_nodes_full(coordinator: &str) -> Result<Vec<NodeRecordFull>, Box<dyn std::error::Error>> {
+    let lite_list: Vec<NodeRecordLite> = match send_recv(coordinator, &MeshMessage::RequestNodes).await? {
         MeshMessage::NodeList(nodes) => nodes,
         other => return Err(format!("Unexpected response: {:?}", other).into()),
     };
 
     let mut full = Vec::with_capacity(lite_list.len());
     for lite in lite_list {
-        match send_recv(&MeshMessage::RequestNodeInfo(lite.id)).await? {
+        match send_recv(coordinator, &MeshMessage::RequestNodeInfo(lite.id)).await? {
             MeshMessage::NodeInfo(info) => full.push(info),
             other => return Err(format!("Unexpected response: {:?}", other).into()),
         }

@@ -3,15 +3,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-pub async fn run(model_name: String, prompt: String) {
-    match send_infer(model_name, prompt).await {
+pub async fn run(coordinator: &str, model_name: String, prompt: String) {
+    match send_infer(coordinator, model_name, prompt).await {
         Ok(()) => {}
         Err(e) => println!("Error: {}", e),
     }
 }
 
-async fn send_infer(model_name: String, prompt: String) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect("127.0.0.1:9000").await?;
+async fn send_infer(coordinator: &str, model_name: String, prompt: String) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect(coordinator).await?;
 
     let msg = MeshMessage::RequestModelInference(InferenceRequest {
         request_id: Uuid::new_v4().to_string(),

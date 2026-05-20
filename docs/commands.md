@@ -18,10 +18,36 @@ All commands are run via `just <target>` from the workspace root.
 
 | Command | Description |
 |---------|-------------|
-| `just dev` | **Start here.** Kills stale local processes, starts coordinator + controller agent, verifies portproxy connectivity, bounces Pi + Beelink services, drops into live `mesh watch`. Ctrl+C stops local services only — remote nodes keep running |
+| `just dev` | **Start here.** Kills stale local processes, starts coordinator + controller, verifies portproxy, bounces all remote node services, drops into live `mesh watch`. Ctrl+C stops local services only — remote nodes keep running |
 | `just run-coordinator` | Start coordinator on `0.0.0.0:9000` (foreground) |
-| `just run-controller` | Start controller agent in `controller` role (foreground) |
-| `just reset` | Send `AdminMessage::ResetRegistry` — clears all nodes from the live coordinator |
+| `just run-controller` | Start controller agent (foreground) |
+| `just reset` | Send `AdminMessage::ResetRegistry` — spins up a temporary coordinator, clears all nodes, then shuts it down |
+
+---
+
+## Generic Node Management
+
+Node config lives in `nodes/<name>.env`. Each file defines four variables:
+
+```bash
+NODE_HOST=192.168.1.x
+NODE_USER=youruser
+NODE_OS=linux        # or windows
+NODE_ROLE=compute    # or controller
+```
+
+| Command | Description |
+|---------|-------------|
+| `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs Ollama, registers a persistent service |
+| `just update-node <node>` | OTA binary update only — rebuild, upload, restart. No reprovisioning |
+| `just uninstall-node <node>` | Remove the `ai-mesh-agent` service from the node |
+| `just logs-node <node>` | Live tail of the agent log on the node |
+| `just sanity-node <node>` | Check service state on the node and print the node table |
+
+### Adding a new node
+
+1. Create `nodes/<name>.env` with the four variables above
+2. `just deploy-node <name>` — no other files need changing
 
 ---
 
@@ -29,9 +55,8 @@ All commands are run via `just <target>` from the workspace root.
 
 | Command | Description |
 |---------|-------------|
-| `just logs` | Tail coordinator + controller + Pi + Beelink log streams simultaneously with prefixes. Ctrl+C cleans up all SSH sessions |
-| `just logs-pi` | Live tail of Pi agent systemd journal (`journalctl -u ai-mesh-agent -f`) |
-| `just logs-beelink` | Live tail of Beelink agent log file via SSH |
+| `just logs` | Tail coordinator + controller + all remote node logs simultaneously with prefixes. Ctrl+C cleans up all SSH sessions |
+| `just logs-node <node>` | Live tail of a single node's agent log |
 
 ---
 
@@ -40,63 +65,34 @@ All commands are run via `just <target>` from the workspace root.
 | Command | Description |
 |---------|-------------|
 | `just sanity` | Local single-machine test: coordinator + controller + CLI node list |
-| `just sanity-all` | Local test: kills stale processes, starts fresh, resets, runs controller, prints node table |
-| `just sanity-full` | Full cluster: coordinator + controller + Pi + Beelink; stops all remote agents first |
-| `just sanity-pi` | Verify Pi appears in node table (requires coordinator running) |
-| `just sanity-beelink` | Coordinator + controller locally, restart Beelink service, check node table |
+| `just sanity-node <node>` | Check service state on a specific node and show the node table |
+| `just sanity-full` | Full cluster: coordinator + controller + all nodes in `nodes/`; stops all remote agents first, resets registry, starts fresh |
 
-### sanity-all detail
+### sanity-full detail
 
-`just sanity-all` is the recommended local validation workflow:
+`just sanity-full` is the recommended full-cluster validation workflow:
 
-1. Kills any stale coordinator process holding port 9000
-2. Starts a fresh coordinator
-3. Resets the registry (`just reset`)
-4. Starts a controller agent
-5. Prints the node table — expect exactly one fresh entry
-6. Cleans up all processes
-
----
-
-## Raspberry Pi
-
-| Command | Description |
-|---------|-------------|
-| `just build-pi` | Cross-compile agent for `aarch64-unknown-linux-gnu` |
-| `just deploy-pi` | Stop Pi service, ship updated binary, reinstall + restart service |
-| `just run-pi` | Install/update `ai-mesh-agent` systemd service on Pi and start it |
-| `just logs-pi` | Live tail of Pi agent journal log |
-| `just sanity-pi` | Verify Pi appears in node table (requires coordinator running) |
-
-### Pi deployment workflow
-
-```
-just build-pi
-just deploy-pi    # stops service, uploads binary, reinstalls service
-just sanity-pi    # verify Pi appears in node table
-```
-
-The Pi agent runs as a persistent systemd service (`ai-mesh-agent`) with `Restart=always`. It reconnects automatically when the coordinator restarts — no manual intervention needed.
+1. Stops all remote agent services
+2. Kills any stale local coordinator / agent processes
+3. Starts a fresh coordinator
+4. Resets the registry
+5. Starts a controller agent
+6. Starts all remote node services (via `nodes/*.env`)
+7. Waits 12 s for registration
+8. Prints the node table — expect one entry per node
 
 ---
 
-## Beelink (Windows)
+## Provisioning Scripts
 
-| Command | Description |
-|---------|-------------|
-| `just build-beelink-exe` | Cross-compile agent for `x86_64-pc-windows-gnu` |
-| `just update-beelink` | Rebuild, upload via temp file, restart NSSM service on Beelink |
-| `just sanity-beelink` | Coordinator + controller locally, restart Beelink service, check node table |
-| `just logs-beelink` | Live tail of Beelink agent log file |
+| Script | Purpose |
+|--------|---------|
+| `scripts/install-node-windows.ps1` | Windows node installer. Params: `-CoordinatorIp`, `-Role`. Uses `$env:USERNAME` for paths |
+| `scripts/uninstall-node-windows.ps1` | Removes NSSM service. Flag: `-RemoveBinary` |
+| `scripts/install-node-linux.sh` | Linux node installer. Args: `<coordinator_ip> <role> <user>` |
+| `scripts/uninstall-node-linux.sh` | Removes systemd service |
 
-### Beelink deployment workflow
-
-```
-just build-beelink-exe
-just update-beelink    # uploads as agent_next.exe, moves to agent.exe, restarts service
-```
-
-The Beelink agent runs as an NSSM service (`ai-mesh-agent`). Never SCP directly to `agent.exe` while the service is running — it's file-locked.
+These are uploaded and run remotely by the justfile recipes — you do not need to run them manually.
 
 ---
 
@@ -110,13 +106,11 @@ The Beelink agent runs as an NSSM service (`ai-mesh-agent`). Never SCP directly 
 
 ## Configuration Variables
 
-Defined at the top of `justfile` — change once, all targets update:
+Defined at the top of `justfile`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `pi_host` | `192.168.1.11` | Pi IP address |
-| `pi_user` | `jonno` | Pi SSH username |
-| `beelink_host` | `192.168.1.14` | Beelink IP address |
-| `beelink_user` | `jonno` | Beelink SSH username |
-| `coordinator_ip` | `192.168.1.12` | Windows host IP (used by remote nodes to reach coordinator via portproxy) |
+| `coordinator_ip` | `192.168.1.12` | Windows host IP used by remote nodes to reach the coordinator via portproxy |
 | `coordinator_port` | `9000` | Coordinator TCP port |
+
+Per-node config (host, user, OS, role) lives in `nodes/<name>.env`, not in the justfile.

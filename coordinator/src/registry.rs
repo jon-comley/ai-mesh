@@ -475,8 +475,8 @@ mod tests {
     fn make_identity(id: &str) -> NodeIdentity {
         NodeIdentity {
             id: id.into(),
-            hostname: "OmniBook7".into(),
-            ip: "172.20.107.210".into(),
+            hostname: "test-node".into(),
+            ip: "10.0.0.1".into(),
             role: NodeRole::Compute,
         }
     }
@@ -532,8 +532,8 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         let n = &nodes[0];
         assert_eq!(n.id, "node-1");
-        assert_eq!(n.hostname, "OmniBook7");
-        assert_eq!(n.ip, "172.20.107.210");
+        assert_eq!(n.hostname, "test-node");
+        assert_eq!(n.ip, "10.0.0.1");
         assert!(n.last_heartbeat_ms < u128::MAX);
     }
 

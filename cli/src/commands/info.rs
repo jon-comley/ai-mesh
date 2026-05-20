@@ -2,15 +2,15 @@ use shared::{MeshMessage, NodeRecordFull};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub async fn run(id: String) {
-    match fetch_info(id).await {
+pub async fn run(coordinator: &str, id: String) {
+    match fetch_info(coordinator, id).await {
         Ok(info) => print_info(info),
         Err(e) => println!("Error: {}", e),
     }
 }
 
-async fn fetch_info(id: String) -> Result<NodeRecordFull, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect("127.0.0.1:9000").await?;
+async fn fetch_info(coordinator: &str, id: String) -> Result<NodeRecordFull, Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect(coordinator).await?;
 
     let msg = MeshMessage::RequestNodeInfo(id);
     let data = serde_json::to_vec(&msg)?;

@@ -58,7 +58,7 @@ netsh interface portproxy delete v4tov4 listenport=9000 listenaddress=0.0.0.0
 netsh interface portproxy add    v4tov4 listenport=9000 listenaddress=0.0.0.0 connectport=9000 connectaddress=$wslIp
 ```
 
-`update-portproxy` is a dependency of `just run-coordinator` and `just sanity-beelink`, so it runs automatically for those recipes.
+`update-portproxy` is a dependency of `just run-coordinator` and `just sanity-node beelink1`, so it runs automatically for those recipes.
 
 ---
 
@@ -75,7 +75,7 @@ Set-ItemProperty `
     -Value 1 -Type DWord
 ```
 
-This persists across reboots. After it is set, all subsequent operations (`just update-beelink`, `just sanity-beelink`, etc.) work over SSH with no manual steps on the Windows machine.
+This persists across reboots. After it is set, all subsequent operations (`just update-node beelink1`, `just sanity-node beelink1`, etc.) work over SSH with no manual steps on the Windows machine.
 
 The provision script (step 4) sets this automatically — but it must be run elevated, so you still need to do step 4 in person the first time.
 
@@ -93,7 +93,7 @@ cargo build --release -p agent --target x86_64-pc-windows-gnu
 # Output: target/x86_64-pc-windows-gnu/release/agent.exe
 
 # Or via justfile
-just build-beelink-exe
+just deploy-node beelink1
 ```
 
 ---
@@ -108,7 +108,7 @@ This step **must be done locally on the Windows machine** (not over SSH) because
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-& "C:\Users\<user>\ai-mesh\provision-beelink.ps1" -CoordinatorIp 192.168.1.12
+& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp 192.168.1.12
 ```
 
 The provision script does:
@@ -129,7 +129,7 @@ The provision script does:
 From WSL, after provisioning completes:
 
 ```bash
-just sanity-beelink
+just sanity-node beelink1
 ```
 
 The node table should show the Windows machine as a Compute node:
@@ -144,13 +144,13 @@ The node table should show the Windows machine as a Compute node:
 
 | Task | Command |
 |------|---------|
-| Deploy updated agent | `just update-beelink` |
-| Check agent logs (live tail) | `just logs-beelink` |
-| Full sanity check | `just sanity-beelink` |
+| Deploy updated agent | `just update-node beelink1` |
+| Check agent logs (live tail) | `just logs-node beelink1` |
+| Full sanity check | `just sanity-node beelink1` |
 | Check service state | `ssh user@host "sc.exe query ai-mesh-agent"` |
 | Restart service | `ssh user@host "sc.exe stop ai-mesh-agent && sc.exe start ai-mesh-agent"` |
 
-`just update-beelink` rebuilds, uploads via temp file (to avoid file lock), stops the service, swaps the binary, and restarts — all from WSL.
+`just update-node beelink1` rebuilds, uploads via temp file (to avoid file lock), stops the service, swaps the binary, and restarts — all from WSL.
 
 ---
 
@@ -180,7 +180,7 @@ Check in order:
 2. Is the portproxy current? `just update-portproxy`
 3. Can the Windows machine reach the coordinator? On the Windows machine: `Test-NetConnection 192.168.1.12 -Port 9000`
 4. Are there stale registry entries obscuring the new entry? `just reset` clears them.
-5. Check the agent log: `just logs-beelink`
+5. Check the agent log: `just logs-node beelink1`
 
 ### SCP fails because agent.exe is locked
 
@@ -191,7 +191,7 @@ scp agent.exe user@host:"C:\path\agent_next.exe"
 ssh user@host "Move-Item -Force C:\path\agent_next.exe C:\path\agent.exe"
 ```
 
-`just update-beelink` does this automatically.
+`just update-node beelink1` does this automatically.
 
 ### SSH commands fail with access denied
 
