@@ -53,7 +53,9 @@ async fn main() {
             model_name,
             size_mb,
         } => commands::load::run(addr, node_id, model_name, size_mb).await,
-        Commands::Infer { model_name, prompt } => commands::infer::run(addr, model_name, prompt).await,
+        Commands::Infer { model_name, prompt } => {
+            commands::infer::run(addr, model_name, prompt).await
+        }
         Commands::Unload {
             node_id,
             model_name,

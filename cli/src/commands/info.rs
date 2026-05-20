@@ -9,7 +9,10 @@ pub async fn run(coordinator: &str, id: String) {
     }
 }
 
-async fn fetch_info(coordinator: &str, id: String) -> Result<NodeRecordFull, Box<dyn std::error::Error>> {
+async fn fetch_info(
+    coordinator: &str,
+    id: String,
+) -> Result<NodeRecordFull, Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(coordinator).await?;
 
     let msg = MeshMessage::RequestNodeInfo(id);

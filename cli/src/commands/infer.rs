@@ -10,7 +10,11 @@ pub async fn run(coordinator: &str, model_name: String, prompt: String) {
     }
 }
 
-async fn send_infer(coordinator: &str, model_name: String, prompt: String) -> Result<(), Box<dyn std::error::Error>> {
+async fn send_infer(
+    coordinator: &str,
+    model_name: String,
+    prompt: String,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(coordinator).await?;
 
     let msg = MeshMessage::RequestModelInference(InferenceRequest {

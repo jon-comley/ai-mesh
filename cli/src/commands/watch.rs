@@ -210,7 +210,10 @@ fn ui(f: &mut Frame, state: &AppState) {
 
 // ── data fetching ─────────────────────────────────────────────────────────────
 
-async fn send_recv(coordinator: &str, msg: &MeshMessage) -> Result<MeshMessage, Box<dyn std::error::Error>> {
+async fn send_recv(
+    coordinator: &str,
+    msg: &MeshMessage,
+) -> Result<MeshMessage, Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(coordinator).await?;
     let data = serde_json::to_vec(msg)?;
     let len = (data.len() as u32).to_le_bytes();
@@ -225,11 +228,14 @@ async fn send_recv(coordinator: &str, msg: &MeshMessage) -> Result<MeshMessage, 
     Ok(serde_json::from_slice(&buf)?)
 }
 
-async fn fetch_nodes_full(coordinator: &str) -> Result<Vec<NodeRecordFull>, Box<dyn std::error::Error>> {
-    let lite_list: Vec<NodeRecordLite> = match send_recv(coordinator, &MeshMessage::RequestNodes).await? {
-        MeshMessage::NodeList(nodes) => nodes,
-        other => return Err(format!("Unexpected response: {:?}", other).into()),
-    };
+async fn fetch_nodes_full(
+    coordinator: &str,
+) -> Result<Vec<NodeRecordFull>, Box<dyn std::error::Error>> {
+    let lite_list: Vec<NodeRecordLite> =
+        match send_recv(coordinator, &MeshMessage::RequestNodes).await? {
+            MeshMessage::NodeList(nodes) => nodes,
+            other => return Err(format!("Unexpected response: {:?}", other).into()),
+        };
 
     let mut full = Vec::with_capacity(lite_list.len());
     for lite in lite_list {
