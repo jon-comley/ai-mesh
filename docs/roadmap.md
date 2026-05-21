@@ -52,7 +52,7 @@
 ## Phase 9 — Remaining Cluster Nodes (In Progress)
 
 - **Mac mini M4** ⚠️ _hardware not available until ~end of July 2026_ — cross-compile for `aarch64-apple-darwin`, provision as compute node, add `just deploy-node mac1`
-- **Multi-node load balancing validation** — run `test-inference` with 2+ compute nodes, verify scheduler distributes load correctly across Pi and Beelink
+- **Multi-node routing validation** ✓ — `just validate-routing` confirms `qwen2.5:1.5b` → Pi and `qwen2.5:7b` → Beelink; `mesh infer` output now includes a `served-by:` line showing the serving node; load-balancing across identical-model nodes is a future concern when a second GPU node joins
 - **`just start-cluster` recipe** ✓ — starts coordinator + controller + all remote agents, then calls `auto-load-model` on every compute node; leaves mesh in a ready-to-use inference state
 - **`just auto-load-model <node>`** ✓ — SSHes into node, detects GPU VRAM or CPU RAM, selects best-fit model, loads it with hardware-filtered fallback hints
 - **Automatic model placement (coordinator side)** — wire `select_node_for_model(mb)` into the coordinator's `ModelLoad` handler so the coordinator picks the best-fit node automatically when `node_id` is absent from the `PullModel` request

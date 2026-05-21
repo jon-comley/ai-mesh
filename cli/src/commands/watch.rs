@@ -159,7 +159,7 @@ fn ui(f: &mut Frame, state: &AppState) {
     f.render_widget(Paragraph::new(status_text).style(status_style), chunks[0]);
 
     // Node table
-    let header = Row::new(["ID", "Hostname", "IP", "Role", "Last Seen (ms)", "Models"])
+    let header = Row::new(["Hostname", "IP", "Role", "Last Seen", "Models"])
         .style(Style::default().add_modifier(Modifier::BOLD))
         .bottom_margin(1);
 
@@ -168,22 +168,20 @@ fn ui(f: &mut Frame, state: &AppState) {
         .iter()
         .map(|n| {
             Row::new(vec![
-                n.id.clone(),
                 n.hostname.clone(),
                 n.ip.clone(),
                 format!("{:?}", n.role),
-                n.last_heartbeat_ms.to_string(),
+                format_last_seen(n.last_heartbeat_ms),
                 format_models(n),
             ])
         })
         .collect();
 
     let widths = [
-        Constraint::Length(36),
-        Constraint::Length(18),
+        Constraint::Length(14),
         Constraint::Length(15),
         Constraint::Length(12),
-        Constraint::Length(14),
+        Constraint::Length(10),
         Constraint::Min(10),
     ];
 
@@ -245,6 +243,17 @@ async fn fetch_nodes_full(
         }
     }
     Ok(full)
+}
+
+fn format_last_seen(ms: u128) -> String {
+    if ms < 2_000 {
+        return format!("{}ms", ms);
+    }
+    let s = ms / 1_000;
+    if s < 60 {
+        return format!("{}s", s);
+    }
+    format!("{}m {}s", s / 60, s % 60)
 }
 
 fn format_models(node: &NodeRecordFull) -> String {

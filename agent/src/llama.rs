@@ -7,6 +7,23 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
+// ── HTTP client (shared, keeps connection pool to llama-server) ───────────────
+
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn http_client() -> &'static reqwest::Client {
+    HTTP_CLIENT.get_or_init(|| {
+        let timeout_secs = std::env::var("LLAMA_GENERATE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(120u64);
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .expect("failed to build HTTP client")
+    })
+}
+
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 fn llama_host() -> String {
@@ -299,7 +316,7 @@ struct ChatResponse {
 
 /// Run inference. Returns (output_text, tokens_generated, duration_ms).
 pub async fn generate(model_name: &str, prompt: &str) -> Result<(String, u32, u64), String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = format!("{}/v1/chat/completions", llama_host());
 
     let wall_start = Instant::now();

@@ -88,7 +88,44 @@ These tests pin the contract: a closed channel is a normal condition (the TCP co
 
 ---
 
-## 3. Integration Tests
+### Agent — `identity.rs` — Persistent node UUID
+
+| Test | What it pins |
+|------|-------------|
+| `test_generate_node_id` | UUID is written to `~/.ai-mesh/node-id` on first call and returned unchanged on subsequent calls (same machine, same UUID) |
+| `test_detect_hostname` | Hostname is non-empty |
+| `test_detect_local_ip` | Returns a valid dotted IPv4 address |
+| `test_detect_identity` | Full identity struct is non-empty for all fields |
+
+---
+
+### CLI — `commands/wait_ready.rs` — state helpers
+
+| Test | What it pins |
+|------|-------------|
+| `format_last_seen_ms` | Values under 2000 ms rendered as `Xms` |
+| `format_last_seen_seconds` | Values 2–59 s rendered as `Xs` |
+| `format_last_seen_minutes` | Values ≥ 60 s rendered as `Xm Ys` |
+| `ready_count_counts_ready_targets` | Only target IPs with a Ready model are counted |
+| `all_ready_false_when_no_targets` | Empty target set → not ready |
+| `all_ready_true_when_all_ready` | All targets Ready → true |
+
+---
+
+## 3. Known Gaps
+
+These behaviours are implemented but not yet covered by automated tests:
+
+| Area | Gap | Reason not yet tested |
+|------|-----|-----------------------|
+| `agent/src/main.rs` | TCP keepalive actually set on socket | Requires mock network; `socket2` call is one line |
+| `agent/src/main.rs` | INFER_SEM serialises concurrent inferences | Requires two concurrent async tasks racing on a real or mock llama-server |
+| `coordinator/src/server.rs` | Fast-fail on agent disconnect during pending inference | Integration test harness exists but teardown-mid-request is tricky to orchestrate |
+| `cli/src/commands/wait_ready.rs` | TTY fallback path (`run_plain`) | Requires mocking `stdin` TTY detection |
+
+---
+
+## 4. Integration Tests
 
 Integration tests live in the `tests/` directory and verify:
 
@@ -101,7 +138,7 @@ These tests spin up an in-process coordinator and assert on the full message rou
 
 ---
 
-## 3. Coverage
+## 5. Coverage
 
 Coverage is measured using:
 
@@ -117,7 +154,7 @@ Coverage goals:
 
 ---
 
-## 4. Pre-commit Requirements
+## 6. Pre-commit Requirements
 
 Before any commit:
 
@@ -130,7 +167,7 @@ These rules are enforced by the pre-commit hook.
 
 ---
 
-## 5. AI Collaboration
+## 7. AI Collaboration
 
 AIs (Copilot, , Gemini) are expected to:
 

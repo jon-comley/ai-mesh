@@ -3,10 +3,19 @@ use agent::config::AgentConfig;
 use agent::llama;
 use shared::hardware::NodeRole;
 use shared::{InferenceResult, MeshMessage, ModelLifecycleState, ModelStatusReport, WIRE_VERSION};
+use socket2::{SockRef, TcpKeepalive};
+use std::sync::OnceLock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{info, warn};
+
+// Process-wide: only one llama-server inference at a time.
+// Prevents concurrent requests (e.g. after reconnect) from doubling GPU memory usage.
+static INFER_SEM: OnceLock<Semaphore> = OnceLock::new();
+fn infer_sem() -> &'static Semaphore {
+    INFER_SEM.get_or_init(|| Semaphore::new(1))
+}
 
 #[tokio::main]
 async fn main() {
@@ -29,6 +38,18 @@ async fn main() {
                 }
             }
         };
+
+        // Enable TCP keepalive so NIC power-management or network idle timeouts
+        // don't drop the connection during a long inference.
+        {
+            let sock = SockRef::from(&stream);
+            let ka = TcpKeepalive::new()
+                .with_time(std::time::Duration::from_secs(10))
+                .with_interval(std::time::Duration::from_secs(5));
+            if let Err(e) = sock.set_tcp_keepalive(&ka) {
+                warn!("Failed to set TCP keepalive: {}", e);
+            }
+        }
 
         info!("Connected to coordinator");
 
@@ -114,37 +135,54 @@ async fn main() {
                             model = %req.model_name,
                             "received inference request"
                         );
-                        // skip inference if the connection already dropped
-                        if tx_in.is_closed() {
-                            warn!(request_id = %req.request_id, "inference aborted: channel closed");
-                            continue;
-                        }
-                        let result = match llama::generate(&req.model_name, &req.prompt).await {
-                            Ok((output, tokens, duration_ms)) => InferenceResult {
-                                request_id: req.request_id,
-                                node_id: node_id.clone(),
-                                model_name: req.model_name,
-                                output,
-                                tokens_generated: tokens,
-                                duration_ms,
-                                error: None,
-                                wire_version: WIRE_VERSION,
-                            },
-                            Err(e) => {
-                                warn!(error = %e, "llama generate failed");
-                                InferenceResult {
-                                    request_id: req.request_id,
-                                    node_id: node_id.clone(),
-                                    model_name: req.model_name,
-                                    output: String::new(),
-                                    tokens_generated: 0,
-                                    duration_ms: 0,
-                                    error: Some(e),
-                                    wire_version: WIRE_VERSION,
+                        // Spawn inference so the reader keeps processing heartbeats
+                        // and coordinator commands while the GPU works.
+                        // The semaphore ensures only one inference runs at a time —
+                        // if the connection dropped and reconnected, a second request
+                        // queues here rather than doubling GPU memory usage.
+                        let tx2 = tx_in.clone();
+                        let nid = node_id.clone();
+                        tokio::spawn(async move {
+                            let _permit = infer_sem().acquire().await.unwrap();
+                            // If the connection drops while we're waiting for the GPU,
+                            // drop the reqwest future — this cancels the HTTP request to
+                            // llama-server and frees the GPU immediately rather than
+                            // running until the 120s timeout.
+                            tokio::select! {
+                                _ = tx2.closed() => {
+                                    warn!(request_id = %req.request_id,
+                                          "inference cancelled: connection dropped");
+                                }
+                                res = llama::generate(&req.model_name, &req.prompt) => {
+                                    let result = match res {
+                                        Ok((output, tokens, duration_ms)) => InferenceResult {
+                                            request_id: req.request_id,
+                                            node_id: nid,
+                                            model_name: req.model_name,
+                                            output,
+                                            tokens_generated: tokens,
+                                            duration_ms,
+                                            error: None,
+                                            wire_version: WIRE_VERSION,
+                                        },
+                                        Err(e) => {
+                                            warn!(error = %e, "llama generate failed");
+                                            InferenceResult {
+                                                request_id: req.request_id,
+                                                node_id: nid,
+                                                model_name: req.model_name,
+                                                output: String::new(),
+                                                tokens_generated: 0,
+                                                duration_ms: 0,
+                                                error: Some(e),
+                                                wire_version: WIRE_VERSION,
+                                            }
+                                        }
+                                    };
+                                    let _ = tx2.send(MeshMessage::ModelInferenceResult(result)).await;
                                 }
                             }
-                        };
-                        let _ = tx_in.send(MeshMessage::ModelInferenceResult(result)).await;
+                        });
                     }
                     MeshMessage::ModelUnload(req) => {
                         info!("Received command to unload model {}", req.model_name);

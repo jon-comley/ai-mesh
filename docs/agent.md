@@ -28,7 +28,7 @@ Platform implementations are gated with `#[cfg]`:
 
 ### identity.rs
 Provides:
-- Node ID generation (UUID v4)
+- Node ID generation — UUID v4 persisted to `~/.ai-mesh/node-id`; the same ID is returned on every agent restart, so the coordinator recognises the node without stale registry entries
 - Hostname detection — Windows reads `COMPUTERNAME` env var; Linux reads `/etc/hostname`
 - Local IP detection via UDP socket trick (cross-platform)
 
@@ -41,11 +41,14 @@ Determines:
 
 ### agent.rs
 Implements:
-- Heartbeat loop
-- Hardware report
-- Capability report
-- Coordinator discovery (stub)
-- Message sending
+- Heartbeat loop (configurable interval, default 5 s)
+- Hardware report and capability report sent once on startup via `start_once()`
+- Message sending through an async MPSC channel
+
+### main.rs (runtime)
+- **TCP keepalive** — after connecting, `socket2::SockRef` sets `SO_KEEPALIVE` with a 10 s idle probe and 5 s retry interval. Prevents NIC power management or network idle timeouts from silently dropping long-running inference connections.
+- **Process-wide inference semaphore** — `static INFER_SEM: OnceLock<Semaphore>` with capacity 1. A second inference request queues here rather than launching a concurrent llama-server call that would double GPU memory usage and risk an OOM freeze.
+- **Cancellation on disconnect** — inference is wrapped in `tokio::select! { _ = tx2.closed() => cancel, res = llama::generate() => ... }`. If the TCP connection drops mid-inference, the HTTP request to llama-server is cancelled immediately, freeing the GPU without waiting for the 120 s timeout.
 
 ---
 
@@ -85,7 +88,7 @@ As of this stage of development, the agent crate includes fully implemented and 
 - Fully tested with round‑trip and basic invariants
 
 ### ✔ Identity Detection
-- Node ID generation (UUID v4)
+- Node ID generation — UUID v4 persisted to `~/.ai-mesh/node-id`; stable across restarts
 - Hostname detection — Windows reads `COMPUTERNAME`; Linux reads `/etc/hostname`
 - Local IP detection via UDP socket trick (cross-platform)
 - Fully tested

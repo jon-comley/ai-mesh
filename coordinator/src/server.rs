@@ -11,7 +11,8 @@ use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
 type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
-pub type PendingInferences = Arc<Mutex<HashMap<String, oneshot::Sender<MeshMessage>>>>;
+/// Maps request_id → (reply_channel, node_id_that_was_selected)
+pub type PendingInferences = Arc<Mutex<HashMap<String, (oneshot::Sender<MeshMessage>, String)>>>;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -118,6 +119,24 @@ pub async fn handle_connection(
     if let Some(id) = node_id {
         info!(node_id = %id, "connection closed, removing from connection map");
         connections.lock().unwrap().remove(&id);
+
+        // Immediately fail any pending inferences that were routed to this node,
+        // so CLI clients get a fast error instead of waiting GENERATE_TIMEOUT_SECS.
+        let mut pending = pending_inferences.lock().unwrap();
+        let to_fail: Vec<String> = pending
+            .iter()
+            .filter(|(_, (_, nid))| nid == &id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for req_id in to_fail {
+            if let Some((otx, _)) = pending.remove(&req_id) {
+                warn!(node_id = %id, request_id = %req_id, "failing pending inference: agent disconnected");
+                let _ = otx.send(MeshMessage::Error(format!(
+                    "compute node '{}' disconnected during inference",
+                    id
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -215,7 +234,7 @@ async fn process_message(
                             pending_inferences
                                 .lock()
                                 .unwrap()
-                                .insert(request_id.clone(), otx);
+                                .insert(request_id.clone(), (otx, node.id.clone()));
                             info!(
                                 node_id    = %node.id,
                                 model_name = %req.model_name,
@@ -243,6 +262,7 @@ async fn process_message(
                                 ));
                             }
                             // Phase 2 — generation timeout: separate, shorter window.
+                            // The oneshot is also resolved early if the agent disconnects.
                             match timeout(Duration::from_secs(GENERATE_TIMEOUT_SECS), orx).await {
                                 Ok(Ok(result)) => result,
                                 Ok(Err(_)) => {
@@ -306,8 +326,8 @@ async fn process_message(
                 node_id    = %res.node_id,
                 "model inference result received from agent"
             );
-            let otx = pending_inferences.lock().unwrap().remove(&res.request_id);
-            if let Some(otx) = otx {
+            let entry = pending_inferences.lock().unwrap().remove(&res.request_id);
+            if let Some((otx, _)) = entry {
                 let _ = otx.send(MeshMessage::ModelInferenceResult(res));
             }
             MeshMessage::Acknowledge

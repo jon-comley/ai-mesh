@@ -1,4 +1,4 @@
-use prettytable::{row, Table};
+use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, CellAlignment, ContentArrangement, Table};
 use shared::{MeshMessage, NodeRecordFull, NodeRecordLite};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -47,6 +47,19 @@ async fn fetch_nodes_full(
     Ok(full)
 }
 
+fn format_last_seen(ms: u128) -> String {
+    if ms < 2_000 {
+        return format!("{}ms", ms);
+    }
+    let s = ms / 1_000;
+    if s < 60 {
+        return format!("{}s", s);
+    }
+    let m = s / 60;
+    let s = s % 60;
+    format!("{}m {}s", m, s)
+}
+
 fn format_models(node: &NodeRecordFull) -> String {
     if node.models.is_empty() {
         return "-".into();
@@ -55,30 +68,31 @@ fn format_models(node: &NodeRecordFull) -> String {
         .iter()
         .map(|m| format!("{} ({:?})", m.model_name, m.state))
         .collect::<Vec<_>>()
-        .join(", ")
+        .join("\n")
 }
 
 fn print_table(nodes: Vec<NodeRecordFull>) {
     let mut table = Table::new();
-    table.add_row(row![
-        "ID",
-        "Hostname",
-        "IP",
-        "Role",
-        "Last Seen (ms)",
-        "Models"
-    ]);
+    table
+        .load_preset(UTF8_FULL_CONDENSED)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            Cell::new("Hostname").set_alignment(CellAlignment::Left),
+            Cell::new("IP").set_alignment(CellAlignment::Left),
+            Cell::new("Role").set_alignment(CellAlignment::Left),
+            Cell::new("Last Seen").set_alignment(CellAlignment::Right),
+            Cell::new("Models").set_alignment(CellAlignment::Left),
+        ]);
 
     for n in &nodes {
-        table.add_row(row![
-            n.id,
-            n.hostname,
-            n.ip,
-            format!("{:?}", n.role),
-            n.last_heartbeat_ms,
-            format_models(n),
+        table.add_row(vec![
+            Cell::new(&n.hostname),
+            Cell::new(&n.ip),
+            Cell::new(format!("{:?}", n.role)),
+            Cell::new(format_last_seen(n.last_heartbeat_ms)).set_alignment(CellAlignment::Right),
+            Cell::new(format_models(n)),
         ]);
     }
 
-    table.printstd();
+    println!("{table}");
 }

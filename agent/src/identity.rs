@@ -24,7 +24,24 @@ pub fn detect_identity(role: NodeRole) -> Result<NodeIdentity, IdentityError> {
 }
 
 fn generate_node_id() -> String {
-    Uuid::new_v4().to_string()
+    let id_file = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".ai-mesh")
+        .join("node-id");
+
+    if let Ok(contents) = std::fs::read_to_string(&id_file) {
+        let trimmed = contents.trim();
+        if Uuid::parse_str(trimmed).is_ok() {
+            return trimmed.to_string();
+        }
+    }
+
+    let id = Uuid::new_v4().to_string();
+    if let Some(parent) = id_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&id_file, &id);
+    id
 }
 
 #[cfg(target_os = "windows")]
@@ -63,7 +80,9 @@ mod tests {
     fn test_generate_node_id() {
         let id1 = generate_node_id();
         let id2 = generate_node_id();
-        assert_ne!(id1, id2);
+        // ID is persisted — same machine always returns the same UUID.
+        assert_eq!(id1, id2);
+        assert!(Uuid::parse_str(&id1).is_ok());
     }
 
     #[test]

@@ -43,6 +43,7 @@ NODE_ROLE=compute    # or controller
 | `just load-model <node> <model>` | Load a specific model on a live node (e.g. `just load-model pi1 qwen2.5:1.5b`). Prints hardware-filtered fallback options if the model fails to load |
 | `just auto-load-model <node>` | Detect node hardware and automatically load the best-fit model |
 | `just start-cluster` | Bring the full cluster up: coordinator, controller, all remote agents, and hardware-selected models on every compute node. Leaves everything running after exit |
+| `just stop-cluster` | Stop all remote agent services, then kill the local coordinator and controller |
 | `just uninstall-node <node>` | Remove the `ai-mesh-agent` service from the node |
 | `just logs-node <node>` | Live tail of the agent log on the node |
 | `just sanity-node <node>` | Check service state on the node and print the node table |
@@ -129,7 +130,23 @@ These are uploaded and run remotely by the justfile recipes — you do not need 
 
 | Command | Description |
 |---------|-------------|
-| `just test-inference` | End-to-end inference test: loads `qwen2.5:1.5b` on all compute nodes, fires 4 requests |
+| `just validate-routing` | **Recommended.** Confirms each model routes to the correct node: `qwen2.5:1.5b` → Pi, `qwen2.5:7b` → Beelink. Assumes `just start-cluster` has already been run. Prints PASS/FAIL per assertion |
+| `just test-inference` | Legacy end-to-end test: loads `qwen2.5:1.5b` on **all** compute nodes then fires 4 requests. Does not validate hardware-aware routing |
+
+### validate-routing detail
+
+`just validate-routing` is the correct way to verify routing after `just start-cluster`:
+
+1. Queries `mesh nodes` to get the node UUIDs for Pi (192.168.1.11) and Beelink (192.168.1.14)
+2. Fires `mesh infer qwen2.5:1.5b` — asserts the response came from Pi
+3. Fires `mesh infer qwen2.5:7b` — asserts the response came from Beelink
+4. Prints `PASS` / `FAIL` per assertion and exits non-zero if any fail
+
+The `mesh infer` output now includes a `served-by:` line showing which node handled the request:
+```
+Hello!
+served-by: <node-uuid> | qwen2.5:1.5b | 12 tokens | 743ms
+```
 
 ---
 

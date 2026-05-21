@@ -21,6 +21,20 @@ enum Commands {
     Info {
         id: String,
     },
+    /// Print the node UUID for a given IP address. Exits non-zero if not found.
+    FindNode {
+        ip: String,
+    },
+    /// Live table: wait until all listed compute nodes have a Ready model.
+    /// Exits 0 when all Ready, 1 on timeout or abort (q / Ctrl+C).
+    WaitReady {
+        /// IP addresses of the compute nodes to watch.
+        #[arg(required = true)]
+        ips: Vec<String>,
+        /// Timeout in seconds before giving up.
+        #[arg(long, default_value = "600")]
+        timeout: u64,
+    },
     ResetRegistry,
     Load {
         node_id: String,
@@ -47,6 +61,16 @@ async fn main() {
         Commands::Nodes => commands::nodes::run(addr).await,
         Commands::Watch => commands::watch::run(addr).await,
         Commands::Info { id } => commands::info::run(addr, id).await,
+        Commands::FindNode { ip } => commands::find_node::run(addr, ip).await,
+        Commands::WaitReady { ips, timeout } => {
+            let ok = commands::wait_ready::run(addr, ips, timeout).await;
+            if ok {
+                println!(">>> All models Ready.");
+            } else {
+                eprintln!(">>> Timed out or aborted waiting for Ready state.");
+                std::process::exit(1);
+            }
+        }
         Commands::ResetRegistry => commands::reset::run(addr).await,
         Commands::Load {
             node_id,

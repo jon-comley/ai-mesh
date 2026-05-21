@@ -56,8 +56,22 @@ Inserts or updates a `ModelAllocation` entry for the given node. Used to track w
 ### eligible_compute_nodes()
 Returns all `NodeRecordFull` records for nodes with role `Compute`.
 
+## Pending Inference Map
+
+When the coordinator forwards a `RequestModelInference` to an agent it inserts a `oneshot::Sender` into `PendingInferences`:
+
+```rust
+Arc<Mutex<HashMap<String, (oneshot::Sender<MeshMessage>, String)>>>
+//                                                         ^node_id
+```
+
+The node_id is stored alongside the sender so that when an agent disconnects the coordinator can fast-fail any outstanding requests routed to that agent. Without this, the CLI would wait the full `GENERATE_TIMEOUT_SECS` (300 s) before seeing an error.
+
+**Fast-fail on disconnect** — when an agent's TCP socket closes, the connection-handler task locks the pending map, finds all entries whose node_id matches the disconnected agent, removes them, and sends an `Error("agent disconnected")` on each `oneshot`. The CLI receives the error immediately.
+
 ## Concurrency Model
 - Registry is protected by a `Mutex`
 - Connections map is protected by a separate `Mutex`
+- Pending inferences map is protected by a separate `Mutex`
 - Locks are never held across `.await`
 - Each TCP connection runs its own reader loop and a dedicated writer task draining an `mpsc` channel

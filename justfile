@@ -66,7 +66,7 @@ run-controller:
 reset:
     #!/usr/bin/env bash
     set -e
-    pkill -f "target/debug/coordinator" || true
+    pkill -f "target/(debug|release)/coordinator" || true
     sleep 0.3
     cargo run -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
     COORD_PID=$!
@@ -288,6 +288,35 @@ restart-node node:
     esac
     echo ">>> Node {{node}} agent restarted."
 
+# Restart the agent service on a node, then reload its best-fit model.
+# Use this when a node's llama-server is stuck or inference is failing.
+# Usage: just reload-node beelink1
+reload-node node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    echo ">>> Restarting agent on {{node}}..."
+    just restart-node {{node}}
+    echo ">>> Waiting for {{node}} to reconnect..."
+    NODE_ID=""
+    for i in $(seq 1 15); do
+        NODE_ID=$(cargo run -q -p cli -- find-node "${NODE_HOST}" 2>/dev/null || true)
+        [ -n "$NODE_ID" ] && break
+        printf "\r    %ds... " "$((i*2))"
+        sleep 2
+    done
+    printf "\r\n"
+    if [ -z "$NODE_ID" ]; then
+        echo "Error: {{node}} did not reconnect within 30s"
+        exit 1
+    fi
+    echo ">>> {{node}} reconnected. Loading model..."
+    just auto-load-model {{node}}
+    echo ">>> Waiting for model to be Ready..."
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
+        wait-ready "${NODE_HOST}" --timeout 300
+    echo ">>> {{node}} is ready."
+
 # OTA update: rebuild agent, upload, restart — no reprovisioning.
 # Usage: just update-node pi1
 update-node node:
@@ -307,17 +336,39 @@ update-node node:
         fi
         echo ">>> Uploading updated agent to ${NODE_HOST}..."
         ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent"
-        scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
+        scp -q -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
+            ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
         ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
         ;;
 
       windows)
         cargo build --release -p agent --target x86_64-pc-windows-gnu
         WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
-        echo ">>> Uploading updated agent.exe to ${NODE_HOST}..."
-        scp -q target/x86_64-pc-windows-gnu/release/agent.exe \
-            ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"
-        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+        # Strip debug symbols to shrink the binary and speed up the transfer.
+        SRC="target/x86_64-pc-windows-gnu/release/agent.exe"
+        STRIPPED="/tmp/agent_stripped_{{node}}.exe"
+        x86_64-w64-mingw32-strip "$SRC" -o "$STRIPPED" 2>/dev/null || cp "$SRC" "$STRIPPED"
+        echo ">>> Uploading updated agent.exe to ${NODE_HOST} ($(du -h "$STRIPPED" | cut -f1))..."
+        # Upload with a 90s hard timeout and 3 retries — LAN transfers to Windows
+        # can hang mid-stream on flaky links.
+        uploaded=false
+        for attempt in 1 2 3; do
+            printf ">>> Upload attempt %d/3 (90s timeout)...\n" "$attempt"
+            if timeout 90 scp -o LogLevel=ERROR \
+                    -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
+                    "$STRIPPED" \
+                    ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"; then
+                uploaded=true
+                break
+            fi
+            echo ">>> Upload attempt $attempt failed."
+            [ "$attempt" -lt 3 ] && echo ">>> Retrying in 5s..." && sleep 5
+        done
+        if [ "$uploaded" = false ]; then
+            echo ">>> Upload failed after 3 attempts. Run 'just update-node {{node}}' to try again."
+            exit 1
+        fi
+        ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
             sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
             Start-Sleep 2;\
             \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
@@ -412,13 +463,20 @@ load-model node model:
         qwen2.5:32b)   SIZE_MB=20480 ;;
         *) echo "Unknown model: $MODEL (supported: qwen2.5:0.5b 1.5b 7b 14b 32b)"; exit 1 ;;
     esac
-    NODE_ID=$(cargo run -q -p cli -- nodes 2>/dev/null \
-        | awk -F'|' -v host="${NODE_HOST}" '$4 ~ host {print $2}' \
-        | tr -d ' ' | head -1)
+    # Retry for up to 90s — Windows services can be slow to start and register.
+    NODE_ID=""
+    for i in $(seq 1 45); do
+        NODE_ID=$(cargo run -q -p cli -- find-node "${NODE_HOST}" 2>/dev/null || true)
+        [ -n "$NODE_ID" ] && break
+        printf "\r>>> Waiting for ${NODE_HOST} to register... (%ds) " "$((i*2))"
+        sleep 2
+    done
     if [ -z "$NODE_ID" ]; then
-        echo "Error: node ${NODE_HOST} not found in coordinator registry. Is the agent running?"
+        printf "\n"
+        echo "Error: node ${NODE_HOST} not found in coordinator registry after 90s. Is the agent running?"
         exit 1
     fi
+    printf "\r>>> ${NODE_HOST} registered.                              \n"
 
     # Detect hardware to determine this node's capability ceiling.
     # Outputs mb:gpu_flag (gpu_flag=1 when VRAM detected, 0 for CPU/unified RAM).
@@ -440,7 +498,7 @@ load-model node model:
         ' 2>/dev/null || echo "0:0")
         ;;
       windows)
-        HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$m=8192}else{$m=[int]($g.AdapterRAM/1MB)};$gpu=1};if($m -eq 0){$m=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB)};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
+        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$m=8192}else{$m=[int]($g.AdapterRAM/1MB)};$gpu=1};if($m -eq 0){$m=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB)};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
         ;;
       *) HW_INFO="0:0" ;;
     esac
@@ -512,7 +570,7 @@ auto-load-model node:
         ')
         ;;
       windows)
-        HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$m=8192}else{$m=[int]($g.AdapterRAM/1MB)};$gpu=1};if($m -eq 0){$m=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB)};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
+        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$m=8192}else{$m=[int]($g.AdapterRAM/1MB)};$gpu=1};if($m -eq 0){$m=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB)};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
         ;;
       *)
         echo "Unknown NODE_OS: $NODE_OS"; exit 1 ;;
@@ -601,24 +659,35 @@ update-portproxy:
 # Safe to call when agents are already running (systemctl start is idempotent).
 start-agents:
     #!/usr/bin/env bash
+    # Fire SSH service-start commands for all nodes in parallel, then wait.
+    # We don't retry here — if a node is offline, its Windows/Linux service
+    # will auto-start on boot and self-register. load-model's retry loop
+    # (90s window) handles the "slow to register" case.
+    pids=()
     for f in nodes/*.env; do
-        source "$f"
-        NODE_NAME=$(basename "$f" .env)
-        case "$NODE_OS" in
-          linux)
+        (
+            source "$f"
+            NODE_NAME=$(basename "$f" .env)
             echo ">>> Starting agent on ${NODE_NAME} (${NODE_HOST})..."
-            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
-                "sudo systemctl start ai-mesh-agent" 2>/dev/null \
-                || echo ">>> Warning: could not reach ${NODE_NAME} (offline?)"
-            ;;
-          windows)
-            echo ">>> Starting agent on ${NODE_NAME} (${NODE_HOST})..."
-            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
-                "powershell -Command \"sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0\"" 2>/dev/null \
-                || echo ">>> Warning: could not reach ${NODE_NAME} (offline?)"
-            ;;
-        esac
+            case "$NODE_OS" in
+              linux)
+                ssh -o ConnectTimeout=10 "${NODE_USER}@${NODE_HOST}" \
+                    "sudo systemctl start ai-mesh-agent" 2>/dev/null \
+                    && echo ">>> ${NODE_NAME} service started." \
+                    || echo ">>> Warning: could not reach ${NODE_NAME} (will self-register if online)"
+                ;;
+              windows)
+                ssh -o ConnectTimeout=10 -o LogLevel=ERROR "${NODE_USER}@${NODE_HOST}" \
+                    "powershell -Command \"sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0\"" \
+                    2>/dev/null \
+                    && echo ">>> ${NODE_NAME} service started." \
+                    || echo ">>> Warning: could not reach ${NODE_NAME} (will self-register if online)"
+                ;;
+            esac
+        ) &
+        pids+=($!)
     done
+    wait "${pids[@]}"
 
 # Bring the full cluster up and load the best model on each compute node.
 # Leaves everything running — coordinator, controller, and remote agents stay up after the script exits.
@@ -628,8 +697,8 @@ start-cluster: update-portproxy
     set -e
 
     echo ">>> Stopping any stale local processes..."
-    pkill -f "target/debug/coordinator" || true
-    pkill -f "target/debug/agent" || true
+    pkill -f "target/(debug|release)/coordinator" || true
+    pkill -f "target/(debug|release)/agent" || true
     sleep 0.3
 
     echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
@@ -653,21 +722,58 @@ start-cluster: update-portproxy
     echo ">>> Starting remote compute agents..."
     just start-agents
 
-    echo ">>> Waiting for nodes to register (15s)..."
-    sleep 15
-
     echo ">>> Loading hardware-selected models on compute nodes..."
+    COMPUTE_NODES=()   # "name:ip" pairs for the wait loop below
     for f in nodes/*.env; do
         source "$f"
         NODE_NAME=$(basename "$f" .env)
         [ "${NODE_ROLE}" = "compute" ] || continue
         just auto-load-model ${NODE_NAME} \
             || echo ">>> Warning: could not load model on ${NODE_NAME} (skipping)"
+        COMPUTE_NODES+=("${NODE_NAME}:${NODE_HOST}")
+    done
+
+    # Collect compute IPs for the live-table wait
+    WAIT_IPS=()
+    for entry in "${COMPUTE_NODES[@]}"; do
+        WAIT_IPS+=("${entry##*:}")
     done
 
     echo ""
-    echo ">>> Cluster ready. Run inference with: mesh infer <model> <prompt>"
+    cargo run -q -p cli -- wait-ready "${WAIT_IPS[@]}" --timeout 600 \
+        || echo ">>> Warning: timed out or aborted before all models were Ready"
+
+    echo ""
+    echo ">>> Cluster ready. Run: just validate-routing"
     cargo run -q -p cli -- nodes
+
+# Stop the full cluster: remote agents first, then local coordinator and controller.
+# Usage: just stop-cluster
+stop-cluster:
+    #!/usr/bin/env bash
+    echo ">>> Stopping remote agents..."
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        case "$NODE_OS" in
+          linux)
+            echo ">>> Stopping ${NODE_NAME} (${NODE_HOST})..."
+            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
+                "sudo systemctl stop ai-mesh-agent" 2>/dev/null \
+                || echo ">>> Warning: could not reach ${NODE_NAME} (skipping)"
+            ;;
+          windows)
+            echo ">>> Stopping ${NODE_NAME} (${NODE_HOST})..."
+            ssh -o ConnectTimeout=5 -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} \
+                "powershell -Command \"sc.exe stop ai-mesh-agent 2>&1 | Out-Null; exit 0\"" 2>/dev/null \
+                || echo ">>> Warning: could not reach ${NODE_NAME} (skipping)"
+            ;;
+        esac
+    done
+    echo ">>> Stopping local coordinator and controller..."
+    pkill -f "target/(debug|release)/coordinator" 2>/dev/null || true
+    pkill -f "target/(debug|release)/agent" 2>/dev/null || true
+    echo ">>> Cluster stopped."
 
 # Start coordinator + controller locally, then start all remote nodes.
 # Ctrl+C stops only the local processes; remote services keep running.
@@ -676,8 +782,8 @@ dev: update-portproxy
     set -e
 
     echo ">>> Stopping any stale local processes..."
-    pkill -f "target/debug/coordinator" || true
-    pkill -f "target/debug/agent" || true
+    pkill -f "target/(debug|release)/coordinator" || true
+    pkill -f "target/(debug|release)/agent" || true
     sleep 0.5
 
     cleanup() {
@@ -786,8 +892,8 @@ sanity-full: update-portproxy
         esac
     done
 
-    pkill -f "target/debug/coordinator" || true
-    pkill -f "target/debug/agent" || true
+    pkill -f "target/(debug|release)/coordinator" || true
+    pkill -f "target/(debug|release)/agent" || true
     sleep 0.5
 
     cargo run -p coordinator &
@@ -850,6 +956,72 @@ logs:
     done
     wait
 
+# Validate that each model routes to the correct hardware node.
+# Assumes the cluster is already running with hardware-selected models loaded
+# (i.e. run `just start-cluster` first).
+# Pi (192.168.1.11) should serve qwen2.5:1.5b; Beelink (192.168.1.14) should serve qwen2.5:7b.
+# Usage: just validate-routing
+validate-routing: update-portproxy
+    #!/usr/bin/env bash
+    set -e
+
+    COORD="{{coordinator_ip}}:{{coordinator_port}}"
+    PASS=0
+    FAIL=0
+
+    echo "=== Routing Validation ==="
+    echo ""
+
+    # Helper: fire one inference and return the hostname that served it.
+    # Retries up to 3 times so a single transient connection drop doesn't fail the test.
+    run_infer() {
+        local model="$1"
+        for attempt in 1 2 3; do
+            local result
+            result=$(cargo run -q -p cli -- --coordinator "$COORD" infer "$model" \
+                "Reply with one word only: hello" 2>/dev/null \
+                | grep '^served-by:' | awk '{print $2}')
+            if [ -n "$result" ]; then
+                echo "$result"
+                return
+            fi
+            if [ "$attempt" -lt 3 ]; then
+                echo ">>> Inference attempt $attempt failed, waiting 20s before retry..." >&2
+                sleep 20
+            fi
+        done
+    }
+
+    # Normalise hostname for case-insensitive comparison (BEELINK1 ↔ beelink1).
+    norm() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
+
+    # --- Test 1: qwen2.5:1.5b → pi1 ---
+    echo "--- Test 1: qwen2.5:1.5b → expect pi1 ---"
+    SERVED=$(run_infer qwen2.5:1.5b)
+    if [ "$(norm "$SERVED")" = "pi1" ]; then
+        echo "PASS: qwen2.5:1.5b → ${SERVED}"
+        PASS=$((PASS+1))
+    else
+        echo "FAIL: qwen2.5:1.5b → expected pi1, got '${SERVED:-<no response>}'"
+        FAIL=$((FAIL+1))
+    fi
+    echo ""
+
+    # --- Test 2: qwen2.5:7b → beelink1 ---
+    echo "--- Test 2: qwen2.5:7b → expect beelink1 ---"
+    SERVED=$(run_infer qwen2.5:7b)
+    if [ "$(norm "$SERVED")" = "beelink1" ]; then
+        echo "PASS: qwen2.5:7b → ${SERVED}"
+        PASS=$((PASS+1))
+    else
+        echo "FAIL: qwen2.5:7b → expected beelink1, got '${SERVED:-<no response>}'"
+        FAIL=$((FAIL+1))
+    fi
+    echo ""
+
+    echo "=== Results: $PASS passed, $FAIL failed ==="
+    [ "$FAIL" -eq 0 ]
+
 # Run an end-to-end live inference loop across the whole cluster.
 test-inference: update-portproxy
     #!/usr/bin/env bash
@@ -896,8 +1068,8 @@ test-inference: update-portproxy
             ;;
         esac
     done
-    pkill -f "target/debug/coordinator" || true
-    pkill -f "target/debug/agent" || true
+    pkill -f "target/(debug|release)/coordinator" || true
+    pkill -f "target/(debug|release)/agent" || true
     sleep 0.5
 
     cargo run -p coordinator &

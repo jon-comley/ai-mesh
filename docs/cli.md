@@ -37,11 +37,24 @@ Full-screen TUI (ratatui, alternate screen). Redraws every second. Exit with `q`
 ### mesh load <node-id> <model-name> <size-mb>
 Send a `ModelLoad` request to the coordinator targeting the specified node. The coordinator forwards the command to the agent, which responds with `ModelStatus(Loading)` then `ModelStatus(Ready)`.
 
+### mesh infer <model-name> <prompt>
+Send a `RequestModelInference` to the coordinator. The coordinator uses `select_node_for_inference` to find a Ready node and forwards the request. Output format:
+```
+<response text>
+served-by: <hostname> | <model> | <tokens> tokens | <ms>ms
+```
+If hostname lookup fails, the first 8 characters of the node ID are shown instead.
+
+### mesh wait-ready [<ip>...] --timeout <secs>
+Poll the coordinator until all specified node IPs have at least one model in `Ready` state, then exit 0. Exits 1 on timeout or user abort (`q`/`Esc`/`Ctrl+C`).
+
+When stdout is a TTY, displays a live ratatui table with per-node status, a colour-coded status bar, and a 5-second linger countdown on success. When stdout is not a TTY (e.g. called from a shell script), falls back to plain-text progress lines — `wait-ready: N/M Ready | Xs elapsed` — so `just start-cluster` doesn't panic with `ENXIO`.
+
+### mesh find-node <host-or-ip>
+Return the node ID of the registered node matching the given hostname or IP. Used internally by `just reload-node` and `just load-model` to resolve a node name to its UUID without requiring the user to look it up manually.
+
 ### mesh reset-registry
 Send `AdminMessage::ResetRegistry` to the coordinator. Clears all registered nodes without restarting.
-
-### mesh updates
-Manage update channels (future).
 
 ---
 
