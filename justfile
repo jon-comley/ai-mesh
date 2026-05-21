@@ -463,9 +463,9 @@ load-model node model:
         qwen2.5:32b)   SIZE_MB=20480 ;;
         *) echo "Unknown model: $MODEL (supported: qwen2.5:0.5b 1.5b 7b 14b 32b)"; exit 1 ;;
     esac
-    # Retry for up to 90s — Windows services can be slow to start and register.
+    # Retry for up to 120s — allow time for reconnect after coordinator restart.
     NODE_ID=""
-    for i in $(seq 1 45); do
+    for i in $(seq 1 60); do
         NODE_ID=$(cargo run -q -p cli -- find-node "${NODE_HOST}" 2>/dev/null || true)
         [ -n "$NODE_ID" ] && break
         printf "\r>>> Waiting for ${NODE_HOST} to register... (%ds) " "$((i*2))"
@@ -473,7 +473,7 @@ load-model node model:
     done
     if [ -z "$NODE_ID" ]; then
         printf "\n"
-        echo "Error: node ${NODE_HOST} not found in coordinator registry after 90s. Is the agent running?"
+        echo "Error: node ${NODE_HOST} not found in coordinator registry after 120s. Is the agent running?"
         exit 1
     fi
     printf "\r>>> ${NODE_HOST} registered.                              \n"
@@ -747,6 +747,58 @@ start-cluster: update-portproxy
     echo ">>> Cluster ready. Run: just validate-routing"
     cargo run -q -p cli -- nodes
 
+# Restart the coordinator after laptop suspend/resume without restarting remote agents.
+# Remote agent services reconnect automatically; this just gives them a fresh coordinator.
+# Usage: just restart-coordinator
+restart-coordinator: update-portproxy
+    #!/usr/bin/env bash
+    set -e
+
+    echo ">>> Stopping stale local processes..."
+    pkill -f "target/(debug|release)/coordinator" || true
+    pkill -f "target/(debug|release)/agent" || true
+    sleep 0.3
+
+    echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
+    MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
+
+    echo ">>> Waiting for coordinator to accept connections..."
+    for i in $(seq 1 30); do
+        sleep 1
+        if timeout 1 bash -c "echo > /dev/tcp/{{coordinator_ip}}/{{coordinator_port}}" 2>/dev/null; then
+            echo ">>> Coordinator ready."
+            break
+        fi
+        [ "$i" -eq 30 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
+    done
+
+    cargo run -q -p cli -- reset-registry > /dev/null || true
+
+    echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
+    AGENT_ROLE=controller cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
+
+    echo ">>> Reloading hardware-selected models on compute nodes..."
+    COMPUTE_NODES=()
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        [ "${NODE_ROLE}" = "compute" ] || continue
+        just auto-load-model ${NODE_NAME} \
+            || echo ">>> Warning: could not load model on ${NODE_NAME} (skipping)"
+        COMPUTE_NODES+=("${NODE_NAME}:${NODE_HOST}")
+    done
+
+    WAIT_IPS=()
+    for entry in "${COMPUTE_NODES[@]}"; do
+        WAIT_IPS+=("${entry##*:}")
+    done
+
+    cargo run -q -p cli -- wait-ready "${WAIT_IPS[@]}" --timeout 120 \
+        || { echo ">>> Nodes did not come Ready in time. Try: just start-cluster"; exit 1; }
+
+    echo ">>> Cluster reconnected. Run: just validate-routing"
+    cargo run -q -p cli -- nodes
+
 # Stop the full cluster: remote agents first, then local coordinator and controller.
 # Usage: just stop-cluster
 stop-cluster:
@@ -972,6 +1024,16 @@ validate-routing: update-portproxy
     echo "=== Routing Validation ==="
     echo ""
 
+    # Pre-flight: abort early if no compute nodes are registered.
+    # This happens after laptop suspend/resume when the coordinator restarted but agents haven't reconnected.
+    COMPUTE_COUNT=$(cargo run -q -p cli -- nodes 2>/dev/null | grep -c "Compute" || true)
+    if [ "$COMPUTE_COUNT" -eq 0 ]; then
+        echo "ERROR: No compute nodes are registered with the coordinator."
+        echo "       After opening your laptop, run:  just restart-coordinator"
+        echo "       For a full cluster start, run:   just start-cluster"
+        exit 1
+    fi
+
     # Helper: fire one inference and return the hostname that served it.
     # Retries up to 3 times so a single transient connection drop doesn't fail the test.
     run_infer() {
@@ -990,6 +1052,7 @@ validate-routing: update-portproxy
                 sleep 20
             fi
         done
+        echo ">>> All attempts failed. If the cluster was idle or you just opened your laptop, run: just restart-coordinator" >&2
     }
 
     # Normalise hostname for case-insensitive comparison (BEELINK1 ↔ beelink1).
