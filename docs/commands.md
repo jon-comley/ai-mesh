@@ -43,6 +43,7 @@ NODE_ROLE=compute    # or controller
 | `just load-model <node> <model>` | Load a specific model on a live node (e.g. `just load-model pi1 qwen2.5:1.5b`). Prints hardware-filtered fallback options if the model fails to load |
 | `just auto-load-model <node>` | Detect node hardware and automatically load the best-fit model |
 | `just start-cluster` | Bring the full cluster up: coordinator, controller, all remote agents, and hardware-selected models on every compute node. Leaves everything running after exit |
+| `just restart-coordinator` | **Post-suspend recovery.** Kills stale local coordinator + controller, starts fresh ones, reloads models on compute nodes, waits for Ready. Remote agent services reconnect automatically — use this after opening your laptop instead of `just start-cluster` |
 | `just stop-cluster` | Stop all remote agent services, then kill the local coordinator and controller |
 | `just uninstall-node <node>` | Remove the `ai-mesh-agent` service from the node |
 | `just logs-node <node>` | Live tail of the agent log on the node |
@@ -130,17 +131,20 @@ These are uploaded and run remotely by the justfile recipes — you do not need 
 
 | Command | Description |
 |---------|-------------|
-| `just validate-routing` | **Recommended.** Confirms each model routes to the correct node: `qwen2.5:1.5b` → Pi, `qwen2.5:7b` → Beelink. Assumes `just start-cluster` has already been run. Prints PASS/FAIL per assertion |
+| `just validate-routing` | **Recommended.** Confirms each model routes to the correct node: `qwen2.5:1.5b` → Pi, `qwen2.5:7b` → Beelink. Fails fast with a clear message if no compute nodes are registered (run `just restart-coordinator` or `just start-cluster` first). Prints PASS/FAIL per assertion |
 | `just test-inference` | Legacy end-to-end test: loads `qwen2.5:1.5b` on **all** compute nodes then fires 4 requests. Does not validate hardware-aware routing |
 
 ### validate-routing detail
 
-`just validate-routing` is the correct way to verify routing after `just start-cluster`:
+`just validate-routing` is the correct way to verify routing after `just start-cluster` or `just restart-coordinator`:
 
-1. Queries `mesh nodes` to get the node UUIDs for Pi (192.168.1.11) and Beelink (192.168.1.14)
+1. **Pre-flight check** — queries `mesh nodes`; if no Compute nodes are registered, prints an error and exits immediately rather than waiting 60 s on doomed retries
 2. Fires `mesh infer qwen2.5:1.5b` — asserts the response came from Pi
 3. Fires `mesh infer qwen2.5:7b` — asserts the response came from Beelink
 4. Prints `PASS` / `FAIL` per assertion and exits non-zero if any fail
+5. If all retries are exhausted, prints a hint to run `just restart-coordinator`
+
+If you see "No compute nodes registered", run `just restart-coordinator` first.
 
 The `mesh infer` output now includes a `served-by:` line showing which node handled the request:
 ```

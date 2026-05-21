@@ -96,11 +96,12 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just load-model <node> <model>` | Load a specific model on a node (e.g. `qwen2.5:7b`) |
 | `just auto-load-model <node>` | Detect node hardware and load the best-fit model automatically |
 | `just start-cluster` | Bring the full cluster up and load the best model on each compute node |
+| `just restart-coordinator` | Post-suspend recovery — restart coordinator + controller, reload models (use after opening laptop) |
 | `just stop-cluster` | Stop all remote agents and the local coordinator/controller |
 | `just uninstall-node <node>` | Remove agent service from a node |
 | `just sanity-node <node>` | Check service state + node table |
 | `just sanity-full` | Full cluster validation (all nodes) |
-| `just validate-routing` | Confirm each model routes to its correct node (run after `start-cluster`) |
+| `just validate-routing` | Confirm each model routes to its correct node (run after `start-cluster` or `restart-coordinator`) |
 | `just logs-node <node>` | Tail live agent logs from a node |
 | `just logs` | Tail all logs simultaneously |
 
