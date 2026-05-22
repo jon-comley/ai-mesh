@@ -4,6 +4,7 @@ members = [
     "capabilities/core",
     "capabilities/llm",
     "capabilities/lighting",
+    "capabilities/zigbee",
     "agent",
     "coordinator",
     "cli",
