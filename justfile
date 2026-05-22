@@ -1158,6 +1158,19 @@ logs:
     done
     wait
 
+# Open a 60-second Zigbee pairing window and stream join events to the terminal.
+# Power-cycle a bulb after running this to pair it.
+# Usage: just pair-bulb
+pair-bulb:
+    #!/usr/bin/env bash
+    PI_MQTT="192.168.1.11"
+    echo ">>> Opening 5-minute pairing window on Zigbee network..."
+    mosquitto_pub -h ${PI_MQTT} -t 'zigbee2mqtt/bridge/request/permit_join' \
+        -m '{"value":true,"time":254}'
+    echo ">>> Pairing window open (4 minutes) — power-cycle your bulb now."
+    echo ">>> Watching for join events (Ctrl+C to stop)..."
+    mosquitto_sub -h ${PI_MQTT} -t 'zigbee2mqtt/bridge/event' -v
+
 # Validate that each model routes to the correct hardware node.
 # Assumes the cluster is already running with hardware-selected models loaded
 # (i.e. run `just start-cluster` first).

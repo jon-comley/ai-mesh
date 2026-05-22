@@ -1,0 +1,15 @@
+[package]
+name = "capability-zigbee"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rumqttc    = "0.24"
+thiserror  = "1"
+serde_json = "1"
+tokio      = { version = "1", features = ["full"] }
+tracing    = "0.1"
+shared     = { path = "../../shared" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
