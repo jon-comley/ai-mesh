@@ -125,6 +125,16 @@ function Ensure-AgentBinary {
     }
 }
 
+function Disable-Sleep {
+    # Prevents Windows from sleeping while idle. The SER8 does not recover
+    # cleanly from sleep (BIOS shows an unrecoverable screen requiring a CMOS
+    # reset). Must be re-applied after every CMOS reset.
+    powercfg /h off
+    powercfg /change standby-timeout-ac 0
+    powercfg /change monitor-timeout-ac 0
+    Write-Host ">>> Sleep and hibernate disabled."
+}
+
 function Enable-SshElevation {
     # LocalAccountTokenFilterPolicy = 1 allows SSH sessions for local admin
     # accounts to run with a full (elevated) token rather than the default
@@ -192,6 +202,7 @@ Write-Host ">>> To load it after provisioning: just auto-load-model <node-name>"
 Ensure-Directory -Path $aiMeshRoot
 Ensure-Directory -Path $logDir
 
+Disable-Sleep
 Enable-SshElevation
 
 Ensure-LlamaCpp

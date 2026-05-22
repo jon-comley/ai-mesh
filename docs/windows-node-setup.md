@@ -345,3 +345,47 @@ Windows will turn off the machine if sleep is enabled. Disable it:
 powercfg /h off          # disable hibernate
 powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 ```
+
+### Beelink SER8 — CMOS reset recovery
+
+**Symptom:** Beelink shows an "unrecoverable" BIOS screen on boot (has happened twice). Requires a physical CMOS reset (button on the back of the unit).
+
+**What a CMOS reset wipes:**
+- BIOS settings (boot order, etc.) — usually fine after reset
+- The SSH `administrators_authorized_keys` may survive, but in practice the machine needs to be treated as freshly provisioned
+
+**Recovery steps (from WSL on OmniLink1):**
+
+1. Once the machine boots and is reachable on the network, re-copy the SSH key:
+   ```bash
+   ssh-copy-id jonno@192.168.1.14
+   ```
+   If `ssh-copy-id` fails because the key isn't in `authorized_keys` yet, add it manually — open a PowerShell on the Beelink and run:
+   ```powershell
+   Add-Content 'C:\ProgramData\ssh\administrators_authorized_keys' '<paste public key here>'
+   ```
+   Or from WSL:
+   ```bash
+   cat ~/.ssh/id_ed25519.pub | ssh jonno@192.168.1.14 "powershell -Command \"Add-Content 'C:\\ProgramData\\ssh\\administrators_authorized_keys' '\$(cat)'\""
+   ```
+
+2. Re-add the firewall rule (CMOS reset can clear custom rules):
+   ```bash
+   powershell.exe -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -Command New-NetFirewallRule -DisplayName ''ai-mesh coordinator'' -Direction Inbound -Protocol TCP -LocalPort 9000 -Action Allow' -Wait"
+   ```
+
+3. Re-provision the node (binary, service, env vars):
+   ```bash
+   just deploy-node beelink1
+   ```
+
+4. Bring the cluster back up:
+   ```bash
+   just start-cluster
+   just validate-routing
+   ```
+
+**Notes:**
+- `LocalAccountTokenFilterPolicy` (SSH elevation) is set by the provision script — it will be re-applied by `just deploy-node`
+- The NSSM service and agent binary are wiped by a CMOS reset if Windows was reinstalled, but survive a simple CMOS clear if the OS volume is intact
+- If the node doesn't re-appear after `deploy-node`, run `just reset` to clear stale registry entries then `just start-cluster` again
