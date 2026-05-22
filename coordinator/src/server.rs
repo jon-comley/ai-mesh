@@ -1,3 +1,4 @@
+use crate::intent::PendingIntents;
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
 use shared::{AdminMessage, MeshMessage, NodeRecordFull, NodeRole};
@@ -10,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
-type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
+pub type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
 /// Maps request_id → (reply_channel, node_id_that_was_selected)
 pub type PendingInferences = Arc<Mutex<HashMap<String, (oneshot::Sender<MeshMessage>, String)>>>;
 
@@ -28,6 +29,7 @@ pub struct Server {
     pub registry: Arc<Mutex<Registry>>,
     connections: Connections,
     pending_inferences: PendingInferences,
+    pending_intents: PendingIntents,
 }
 
 impl Server {
@@ -37,6 +39,7 @@ impl Server {
             registry,
             connections: Arc::new(Mutex::new(HashMap::new())),
             pending_inferences: Arc::new(Mutex::new(HashMap::new())),
+            pending_intents: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -48,9 +51,17 @@ impl Server {
             let registry = self.registry.clone();
             let connections = self.connections.clone();
             let pending_inferences = self.pending_inferences.clone();
+            let pending_intents = self.pending_intents.clone();
 
             tokio::spawn(async move {
-                let _ = handle_connection(socket, registry, connections, pending_inferences).await;
+                let _ = handle_connection(
+                    socket,
+                    registry,
+                    connections,
+                    pending_inferences,
+                    pending_intents,
+                )
+                .await;
             });
         }
     }
@@ -61,6 +72,7 @@ pub async fn handle_connection(
     registry: Arc<Mutex<Registry>>,
     connections: Connections,
     pending_inferences: PendingInferences,
+    pending_intents: PendingIntents,
 ) -> Result<(), ServerError> {
     let (mut reader, mut writer) = socket.into_split();
     let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
@@ -105,6 +117,7 @@ pub async fn handle_connection(
             &registry,
             &connections,
             &pending_inferences,
+            &pending_intents,
             &tx,
             &mut node_id,
         )
@@ -147,6 +160,7 @@ async fn process_message(
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
     pending_inferences: &PendingInferences,
+    pending_intents: &PendingIntents,
     tx: &mpsc::Sender<MeshMessage>,
     node_id: &mut Option<String>,
 ) -> MeshMessage {
@@ -384,6 +398,35 @@ async fn process_message(
                 &report.model_name,
                 report.size_mb,
                 report.state,
+            );
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::IntentRequest(req) => {
+            info!(request_id = %req.request_id, "intent request received");
+            let response = crate::intent::handle_intent(
+                req,
+                registry.clone(),
+                connections.clone(),
+                pending_inferences.clone(),
+                pending_intents.clone(),
+            )
+            .await;
+            MeshMessage::IntentResponse(response)
+        }
+        MeshMessage::SceneLoaded(report) => {
+            let entry = pending_intents.lock().unwrap().remove(&report.request_id);
+            if let Some(otx) = entry {
+                let _ = otx.send(MeshMessage::SceneLoaded(report));
+            }
+            MeshMessage::Acknowledge
+        }
+        MeshMessage::LightState(report) => {
+            // Unsolicited state report from lighting node — log and acknowledge.
+            info!(
+                node_id = %report.node_id,
+                device_id = %report.device_id,
+                on = %report.on,
+                "light state report received"
             );
             MeshMessage::Acknowledge
         }

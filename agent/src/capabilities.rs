@@ -23,11 +23,19 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
     // Max model size = 50% of RAM (simple heuristic).
     let max_model_size_gb = hw.ram_gb * 0.5;
 
+    let features: Vec<String> = vec![
+        #[cfg(feature = "llm")]
+        "llm".into(),
+        #[cfg(feature = "lighting")]
+        "lighting".into(),
+    ];
+
     Ok(NodeCapabilities {
         cpu_inference,
         gpu_inference,
         ane_inference,
         max_model_size_gb,
+        features,
     })
 }
 
@@ -40,6 +48,20 @@ mod tests {
         let caps = detect_capabilities().unwrap();
         assert!(caps.cpu_inference);
         assert!(caps.max_model_size_gb > 0.0);
+    }
+
+    #[cfg(feature = "llm")]
+    #[test]
+    fn features_includes_llm_when_built_with_llm_feature() {
+        let caps = detect_capabilities().unwrap();
+        assert!(caps.features.contains(&"llm".to_string()));
+    }
+
+    #[cfg(not(feature = "llm"))]
+    #[test]
+    fn features_empty_without_feature_flags() {
+        let caps = detect_capabilities().unwrap();
+        assert!(caps.features.is_empty());
     }
 
     // ANE is only available on Apple Silicon macOS.

@@ -331,6 +331,44 @@ impl Registry {
         }
     }
 
+    /// Returns all Compute nodes whose reported capabilities include `feature`.
+    pub fn nodes_with_feature(&self, feature: &str) -> Vec<NodeRecordFull> {
+        self.nodes
+            .values()
+            .filter(|n| {
+                n.capabilities
+                    .as_ref()
+                    .map(|c| c.features.iter().any(|f| f == feature))
+                    .unwrap_or(false)
+            })
+            .filter_map(|rec| self.get_node_full(&rec.identity.id))
+            .collect()
+    }
+
+    /// Returns the name of any model in Ready state on any LLM-capable Compute node.
+    /// Used by the intent router when no model_name is specified.
+    pub fn any_ready_llm_model(&self) -> Option<String> {
+        for node in self.nodes.values() {
+            if node.identity.role != NodeRole::Compute {
+                continue;
+            }
+            let has_llm = node
+                .capabilities
+                .as_ref()
+                .map(|c| c.features.iter().any(|f| f == "llm"))
+                .unwrap_or(false);
+            if !has_llm {
+                continue;
+            }
+            for (model_name, alloc) in &node.models {
+                if alloc.state == ModelLifecycleState::Ready {
+                    return Some(model_name.clone());
+                }
+            }
+        }
+        None
+    }
+
     pub fn get_node_full(&self, id: &str) -> Option<NodeRecordFull> {
         let now = SystemTime::now();
         let rec = self.nodes.get(id)?;
@@ -404,6 +442,7 @@ mod tests {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 8.0,
+            features: vec!["llm".into()],
         }
     }
 
@@ -521,6 +560,7 @@ mod tests {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 3.69,
+            features: vec!["llm".into()],
         }
     }
 
@@ -607,5 +647,62 @@ mod tests {
         assert_eq!(alloc.size_mb, 500);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn nodes_with_feature_finds_lighting_nodes() {
+        let mut reg = Registry::new();
+        reg.update_heartbeat(make_identity("llm-only"));
+        reg.update_capabilities(
+            "llm-only",
+            NodeCapabilities {
+                features: vec!["llm".into()],
+                ..NodeCapabilities::default()
+            },
+        );
+        reg.update_heartbeat(make_identity("llm-and-lighting"));
+        reg.update_capabilities(
+            "llm-and-lighting",
+            NodeCapabilities {
+                features: vec!["llm".into(), "lighting".into()],
+                ..NodeCapabilities::default()
+            },
+        );
+
+        let lighting_nodes = reg.nodes_with_feature("lighting");
+        assert_eq!(lighting_nodes.len(), 1);
+        assert_eq!(lighting_nodes[0].id, "llm-and-lighting");
+    }
+
+    #[test]
+    fn any_ready_llm_model_returns_model_name() {
+        let mut reg = Registry::new();
+        reg.update_heartbeat(make_identity("node-1"));
+        reg.update_capabilities(
+            "node-1",
+            NodeCapabilities {
+                features: vec!["llm".into()],
+                ..NodeCapabilities::default()
+            },
+        );
+        reg.update_model_status("node-1", "qwen2.5:7b", 4096, ModelLifecycleState::Ready);
+
+        assert_eq!(reg.any_ready_llm_model(), Some("qwen2.5:7b".into()));
+    }
+
+    #[test]
+    fn any_ready_llm_model_returns_none_when_loading() {
+        let mut reg = Registry::new();
+        reg.update_heartbeat(make_identity("node-1"));
+        reg.update_capabilities(
+            "node-1",
+            NodeCapabilities {
+                features: vec!["llm".into()],
+                ..NodeCapabilities::default()
+            },
+        );
+        reg.update_model_status("node-1", "qwen2.5:7b", 4096, ModelLifecycleState::Loading);
+
+        assert_eq!(reg.any_ready_llm_model(), None);
     }
 }
