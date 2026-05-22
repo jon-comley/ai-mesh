@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 capability-core = { path = "../core" }
+capability-zigbee = { path = "../zigbee" }
 shared = { path = "../../shared" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["sync"] }
