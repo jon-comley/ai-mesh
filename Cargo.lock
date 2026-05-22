@@ -181,6 +181,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "capability-core",
+ "capability-zigbee",
  "serde_json",
  "shared",
  "tokio",

@@ -1,14 +1,21 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use capability_core::{Capability, ToolSchema};
+use capability_zigbee::{ZigbeeClient, ZigbeeError, ZigbeeEvent};
 use shared::{MeshMessage, SceneLoadedReport};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{OnceCell, mpsc::Sender};
 use tracing::{info, warn};
 
-pub struct LightingCapability;
+pub struct LightingCapability {
+    zigbee: Arc<OnceCell<Arc<ZigbeeClient>>>,
+}
 
 impl LightingCapability {
     pub fn new() -> Self {
-        Self
+        Self {
+            zigbee: Arc::new(OnceCell::new()),
+        }
     }
 }
 
@@ -31,23 +38,72 @@ impl Capability for LightingCapability {
         )
     }
 
-    async fn start(&self, _tx: Sender<MeshMessage>) -> Result<(), String> {
-        info!("lighting capability started (MQTT stub — Phase 6 will add event loop)");
+    async fn start(&self, tx: Sender<MeshMessage>) -> Result<(), String> {
+        let Ok(host) = std::env::var("MQTT_HOST") else {
+            info!("lighting: MQTT_HOST not set — running as stub");
+            return Ok(());
+        };
+        let port: u16 = std::env::var("MQTT_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1883);
+        let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".into());
+
+        let client = ZigbeeClient::connect(&host, port, node_id)
+            .await
+            .map_err(|e: ZigbeeError| format!("zigbee connect: {e}"))?;
+        let client = Arc::new(client);
+
+        let mut events = client.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(ZigbeeEvent::StateChanged(report)) => {
+                        let _ = tx.send(MeshMessage::LightState(report)).await;
+                    }
+                    Ok(ZigbeeEvent::ConnectionLost) => {
+                        warn!("zigbee: connection lost");
+                    }
+                    Ok(ZigbeeEvent::ConnectionRestored) => {
+                        info!("zigbee: connection restored");
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("zigbee: event receiver lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        self.zigbee
+            .set(client)
+            .map_err(|_| String::from("zigbee already initialized"))?;
+        info!("lighting: MQTT connected to {host}:{port}");
         Ok(())
     }
 
     async fn handle(&self, msg: MeshMessage, tx: Sender<MeshMessage>) {
         match msg {
-            MeshMessage::LightCommand(req) => {
-                info!(request_id = %req.request_id, "LightCommand received (stub — not yet implemented)");
-            }
+            MeshMessage::LightCommand(req) => match self.zigbee.get() {
+                Some(client) => {
+                    if let Err(e) = client.send_command(&req.target, &req.command).await {
+                        warn!(request_id = %req.request_id, "light command failed: {e}");
+                    } else {
+                        info!(request_id = %req.request_id, "light command sent");
+                    }
+                }
+                None => {
+                    warn!(request_id = %req.request_id, "LightCommand received but MQTT not connected");
+                }
+            },
             MeshMessage::SceneLoad(req) => {
-                info!(request_id = %req.request_id, scene = %req.scene_name, "SceneLoad received (stub)");
+                info!(request_id = %req.request_id, scene = %req.scene_name, "SceneLoad received (scenes not yet implemented)");
                 let report = SceneLoadedReport {
                     request_id: req.request_id,
                     scene_name: req.scene_name,
                     success: false,
-                    error: Some("lighting not yet implemented".into()),
+                    error: Some("scenes not yet implemented".into()),
                 };
                 if tx.send(MeshMessage::SceneLoaded(report)).await.is_err() {
                     warn!("lighting: failed to send SceneLoaded — channel closed");
@@ -152,6 +208,9 @@ mod tests {
 
     #[tokio::test]
     async fn start_returns_ok() {
+        // MQTT_HOST not set → stub mode
+        // SAFETY: single-threaded test, no concurrent env access
+        unsafe { std::env::remove_var("MQTT_HOST") };
         let (tx, _rx) = mpsc::channel(8);
         assert!(LightingCapability::new().start(tx).await.is_ok());
     }
@@ -187,5 +246,15 @@ mod tests {
             }
             _ => panic!("expected SceneLoaded"),
         }
+    }
+
+    #[tokio::test]
+    async fn light_command_without_mqtt_logs_warning() {
+        // ZigbeeClient not initialized → handle should not panic
+        // SAFETY: single-threaded test, no concurrent env access
+        unsafe { std::env::remove_var("MQTT_HOST") };
+        let (tx, _rx) = mpsc::channel(8);
+        LightingCapability::new().handle(light_command(), tx).await;
+        // no panic = pass
     }
 }

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <coordinator_ip> <role> <user>"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <coordinator_ip> <role> <user> [mqtt_host] [mqtt_port]"
 set -e
 
 COORDINATOR_IP="$1"
 ROLE="${2:-compute}"
 AGENT_USER="$3"
+MQTT_HOST="${4:-}"
+MQTT_PORT="${5:-1883}"
 
 if [ -z "$COORDINATOR_IP" ] || [ -z "$AGENT_USER" ]; then
-    echo "Usage: $0 <coordinator_ip> <role> <user>"
+    echo "Usage: $0 <coordinator_ip> <role> <user> [mqtt_host] [mqtt_port]"
     exit 1
 fi
 
@@ -102,6 +104,8 @@ Environment=LLAMA_SERVER_BIN=/opt/llama.cpp/llama-server
 Environment=LD_LIBRARY_PATH=/opt/llama.cpp
 Environment=LLAMA_GPU_LAYERS=0
 Environment=DEFAULT_MODEL=${DEFAULT_MODEL}
+$([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_HOST=${MQTT_HOST}" || true)
+$([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_PORT=${MQTT_PORT}" || true)
 Restart=always
 RestartSec=5
 User=${AGENT_USER}
