@@ -1,0 +1,13 @@
+[package]
+name = "capability-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+shared = { path = "../../shared" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

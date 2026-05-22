@@ -16,9 +16,16 @@ async fn server_handles_request_node_info() {
         let (socket, _) = listener.accept().await.unwrap();
         let connections = Arc::new(Mutex::new(HashMap::new()));
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        coordinator::server::handle_connection(socket, reg_clone, connections, pending)
-            .await
-            .unwrap();
+        let pending_intents = Arc::new(Mutex::new(HashMap::new()));
+        coordinator::server::handle_connection(
+            socket,
+            reg_clone,
+            connections,
+            pending,
+            pending_intents,
+        )
+        .await
+        .unwrap();
     });
 
     // Insert a node

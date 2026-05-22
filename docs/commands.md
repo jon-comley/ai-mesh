@@ -14,6 +14,35 @@ All commands are run via `just <target>` from the workspace root.
 
 ---
 
+## Controller Setup (new machine)
+
+Run once on a fresh laptop (WSL2). Idempotent — safe to re-run.
+
+```bash
+just setup-controller
+```
+
+What it does:
+1. Installs Rust via rustup (skips if already present); adds `~/.cargo/env` to `~/.bashrc`
+2. Checks for `build-essential`, `gcc-mingw-w64-x86-64`, `gcc-aarch64-linux-gnu` — prints install command if missing
+3. Adds ARM64 and Windows cross-compilation targets via rustup
+4. Generates an SSH key (`~/.ssh/id_ed25519`) if none exists
+5. Pushes the SSH key to every node in `nodes/*.env` (Linux via `ssh-copy-id`; Windows via `C:\ProgramData\ssh\administrators_authorized_keys`)
+6. Runs `just update-portproxy` to set up the WSL2 → Windows portproxy
+7. Opens port `coordinator_port` in the Windows Firewall (UAC prompt)
+8. Warns if `coordinator_ip` in the justfile does not match this machine's LAN IP
+9. Runs `cargo build` to verify the toolchain
+
+After setup:
+```bash
+just provision-all    # deploy agent to all nodes with this machine's coordinator IP
+just start-cluster    # bring the full cluster up
+```
+
+**When moving to a new laptop:** update `coordinator_ip` at the top of `justfile` to the new machine's LAN IP, then run `just setup-controller` and `just provision-all`.
+
+---
+
 ## Dev Workflow
 
 | Command | Description |
@@ -132,7 +161,7 @@ These are uploaded and run remotely by the justfile recipes — you do not need 
 | Command | Description |
 |---------|-------------|
 | `just validate-routing` | **Recommended.** Confirms each model routes to the correct node: `qwen2.5:1.5b` → Pi, `qwen2.5:7b` → Beelink. Fails fast with a clear message if no compute nodes are registered (run `just restart-coordinator` or `just start-cluster` first). Prints PASS/FAIL per assertion |
-| `just test-inference` | Legacy end-to-end test: loads `qwen2.5:1.5b` on **all** compute nodes then fires 4 requests. Does not validate hardware-aware routing |
+| `just test-inference` | Legacy end-to-end test: loads `qwen2.5:1.5b` on **all** compute nodes then fires 4 requests. Does not validate hardware-aware routing. **Note: stops all remote agent services on exit** — run `just start-agents && just restart-coordinator` afterwards |
 
 ### validate-routing detail
 
@@ -160,7 +189,7 @@ Defined at the top of `justfile`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `coordinator_ip` | `192.168.1.12` | Windows host IP used by remote nodes to reach the coordinator via portproxy |
+| `coordinator_ip` | `192.168.1.15` | Windows host LAN IP — remote nodes connect here via portproxy. Update when moving to a new machine, then run `just provision-all` |
 | `coordinator_port` | `9000` | Coordinator TCP port |
 
 Per-node config (host, user, OS, role) lives in `nodes/<name>.env`, not in the justfile.

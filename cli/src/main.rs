@@ -45,6 +45,14 @@ enum Commands {
         model_name: String,
         prompt: String,
     },
+    /// Natural language intent — the LLM decides whether to answer or call a tool.
+    Intent {
+        /// The text to send (e.g. "dim the lights" or "explain TCP keepalive").
+        text: String,
+        /// Optional model to use. Omit to let the coordinator pick the best available.
+        #[arg(long)]
+        model: Option<String>,
+    },
     Unload {
         node_id: String,
         model_name: String,
@@ -80,6 +88,7 @@ async fn main() {
         Commands::Infer { model_name, prompt } => {
             commands::infer::run(addr, model_name, prompt).await
         }
+        Commands::Intent { text, model } => commands::intent::run(addr, text, model).await,
         Commands::Unload {
             node_id,
             model_name,

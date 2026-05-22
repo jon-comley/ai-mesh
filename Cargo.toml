@@ -1,6 +1,9 @@
 [workspace]
 members = [
     "shared",
+    "capabilities/core",
+    "capabilities/llm",
+    "capabilities/lighting",
     "agent",
     "coordinator",
     "cli",

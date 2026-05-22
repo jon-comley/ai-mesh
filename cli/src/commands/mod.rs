@@ -1,6 +1,7 @@
 pub mod find_node;
 pub mod infer;
 pub mod info;
+pub mod intent;
 pub mod load;
 pub mod nodes;
 pub mod reset;

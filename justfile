@@ -1,7 +1,155 @@
-coordinator_ip   := "192.168.1.12"
+coordinator_ip   := "192.168.1.15"
 coordinator_port := "9000"
 
+export PATH := env_var("HOME") / ".cargo/bin" + ":" + env_var("PATH")
+
 default: build
+
+# Set up this machine as the ai-mesh controller.
+# Run once on a fresh laptop (from WSL2). Idempotent — safe to re-run.
+# Usage: just setup-controller
+setup-controller:
+    #!/usr/bin/env bash
+    set -e
+
+    echo "=== ai-mesh controller setup ==="
+    echo ""
+
+    # 1. Rust toolchain
+    if ! command -v rustup &>/dev/null; then
+        echo ">>> Installing Rust toolchain..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+        source "$HOME/.cargo/env"
+        if ! grep -q 'cargo/env' "$HOME/.bashrc" 2>/dev/null; then
+            echo '' >> "$HOME/.bashrc"
+            echo '. "$HOME/.cargo/env"' >> "$HOME/.bashrc"
+            echo ">>> Added cargo to PATH in ~/.bashrc"
+        fi
+    else
+        source "$HOME/.cargo/env" 2>/dev/null || true
+        echo ">>> Rust already installed ($(rustc --version))"
+    fi
+
+    # 2. Cross-compilation toolchains for remote node deployment
+    echo ">>> Checking cross-compilation toolchains..."
+    MISSING_PKGS=()
+    dpkg -l build-essential       2>/dev/null | grep -q "^ii" || MISSING_PKGS+=(build-essential)
+    dpkg -l gcc-mingw-w64-x86-64  2>/dev/null | grep -q "^ii" || MISSING_PKGS+=(gcc-mingw-w64-x86-64)
+    dpkg -l gcc-aarch64-linux-gnu 2>/dev/null | grep -q "^ii" || MISSING_PKGS+=(gcc-aarch64-linux-gnu)
+    if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+        echo ""
+        echo ">>> Missing apt packages: ${MISSING_PKGS[*]}"
+        echo ">>> Please run the following, then re-run 'just setup-controller':"
+        echo ""
+        echo "    sudo apt-get install -y ${MISSING_PKGS[*]}"
+        echo ""
+        exit 1
+    else
+        echo ">>> build-essential and gcc-mingw-w64-x86-64 already installed"
+    fi
+
+    if ! rustup target list --installed | grep -q "x86_64-pc-windows-gnu"; then
+        rustup target add x86_64-pc-windows-gnu
+    else
+        echo ">>> x86_64-pc-windows-gnu already added"
+    fi
+
+    if ! rustup target list --installed | grep -q "aarch64-unknown-linux-gnu"; then
+        rustup target add aarch64-unknown-linux-gnu
+    else
+        echo ">>> aarch64-unknown-linux-gnu already added"
+    fi
+
+    # 3. Git hooks
+    echo ">>> Installing git hooks..."
+    bash scripts/install-hooks.sh
+
+    # 4. SSH key — generate if missing, then push to all nodes
+    if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
+        echo ">>> Generating SSH key..."
+        ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519"
+    else
+        echo ">>> SSH key already exists"
+    fi
+
+    echo ">>> Pushing SSH key to all nodes..."
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        echo ">>> Setting up SSH key on ${NODE_NAME} (${NODE_HOST}, ${NODE_OS})..."
+        case "$NODE_OS" in
+          linux)
+            ssh-copy-id -o StrictHostKeyChecking=accept-new \
+                -o ConnectTimeout=10 \
+                "${NODE_USER}@${NODE_HOST}" \
+                && echo ">>> ${NODE_NAME} SSH key OK" \
+                || echo ">>> Warning: could not push key to ${NODE_NAME} (skipping)"
+            ;;
+          windows)
+            PUBKEY=$(cat "$HOME/.ssh/id_ed25519.pub")
+            ssh -o StrictHostKeyChecking=accept-new \
+                -o ConnectTimeout=10 \
+                "${NODE_USER}@${NODE_HOST}" \
+                "powershell -Command \"\
+                    \$f = 'C:\\ProgramData\\ssh\\administrators_authorized_keys';\
+                    \$key = '${PUBKEY}';\
+                    if (-not (Test-Path \$f)) { New-Item -ItemType File -Path \$f -Force | Out-Null };\
+                    \$existing = Get-Content \$f -ErrorAction SilentlyContinue;\
+                    if (\$existing -notcontains \$key) { Add-Content \$f \$key; Write-Host 'Key added' } else { Write-Host 'Key already present' }\
+                \"" \
+                && echo ">>> ${NODE_NAME} SSH key OK" \
+                || echo ">>> Warning: could not push key to ${NODE_NAME} (skipping)"
+            ;;
+        esac
+    done
+
+    # 5. Portproxy + firewall
+    echo ">>> Setting up Windows portproxy..."
+    just update-portproxy
+    echo ">>> Opening port {{coordinator_port}} in Windows Firewall..."
+    powershell.exe -Command "
+        \$rule = Get-NetFirewallRule -DisplayName 'ai-mesh coordinator' -ErrorAction SilentlyContinue
+        if (-not \$rule) {
+            Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile -Command New-NetFirewallRule -DisplayName ''ai-mesh coordinator'' -Direction Inbound -Protocol TCP -LocalPort {{coordinator_port}} -Action Allow'
+            Write-Host '>>> Firewall rule added.'
+        } else {
+            Write-Host '>>> Firewall rule already exists.'
+        }
+    " 2>/dev/null || echo ">>> Warning: could not configure firewall (add manually if nodes cannot connect)"
+
+    # 6. Check coordinator_ip matches this machine's LAN IP
+    LAN_IP=$(powershell.exe -NoProfile -Command \
+        "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { \$_.InterfaceAlias -notmatch 'Loopback|WSL|vEthernet|Bluetooth' -and \$_.IPAddress -notmatch '^169\.' } | Select-Object -First 1 -ExpandProperty IPAddress" \
+        2>/dev/null | tr -d '\r\n')
+    if [ "{{coordinator_ip}}" != "$LAN_IP" ]; then
+        echo ""
+        echo ">>> WARNING: coordinator_ip in justfile ({{coordinator_ip}}) does not match"
+        echo ">>>          this machine's LAN IP ($LAN_IP)."
+        echo ">>>          Update the top of justfile: coordinator_ip := \"$LAN_IP\""
+        echo ">>>          Then reprovision remote nodes: just provision-all"
+    else
+        echo ">>> coordinator_ip matches LAN IP ({{coordinator_ip}}) — OK"
+    fi
+
+    # 7. Build
+    echo ""
+    echo ">>> Building project (this takes a minute on a fresh clone)..."
+    cargo build
+
+    echo ""
+    echo "=== Setup complete ==="
+    echo ""
+    echo "Next steps:"
+    if [ "{{coordinator_ip}}" != "$LAN_IP" ]; then
+        echo "  1. Fix coordinator_ip in justfile (see warning above)"
+        echo "  2. Reprovision remote nodes:  just provision-all"
+        echo "  3. Start the cluster:         just start-cluster"
+    else
+        echo "  1. Reprovision remote nodes with this machine's coordinator IP:"
+        echo "       just provision-all"
+        echo "  2. Start the cluster:"
+        echo "       just start-cluster"
+    fi
 
 install-hooks:
     bash scripts/install-hooks.sh
@@ -126,11 +274,11 @@ deploy-node node:
         NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
         if [ "$NODE_ARCH" = "x86_64" ]; then
             echo ">>> Building Linux x86_64 agent..."
-            cargo build --release --target x86_64-unknown-linux-gnu -p agent
+            cargo build --release --target x86_64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
             AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
         else
             echo ">>> Building Linux ARM64 agent..."
-            cargo build --release --target aarch64-unknown-linux-gnu -p agent
+            cargo build --release --target aarch64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
             AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
         fi
 
@@ -145,7 +293,7 @@ deploy-node node:
 
       windows)
         echo ">>> Building Windows x86_64 agent..."
-        cargo build --release -p agent --target x86_64-pc-windows-gnu
+        cargo build --release -p agent --target x86_64-pc-windows-gnu --features ${NODE_FEATURES:-llm}
 
         WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
         echo ">>> Creating ${WIN_PATH} on ${NODE_HOST}..."
@@ -194,25 +342,24 @@ provision-all:
         wait $pid; local rc=$?; echo ""; return $rc
     }
 
-    echo ">>> Building Linux ARM64 agent..."
-    cargo build --release --target aarch64-unknown-linux-gnu -p agent
-
-    echo ">>> Building Linux x86_64 agent..."
-    cargo build --release --target x86_64-unknown-linux-gnu -p agent
-
-    echo ">>> Building Windows x86_64 agent..."
-    cargo build --release -p agent --target x86_64-pc-windows-gnu
-
     for f in nodes/*.env; do
         source "$f"
         NODE_NAME=$(basename "$f" .env)
+        NODE_FEATURES="${NODE_FEATURES:-llm}"
         echo ""
-        echo "=== Provisioning ${NODE_NAME} (${NODE_OS} / ${NODE_HOST}) ==="
+        echo "=== Provisioning ${NODE_NAME} (${NODE_OS} / ${NODE_HOST}) [features: ${NODE_FEATURES}] ==="
 
         case "$NODE_OS" in
           linux)
             NODE_ARCH=$(ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
-            AGENT_BIN=$([ "$NODE_ARCH" = "x86_64" ] && echo "target/x86_64-unknown-linux-gnu/release/agent" || echo "target/aarch64-unknown-linux-gnu/release/agent")
+            if [ "$NODE_ARCH" = "x86_64" ]; then
+                TARGET="x86_64-unknown-linux-gnu"
+            else
+                TARGET="aarch64-unknown-linux-gnu"
+            fi
+            AGENT_BIN="target/${TARGET}/release/agent"
+            echo ">>> Building Linux ${NODE_ARCH} agent (features: ${NODE_FEATURES})..."
+            cargo build --release --target "${TARGET}" -p agent --features "${NODE_FEATURES}"
 
             echo ">>> Stopping agent service..."
             ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "
@@ -229,6 +376,9 @@ provision-all:
 
           windows)
             WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
+
+            echo ">>> Building Windows x86_64 agent (features: ${NODE_FEATURES})..."
+            cargo build --release -p agent --target x86_64-pc-windows-gnu --features "${NODE_FEATURES}"
 
             echo ">>> Stopping agent service..."
             ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
@@ -328,10 +478,10 @@ update-node node:
       linux)
         NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
         if [ "$NODE_ARCH" = "x86_64" ]; then
-            cargo build --release --target x86_64-unknown-linux-gnu -p agent
+            cargo build --release --target x86_64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
             AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
         else
-            cargo build --release --target aarch64-unknown-linux-gnu -p agent
+            cargo build --release --target aarch64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
             AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
         fi
         echo ">>> Uploading updated agent to ${NODE_HOST}..."
@@ -342,7 +492,7 @@ update-node node:
         ;;
 
       windows)
-        cargo build --release -p agent --target x86_64-pc-windows-gnu
+        cargo build --release -p agent --target x86_64-pc-windows-gnu --features ${NODE_FEATURES:-llm}
         WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
         # Strip debug symbols to shrink the binary and speed up the transfer.
         SRC="target/x86_64-pc-windows-gnu/release/agent.exe"
@@ -705,13 +855,13 @@ start-cluster: update-portproxy
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
 
     echo ">>> Waiting for coordinator to accept connections..."
-    for i in $(seq 1 30); do
+    for i in $(seq 1 60); do
         sleep 1
-        if timeout 1 bash -c "echo > /dev/tcp/{{coordinator_ip}}/{{coordinator_port}}" 2>/dev/null; then
+        if grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null; then
             echo ">>> Coordinator ready."
             break
         fi
-        [ "$i" -eq 30 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
+        [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
     done
 
     cargo run -q -p cli -- reset-registry > /dev/null || true
@@ -763,13 +913,13 @@ restart-coordinator: update-portproxy
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
 
     echo ">>> Waiting for coordinator to accept connections..."
-    for i in $(seq 1 30); do
+    for i in $(seq 1 60); do
         sleep 1
-        if timeout 1 bash -c "echo > /dev/tcp/{{coordinator_ip}}/{{coordinator_port}}" 2>/dev/null; then
+        if grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null; then
             echo ">>> Coordinator ready."
             break
         fi
-        [ "$i" -eq 30 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
+        [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
     done
 
     cargo run -q -p cli -- reset-registry > /dev/null || true

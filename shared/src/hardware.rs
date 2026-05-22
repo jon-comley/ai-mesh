@@ -31,6 +31,10 @@ pub struct NodeCapabilities {
     pub gpu_inference: bool,
     pub ane_inference: bool,
     pub max_model_size_gb: f32,
+    /// Active Cargo feature capabilities on this node, e.g. ["llm", "lighting"].
+    /// Populated from compile-time feature flags; used by the coordinator to route
+    /// capability-specific messages (e.g. LightCommand) to the right node.
+    pub features: Vec<String>,
 }
 
 impl Default for NodeCapabilities {
@@ -40,6 +44,7 @@ impl Default for NodeCapabilities {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 0.0,
+            features: vec![],
         }
     }
 }
@@ -104,6 +109,29 @@ mod tests {
             let back: ModelLifecycleState = serde_json::from_str(&json).unwrap();
             assert_eq!(state, back);
         }
+    }
+
+    #[test]
+    fn node_capabilities_with_features_roundtrip() {
+        let caps = NodeCapabilities {
+            cpu_inference: true,
+            gpu_inference: true,
+            ane_inference: false,
+            max_model_size_gb: 8.0,
+            features: vec!["llm".into(), "lighting".into()],
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: NodeCapabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, caps);
+        assert_eq!(back.features, vec!["llm", "lighting"]);
+    }
+
+    #[test]
+    fn node_capabilities_empty_features_roundtrip() {
+        let caps = NodeCapabilities::default();
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: NodeCapabilities = serde_json::from_str(&json).unwrap();
+        assert!(back.features.is_empty());
     }
 
     #[test]

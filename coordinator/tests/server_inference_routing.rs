@@ -41,7 +41,15 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
         let pend = pending_inferences.clone();
         tokio::spawn(async move {
             if let Ok((socket, _)) = agent_listener.accept().await {
-                let _ = coordinator::server::handle_connection(socket, reg, conns, pend).await;
+                let pending_intents = Arc::new(Mutex::new(HashMap::new()));
+                let _ = coordinator::server::handle_connection(
+                    socket,
+                    reg,
+                    conns,
+                    pend,
+                    pending_intents,
+                )
+                .await;
             }
         });
     }
@@ -55,7 +63,15 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
         let pend = pending_inferences.clone();
         tokio::spawn(async move {
             if let Ok((socket, _)) = cli_listener.accept().await {
-                let _ = coordinator::server::handle_connection(socket, reg, conns, pend).await;
+                let pending_intents = Arc::new(Mutex::new(HashMap::new()));
+                let _ = coordinator::server::handle_connection(
+                    socket,
+                    reg,
+                    conns,
+                    pend,
+                    pending_intents,
+                )
+                .await;
             }
         });
     }
@@ -88,6 +104,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 8.0,
+            features: vec!["llm".into()],
         }),
     )
     .await;

@@ -37,7 +37,15 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
         tokio::spawn(async move {
             if let Ok((socket, _)) = agent_listener.accept().await {
                 let pending = Arc::new(Mutex::new(HashMap::new()));
-                let _ = coordinator::server::handle_connection(socket, reg, conns, pending).await;
+                let pending_intents = Arc::new(Mutex::new(HashMap::new()));
+                let _ = coordinator::server::handle_connection(
+                    socket,
+                    reg,
+                    conns,
+                    pending,
+                    pending_intents,
+                )
+                .await;
             }
         });
     }
@@ -51,7 +59,15 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
         tokio::spawn(async move {
             if let Ok((socket, _)) = cli_listener.accept().await {
                 let pending = Arc::new(Mutex::new(HashMap::new()));
-                let _ = coordinator::server::handle_connection(socket, reg, conns, pending).await;
+                let pending_intents = Arc::new(Mutex::new(HashMap::new()));
+                let _ = coordinator::server::handle_connection(
+                    socket,
+                    reg,
+                    conns,
+                    pending,
+                    pending_intents,
+                )
+                .await;
             }
         });
     }

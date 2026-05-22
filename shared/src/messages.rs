@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 1;
+pub const WIRE_VERSION: u32 = 2;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -97,6 +97,96 @@ pub struct NodeRecordFull {
     pub models: Vec<ModelAllocationFull>,
 }
 
+// ── Lighting types ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum LightTarget {
+    Group(u16),
+    Device(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum LightAction {
+    On,
+    Off,
+    Toggle,
+    Brightness(u8),
+    ColorXY { x: f32, y: f32 },
+    ColorTemp(u16), // mireds
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LightCommandRequest {
+    pub request_id: String,
+    pub target: LightTarget,
+    pub command: LightAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LightStateReport {
+    pub node_id: String,
+    pub device_id: String,
+    pub on: bool,
+    pub brightness: Option<u8>,
+    pub color_xy: Option<(f32, f32)>,
+    pub color_temp: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneLoadRequest {
+    pub request_id: String,
+    pub scene_name: String,
+    pub transition_ms: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneLoadedReport {
+    pub request_id: String,
+    pub scene_name: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+// ── Intent routing types ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IntentRole {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentTurn {
+    pub role: IntentRole,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentRequest {
+    pub request_id: String,
+    pub text: String,
+    pub model_name: Option<String>,
+    pub context: Vec<IntentTurn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCallRecord {
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub result: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntentResponse {
+    pub request_id: String,
+    pub node_id: String,
+    pub text: Option<String>,
+    pub tool_calls: Vec<ToolCallRecord>,
+    pub error: Option<String>,
+}
+
+// ── MeshMessage ───────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MeshMessage {
     Heartbeat(NodeIdentity),
@@ -116,10 +206,18 @@ pub enum MeshMessage {
     ModelLoad(ModelLoadRequest),
     ModelUnload(ModelUnloadRequest),
     ModelStatus(ModelStatusReport),
-    // Admin messages (Phase 6+)
+    // Admin messages
     Admin(AdminMessage),
     // Coordinator → caller: generic error response
     Error(String),
+    // Lighting capability messages
+    LightCommand(LightCommandRequest),
+    LightState(LightStateReport),
+    SceneLoad(SceneLoadRequest),
+    SceneLoaded(SceneLoadedReport),
+    // Intent routing
+    IntentRequest(IntentRequest),
+    IntentResponse(IntentResponse),
 }
 
 /// Structured admin messages for coordinator control.
@@ -249,6 +347,7 @@ mod tests {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 3.69,
+            features: vec!["llm".into()],
         };
 
         let rec = NodeRecordFull {
@@ -417,5 +516,149 @@ mod tests {
             serde_json::from_str::<ModelStatusReport>(&json).unwrap(),
             rep
         );
+    }
+
+    // ── Lighting type tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn light_command_on_roundtrip() {
+        let msg = MeshMessage::LightCommand(LightCommandRequest {
+            request_id: "lc-1".into(),
+            target: LightTarget::Group(1),
+            command: LightAction::On,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn light_command_color_xy_roundtrip() {
+        let msg = MeshMessage::LightCommand(LightCommandRequest {
+            request_id: "lc-2".into(),
+            target: LightTarget::Device("0x00158d0001".into()),
+            command: LightAction::ColorXY {
+                x: 0.3127,
+                y: 0.3290,
+            },
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let back = serde_json::from_str::<MeshMessage>(&json).unwrap();
+        assert_eq!(back, msg);
+        // verify float precision survives the round-trip
+        if let MeshMessage::LightCommand(req) = back {
+            if let LightAction::ColorXY { x, y } = req.command {
+                assert!((x - 0.3127_f32).abs() < f32::EPSILON);
+                assert!((y - 0.3290_f32).abs() < f32::EPSILON);
+            } else {
+                panic!("wrong variant");
+            }
+        }
+    }
+
+    #[test]
+    fn light_command_brightness_roundtrip() {
+        let msg = MeshMessage::LightCommand(LightCommandRequest {
+            request_id: "lc-3".into(),
+            target: LightTarget::Group(2),
+            command: LightAction::Brightness(128),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn light_state_report_roundtrip() {
+        let msg = MeshMessage::LightState(LightStateReport {
+            node_id: "pi1".into(),
+            device_id: "bulb-1".into(),
+            on: true,
+            brightness: Some(200),
+            color_xy: Some((0.3127, 0.3290)),
+            color_temp: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn scene_load_roundtrip() {
+        let msg = MeshMessage::SceneLoad(SceneLoadRequest {
+            request_id: "sl-1".into(),
+            scene_name: "cozy".into(),
+            transition_ms: 2000,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn scene_loaded_roundtrip() {
+        let msg = MeshMessage::SceneLoaded(SceneLoadedReport {
+            request_id: "sl-1".into(),
+            scene_name: "cozy".into(),
+            success: true,
+            error: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn scene_loaded_with_error_roundtrip() {
+        let msg = MeshMessage::SceneLoaded(SceneLoadedReport {
+            request_id: "sl-2".into(),
+            scene_name: "disco".into(),
+            success: false,
+            error: Some("unknown scene".into()),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    // ── Intent type tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn intent_request_roundtrip() {
+        let msg = MeshMessage::IntentRequest(IntentRequest {
+            request_id: "ir-1".into(),
+            text: "dim the living room lights".into(),
+            model_name: None,
+            context: vec![IntentTurn {
+                role: IntentRole::User,
+                content: "hello".into(),
+            }],
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn intent_response_with_tool_call_roundtrip() {
+        let msg = MeshMessage::IntentResponse(IntentResponse {
+            request_id: "ir-1".into(),
+            node_id: "pi1".into(),
+            text: Some("Done — living room set to cozy.".into()),
+            tool_calls: vec![ToolCallRecord {
+                tool: "scene_load".into(),
+                args: serde_json::json!({"scene": "cozy", "transition_ms": 2000}),
+                result: Some("ok".into()),
+            }],
+            error: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn intent_response_free_text_roundtrip() {
+        let msg = MeshMessage::IntentResponse(IntentResponse {
+            request_id: "ir-2".into(),
+            node_id: "beelink1".into(),
+            text: Some("TCP keepalive is a mechanism that...".into()),
+            tool_calls: vec![],
+            error: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
     }
 }
