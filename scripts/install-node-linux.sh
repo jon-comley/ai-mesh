@@ -59,6 +59,9 @@ DEFAULT_MODEL="$(detect_default_model)"
 echo ">>> Detected hardware → default model: ${DEFAULT_MODEL}"
 echo ">>> To load it after provisioning: just auto-load-model <node-name>"
 
+echo ">>> Installing system dependencies..."
+apt-get install -y -q git curl
+
 echo ">>> Installing llama-server (llama.cpp latest release)..."
 if ! LLAMA_VERSION="$(curl -fsSL --connect-timeout 5 \
         https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
