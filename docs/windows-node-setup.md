@@ -389,3 +389,37 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 - `LocalAccountTokenFilterPolicy` (SSH elevation) is set by the provision script — it will be re-applied by `just deploy-node`
 - The NSSM service and agent binary are wiped by a CMOS reset if Windows was reinstalled, but survive a simple CMOS clear if the OS volume is intact
 - If the node doesn't re-appear after `deploy-node`, run `just reset` to clear stale registry entries then `just start-cluster` again
+
+### Beelink SER8 — OS hang (power light on, no network response)
+
+**Symptom:** Machine appears powered on (front LED lit) but does not respond to ping or SSH. Recovered by holding the power button for a hard reset. Booted cleanly after. First observed 2026-05-23.
+
+This is distinct from the CMOS/BIOS issue above — no BIOS screen, OS likely crashed or hung mid-run.
+
+**Suspected causes (most likely first):**
+
+1. **NIC power management** — Windows can suspend the network adapter independently of system sleep. `powercfg` disables system sleep but not the NIC adapter's own power-save setting. The machine is running but unreachable.
+2. **GPU driver crash** — AMD Radeon 780M running Vulkan via llama-server. A driver TDR event or BSOD with no monitor attached can leave the system hung with no recovery path.
+3. **Fast Startup** — `powercfg /h off` disables hibernate but not Windows Fast Startup (hybrid shutdown). Can produce a half-suspended state.
+
+**Diagnostics — run after next recovery, before restarting agent:**
+
+Check Event Log for kernel-power (ID 41 = unexpected shutdown) or BugCheck (BSOD):
+```bash
+ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.LevelDisplayName -eq 'Critical' -or \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
+```
+
+Check whether NIC power management is on:
+```bash
+ssh jonno@192.168.1.14 "powershell -Command \"Get-NetAdapter | Get-NetAdapterPowerManagement | Select-Object Name, AllowComputerToTurnOffDevice\""
+```
+
+**Mitigations (not yet applied — add to `install-node-windows.ps1`):**
+
+```powershell
+# Disable NIC power management
+Get-NetAdapter | Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice Disabled
+
+# Disable Fast Startup (separate from hibernate)
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f
+```
