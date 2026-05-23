@@ -427,3 +427,5 @@ ssh jonno@192.168.1.14 "powershell -Command \"reg add 'HKLM\\SYSTEM\\CurrentCont
 ```
 
 If TDR events are confirmed in the logs after a future incident, consider also reducing `LLAMA_GPU_LAYERS` from 99 to a lower value (e.g. 20–30) to reduce sustained GPU pressure.
+
+**Confirmed root cause (2026-05-23):** BSOD 0x00000133 DPC_WATCHDOG_VIOLATION — not a TDR. AMD GPU driver's DPC routine running too long under Vulkan load. **Most likely fix: update AMD GPU drivers** via Device Manager → Display Adapters → AMD Radeon 780M → Update Driver. Minidumps at `C:\WINDOWS\Minidump\052326-8968-01.dmp` and `052326-9078-01.dmp` if deeper analysis needed.
