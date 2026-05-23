@@ -280,7 +280,11 @@ fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightComma
         _ => LightAction::On,
     };
 
-    let target = match args.get("target").and_then(|v| v.as_str()) {
+    let target = match args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         Some(name) => LightTarget::Device(name.to_string()),
         None => LightTarget::Group(1),
     };
