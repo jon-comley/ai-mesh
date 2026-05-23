@@ -5,10 +5,11 @@ use shared::{AdminMessage, MeshMessage, NodeRecordFull, NodeRole};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
+use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 pub type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
@@ -30,6 +31,10 @@ pub struct Server {
     connections: Connections,
     pending_inferences: PendingInferences,
     pending_intents: PendingIntents,
+    /// Valid auth tokens. Empty = no authentication (dev/test mode).
+    pub auth_tokens: Arc<Vec<String>>,
+    /// TLS acceptor. None = plain TCP (tests and MESH_INSECURE=1 mode).
+    pub tls: Option<TlsAcceptor>,
 }
 
 impl Server {
@@ -40,6 +45,8 @@ impl Server {
             connections: Arc::new(Mutex::new(HashMap::new())),
             pending_inferences: Arc::new(Mutex::new(HashMap::new())),
             pending_intents: Arc::new(Mutex::new(HashMap::new())),
+            auth_tokens: Arc::new(vec![]),
+            tls: None,
         }
     }
 
@@ -52,30 +59,86 @@ impl Server {
             let connections = self.connections.clone();
             let pending_inferences = self.pending_inferences.clone();
             let pending_intents = self.pending_intents.clone();
+            let auth_tokens = self.auth_tokens.clone();
 
-            tokio::spawn(async move {
-                let _ = handle_connection(
-                    socket,
-                    registry,
-                    connections,
-                    pending_inferences,
-                    pending_intents,
-                )
-                .await;
-            });
+            if let Some(acceptor) = &self.tls {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    match acceptor.accept(socket).await {
+                        Ok(tls_stream) => {
+                            let _ = handle_connection(
+                                tls_stream,
+                                registry,
+                                connections,
+                                pending_inferences,
+                                pending_intents,
+                                auth_tokens,
+                            )
+                            .await;
+                        }
+                        Err(e) => warn!("TLS handshake failed: {}", e),
+                    }
+                });
+            } else {
+                tokio::spawn(async move {
+                    let _ = handle_connection(
+                        socket,
+                        registry,
+                        connections,
+                        pending_inferences,
+                        pending_intents,
+                        auth_tokens,
+                    )
+                    .await;
+                });
+            }
         }
     }
 }
 
-pub async fn handle_connection(
-    socket: TcpStream,
+pub async fn handle_connection<S>(
+    socket: S,
     registry: Arc<Mutex<Registry>>,
     connections: Connections,
     pending_inferences: PendingInferences,
     pending_intents: PendingIntents,
-) -> Result<(), ServerError> {
-    let (mut reader, mut writer) = socket.into_split();
+    auth_tokens: Arc<Vec<String>>,
+) -> Result<(), ServerError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut reader, mut writer) = tokio::io::split(socket);
     let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
+
+    // Auth check: if tokens are configured, the first message must be AuthToken.
+    if !auth_tokens.is_empty() {
+        let mut len_buf = [0u8; 4];
+        if reader.read_exact(&mut len_buf).await.is_err() {
+            return Ok(());
+        }
+        let msg_len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; msg_len];
+        if reader.read_exact(&mut buf).await.is_err() {
+            return Ok(());
+        }
+        match serde_json::from_slice::<MeshMessage>(&buf) {
+            Ok(MeshMessage::AuthToken(token)) if auth_tokens.contains(&token) => {
+                // Valid token — continue to normal message loop.
+            }
+            Ok(MeshMessage::AuthToken(_)) => {
+                warn!("rejected connection: invalid auth token");
+                return Ok(());
+            }
+            Ok(other) => {
+                warn!("rejected connection: expected AuthToken, got {:?}", other);
+                return Ok(());
+            }
+            Err(_) => {
+                warn!("rejected connection: could not parse first message");
+                return Ok(());
+            }
+        }
+    }
 
     // Tracks the node ID once a Heartbeat has been received, for cleanup on disconnect.
     let mut node_id: Option<String> = None;
@@ -500,7 +563,8 @@ mod tests {
     #[tokio::test]
     async fn test_server_receives_heartbeat() {
         let registry = Arc::new(Mutex::new(Registry::new()));
-        let server = Server::new("127.0.0.1:9001", registry.clone());
+        let mut server = Server::new("127.0.0.1:9001", registry.clone());
+        server.auth_tokens = Arc::new(vec![]);
 
         tokio::spawn(async move {
             let _ = server.run().await;

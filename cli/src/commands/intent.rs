@@ -1,6 +1,4 @@
 use shared::{IntentRequest, MeshMessage};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use uuid::Uuid;
 
 pub async fn run(coordinator: &str, text: String, model: Option<String>) {
@@ -14,18 +12,8 @@ async fn send_recv(
     coordinator: &str,
     msg: &MeshMessage,
 ) -> Result<MeshMessage, Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(coordinator).await?;
-    let data = serde_json::to_vec(msg)?;
-    let len = (data.len() as u32).to_le_bytes();
-    stream.write_all(&len).await?;
-    stream.write_all(&data).await?;
-
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let msg_len = u32::from_le_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; msg_len];
-    stream.read_exact(&mut buf).await?;
-    Ok(serde_json::from_slice(&buf)?)
+    let mut stream = crate::connection::connect(coordinator).await?;
+    Ok(crate::connection::send_recv(&mut stream, msg).await?)
 }
 
 async fn lookup_hostname(coordinator: &str, node_id: &str) -> String {

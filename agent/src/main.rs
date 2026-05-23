@@ -2,6 +2,9 @@ use agent::agent::Agent;
 use agent::config::AgentConfig;
 use agent::dispatch::{build_capabilities, dispatch};
 use agent::identity::detect_identity;
+use agent::tls::make_connector;
+use rustls::crypto::ring;
+use rustls::pki_types::ServerName;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
 use socket2::{SockRef, TcpKeepalive};
@@ -13,6 +16,9 @@ use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() {
+    ring::default_provider()
+        .install_default()
+        .expect("failed to install ring crypto provider");
     tracing_subscriber::fmt().init();
 
     let role = read_role_from_env();
@@ -42,6 +48,11 @@ async fn main() {
     loop {
         info!("Connecting to coordinator at {}", addr);
 
+        let connector = make_connector();
+        let server_name = ServerName::try_from("ai-mesh-coordinator")
+            .expect("invalid server name")
+            .to_owned();
+
         let stream = loop {
             match TcpStream::connect(&addr).await {
                 Ok(s) => break s,
@@ -64,9 +75,32 @@ async fn main() {
             }
         }
 
-        info!("Connected to coordinator");
+        let tls_stream = match connector.connect(server_name.clone(), stream).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("TLS handshake failed: {}. Retrying in 5s...", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
 
-        let (mut reader, mut writer) = stream.into_split();
+        info!("Connected to coordinator (TLS)");
+
+        let (mut reader, mut writer) = tokio::io::split(tls_stream);
+
+        // Send AuthToken as the first message if configured.
+        if let Ok(token) = std::env::var("MESH_AUTH_TOKEN") {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                let data = serde_json::to_vec(&MeshMessage::AuthToken(token)).unwrap();
+                let len = (data.len() as u32).to_le_bytes();
+                if writer.write_all(&len).await.is_err() || writer.write_all(&data).await.is_err() {
+                    warn!("Failed to send AuthToken. Retrying in 5s...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
+        }
         let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
 
         // Heartbeat loop.
