@@ -289,4 +289,11 @@ mod tests {
         assert!(!r.on);
         assert_eq!(r.brightness, Some(100));
     }
+
+    #[test]
+    fn parse_group_names_skips_entries_without_friendly_name() {
+        let payload = br#"[{"id":1},{"id":2,"friendly_name":"all"}]"#;
+        let names = parse_group_names(payload);
+        assert_eq!(names, vec!["all"]);
+    }
 }
