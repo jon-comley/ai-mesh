@@ -574,6 +574,38 @@ mod tests {
     }
 
     #[test]
+    fn build_light_command_toggle() {
+        let args = serde_json::json!({"target": "lounge", "action": "toggle"});
+        let cmd = build_light_command("r6", &args);
+        assert!(matches!(cmd.command, LightAction::Toggle));
+    }
+
+    #[test]
+    fn build_light_command_empty_target_falls_back_to_group() {
+        let args = serde_json::json!({"target": "", "action": "on"});
+        let cmd = build_light_command("r7", &args);
+        assert!(matches!(cmd.target, LightTarget::Group(1)));
+    }
+
+    #[test]
+    fn build_system_prompt_devices_only_no_groups() {
+        let schemas = tool_schemas_for_feature("lighting");
+        let devices = vec!["test_bulb".to_string()];
+        let p = build_system_prompt(&schemas, &devices, &[]);
+        assert!(p.contains("Known devices"));
+        assert!(!p.contains("Known groups"));
+    }
+
+    #[test]
+    fn build_system_prompt_groups_only_no_devices() {
+        let schemas = tool_schemas_for_feature("lighting");
+        let groups = vec!["all".to_string()];
+        let p = build_system_prompt(&schemas, &[], &groups);
+        assert!(!p.contains("Known devices"));
+        assert!(p.contains("Known groups"));
+    }
+
+    #[test]
     fn build_system_prompt_injects_device_list_into_target_description() {
         let schemas = tool_schemas_for_feature("lighting");
         let devices = vec!["test_bulb".to_string()];
