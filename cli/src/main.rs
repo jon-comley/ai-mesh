@@ -64,6 +64,10 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install ring crypto provider");
+
     let cli = Cli::parse();
     let addr = cli.coordinator.as_str();
 
