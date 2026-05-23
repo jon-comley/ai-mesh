@@ -1,5 +1,5 @@
 use coordinator::registry::Registry;
-use shared::{MeshMessage, ModelLoadRequest, NodeIdentity, NodeRole};
+use shared::{HeartbeatPayload, MeshMessage, ModelLoadRequest, NodeIdentity, NodeRole};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -79,11 +79,14 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
     let mut agent_stream = TcpStream::connect(agent_addr).await.unwrap();
     write_frame(
         &mut agent_stream,
-        &MeshMessage::Heartbeat(NodeIdentity {
-            id: node_id.clone(),
-            hostname: "pi-test".into(),
-            ip: "127.0.0.1".into(),
-            role: NodeRole::Compute,
+        &MeshMessage::Heartbeat(HeartbeatPayload {
+            identity: NodeIdentity {
+                id: node_id.clone(),
+                hostname: "pi-test".into(),
+                ip: "127.0.0.1".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
         }),
     )
     .await;

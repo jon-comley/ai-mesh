@@ -125,7 +125,13 @@
 - **`just set-fingerprint <node>`** — reads fingerprint from coordinator log, pushes to node (systemd override on Linux, NSSM AppEnvironmentExtra on Windows); called automatically by `just restart-coordinator`
 - **`just restart-coordinator`** auto-writes `MESH_TLS_FINGERPRINT` to `~/.bashrc` — no manual env var management on the controller machine
 - **Linux nodes** — `install-node-linux.sh` grants passwordless `sudo tee` + `sudo systemctl` via `/etc/sudoers.d/ai-mesh-agent` so fingerprint pushes work non-interactively
+- **Coordinator state file** ✓ — coordinator writes `~/.config/ai-mesh/coordinator.state` (shell-sourceable KEY=VALUE, `0600`) on startup with `MESH_TLS_FINGERPRINT` and `MESH_AUTH_TOKEN`; `set-fingerprint`, `set-auth-token`, and `restart-coordinator` source this file instead of grepping `/tmp/mesh-coordinator.log`, eliminating the log-rotation race condition
+- **Per-message heartbeat auth token** ✓ — `HeartbeatPayload` carries `auth_token: Option<String>`; agent populates it from `MESH_AUTH_TOKEN`; coordinator rejects heartbeats with a missing or wrong token when auth is configured (defence-in-depth on top of connection-level `AuthToken` first-frame check)
 - Signed wire messages (HMAC) — deferred, optional defence-in-depth
+
+### Phase 10 — Deferred / Follow-up
+
+- **Auth token auto-distribution** — `just set-auth-token <token>` exists and pushes `MESH_AUTH_TOKEN` to all compute nodes (systemd drop-in on Linux, NSSM AppEnvironmentExtra on Windows) and updates `~/.bashrc` on the controller. Still manual — the remaining step is for `just restart-coordinator` to auto-generate a token and call `set-auth-token` automatically, closing the gap where TLS transport is secured but the application-layer pre-shared secret requires a separate manual step.
 
 ---
 

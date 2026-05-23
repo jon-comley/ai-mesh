@@ -112,6 +112,48 @@ These tests pin the contract: a closed channel is a normal condition (the TCP co
 
 ---
 
+### Coordinator — `server.rs` — per-heartbeat auth token validation
+
+| Test | What it pins |
+|------|-------------|
+| `test_heartbeat_correct_token_registered` | Heartbeat with correct token registers the node |
+| `test_heartbeat_wrong_token_not_registered` | Heartbeat with wrong token silently rejected (Acknowledge returned, node absent from registry) |
+| `test_heartbeat_empty_token_not_registered` | Empty `auth_token` string rejected when coordinator has tokens configured |
+
+These tests use `authenticated_send` — a helper that sends the connection-level `AuthToken` first frame, then the `Heartbeat`, to correctly simulate the two-layer auth flow.
+
+---
+
+### Coordinator — `state.rs` — coordinator state file
+
+| Test | What it pins |
+|------|-------------|
+| `state_contains_fingerprint` | Written file contains `MESH_TLS_FINGERPRINT=<value>` |
+| `state_contains_auth_token_when_set` | Written file contains `MESH_AUTH_TOKEN=<value>` when token is provided |
+| `state_omits_auth_token_when_empty` | `MESH_AUTH_TOKEN` line absent when tokens slice is empty |
+| `state_uses_first_token_only` | Only the first token is written; secondary rotation tokens are not exposed |
+
+---
+
+### Shared — `hardware.rs` — HeartbeatPayload
+
+| Test | What it pins |
+|------|-------------|
+| `heartbeat_payload_from_identity_has_empty_token` | `From<NodeIdentity>` produces `auth_token: ""` |
+| `heartbeat_payload_roundtrip_with_token` | Full round-trip with non-empty token; `auth_token` field always present in JSON |
+
+---
+
+### Shared — `messages.rs` — Heartbeat wire format
+
+| Test | What it pins |
+|------|-------------|
+| `test_serialize_heartbeat` | `Heartbeat(HeartbeatPayload)` round-trips correctly |
+| `test_heartbeat_with_auth_token_roundtrip` | Token value survives JSON round-trip |
+| `test_heartbeat_token_always_serialized` | `auth_token` field is always present in JSON (never omitted) |
+
+---
+
 ## 3. Known Gaps
 
 These behaviours are implemented but not yet covered by automated tests:
@@ -122,6 +164,7 @@ These behaviours are implemented but not yet covered by automated tests:
 | `agent/src/main.rs` | INFER_SEM serialises concurrent inferences | Requires two concurrent async tasks racing on a real or mock llama-server |
 | `coordinator/src/server.rs` | Fast-fail on agent disconnect during pending inference | Integration test harness exists but teardown-mid-request is tricky to orchestrate |
 | `cli/src/commands/wait_ready.rs` | TTY fallback path (`run_plain`) | Requires mocking `stdin` TTY detection |
+| `agent/src/agent.rs` | `heartbeat_payload()` reads `MESH_AUTH_TOKEN` from env | `std::env::set_var` in parallel tests risks pollution; env-reading is one line |
 
 ---
 

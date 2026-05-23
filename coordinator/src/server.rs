@@ -1,7 +1,7 @@
 use crate::intent::PendingIntents;
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
-use shared::{AdminMessage, MeshMessage, NodeRecordFull, NodeRole};
+use shared::{AdminMessage, HeartbeatPayload, MeshMessage, NodeRecordFull, NodeRole};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -183,6 +183,7 @@ where
             &pending_intents,
             &tx,
             &mut node_id,
+            &auth_tokens,
         )
         .await;
 
@@ -218,6 +219,7 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_message(
     msg: MeshMessage,
     registry: &Arc<Mutex<Registry>>,
@@ -226,9 +228,18 @@ async fn process_message(
     pending_intents: &PendingIntents,
     tx: &mpsc::Sender<MeshMessage>,
     node_id: &mut Option<String>,
+    auth_tokens: &Arc<Vec<String>>,
 ) -> MeshMessage {
     match msg {
-        MeshMessage::Heartbeat(identity) => {
+        MeshMessage::Heartbeat(HeartbeatPayload {
+            identity,
+            auth_token,
+        }) => {
+            // When tokens are configured, require the heartbeat token to match exactly.
+            if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
+                warn!(node_id = %identity.id, "heartbeat rejected: missing or wrong auth token");
+                return MeshMessage::Acknowledge;
+            }
             info!(node_id = %identity.id, hostname = %identity.hostname, "heartbeat");
             *node_id = Some(identity.id.clone());
             registry.lock().unwrap().update_heartbeat(identity.clone());
@@ -538,7 +549,7 @@ async fn process_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::{NodeIdentity, NodeRole};
+    use shared::{HeartbeatPayload, NodeIdentity, NodeRole};
     use tokio::net::TcpStream;
 
     async fn send_message(addr: &str, msg: &MeshMessage) -> MeshMessage {
@@ -579,7 +590,14 @@ mod tests {
             role: NodeRole::Compute,
         };
 
-        let ack = send_message("127.0.0.1:9001", &MeshMessage::Heartbeat(ident.clone())).await;
+        let ack = send_message(
+            "127.0.0.1:9001",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: ident.clone(),
+                auth_token: String::new(),
+            }),
+        )
+        .await;
 
         match ack {
             MeshMessage::Acknowledge => {}
@@ -588,6 +606,119 @@ mod tests {
 
         let reg = registry.lock().unwrap();
         assert!(reg.get("node1").is_some());
+    }
+
+    /// Open a raw TCP connection, send `auth_frame` then `msg`, read one reply.
+    /// Used to test scenarios that require the connection-level AuthToken first frame.
+    async fn authenticated_send(addr: &str, auth_token: &str, msg: &MeshMessage) -> MeshMessage {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let write_frame = |_stream: &mut TcpStream, m: &MeshMessage| -> Vec<u8> {
+            let data = serde_json::to_vec(m).unwrap();
+            let mut out = (data.len() as u32).to_le_bytes().to_vec();
+            out.extend_from_slice(&data);
+            out
+        };
+        let auth_bytes = write_frame(&mut stream, &MeshMessage::AuthToken(auth_token.into()));
+        stream.write_all(&auth_bytes).await.unwrap();
+        let msg_bytes = write_frame(&mut stream, msg);
+        stream.write_all(&msg_bytes).await.unwrap();
+
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.unwrap();
+        let msg_len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; msg_len];
+        stream.read_exact(&mut buf).await.unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_wrong_token_not_registered() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let mut server = Server::new("127.0.0.1:9010", registry.clone());
+        server.auth_tokens = Arc::new(vec!["correct-token".into()]);
+
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Connection-level auth passes, but heartbeat carries a wrong token.
+        let ack = authenticated_send(
+            "127.0.0.1:9010",
+            "correct-token",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: NodeIdentity {
+                    id: "rogue-node".into(),
+                    hostname: "evil".into(),
+                    ip: "127.0.0.1".into(),
+                    role: NodeRole::Compute,
+                },
+                auth_token: "wrong-token".into(),
+            }),
+        )
+        .await;
+        assert_eq!(ack, MeshMessage::Acknowledge);
+        assert!(registry.lock().unwrap().get("rogue-node").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_empty_token_not_registered() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let mut server = Server::new("127.0.0.1:9012", registry.clone());
+        server.auth_tokens = Arc::new(vec!["required-token".into()]);
+
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Heartbeat carries an empty auth_token — must be rejected when tokens are configured.
+        let ack = authenticated_send(
+            "127.0.0.1:9012",
+            "required-token",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: NodeIdentity {
+                    id: "no-token-node".into(),
+                    hostname: "old-agent".into(),
+                    ip: "127.0.0.1".into(),
+                    role: NodeRole::Compute,
+                },
+                auth_token: String::new(),
+            }),
+        )
+        .await;
+        assert_eq!(ack, MeshMessage::Acknowledge);
+        assert!(registry.lock().unwrap().get("no-token-node").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_correct_token_registered() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let mut server = Server::new("127.0.0.1:9011", registry.clone());
+        server.auth_tokens = Arc::new(vec!["good-token".into()]);
+
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let ack = authenticated_send(
+            "127.0.0.1:9011",
+            "good-token",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: NodeIdentity {
+                    id: "legit-node".into(),
+                    hostname: "trusted".into(),
+                    ip: "127.0.0.1".into(),
+                    role: NodeRole::Compute,
+                },
+                auth_token: "good-token".into(),
+            }),
+        )
+        .await;
+        assert_eq!(ack, MeshMessage::Acknowledge);
+        assert!(registry.lock().unwrap().get("legit-node").is_some());
     }
 
     #[tokio::test]
@@ -609,7 +740,14 @@ mod tests {
         };
 
         // Register the node via heartbeat
-        send_message("127.0.0.1:9003", &MeshMessage::Heartbeat(ident.clone())).await;
+        send_message(
+            "127.0.0.1:9003",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: ident.clone(),
+                auth_token: String::new(),
+            }),
+        )
+        .await;
 
         // Request full node info
         let reply = send_message(

@@ -213,12 +213,15 @@ mod tests {
 
     #[test]
     fn does_not_handle_heartbeat() {
-        use shared::{NodeIdentity, NodeRole};
-        let msg = MeshMessage::Heartbeat(NodeIdentity {
-            id: "n1".into(),
-            hostname: "h".into(),
-            ip: "127.0.0.1".into(),
-            role: NodeRole::Compute,
+        use shared::{HeartbeatPayload, NodeIdentity, NodeRole};
+        let msg = MeshMessage::Heartbeat(HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "n1".into(),
+                hostname: "h".into(),
+                ip: "127.0.0.1".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
         });
         assert!(!LightingCapability::new("test-node").handles(&msg));
     }

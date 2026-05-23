@@ -2,7 +2,7 @@ use crate::capabilities::detect_capabilities;
 use crate::config::AgentConfig;
 use crate::hardware::detect_hardware;
 use crate::identity::detect_identity;
-use shared::{MeshMessage, NodeIdentity, NodeRole};
+use shared::{HeartbeatPayload, MeshMessage, NodeIdentity, NodeRole};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
@@ -54,13 +54,23 @@ impl Agent {
         &self.identity.id
     }
 
+    fn heartbeat_payload(&self) -> HeartbeatPayload {
+        HeartbeatPayload {
+            identity: self.identity.clone(),
+            auth_token: std::env::var("MESH_AUTH_TOKEN")
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        }
+    }
+
     /// Send one startup burst (heartbeat + optional hardware/capabilities), no loop.
     /// Returns Ok(false) if the outbound channel is closed (connection dropped).
     pub async fn start_once(&self) -> Result<bool, AgentError> {
         info!(node_id = %self.identity.id, "sending heartbeat");
         if self
             .tx
-            .send(MeshMessage::Heartbeat(self.identity.clone()))
+            .send(MeshMessage::Heartbeat(self.heartbeat_payload()))
             .await
             .is_err()
         {
@@ -106,7 +116,7 @@ impl Agent {
             sleep(Duration::from_secs(self.config.heartbeat_interval_secs)).await;
             if self
                 .tx
-                .send(MeshMessage::Heartbeat(self.identity.clone()))
+                .send(MeshMessage::Heartbeat(self.heartbeat_payload()))
                 .await
                 .is_err()
             {

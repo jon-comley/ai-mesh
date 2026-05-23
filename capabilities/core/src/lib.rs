@@ -80,11 +80,15 @@ mod tests {
     }
 
     fn heartbeat() -> MeshMessage {
-        MeshMessage::Heartbeat(NodeIdentity {
-            id: "n1".into(),
-            hostname: "host".into(),
-            ip: "127.0.0.1".into(),
-            role: NodeRole::Compute,
+        use shared::HeartbeatPayload;
+        MeshMessage::Heartbeat(HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "n1".into(),
+                hostname: "host".into(),
+                ip: "127.0.0.1".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
         })
     }
 

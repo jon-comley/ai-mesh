@@ -18,16 +18,29 @@ Messages are defined in `shared::MeshMessage`.
 
 # Message Types
 
-## Heartbeat(NodeIdentity)
+## AuthToken(String)
+**First frame** sent by every agent/CLI on connect, before any other message.
+
+When `MESH_AUTH_TOKEN` is set on the coordinator, the first frame must be `AuthToken` carrying the correct token. Wrong or missing token → connection closed immediately.
+
+---
+
+## Heartbeat(HeartbeatPayload)
 Sent by agents periodically to indicate liveness.
 
-Includes:
-- id
-- hostname
-- ip
-- role
+`HeartbeatPayload` wraps `NodeIdentity` (flattened in JSON) plus a per-message auth token:
 
-Coordinator updates last-seen timestamp.
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | String | Persistent node UUID |
+| `hostname` | String | OS hostname |
+| `ip` | String | LAN IP address |
+| `role` | NodeRole | `Controller` or `Compute` |
+| `auth_token` | String | `MESH_AUTH_TOKEN` value; empty string when not configured |
+
+The coordinator validates `auth_token` on every heartbeat (defence-in-depth on top of the connection-level `AuthToken` check). An empty or wrong token is rejected when auth is configured.
+
+Coordinator updates last-seen timestamp on successful validation.
 
 ---
 
