@@ -415,15 +415,15 @@ Also check the AMD driver log:
 ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName 'System' | Where-Object { \$_.ProviderName -like '*amd*' -or \$_.ProviderName -like '*display*' } | Select-Object -First 20 TimeCreated, Id, Message | Format-List\""
 ```
 
-**Mitigations (not yet applied — add to `install-node-windows.ps1`):**
+**Mitigations — baked into `install-node-windows.ps1` (`Harden-Stability` function), applied on every `just deploy-node beelink1`:**
 
-```powershell
-# Increase TDR timeout from default 2s to 60s — gives AMD driver more time to recover
-# under sustained GPU load before Windows decides it's hung
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 60 /f
+- **TDR timeout 2s → 60s** — gives AMD driver time to finish a large GPU dispatch before Windows declares it hung
+- **Fast Startup disabled** — prevents hybrid-shutdown half-suspended state
+- **NIC power management off** — belt-and-braces
 
-# Disable Fast Startup (separate from hibernate)
-reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f
+To apply immediately without a full re-provision:
+```bash
+ssh jonno@192.168.1.14 "powershell -Command \"reg add 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers' /v TdrDelay /t REG_DWORD /d 60 /f; reg add 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power' /v HiberbootEnabled /t REG_DWORD /d 0 /f; Get-NetAdapter | Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice Disabled\""
 ```
 
-If TDR events are confirmed in the logs, consider reducing `LLAMA_GPU_LAYERS` from 99 to a lower value (e.g. 20–30) to keep some compute on CPU and reduce sustained GPU pressure.
+If TDR events are confirmed in the logs after a future incident, consider also reducing `LLAMA_GPU_LAYERS` from 99 to a lower value (e.g. 20–30) to reduce sustained GPU pressure.
