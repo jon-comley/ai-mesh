@@ -573,7 +573,8 @@ set-fingerprint node:
                 'LLAMA_FLASH_ATTN=1' \
                 'DEFAULT_MODEL=${DEFAULT_MODEL}' \
                 'MESH_TLS_FINGERPRINT=${FP}';\
-            Restart-Service ai-mesh-agent -Force -ErrorAction SilentlyContinue\
+            Restart-Service ai-mesh-agent -Force -ErrorAction SilentlyContinue;\
+            exit 0\
         \""
         ;;
     esac
