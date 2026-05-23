@@ -12,7 +12,7 @@ pub fn build_capabilities(node_id: &str) -> Vec<Arc<dyn Capability + Send + Sync
         #[cfg(feature = "llm")]
         Arc::new(capability_llm::LlmCapability::new(node_id)),
         #[cfg(feature = "lighting")]
-        Arc::new(capability_lighting::LightingCapability::new()),
+        Arc::new(capability_lighting::LightingCapability::new(node_id)),
     ]
 }
 
@@ -78,7 +78,7 @@ mod tests {
     fn model_load() -> MeshMessage {
         MeshMessage::ModelLoad(ModelLoadRequest {
             request_id: "r1".into(),
-            node_id: "n1".into(),
+            node_id: Some("n1".into()),
             model_name: "qwen2.5:7b".into(),
             model_size_mb: 4096,
             wire_version: WIRE_VERSION,

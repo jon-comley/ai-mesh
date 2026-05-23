@@ -346,22 +346,39 @@ async fn process_message(
             }
             MeshMessage::Acknowledge
         }
-        MeshMessage::ModelLoad(req) => {
-            let agent_tx = connections.lock().unwrap().get(&req.node_id).cloned();
+        MeshMessage::ModelLoad(mut req) => {
+            // Auto-place: if no node_id supplied, pick the best-fit node by headroom.
+            if req.node_id.is_none() {
+                let selected = {
+                    let reg = registry.lock().unwrap();
+                    Scheduler::new(&reg)
+                        .select_node_for_model(req.model_size_mb)
+                        .map(|n| n.id)
+                };
+                match selected {
+                    Some(id) => {
+                        info!(node_id = %id, model_name = %req.model_name, "auto-placed ModelLoad");
+                        req.node_id = Some(id);
+                    }
+                    None => {
+                        warn!(model_name = %req.model_name, "no node has capacity for auto-placed ModelLoad");
+                        return MeshMessage::Acknowledge;
+                    }
+                }
+            }
+            let target_id = req.node_id.as_deref().unwrap_or("");
+            let agent_tx = connections.lock().unwrap().get(target_id).cloned();
             match agent_tx {
                 Some(agent_tx) => {
                     info!(
-                        node_id    = %req.node_id,
+                        node_id    = %target_id,
                         model_name = %req.model_name,
                         "forwarding ModelLoad to agent"
                     );
                     let _ = agent_tx.send(MeshMessage::ModelLoad(req)).await;
                 }
                 None => {
-                    warn!(
-                        node_id = %req.node_id,
-                        "ModelLoad target node not connected"
-                    );
+                    warn!(node_id = %target_id, "ModelLoad target node not connected");
                 }
             }
             MeshMessage::Acknowledge
@@ -544,5 +561,32 @@ mod tests {
             }
             _ => panic!("Expected NodeInfo"),
         }
+    }
+
+    #[tokio::test]
+    async fn model_load_without_node_id_is_acknowledged() {
+        // Auto-placement: coordinator receives ModelLoad with node_id=None.
+        // No compute node is registered so auto-placement finds nothing and
+        // returns Acknowledge (fail-silent). The important thing is it doesn't panic.
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let server = Server::new("127.0.0.1:9005", registry.clone());
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let ack = send_message(
+            "127.0.0.1:9005",
+            &MeshMessage::ModelLoad(shared::ModelLoadRequest {
+                request_id: "auto-1".into(),
+                node_id: None,
+                model_name: "qwen2.5:1.5b".into(),
+                model_size_mb: 1024,
+                wire_version: shared::WIRE_VERSION,
+            }),
+        )
+        .await;
+
+        assert!(matches!(ack, MeshMessage::Acknowledge));
     }
 }

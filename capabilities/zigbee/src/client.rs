@@ -45,6 +45,8 @@ impl ZigbeeClient {
         let subscribe_client = mqtt_client.clone();
 
         tokio::spawn(async move {
+            let mut debounce: std::collections::HashMap<String, tokio::task::AbortHandle> =
+                std::collections::HashMap::new();
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
@@ -86,7 +88,19 @@ impl ZigbeeClient {
                         } else if topic.ends_with("/state") {
                             match parse_state_report(topic, p.payload.as_ref(), &node_id) {
                                 Some(report) => {
-                                    let _ = tx_loop.send(ZigbeeEvent::StateChanged(report));
+                                    // Debounce: Z2M fires multiple partial updates per action.
+                                    // Cancel any pending emit for this device and restart the timer.
+                                    let device_id = report.device_id.clone();
+                                    if let Some(h) = debounce.remove(&device_id) {
+                                        h.abort();
+                                    }
+                                    let tx_d = tx_loop.clone();
+                                    let abort_handle = tokio::spawn(async move {
+                                        tokio::time::sleep(Duration::from_millis(75)).await;
+                                        let _ = tx_d.send(ZigbeeEvent::StateChanged(report));
+                                    })
+                                    .abort_handle();
+                                    debounce.insert(device_id, abort_handle);
                                 }
                                 None => warn!("zigbee: unparseable state on topic '{topic}'"),
                             }

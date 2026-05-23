@@ -98,7 +98,7 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
         &mut cli_stream,
         &MeshMessage::ModelLoad(ModelLoadRequest {
             request_id: "req-abc-999".into(),
-            node_id: node_id.clone(),
+            node_id: Some(node_id.clone()),
             model_name: "qwen-2.5-7b".into(),
             model_size_mb: 4200,
             wire_version: 1,
@@ -113,7 +113,7 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
             assert_eq!(req.request_id, "req-abc-999");
             assert_eq!(req.model_name, "qwen-2.5-7b");
             assert_eq!(req.model_size_mb, 4200);
-            assert_eq!(req.node_id, node_id);
+            assert_eq!(req.node_id, Some(node_id));
         }
         other => panic!("Expected ModelLoad, got {:?}", other),
     }

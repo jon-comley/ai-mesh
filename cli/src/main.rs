@@ -37,7 +37,9 @@ enum Commands {
     },
     ResetRegistry,
     Load {
-        node_id: String,
+        /// Target node. Omit to let the coordinator pick the best-fit node automatically.
+        #[arg(long)]
+        node_id: Option<String>,
         model_name: String,
         size_mb: u64,
     },

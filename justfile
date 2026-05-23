@@ -693,7 +693,7 @@ load-model node model:
             echo ">>>   just load-model {{node}} ${MODEL_NAMES[$i]}"
         done
     fi
-    cargo run -q -p cli -- load "${NODE_ID}" "${MODEL}" "${SIZE_MB}"
+    cargo run -q -p cli -- load --node-id "${NODE_ID}" "${MODEL}" "${SIZE_MB}"
 
 # Detect hardware on a node and load the best-fit model automatically.
 # Usage: just auto-load-model pi1
