@@ -30,7 +30,7 @@ impl ZigbeeClient {
     /// spawn the rumqttc event loop poll task. The poll task must be spawned
     /// before any publish calls — without it, publishes hang silently.
     pub async fn connect(host: &str, port: u16, node_id: String) -> Result<Self, ZigbeeError> {
-        let mut opts = MqttOptions::new("ai-mesh-lighting", host, port);
+        let mut opts = MqttOptions::new(format!("ai-mesh-{node_id}"), host, port);
         opts.set_keep_alive(Duration::from_secs(30));
 
         let (mqtt_client, mut eventloop) = AsyncClient::new(opts, 64);
@@ -88,7 +88,7 @@ impl ZigbeeClient {
                     Err(e) => {
                         warn!("zigbee: event loop error: {e}");
                         let _ = tx_loop.send(ZigbeeEvent::ConnectionLost);
-                        // rumqttc reconnects automatically; keep polling
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                     _ => {}
                 }

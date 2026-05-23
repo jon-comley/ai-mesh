@@ -280,10 +280,14 @@ fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightComma
         _ => LightAction::On,
     };
 
-    // All commands target group 1 (the whole house) until Phase 6 adds room resolution.
+    let target = match args.get("target").and_then(|v| v.as_str()) {
+        Some(name) => LightTarget::Device(name.to_string()),
+        None => LightTarget::Group(1),
+    };
+
     LightCommandRequest {
         request_id: request_id.to_string(),
-        target: LightTarget::Group(1),
+        target,
         command,
     }
 }
@@ -441,6 +445,14 @@ mod tests {
         let cmd = build_light_command("r1", &args);
         assert!(matches!(cmd.command, LightAction::On));
         assert_eq!(cmd.request_id, "r1");
+        assert!(matches!(cmd.target, LightTarget::Device(ref n) if n == "kitchen"));
+    }
+
+    #[test]
+    fn build_light_command_no_target_falls_back_to_group() {
+        let args = serde_json::json!({"action": "on"});
+        let cmd = build_light_command("r0", &args);
+        assert!(matches!(cmd.target, LightTarget::Group(1)));
     }
 
     #[test]
