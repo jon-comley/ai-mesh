@@ -567,12 +567,13 @@ set-fingerprint node:
             & \$nssm set ai-mesh-agent AppEnvironmentExtra \
                 'COORDINATOR_IP={{coordinator_ip}}' \
                 'AGENT_ROLE=${NODE_ROLE}' \
-                'LLAMA_MODEL_DIR=C:\\Users\\${NODE_USER}\\.ai-mesh\\models' \
-                'LLAMA_SERVER_BIN=C:\\Users\\${NODE_USER}\\ai-mesh\\llama-server.exe' \
+                ('LLAMA_MODEL_DIR=' + \$env:USERPROFILE + '\\.ai-mesh\\models') \
+                ('LLAMA_SERVER_BIN=' + \$env:LOCALAPPDATA + '\\Programs\\llama.cpp\\llama-server.exe') \
                 'LLAMA_GPU_LAYERS=99' \
                 'LLAMA_FLASH_ATTN=1' \
                 'DEFAULT_MODEL=${DEFAULT_MODEL}' \
                 'MESH_TLS_FINGERPRINT=${FP}';\
+            taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
             Restart-Service ai-mesh-agent -Force -ErrorAction SilentlyContinue;\
             exit 0\
         \""
