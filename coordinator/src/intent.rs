@@ -61,19 +61,18 @@ pub async fn handle_intent(
     // 3. Build system prompt + conversation
     let (known_devices, known_groups) = registry.lock().unwrap().all_light_device_names();
     let system_prompt = build_system_prompt(&schemas, &known_devices, &known_groups);
-    let mut conversation = String::new();
+    let mut user_prompt = String::new();
     for turn in &request.context {
         match turn.role {
             shared::IntentRole::User => {
-                conversation.push_str(&format!("User: {}\n", turn.content));
+                user_prompt.push_str(&format!("User: {}\n", turn.content));
             }
             shared::IntentRole::Assistant => {
-                conversation.push_str(&format!("Assistant: {}\n", turn.content));
+                user_prompt.push_str(&format!("Assistant: {}\n", turn.content));
             }
         }
     }
-    conversation.push_str(&format!("User: {}", request.text));
-    let full_prompt = format!("{}\n\n{}", system_prompt, conversation);
+    user_prompt.push_str(&request.text);
 
     // 4. Find LLM node
     let llm_node_id = {
@@ -99,8 +98,10 @@ pub async fn handle_intent(
         request_id: infer_req_id.clone(),
         node_id: None,
         model_name: model_name.clone(),
-        prompt: full_prompt,
-        max_tokens: 512,
+        system_prompt: Some(system_prompt),
+        prompt: user_prompt,
+        max_tokens: 128,
+        temperature: Some(0.0),
         wire_version: WIRE_VERSION,
     };
 
@@ -391,7 +392,7 @@ pub fn build_system_prompt(
         return "You are a helpful assistant. Answer the user's question directly.".into();
     }
 
-    let schema_json = serde_json::to_string_pretty(schemas).unwrap_or_default();
+    let schema_json = serde_json::to_string(schemas).unwrap_or_default();
 
     let device_section = if known_devices.is_empty() && known_groups.is_empty() {
         String::new()
@@ -410,19 +411,18 @@ pub fn build_system_prompt(
     };
 
     format!(
-        r#"You are a smart home and general-purpose assistant.
+        r#"You are a smart home controller. You control real smart home devices using the tools below.
 
-You have access to the following tools:
+Tools:
 {schema_json}{device_section}
 
-Use the exact device or group name from the known list when filling in the "target" field.
-If the user says "all" or "everything", use a group name if one exists.
-
-If the user's request maps to a tool, respond with ONLY a JSON object:
+Rules:
+- Use the exact device or group name from the known list for the "target" field.
+- If the user says "all" or "everything", use a group name if one exists.
+- For device control requests, respond with ONLY this exact JSON format (no other text, no tags, no markdown):
 {{"tool": "<name>", "args": {{ ... }}}}
-
-If the user's request is a general question or conversation, respond normally in free text.
-Do not explain your reasoning. Do not use markdown for tool calls."#
+- For general questions or conversation, respond normally in plain text.
+- Do NOT use XML tags, function_call tags, or any special formatting. Plain JSON only."#
     )
 }
 
@@ -615,5 +615,27 @@ mod tests {
         assert!(p.contains("exact device or group name"));
         assert!(p.contains("test_bulb"));
         assert!(p.contains("all"));
+    }
+
+    #[test]
+    fn build_system_prompt_forbids_special_tags() {
+        let schemas = tool_schemas_for_feature("lighting");
+        let p = build_system_prompt(&schemas, &[], &[]);
+        assert!(p.contains("Do NOT use XML tags"));
+        assert!(p.contains("Plain JSON only"));
+    }
+
+    #[test]
+    fn build_system_prompt_schema_is_compact_json() {
+        let schemas = tool_schemas_for_feature("lighting");
+        let p = build_system_prompt(&schemas, &[], &[]);
+        for schema in schemas {
+            let s = serde_json::to_string(&schema).unwrap();
+            assert!(!s.contains('\n'), "schema JSON must be compact");
+            assert!(
+                p.contains(&s),
+                "system prompt must embed compact schema JSON"
+            );
+        }
     }
 }

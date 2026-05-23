@@ -371,26 +371,22 @@ impl Registry {
 
     /// Returns the name of any model in Ready state on any LLM-capable Compute node.
     /// Used by the intent router when no model_name is specified.
+    /// Returns the name of the largest ready LLM model across all compute nodes.
+    /// Largest-by-size is used so intents are always routed to the most capable available model.
     pub fn any_ready_llm_model(&self) -> Option<String> {
-        for node in self.nodes.values() {
-            if node.identity.role != NodeRole::Compute {
-                continue;
-            }
-            let has_llm = node
-                .capabilities
-                .as_ref()
-                .map(|c| c.features.iter().any(|f| f == "llm"))
-                .unwrap_or(false);
-            if !has_llm {
-                continue;
-            }
-            for (model_name, alloc) in &node.models {
-                if alloc.state == ModelLifecycleState::Ready {
-                    return Some(model_name.clone());
-                }
-            }
-        }
-        None
+        self.nodes
+            .values()
+            .filter(|n| {
+                n.identity.role == NodeRole::Compute
+                    && n.capabilities
+                        .as_ref()
+                        .map(|c| c.features.iter().any(|f| f == "llm"))
+                        .unwrap_or(false)
+            })
+            .flat_map(|n| n.models.iter())
+            .filter(|(_, alloc)| alloc.state == ModelLifecycleState::Ready)
+            .max_by_key(|(_, alloc)| alloc.size_mb)
+            .map(|(name, _)| name.clone())
     }
 
     /// Store the list of known Zigbee devices and groups reported by a lighting node.
@@ -414,13 +410,13 @@ impl Registry {
 
     /// Returns all known Zigbee device and group friendly names across all lighting nodes.
     pub fn all_light_device_names(&self) -> (Vec<String>, Vec<String>) {
-        let mut devices = Vec::new();
-        let mut groups = Vec::new();
+        let mut devices: std::collections::HashSet<String> = Default::default();
+        let mut groups: std::collections::HashSet<String> = Default::default();
         for (devs, grps) in self.light_devices.values() {
             devices.extend(devs.iter().cloned());
             groups.extend(grps.iter().cloned());
         }
-        (devices, groups)
+        (devices.into_iter().collect(), groups.into_iter().collect())
     }
 
     pub fn get_node_full(&self, id: &str) -> Option<NodeRecordFull> {
@@ -761,6 +757,26 @@ mod tests {
     }
 
     #[test]
+    fn any_ready_llm_model_prefers_largest() {
+        let mut reg = Registry::new();
+        for (id, model, mb) in [
+            ("pi1", "qwen2.5:1.5b", 1024u64),
+            ("beelink1", "qwen2.5:7b", 4096u64),
+        ] {
+            reg.update_heartbeat(make_identity(id));
+            reg.update_capabilities(
+                id,
+                NodeCapabilities {
+                    features: vec!["llm".into()],
+                    ..NodeCapabilities::default()
+                },
+            );
+            reg.update_model_status(id, model, mb, ModelLifecycleState::Ready);
+        }
+        assert_eq!(reg.any_ready_llm_model(), Some("qwen2.5:7b".into()));
+    }
+
+    #[test]
     fn update_light_devices_stores_and_retrieves() {
         let mut reg = Registry::new();
         reg.update_light_devices("pi1", vec!["test_bulb".into()], vec!["all".into()]);
@@ -801,5 +817,16 @@ mod tests {
         assert!(!devices.contains(&"old_bulb".to_string()));
         assert!(devices.contains(&"new_bulb".to_string()));
         assert!(groups.contains(&"all".to_string()));
+    }
+
+    #[test]
+    fn all_light_device_names_deduplicates_across_nodes() {
+        // Simulates a stale SQLite row from an old node_id alongside the current one.
+        let mut reg = Registry::new();
+        reg.update_light_devices("old-uuid", vec!["test_bulb".into()], vec!["all".into()]);
+        reg.update_light_devices("new-uuid", vec!["test_bulb".into()], vec!["all".into()]);
+        let (devices, groups) = reg.all_light_device_names();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(groups.len(), 1);
     }
 }

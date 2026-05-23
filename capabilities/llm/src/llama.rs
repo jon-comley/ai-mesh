@@ -279,6 +279,8 @@ struct ChatRequest<'a> {
     max_tokens: u32,
     stream: bool,
     repeat_penalty: f32,
+    temperature: f32,
+    cache_prompt: bool,
 }
 
 #[derive(Deserialize)]
@@ -315,12 +317,19 @@ struct ChatResponse {
 // ── /v1/chat/completions inference ────────────────────────────────────────────
 
 /// Run inference. Returns (output_text, tokens_generated, duration_ms).
-pub async fn generate(model_name: &str, prompt: &str) -> Result<(String, u32, u64), String> {
+pub async fn generate(
+    model_name: &str,
+    system_prompt: Option<&str>,
+    prompt: &str,
+    max_tokens: u32,
+    temperature: f32,
+) -> Result<(String, u32, u64), String> {
     let client = http_client();
     let url = format!("{}/v1/chat/completions", llama_host());
 
     let wall_start = Instant::now();
 
+    let sys = system_prompt.unwrap_or("You are a helpful assistant.");
     let resp = client
         .post(&url)
         .json(&ChatRequest {
@@ -328,16 +337,18 @@ pub async fn generate(model_name: &str, prompt: &str) -> Result<(String, u32, u6
             messages: vec![
                 ChatMessage {
                     role: "system",
-                    content: "You are a helpful assistant.",
+                    content: sys,
                 },
                 ChatMessage {
                     role: "user",
                     content: prompt,
                 },
             ],
-            max_tokens: 512,
+            max_tokens,
             stream: false,
             repeat_penalty: 1.1,
+            temperature,
+            cache_prompt: true,
         })
         .send()
         .await
