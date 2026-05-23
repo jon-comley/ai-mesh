@@ -1171,6 +1171,13 @@ pair-bulb:
     echo ">>> Watching for join events (Ctrl+C to stop)..."
     mosquitto_sub -h ${PI_MQTT} -t 'zigbee2mqtt/bridge/event' -v
 
+# Send a natural-language intent to the coordinator.
+# Usage: just intent "turn test_bulb on"
+#        just intent "what is the capital of France"
+intent text:
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
+        intent "{{text}}"
+
 # Validate that each model routes to the correct hardware node.
 # Assumes the cluster is already running with hardware-selected models loaded
 # (i.e. run `just start-cluster` first).
