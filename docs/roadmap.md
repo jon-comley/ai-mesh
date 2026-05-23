@@ -118,9 +118,11 @@
 
 ## Phase 10 — Security & Auth
 
-- TLS on coordinator TCP listener
-- Node authentication (shared secret or certificates)
-- Signed wire messages
+- [x] TLS on coordinator TCP listener (self-signed cert, TOFU fingerprint via `MESH_TLS_FINGERPRINT`)
+- [x] Node authentication — `AuthToken` first-frame message, dual-token rotation (`MESH_AUTH_TOKEN` + `MESH_AUTH_TOKEN_NEXT`)
+- [x] Shared CLI connection helper (`cli/src/connection.rs`) — TLS + auth extracted from all 10 commands
+- [x] `MESH_INSECURE=1` explicit escape hatch with loud warnings
+- Signed wire messages (HMAC) — deferred, optional defence-in-depth (see `docs/phase10-security.md`)
 
 ---
 
