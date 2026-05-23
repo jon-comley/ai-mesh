@@ -28,6 +28,8 @@ pub struct NodeRecord {
 pub struct Registry {
     nodes: HashMap<String, NodeRecord>,
     conn: Connection,
+    /// Known Zigbee devices and groups per lighting node, keyed by node_id.
+    light_devices: HashMap<String, (Vec<String>, Vec<String>)>,
 }
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -48,6 +50,11 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             state        TEXT NOT NULL,
             last_updated INTEGER NOT NULL,
             PRIMARY KEY (node_id, model_name)
+        );
+        CREATE TABLE IF NOT EXISTS light_devices (
+            node_id  TEXT PRIMARY KEY,
+            devices  TEXT NOT NULL,
+            groups   TEXT NOT NULL
         );",
     )
 }
@@ -73,6 +80,7 @@ impl Registry {
         Self {
             nodes: HashMap::new(),
             conn,
+            light_devices: HashMap::new(),
         }
     }
 
@@ -84,6 +92,7 @@ impl Registry {
         let mut reg = Self {
             nodes: HashMap::new(),
             conn,
+            light_devices: HashMap::new(),
         };
         reg.load_from_db()?;
         Ok(reg)
@@ -177,6 +186,21 @@ impl Registry {
                     },
                 );
             }
+        }
+
+        // ── light_devices ──────────────────────────────────────────────────
+        let ld_rows: Vec<(String, String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT node_id, devices, groups FROM light_devices")?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+
+        for (node_id, devices_json, groups_json) in ld_rows {
+            let devices: Vec<String> = serde_json::from_str(&devices_json).unwrap_or_default();
+            let groups: Vec<String> = serde_json::from_str(&groups_json).unwrap_or_default();
+            self.light_devices.insert(node_id, (devices, groups));
         }
 
         Ok(())
@@ -367,6 +391,36 @@ impl Registry {
             }
         }
         None
+    }
+
+    /// Store the list of known Zigbee devices and groups reported by a lighting node.
+    pub fn update_light_devices(
+        &mut self,
+        node_id: &str,
+        devices: Vec<String>,
+        groups: Vec<String>,
+    ) {
+        let devices_json = serde_json::to_string(&devices).unwrap_or_default();
+        let groups_json = serde_json::to_string(&groups).unwrap_or_default();
+        if let Err(e) = self.conn.execute(
+            "INSERT OR REPLACE INTO light_devices (node_id, devices, groups) VALUES (?1, ?2, ?3)",
+            params![node_id, devices_json, groups_json],
+        ) {
+            warn!(error = %e, "DB light_devices upsert failed");
+        }
+        self.light_devices
+            .insert(node_id.to_owned(), (devices, groups));
+    }
+
+    /// Returns all known Zigbee device and group friendly names across all lighting nodes.
+    pub fn all_light_device_names(&self) -> (Vec<String>, Vec<String>) {
+        let mut devices = Vec::new();
+        let mut groups = Vec::new();
+        for (devs, grps) in self.light_devices.values() {
+            devices.extend(devs.iter().cloned());
+            groups.extend(grps.iter().cloned());
+        }
+        (devices, groups)
     }
 
     pub fn get_node_full(&self, id: &str) -> Option<NodeRecordFull> {
@@ -704,5 +758,48 @@ mod tests {
         reg.update_model_status("node-1", "qwen2.5:7b", 4096, ModelLifecycleState::Loading);
 
         assert_eq!(reg.any_ready_llm_model(), None);
+    }
+
+    #[test]
+    fn update_light_devices_stores_and_retrieves() {
+        let mut reg = Registry::new();
+        reg.update_light_devices("pi1", vec!["test_bulb".into()], vec!["all".into()]);
+        let (devices, groups) = reg.all_light_device_names();
+        assert!(devices.contains(&"test_bulb".to_string()));
+        assert!(groups.contains(&"all".to_string()));
+    }
+
+    #[test]
+    fn light_devices_persist_across_open() {
+        let path = "/tmp/test-light-devices-registry.db";
+        let _ = std::fs::remove_file(path);
+
+        {
+            let mut reg = Registry::open(path).unwrap();
+            reg.update_light_devices(
+                "pi1",
+                vec!["test_bulb".into(), "desk_lamp".into()],
+                vec!["all".into()],
+            );
+        }
+
+        let reg = Registry::open(path).unwrap();
+        let (devices, groups) = reg.all_light_device_names();
+        assert!(devices.contains(&"test_bulb".to_string()));
+        assert!(devices.contains(&"desk_lamp".to_string()));
+        assert!(groups.contains(&"all".to_string()));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn update_light_devices_overwrites_previous() {
+        let mut reg = Registry::new();
+        reg.update_light_devices("pi1", vec!["old_bulb".into()], vec![]);
+        reg.update_light_devices("pi1", vec!["new_bulb".into()], vec!["all".into()]);
+        let (devices, groups) = reg.all_light_device_names();
+        assert!(!devices.contains(&"old_bulb".to_string()));
+        assert!(devices.contains(&"new_bulb".to_string()));
+        assert!(groups.contains(&"all".to_string()));
     }
 }

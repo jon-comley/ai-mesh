@@ -52,12 +52,25 @@
 ## Lighting MVP ✓ Complete
 
 - **Phase A — pi1 infrastructure**: Mosquitto 2.x (remote listener), Zigbee2MQTT with SLZB-06 PoE coordinator (192.168.1.16, EmberZNet 8.0.2 / EZSP v14, adapter `ember`), Z2M as systemd service
-- **Phase B — `capability-zigbee` crate**: rumqttc 0.24 MQTT client; `ZigbeeClient::connect()` spawns EventLoop poll task internally; broadcast channel for `ZigbeeEvent` (StateChanged, DeviceDiscovered, ConnectionLost, ConnectionRestored); `DeviceRegistry` parses `zigbee2mqtt/bridge/devices`; 20 unit tests
+- **Phase B — `capability-zigbee` crate**: rumqttc 0.24 MQTT client; `ZigbeeClient::connect()` spawns EventLoop poll task internally; broadcast channel for `ZigbeeEvent` (StateChanged, DeviceListUpdated, GroupListUpdated, ConnectionLost, ConnectionRestored); `DeviceRegistry` parses `zigbee2mqtt/bridge/devices`; unit tests
 - **Phase C — `capability-lighting` wired**: reads `MQTT_HOST`/`MQTT_PORT` from env; stubs gracefully when unset (tests pass); forwards `LightState` events back on the mesh tx channel; `handle(LightCommand)` publishes via `ZigbeeClient`
 - **Phase D — end-to-end**: `just intent "turn test_bulb on/off"` → LLM tool call → MQTT → Zigbee → bulb responds; brightness (`50% → 127`) and colour temperature (`candlelight → 1500K`) working
 - **Pairing**: `just pair-bulb` recipe; first Hue White and Color Ambiance B22 paired (IEEE `0x00178801024c077c`, renamed `test_bulb`)
 - **Z2M groups**: `all` group created; `just intent "turn all bulbs off"` broadcasts to all members
 - **Robustness fixes**: 5s reconnect delay (prevents Mosquitto storm); truncated JSON from 0.5b models repaired; empty target falls back to Group(1); node-id in MQTT client ID avoids same-ID collision
+
+---
+
+## Lighting — Device Awareness ✓ Complete
+
+- **`MeshMessage::LightDeviceList`** — lighting node sends full device + group name list to coordinator on every MQTT connect; coordinator stores in registry
+- **`bridge/groups` subscription** — Z2M groups (e.g. `all`) discovered automatically alongside devices
+- **Re-subscribe on reconnect** — subscriptions re-issued in `ConnAck` handler so they survive Mosquitto restarts and network blips; Z2M retained topics re-deliver immediately
+- **Coordinator registry persistence** — device/group lists stored in SQLite `light_devices` table; survive coordinator restarts; LLM has valid targets immediately after `just restart-coordinator` before pi1 reconnects
+- **LLM system prompt injection** — known devices and groups listed in system prompt; LLM uses exact Z2M friendly names rather than guessing
+- **Target validation** — `dispatch_tool` checks LLM-chosen target against known list before sending to MQTT; returns `unknown target 'x' — known targets: ...` on mismatch; skips validation when list is empty (fail-open)
+- **Brightness clamped to 0–254** — Zigbee spec reserves 255; LLM-supplied values are clamped at dispatch
+- **Z2M coordinator filtered** — `bridge/devices` entries with `type: Coordinator` excluded from device list regardless of whether `ieee_address` is present (newer Z2M versions include it)
 
 ---
 
@@ -68,6 +81,15 @@
 - **`just start-cluster` recipe** ✓ — starts coordinator + controller + all remote agents, then calls `auto-load-model` on every compute node; leaves mesh in a ready-to-use inference state
 - **`just auto-load-model <node>`** ✓ — SSHes into node, detects GPU VRAM or CPU RAM, selects best-fit model, loads it with hardware-filtered fallback hints
 - **Automatic model placement (coordinator side)** — wire `select_node_for_model(mb)` into the coordinator's `ModelLoad` handler so the coordinator picks the best-fit node automatically when `node_id` is absent from the `PullModel` request
+
+---
+
+## Lighting — Deferred Improvements
+
+- **Device availability tracking** — `zigbee2mqtt/+/availability` is subscribed but payloads (`{"state":"online"|"offline"}`) are not yet parsed. Add an `online: bool` field to `DeviceRegistry` entries, updated on each availability message. Two design choices to evaluate: (a) suppress offline devices from the LLM system prompt entirely so the model never attempts to control them; (b) include them but mark as `[offline]` so the model can report the device is unreachable. Option (a) is simpler but risks the LLM not knowing the device exists at all; option (b) gives better user feedback. Also affects target validation — an offline device should probably return a distinct error (`device 'test_bulb' is currently offline`) rather than the generic unknown-target error.
+- **State report debounce** — Z2M emits multiple partial updates per bulb action (state, brightness, colour temp arrive separately). Add a per-device 50–100 ms debounce before emitting `StateChanged` to avoid flooding the mesh with partial updates. Implement with a `HashMap<device_id, JoinHandle>` inside the event loop: cancel any pending handle for the device, spawn a new one that sleeps then fires.
+- **`bridge/event` subscription** — Subscribe to `zigbee2mqtt/bridge/event` for real-time device join/leave announcements. Currently `bridge/devices` (retained) covers discovery on connect, but live pairing events require this topic. Low priority until live-pair UX is needed.
+- **ZigbeeClient lifecycle hardening** — `connect()` spawns one event loop task internally and is safe via `OnceCell`. Future work: if multiple lighting nodes or dynamic reconnect logic is added, consider an explicit `shutdown()` signal to cleanly drop the task rather than relying on channel close.
 
 ---
 

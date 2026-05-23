@@ -147,6 +147,16 @@ pub struct SceneLoadedReport {
     pub error: Option<String>,
 }
 
+/// Sent by a lighting node to inform the coordinator of known Z2M devices and groups.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LightDeviceListReport {
+    pub node_id: String,
+    /// Friendly names of individual Zigbee devices (e.g. "test_bulb").
+    pub devices: Vec<String>,
+    /// Friendly names of Z2M groups (e.g. "all").
+    pub groups: Vec<String>,
+}
+
 // ── Intent routing types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,6 +223,7 @@ pub enum MeshMessage {
     // Lighting capability messages
     LightCommand(LightCommandRequest),
     LightState(LightStateReport),
+    LightDeviceList(LightDeviceListReport),
     SceneLoad(SceneLoadRequest),
     SceneLoaded(SceneLoadedReport),
     // Intent routing
@@ -610,6 +621,17 @@ mod tests {
             scene_name: "disco".into(),
             success: false,
             error: Some("unknown scene".into()),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn light_device_list_roundtrip() {
+        let msg = MeshMessage::LightDeviceList(LightDeviceListReport {
+            node_id: "pi1".into(),
+            devices: vec!["test_bulb".into(), "desk_lamp".into()],
+            groups: vec!["all".into()],
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);

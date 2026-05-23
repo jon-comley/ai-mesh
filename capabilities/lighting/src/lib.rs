@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use capability_core::{Capability, ToolSchema};
 use capability_zigbee::{ZigbeeClient, ZigbeeError, ZigbeeEvent};
-use shared::{MeshMessage, SceneLoadedReport};
+use shared::{LightDeviceListReport, MeshMessage, SceneLoadedReport};
 use tokio::sync::{OnceCell, mpsc::Sender};
 use tracing::{info, warn};
 
@@ -49,17 +49,39 @@ impl Capability for LightingCapability {
             .unwrap_or(1883);
         let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".into());
 
-        let client = ZigbeeClient::connect(&host, port, node_id)
+        let client = ZigbeeClient::connect(&host, port, node_id.clone())
             .await
             .map_err(|e: ZigbeeError| format!("zigbee connect: {e}"))?;
         let client = Arc::new(client);
 
         let mut events = client.subscribe();
+        let known_devices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let known_groups: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let kd = Arc::clone(&known_devices);
+        let kg = Arc::clone(&known_groups);
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
                     Ok(ZigbeeEvent::StateChanged(report)) => {
                         let _ = tx.send(MeshMessage::LightState(report)).await;
+                    }
+                    Ok(ZigbeeEvent::DeviceListUpdated(names)) => {
+                        *kd.lock().unwrap() = names.clone();
+                        let report = LightDeviceListReport {
+                            node_id: node_id.clone(),
+                            devices: names,
+                            groups: kg.lock().unwrap().clone(),
+                        };
+                        let _ = tx.send(MeshMessage::LightDeviceList(report)).await;
+                    }
+                    Ok(ZigbeeEvent::GroupListUpdated(names)) => {
+                        *kg.lock().unwrap() = names.clone();
+                        let report = LightDeviceListReport {
+                            node_id: node_id.clone(),
+                            devices: kd.lock().unwrap().clone(),
+                            groups: names,
+                        };
+                        let _ = tx.send(MeshMessage::LightDeviceList(report)).await;
                     }
                     Ok(ZigbeeEvent::ConnectionLost) => {
                         warn!("zigbee: connection lost");
@@ -67,7 +89,6 @@ impl Capability for LightingCapability {
                     Ok(ZigbeeEvent::ConnectionRestored) => {
                         info!("zigbee: connection restored");
                     }
-                    Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!("zigbee: event receiver lagged by {n} messages");
                     }

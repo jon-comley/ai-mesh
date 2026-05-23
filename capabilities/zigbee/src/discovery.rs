@@ -36,9 +36,13 @@ impl DeviceRegistry {
         let mut discovered = vec![];
 
         for entry in entries {
+            // Skip the Z2M coordinator itself — identified by type=="Coordinator" or absent ieee_address.
+            if entry.get("type").and_then(|v| v.as_str()) == Some("Coordinator") {
+                continue;
+            }
             let ieee = match entry.get("ieee_address").and_then(|v| v.as_str()) {
                 Some(s) => s.to_owned(),
-                None => continue, // coordinator entry — no ieee_address, skip silently
+                None => continue,
             };
             let name = entry
                 .get("friendly_name")
@@ -82,6 +86,19 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].ieee_address, "0xabc123");
         assert_eq!(found[0].friendly_name, "kitchen_bulb");
+    }
+
+    #[test]
+    fn skips_coordinator_with_ieee_address() {
+        // Newer Z2M versions include ieee_address on the coordinator entry.
+        let payload = r#"[
+            {"ieee_address": "0x0000000000000000", "friendly_name": "Coordinator", "type": "Coordinator"},
+            {"ieee_address": "0xabc123", "friendly_name": "test_bulb", "type": "EndDevice"}
+        ]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].friendly_name, "test_bulb");
     }
 
     #[test]
