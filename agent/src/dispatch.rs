@@ -36,7 +36,7 @@ pub async fn dispatch(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use shared::{ModelLoadRequest, NodeIdentity, NodeRole, WIRE_VERSION};
+    use shared::{HeartbeatPayload, ModelLoadRequest, NodeIdentity, NodeRole, WIRE_VERSION};
     use tokio::sync::{Mutex, mpsc};
 
     // ── TestCapability ────────────────────────────────────────────────────────
@@ -86,11 +86,14 @@ mod tests {
     }
 
     fn heartbeat() -> MeshMessage {
-        MeshMessage::Heartbeat(NodeIdentity {
-            id: "n1".into(),
-            hostname: "host".into(),
-            ip: "127.0.0.1".into(),
-            role: NodeRole::Compute,
+        MeshMessage::Heartbeat(HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "n1".into(),
+                hostname: "host".into(),
+                ip: "127.0.0.1".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
         })
     }
 

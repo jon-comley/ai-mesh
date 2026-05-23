@@ -1,5 +1,5 @@
 use crate::{
-    HardwareSpec, ModelLifecycleState, NodeCapabilities, NodeIdentity, NodeRole, VersionInfo,
+    HardwareSpec, HeartbeatPayload, ModelLifecycleState, NodeCapabilities, NodeRole, VersionInfo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -209,7 +209,7 @@ pub struct IntentResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MeshMessage {
-    Heartbeat(NodeIdentity),
+    Heartbeat(HeartbeatPayload),
     Capabilities(NodeCapabilities),
     HardwareReport(HardwareSpec),
     UpdateAvailable(VersionInfo),
@@ -252,7 +252,7 @@ pub enum AdminMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NodeRole;
+    use crate::{NodeIdentity, NodeRole};
 
     #[test]
     fn test_serialize_heartbeat() {
@@ -262,12 +262,51 @@ mod tests {
             ip: "192.168.1.16".into(),
             role: NodeRole::Compute,
         };
+        let payload = HeartbeatPayload {
+            identity: identity.clone(),
+            auth_token: String::new(),
+        };
 
-        let msg = MeshMessage::Heartbeat(identity.clone());
+        let msg = MeshMessage::Heartbeat(payload.clone());
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: MeshMessage = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(decoded, MeshMessage::Heartbeat(identity));
+        assert_eq!(decoded, MeshMessage::Heartbeat(payload));
+    }
+
+    #[test]
+    fn test_heartbeat_with_auth_token_roundtrip() {
+        let payload = HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "node-2".into(),
+                hostname: "secure-host".into(),
+                ip: "10.0.0.1".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: "secret-token".into(),
+        };
+        let msg = MeshMessage::Heartbeat(payload.clone());
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: MeshMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, MeshMessage::Heartbeat(payload));
+    }
+
+    #[test]
+    fn test_heartbeat_token_always_serialized() {
+        let payload = HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "node-3".into(),
+                hostname: "host".into(),
+                ip: "10.0.0.22".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
+        };
+        let json = serde_json::to_string(&MeshMessage::Heartbeat(payload)).unwrap();
+        assert!(
+            json.contains("auth_token"),
+            "auth_token must always appear in JSON"
+        );
     }
 
     #[test]

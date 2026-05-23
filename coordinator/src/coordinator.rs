@@ -55,11 +55,41 @@ impl Coordinator {
             let cert_path = cert_dir.join("coordinator.crt");
             let key_path = cert_dir.join("coordinator.key");
             let (cert_der, key_der) = coord_tls::load_or_generate(&cert_path, &key_path);
-            coord_tls::log_fingerprint(&cert_der);
+            let fingerprint = coord_tls::log_fingerprint(&cert_der);
             server.tls = Some(coord_tls::make_acceptor(cert_der, key_der));
+
+            // Collect valid auth tokens from env.
+            let mut tokens: Vec<String> = vec![];
+            if let Ok(t) = std::env::var("MESH_AUTH_TOKEN") {
+                let t = t.trim().to_string();
+                if !t.is_empty() {
+                    tokens.push(t);
+                }
+            }
+            if let Ok(t) = std::env::var("MESH_AUTH_TOKEN_NEXT") {
+                let t = t.trim().to_string();
+                if !t.is_empty() {
+                    tokens.push(t);
+                }
+            }
+            if tokens.is_empty() {
+                warn!(
+                    "MESH_AUTH_TOKEN not set — connections will not be authenticated. Set MESH_INSECURE=1 to suppress this warning."
+                );
+            } else {
+                info!(
+                    "auth token validation enabled ({} token(s) accepted)",
+                    tokens.len()
+                );
+            }
+            crate::state::write(&fingerprint, &tokens);
+            server.auth_tokens = Arc::new(tokens);
+            return tokio::spawn(async move {
+                let _ = server.run().await;
+            });
         }
 
-        // Collect valid auth tokens from env.
+        // Insecure path — collect tokens without writing state (no fingerprint to record).
         let mut tokens: Vec<String> = vec![];
         if let Ok(t) = std::env::var("MESH_AUTH_TOKEN") {
             let t = t.trim().to_string();
@@ -72,16 +102,6 @@ impl Coordinator {
             if !t.is_empty() {
                 tokens.push(t);
             }
-        }
-        if tokens.is_empty() && !insecure {
-            warn!(
-                "MESH_AUTH_TOKEN not set — connections will not be authenticated. Set MESH_INSECURE=1 to suppress this warning."
-            );
-        } else if !tokens.is_empty() {
-            info!(
-                "auth token validation enabled ({} token(s) accepted)",
-                tokens.len()
-            );
         }
         server.auth_tokens = Arc::new(tokens);
 
@@ -98,7 +118,7 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::{MeshMessage, NodeIdentity, NodeRole};
+    use shared::{HeartbeatPayload, MeshMessage, NodeIdentity, NodeRole};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -136,7 +156,14 @@ mod tests {
             role: NodeRole::Compute,
         };
 
-        let ack = send_message("127.0.0.1:9002", &MeshMessage::Heartbeat(ident.clone())).await;
+        let ack = send_message(
+            "127.0.0.1:9002",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: ident.clone(),
+                auth_token: String::new(),
+            }),
+        )
+        .await;
 
         match ack {
             MeshMessage::Acknowledge => {}

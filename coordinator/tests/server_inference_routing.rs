@@ -1,7 +1,7 @@
 use coordinator::registry::Registry;
 use shared::{
-    InferenceRequest, InferenceResult, MeshMessage, ModelLifecycleState, ModelStatusReport,
-    NodeCapabilities, NodeIdentity, NodeRole, WIRE_VERSION,
+    HeartbeatPayload, InferenceRequest, InferenceResult, MeshMessage, ModelLifecycleState,
+    ModelStatusReport, NodeCapabilities, NodeIdentity, NodeRole, WIRE_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -84,11 +84,14 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
     // Step 1 — Agent registers: Heartbeat registers node in both registry and connections map.
     write_frame(
         &mut agent_stream,
-        &MeshMessage::Heartbeat(NodeIdentity {
-            id: node_id.clone(),
-            hostname: "inference-host".into(),
-            ip: "127.0.0.1".into(),
-            role: NodeRole::Compute,
+        &MeshMessage::Heartbeat(HeartbeatPayload {
+            identity: NodeIdentity {
+                id: node_id.clone(),
+                hostname: "inference-host".into(),
+                ip: "127.0.0.1".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
         }),
     )
     .await;

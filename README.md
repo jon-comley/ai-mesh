@@ -39,13 +39,12 @@ passwordless sudo on Linux nodes so fingerprint pushes work non-interactively.
 ### 3. Start the cluster
 
 ```
-just restart-coordinator
+just start-cluster
 ```
 
-This starts the coordinator, **automatically generates a TLS certificate**, pushes the
-fingerprint to all compute nodes, starts the local controller, and loads the best model
-on each compute node. The TLS fingerprint is written to `~/.bashrc` automatically — no
-manual configuration needed.
+Starts the coordinator (generates a TLS certificate on first run), pushes the TLS fingerprint **and auth token** to all compute nodes, starts the local controller agent, and loads the best-fit model on each compute node. Credentials are written to `~/.bashrc` automatically.
+
+Use `just restart-coordinator` after waking from sleep — remote agents reconnect automatically, this just refreshes the coordinator and re-pushes credentials.
 
 ### 4. Check mesh state
 
@@ -57,27 +56,34 @@ just validate-routing   # confirm inference routes to correct nodes
 ### 5. Day-to-day
 
 ```
-just restart-coordinator   # after waking laptop or any coordinator restart
+just restart-coordinator        # after waking laptop or any coordinator restart
 just intent "turn the lights off"
+just set-auth-token <token>     # rotate the shared auth secret across all nodes
 ```
 
 ---
 
 ---
 
-## Security (TLS)
+## Security
 
-All coordinator ↔ agent and coordinator ↔ CLI traffic runs over TLS. The coordinator
-generates a self-signed certificate on first start and persists it at
-`~/.config/ai-mesh/coordinator.crt`. Agents and the CLI verify the cert via its
-SHA-256 fingerprint (TOFU model — trust on first contact, reject any change).
+All coordinator ↔ agent and coordinator ↔ CLI traffic runs over **TLS** with a **shared auth token**.
 
-**`just restart-coordinator` handles everything automatically:**
-- Reads the fingerprint from the coordinator log
-- Writes `export MESH_TLS_FINGERPRINT=...` to `~/.bashrc` on the controller machine
-- Pushes the fingerprint to every compute node via `just set-fingerprint <node>`
+### TLS (transport layer)
+The coordinator generates a self-signed certificate on first start, persisted at `~/.config/ai-mesh/coordinator.crt`. Agents and the CLI verify the cert via its SHA-256 fingerprint (TOFU model — trust on first contact, reject any change).
 
-You never need to copy or paste a fingerprint manually.
+### Auth token (application layer)
+Each agent includes `MESH_AUTH_TOKEN` in its startup `AuthToken` frame (connection-level) and in every `Heartbeat` (per-message defence-in-depth). The coordinator rejects any connection or heartbeat with a missing or wrong token when auth is configured. Dual-token rotation (`MESH_AUTH_TOKEN` + `MESH_AUTH_TOKEN_NEXT`) allows zero-downtime key rotation.
+
+### Coordinator state file
+On startup the coordinator writes `~/.config/ai-mesh/coordinator.state` (0600, shell-sourceable KEY=VALUE) containing the current fingerprint and auth token. All justfile recipes source this file — no log-grepping, no race conditions.
+
+**`just start-cluster` and `just restart-coordinator` handle everything automatically:**
+- Source `~/.config/ai-mesh/coordinator.state` for fingerprint + auth token
+- Write `export MESH_TLS_FINGERPRINT=...` to `~/.bashrc` on the controller machine
+- Call `just set-fingerprint <node>` for every compute node, which pushes **both** `MESH_TLS_FINGERPRINT` and `MESH_AUTH_TOKEN` in one SSH operation
+
+You never need to copy or paste credentials manually.
 
 **To skip TLS verification** (dev/test only):
 ```bash
@@ -127,6 +133,8 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just load <model>` | Auto-place a model via coordinator (no SSH needed, e.g. `just load qwen2.5:7b`) |
 | `just intent "<text>"` | Send a natural-language intent to the coordinator (LLM routes to tool or answers in free text) |
 | `just pair-bulb` | Open a 254-second Zigbee pairing window and stream join events |
+| `just set-fingerprint <node>` | Push TLS fingerprint **and** auth token from coordinator state file to a single node |
+| `just set-auth-token <token>` | Rotate shared auth secret — pushes to all compute nodes and updates `~/.bashrc` |
 
 See `docs/commands.md` for full reference.
 

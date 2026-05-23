@@ -189,6 +189,21 @@ hardware-report: update-portproxy
     fi
 
     cargo run -q -p cli -- reset-registry > /dev/null || true
+
+    # Push credentials in case the coordinator was freshly started (new cert/token).
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then
+        source "$STATE"
+        export MESH_TLS_FINGERPRINT="${MESH_TLS_FINGERPRINT}"
+        echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
+        for f in nodes/*.env; do
+            source "$f"
+            NODE_NAME=$(basename "$f" .env)
+            [ "${NODE_ROLE}" = "compute" ] || continue
+            just set-fingerprint ${NODE_NAME} \
+                || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
+        done
+    fi
     just start-agents
     bash scripts/hardware-report.sh "$COORD"
 
@@ -542,13 +557,20 @@ set-fingerprint node:
     set -e
     source nodes/{{node}}.env
 
-    FP=$(grep "TLS fingerprint" /tmp/mesh-coordinator.log 2>/dev/null | tail -1 | awk '{print $NF}')
-    if [ -z "$FP" ]; then
-        echo ">>> ERROR: could not read fingerprint from /tmp/mesh-coordinator.log"
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ ! -f "$STATE" ]; then
+        echo ">>> ERROR: coordinator state file not found at $STATE"
         echo ">>>        Is the coordinator running? Try: just restart-coordinator"
         exit 1
     fi
+    source "$STATE"
+    FP="${MESH_TLS_FINGERPRINT}"
+    if [ -z "$FP" ]; then
+        echo ">>> ERROR: MESH_TLS_FINGERPRINT missing from $STATE"
+        exit 1
+    fi
     echo ">>> Setting MESH_TLS_FINGERPRINT=${FP} on {{node}}..."
+    [ -n "${MESH_AUTH_TOKEN}" ] && echo ">>> Also pushing MESH_AUTH_TOKEN to {{node}}..."
 
     case "$NODE_OS" in
       linux)
@@ -556,6 +578,8 @@ set-fingerprint node:
             sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
             printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=${FP}\n' \
                 | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
+            printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}\n' \
+                | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
             sudo systemctl daemon-reload
             sudo systemctl restart ai-mesh-agent
         "
@@ -572,14 +596,89 @@ set-fingerprint node:
                 'LLAMA_GPU_LAYERS=99' \
                 'LLAMA_FLASH_ATTN=1' \
                 'DEFAULT_MODEL=${DEFAULT_MODEL}' \
-                'MESH_TLS_FINGERPRINT=${FP}';\
+                'MESH_TLS_FINGERPRINT=${FP}' \
+                'MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}';\
             taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
-            Restart-Service ai-mesh-agent -Force -ErrorAction SilentlyContinue;\
+            \$svcpid = (Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
+            if (\$svcpid -gt 0) { Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue };\
+            Start-Sleep -Milliseconds 800;\
+            Start-Service ai-mesh-agent -ErrorAction SilentlyContinue;\
             exit 0\
         \""
         ;;
     esac
-    echo ">>> {{node}}: fingerprint set and agent restarted."
+    echo ">>> {{node}}: fingerprint and auth token set, agent restarted."
+
+# Push MESH_AUTH_TOKEN to all compute nodes and update local ~/.bashrc.
+# Usage: just set-auth-token <token>
+set-auth-token token:
+    #!/usr/bin/env bash
+    set -e
+    TOKEN="{{token}}"
+
+    # Update ~/.bashrc and current shell
+    if grep -q "MESH_AUTH_TOKEN" "$HOME/.bashrc" 2>/dev/null; then
+        if [[ "$(uname -s)" == "Darwin" ]]; then
+            sed -i '' "s|export MESH_AUTH_TOKEN=.*|export MESH_AUTH_TOKEN=${TOKEN}|" "$HOME/.bashrc"
+        else
+            sed -i "s|export MESH_AUTH_TOKEN=.*|export MESH_AUTH_TOKEN=${TOKEN}|" "$HOME/.bashrc"
+        fi
+    else
+        printf '\n# ai-mesh auth token — managed by just set-auth-token\nexport MESH_AUTH_TOKEN=%s\n' "${TOKEN}" >> "$HOME/.bashrc"
+    fi
+    export MESH_AUTH_TOKEN="${TOKEN}"
+    echo ">>> Local MESH_AUTH_TOKEN updated in ~/.bashrc"
+
+    # Push to every compute node
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ ! -f "$STATE" ]; then
+        echo ">>> ERROR: coordinator state file not found at $STATE — is the coordinator running?"
+        exit 1
+    fi
+    source "$STATE"
+    FP="${MESH_TLS_FINGERPRINT}"
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        [ "${NODE_ROLE}" = "compute" ] || continue
+        echo ">>> Pushing MESH_AUTH_TOKEN to ${NODE_NAME}..."
+
+        case "$NODE_OS" in
+          linux)
+            ssh ${NODE_USER}@${NODE_HOST} "
+                sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
+                printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${TOKEN}\n' \
+                    | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
+                sudo systemctl daemon-reload
+                sudo systemctl restart ai-mesh-agent
+            "
+            ;;
+          windows)
+            DEFAULT_MODEL="${DEFAULT_MODEL:-qwen2.5:7b}"
+            ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+                \$nssm = (Get-Command nssm.exe -ErrorAction Stop).Source;\
+                & \$nssm set ai-mesh-agent AppEnvironmentExtra \
+                    'COORDINATOR_IP={{coordinator_ip}}' \
+                    'AGENT_ROLE=${NODE_ROLE}' \
+                    ('LLAMA_MODEL_DIR=' + \$env:USERPROFILE + '\\.ai-mesh\\models') \
+                    ('LLAMA_SERVER_BIN=' + \$env:LOCALAPPDATA + '\\Programs\\llama.cpp\\llama-server.exe') \
+                    'LLAMA_GPU_LAYERS=99' \
+                    'LLAMA_FLASH_ATTN=1' \
+                    'DEFAULT_MODEL=${DEFAULT_MODEL}' \
+                    'MESH_TLS_FINGERPRINT=${FP}' \
+                    'MESH_AUTH_TOKEN=${TOKEN}';\
+                taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
+                \$svcpid = (Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
+                if (\$svcpid -gt 0) { Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue };\
+                Start-Sleep -Milliseconds 800;\
+                Start-Service ai-mesh-agent -ErrorAction SilentlyContinue;\
+                exit 0\
+            \""
+            ;;
+        esac
+        echo ">>> ${NODE_NAME}: auth token updated."
+    done
+    echo ">>> Auth token push complete."
 
 # Remove the ai-mesh-agent service from a node.
 # Usage: just uninstall-node pi1
@@ -929,6 +1028,36 @@ start-cluster: update-portproxy
 
     cargo run -q -p cli -- reset-registry > /dev/null || true
 
+    # Push TLS fingerprint + auth token to all compute nodes before starting their agents.
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ ! -f "$STATE" ]; then
+        echo ">>> ERROR: coordinator state file not found at $STATE — coordinator may not have started"
+        exit 1
+    fi
+    source "$STATE"
+    FP="${MESH_TLS_FINGERPRINT}"
+    if [ -n "$FP" ]; then
+        if grep -q "MESH_TLS_FINGERPRINT" "$HOME/.bashrc" 2>/dev/null; then
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+                sed -i '' "s|export MESH_TLS_FINGERPRINT=.*|export MESH_TLS_FINGERPRINT=${FP}|" "$HOME/.bashrc"
+            else
+                sed -i "s|export MESH_TLS_FINGERPRINT=.*|export MESH_TLS_FINGERPRINT=${FP}|" "$HOME/.bashrc"
+            fi
+        else
+            printf '\n# ai-mesh TLS fingerprint — managed by just start-cluster\nexport MESH_TLS_FINGERPRINT=%s\n' "${FP}" >> "$HOME/.bashrc"
+        fi
+        export MESH_TLS_FINGERPRINT="${FP}"
+        echo ">>> MESH_TLS_FINGERPRINT set: ${FP}"
+    fi
+    echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        [ "${NODE_ROLE}" = "compute" ] || continue
+        just set-fingerprint ${NODE_NAME} \
+            || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
+    done
+
     echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
     AGENT_ROLE=controller cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
 
@@ -987,25 +1116,36 @@ restart-coordinator: update-portproxy
 
     cargo run -q -p cli -- reset-registry > /dev/null || true
 
-    # Write fingerprint to ~/.bashrc and current shell so the CLI works immediately.
-    FP=$(grep "TLS fingerprint" /tmp/mesh-coordinator.log 2>/dev/null | tail -1 | awk '{print $NF}')
+    # Read fingerprint (and token if set) from the coordinator state file.
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ ! -f "$STATE" ]; then
+        echo ">>> ERROR: coordinator state file not found at $STATE — coordinator may not have started"
+        exit 1
+    fi
+    source "$STATE"
+    FP="${MESH_TLS_FINGERPRINT}"
     if [ -n "$FP" ]; then
         if grep -q "MESH_TLS_FINGERPRINT" "$HOME/.bashrc" 2>/dev/null; then
-            sed -i "s|export MESH_TLS_FINGERPRINT=.*|export MESH_TLS_FINGERPRINT=${FP}|" "$HOME/.bashrc"
+            # macOS sed requires an empty-string backup extension; GNU sed does not
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+                sed -i '' "s|export MESH_TLS_FINGERPRINT=.*|export MESH_TLS_FINGERPRINT=${FP}|" "$HOME/.bashrc"
+            else
+                sed -i "s|export MESH_TLS_FINGERPRINT=.*|export MESH_TLS_FINGERPRINT=${FP}|" "$HOME/.bashrc"
+            fi
         else
-            echo "export MESH_TLS_FINGERPRINT=${FP}" >> "$HOME/.bashrc"
+            printf '\n# ai-mesh TLS fingerprint — managed by just restart-coordinator\nexport MESH_TLS_FINGERPRINT=%s\n' "${FP}" >> "$HOME/.bashrc"
         fi
         export MESH_TLS_FINGERPRINT="${FP}"
         echo ">>> MESH_TLS_FINGERPRINT set: ${FP}"
     fi
 
-    echo ">>> Pushing TLS fingerprint to all compute nodes..."
+    echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
     for f in nodes/*.env; do
         source "$f"
         NODE_NAME=$(basename "$f" .env)
         [ "${NODE_ROLE}" = "compute" ] || continue
         just set-fingerprint ${NODE_NAME} \
-            || echo ">>> Warning: could not set fingerprint on ${NODE_NAME} (skipping)"
+            || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
     done
 
     echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
@@ -1103,9 +1243,33 @@ dev: update-portproxy
     echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
     COORD_PID=$!
-    sleep 1
+
+    echo ">>> Waiting for coordinator to accept connections..."
+    for i in $(seq 1 60); do
+        sleep 1
+        if grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null; then
+            echo ">>> Coordinator ready."
+            break
+        fi
+        [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
+    done
 
     cargo run -p cli -- reset-registry || true
+
+    # Push TLS fingerprint + auth token to all compute nodes.
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then
+        source "$STATE"
+        export MESH_TLS_FINGERPRINT="${MESH_TLS_FINGERPRINT}"
+        echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
+        for f in nodes/*.env; do
+            source "$f"
+            NODE_NAME=$(basename "$f" .env)
+            [ "${NODE_ROLE}" = "compute" ] || continue
+            just set-fingerprint ${NODE_NAME} \
+                || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
+        done
+    fi
 
     echo ">>> Starting local controller agent (log: /tmp/mesh-agent.log)..."
     AGENT_ROLE=controller cargo run -p agent > /tmp/mesh-agent.log 2>&1 &
@@ -1182,13 +1346,15 @@ sanity-full: update-portproxy
     pkill -f "target/(debug|release)/agent" || true
     sleep 0.5
 
-    cargo run -p coordinator &
+    # Dev-only harness: run coordinator in insecure mode so remote agents (which have
+    # production credentials) don't need a fresh fingerprint push.
+    MESH_INSECURE=1 cargo run -p coordinator &
     COORD_PID=$!
     sleep 1
 
-    cargo run -p cli -- reset-registry || true
+    MESH_INSECURE=1 cargo run -p cli -- reset-registry || true
 
-    AGENT_ROLE=controller cargo run -p agent &
+    MESH_INSECURE=1 AGENT_ROLE=controller cargo run -p agent &
     AGENT_PID=$!
     sleep 1
 
@@ -1214,7 +1380,7 @@ sanity-full: update-portproxy
     sleep 12
 
     echo ">>> Node table:"
-    cargo run -p cli -- nodes
+    MESH_INSECURE=1 cargo run -p cli -- nodes
 
 # Tail all mesh logs simultaneously (local + all remote nodes).
 logs:
@@ -1389,13 +1555,15 @@ test-inference: update-portproxy
     pkill -f "target/(debug|release)/agent" || true
     sleep 0.5
 
-    cargo run -p coordinator &
+    # Dev-only harness: run coordinator in insecure mode so remote agents (which have
+    # production credentials) don't need a fresh fingerprint push.
+    MESH_INSECURE=1 cargo run -p coordinator &
     COORD_PID=$!
     sleep 1
 
-    cargo run -p cli -- reset-registry || true
+    MESH_INSECURE=1 cargo run -p cli -- reset-registry || true
 
-    AGENT_ROLE=controller cargo run -p agent &
+    MESH_INSECURE=1 AGENT_ROLE=controller cargo run -p agent &
     AGENT_PID=$!
     sleep 1
 
@@ -1417,9 +1585,9 @@ test-inference: update-portproxy
     sleep 5
 
     echo "=== Step 2: Verifying all compute nodes are registered ==="
-    cargo run -q -p cli -- nodes
+    MESH_INSECURE=1 cargo run -q -p cli -- nodes
 
-    COMPUTE_NODES=$(cargo run -q -p cli -- nodes | grep -E "Compute")
+    COMPUTE_NODES=$(MESH_INSECURE=1 cargo run -q -p cli -- nodes | grep -E "Compute")
     COMPUTE_COUNT=$(echo "$COMPUTE_NODES" | grep -c "Compute" || true)
     echo "Found ${COMPUTE_COUNT} compute node(s)"
 
@@ -1429,20 +1597,20 @@ test-inference: update-portproxy
         HOSTNAME=$(echo "$line" | awk -F'|' '{print $3}' | xargs)
         if [ -n "$NODE_ID" ]; then
             echo "  Loading qwen2.5:1.5b on ${HOSTNAME} (${NODE_ID})..."
-            cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:1.5b 1024
+            MESH_INSECURE=1 cargo run -q -p cli -- load "${NODE_ID}" qwen2.5:1.5b 1024
         fi
     done <<< "$COMPUTE_NODES"
 
     echo "=== Step 4: Waiting for all nodes to reach Ready ==="
     sleep 5
-    cargo run -q -p cli -- nodes
+    MESH_INSECURE=1 cargo run -q -p cli -- nodes
 
     echo "=== Step 5: Firing 4 inference requests (expect load distribution) ==="
     PROMPT='In one sentence, what is the Itchen Bridge toll for?'
     for i in 1 2 3 4; do
         echo "--- Request ${i} ---"
-        cargo run -q -p cli -- infer 'qwen2.5:1.5b' "${PROMPT}"
+        MESH_INSECURE=1 cargo run -q -p cli -- infer 'qwen2.5:1.5b' "${PROMPT}"
     done
 
     echo "=== Step 6: Final cluster state ==="
-    cargo run -q -p cli -- nodes
+    MESH_INSECURE=1 cargo run -q -p cli -- nodes

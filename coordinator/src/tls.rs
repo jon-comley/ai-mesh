@@ -55,11 +55,12 @@ pub fn make_acceptor(cert_der: Vec<u8>, key_der: Vec<u8>) -> TlsAcceptor {
     TlsAcceptor::from(Arc::new(config))
 }
 
-/// Print the coordinator's fingerprint on startup.
-pub fn log_fingerprint(cert_der: &[u8]) {
+/// Print and return the coordinator's TLS fingerprint on startup.
+pub fn log_fingerprint(cert_der: &[u8]) -> String {
     let fp = cert_fingerprint(cert_der);
     info!("coordinator TLS fingerprint: {}", fp);
     info!("  (copy this to MESH_TLS_FINGERPRINT in each node's .env)");
+    fp
 }
 
 fn pem_to_der(pem: &[u8], label: &str) -> Vec<u8> {

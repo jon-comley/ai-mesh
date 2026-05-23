@@ -19,6 +19,25 @@ pub struct NodeIdentity {
     pub role: NodeRole,
 }
 
+/// Heartbeat payload — node identity plus an auth token for per-message
+/// defence-in-depth (supplements the connection-level AuthToken first-frame check).
+/// Always serialised; agents without a token send an empty string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HeartbeatPayload {
+    #[serde(flatten)]
+    pub identity: NodeIdentity,
+    pub auth_token: String,
+}
+
+impl From<NodeIdentity> for HeartbeatPayload {
+    fn from(identity: NodeIdentity) -> Self {
+        HeartbeatPayload {
+            identity,
+            auth_token: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NodeRole {
     Controller,
@@ -150,5 +169,35 @@ mod tests {
         let decoded: HardwareSpec = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, hw);
+    }
+
+    #[test]
+    fn heartbeat_payload_from_identity_has_empty_token() {
+        let identity = NodeIdentity {
+            id: "n1".into(),
+            hostname: "host".into(),
+            ip: "10.0.0.1".into(),
+            role: NodeRole::Compute,
+        };
+        let payload = HeartbeatPayload::from(identity.clone());
+        assert_eq!(payload.identity, identity);
+        assert_eq!(payload.auth_token, "");
+    }
+
+    #[test]
+    fn heartbeat_payload_roundtrip_with_token() {
+        let payload = HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "n2".into(),
+                hostname: "secure".into(),
+                ip: "10.0.0.22".into(),
+                role: NodeRole::Controller,
+            },
+            auth_token: "tok123".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, payload);
+        assert!(json.contains("auth_token"));
     }
 }

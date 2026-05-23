@@ -212,11 +212,15 @@ mod tests {
 
     #[test]
     fn does_not_handle_heartbeat() {
-        let msg = MeshMessage::Heartbeat(NodeIdentity {
-            id: "node-1".into(),
-            hostname: "host".into(),
-            ip: "127.0.0.1".into(),
-            role: NodeRole::Compute,
+        use shared::HeartbeatPayload;
+        let msg = MeshMessage::Heartbeat(HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "node-1".into(),
+                hostname: "host".into(),
+                ip: "127.0.0.1".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
         });
         assert!(!make_cap().handles(&msg));
     }

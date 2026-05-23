@@ -26,9 +26,13 @@ Encrypts the wire, prevents eavesdropping. The coordinator generates a self-sign
 
 **Why self-signed, not a CA:** The mesh is a closed system with a known, small set of nodes. A full PKI adds complexity without benefit. Fingerprint-based trust-on-first-use (TOFU) is the same model SSH uses and is well understood.
 
-### Layer 2 — Shared auth token in Heartbeat
+### Layer 2 — Shared auth token (connection + per-heartbeat)
 
-Each agent includes an `auth_token` in its `Heartbeat` message. The coordinator rejects the connection if the first `Heartbeat` carries an absent or wrong token. A single shared secret covers all nodes for now; per-node tokens (allowing individual revocation) are a future improvement.
+**Two sub-layers:**
+1. **Connection-level `AuthToken` first frame** — on every new TCP connection, the first message must be `AuthToken(token)` carrying the correct shared secret. Wrong or absent → connection dropped before any registry interaction.
+2. **Per-heartbeat `auth_token` field** — `HeartbeatPayload` carries `auth_token: String` in every `Heartbeat`. The coordinator rejects heartbeats with an empty or wrong token when auth is configured. This is defence-in-depth: even if the connection-level check were bypassed, individual messages can't manipulate the registry.
+
+`auth_token` is a required `String` field (always serialised). Agents without a token configured send `""`. A single shared secret covers all nodes; per-node tokens (allowing individual revocation) are a future improvement.
 
 ### Layer 3 — HMAC message integrity
 
@@ -92,11 +96,14 @@ This makes "first connect" clearly distinguishable from "key changed".
 
 ### Step 3: Auth token in Heartbeat
 
-**Modified file:** `shared/src/messages.rs`
-- Add to `Heartbeat`:
+**Modified file:** `shared/src/hardware.rs`
+- `HeartbeatPayload` struct (replaces bare `NodeIdentity` in `Heartbeat`):
   ```rust
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub auth_token: Option<String>,
+  pub struct HeartbeatPayload {
+      #[serde(flatten)]
+      pub identity: NodeIdentity,
+      pub auth_token: String,   // always serialised; empty string when not configured
+  }
   ```
 
 **Modified file:** `coordinator/src/server.rs`

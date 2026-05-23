@@ -115,7 +115,7 @@ Set-ExecutionPolicy Bypass -Scope Process -Force
 The provision script does:
 - Creates `C:\Users\<user>\ai-mesh\` and `logs\` directories
 - Sets `LocalAccountTokenFilterPolicy = 1` (SSH elevation)
-- Downloads the latest **llama.cpp Vulkan release** ZIP from GitHub and extracts it to `%LOCALAPPDATA%\Programs\llama.cpp\`
+- Downloads the latest **llama.cpp Vulkan release** ZIP from GitHub and extracts it to `%LOCALAPPDATA%\Programs\llama.cpp\` (e.g. `C:\Users\jonno\AppData\Local\Programs\llama.cpp\llama-server.exe`)
 - Installs **NSSM** via winget
 - Registers `ai-mesh-agent` as a Windows service (auto-start)
 - Sets `COORDINATOR_IP`, `AGENT_ROLE`, `LLAMA_MODEL_DIR`, `LLAMA_SERVER_BIN`, `LLAMA_GPU_LAYERS=99`, and `LLAMA_FLASH_ATTN=1` as service environment vars
@@ -162,6 +162,7 @@ just validate-routing
 | Check service state | `ssh user@host "sc.exe query ai-mesh-agent"` |
 | Restart service | `ssh user@host "sc.exe stop ai-mesh-agent && sc.exe start ai-mesh-agent"` |
 | Update llama-server | `just update-llama beelink1` |
+| Verify llama-server path | `ssh user@host 'dir "%LOCALAPPDATA%\Programs\llama.cpp\llama-server.exe"'` |
 
 `just update-node beelink1` rebuilds, uploads via temp file (to avoid file lock), kills NSSM by PID, swaps the binary, and restarts — all from WSL.
 
