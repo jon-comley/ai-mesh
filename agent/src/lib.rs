@@ -5,3 +5,4 @@ pub mod discovery;
 pub mod dispatch;
 pub mod hardware;
 pub mod identity;
+pub mod tls;

@@ -239,6 +239,8 @@ pub enum MeshMessage {
     // Intent routing
     IntentRequest(IntentRequest),
     IntentResponse(IntentResponse),
+    // Phase 10 — auth: sent as the first message on every new connection
+    AuthToken(String),
 }
 
 /// Structured admin messages for coordinator control.

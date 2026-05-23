@@ -48,6 +48,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                     conns,
                     pend,
                     pending_intents,
+                    Arc::new(vec![]),
                 )
                 .await;
             }
@@ -70,6 +71,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                     conns,
                     pend,
                     pending_intents,
+                    Arc::new(vec![]),
                 )
                 .await;
             }

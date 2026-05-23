@@ -2,6 +2,9 @@ use coordinator::coordinator::Coordinator;
 
 #[tokio::main]
 async fn main() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install ring crypto provider");
     tracing_subscriber::fmt().init();
     println!("Starting AI Mesh Coordinator on 0.0.0.0:9000...");
 
