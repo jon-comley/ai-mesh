@@ -14,11 +14,19 @@ fn default_wire_version() -> u32 {
 pub struct InferenceRequest {
     pub request_id: String,
     /// Caller-supplied target node. `None` means "let the scheduler decide".
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub model_name: String,
+    /// Optional system prompt. When set the agent passes it in the system role
+    /// and `prompt` goes in the user role. When absent, only a user role is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     pub prompt: String,
     pub max_tokens: u32,
+    /// Sampling temperature. `None` lets the agent use its default (0.8).
+    /// Set to `0.0` for greedy/deterministic output (faster, better for JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
     #[serde(default = "default_wire_version")]
     pub wire_version: u32,
 }
@@ -456,11 +464,38 @@ mod tests {
             request_id: "req-1".into(),
             node_id: Some("node-1".into()),
             model_name: "llama3".into(),
+            system_prompt: None,
             prompt: "hello".into(),
             max_tokens: 128,
+            temperature: None,
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InferenceRequest>(&json).unwrap(),
+            req
+        );
+    }
+
+    #[test]
+    fn inference_request_with_system_prompt_roundtrip() {
+        let req = InferenceRequest {
+            request_id: "req-2".into(),
+            node_id: None,
+            model_name: "qwen2.5:7b".into(),
+            system_prompt: Some("You are a controller.".into()),
+            prompt: "turn light on".into(),
+            max_tokens: 128,
+            temperature: Some(0.0),
+            wire_version: WIRE_VERSION,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("system_prompt"));
+        assert!(json.contains("temperature"));
+        assert!(
+            !json.contains("node_id"),
+            "node_id should be omitted when None"
+        );
         assert_eq!(
             serde_json::from_str::<InferenceRequest>(&json).unwrap(),
             req

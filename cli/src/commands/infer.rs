@@ -49,8 +49,10 @@ async fn send_infer(
         request_id: Uuid::new_v4().to_string(),
         node_id: None,
         model_name,
+        system_prompt: None,
         prompt,
         max_tokens: 256,
+        temperature: None,
         wire_version: WIRE_VERSION,
     });
 

@@ -106,6 +106,7 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just validate-routing` | Confirm each model routes to its correct node (run after `start-cluster` or `restart-coordinator`) |
 | `just logs-node <node>` | Tail live agent logs from a node |
 | `just logs` | Tail all logs simultaneously |
+| `just load <model>` | Auto-place a model via coordinator (no SSH needed, e.g. `just load qwen2.5:7b`) |
 | `just intent "<text>"` | Send a natural-language intent to the coordinator (LLM routes to tool or answers in free text) |
 | `just pair-bulb` | Open a 254-second Zigbee pairing window and stream join events |
 

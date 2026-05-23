@@ -146,8 +146,10 @@ mod tests {
             request_id: "r1".into(),
             node_id: Some("node-1".into()),
             model_name: "llama3".into(),
+            system_prompt: None,
             prompt: "hello".into(),
             max_tokens: 64,
+            temperature: None,
             wire_version: WIRE_VERSION,
         };
         let result = h.execute_inference(&req);

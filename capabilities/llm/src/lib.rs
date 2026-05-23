@@ -107,7 +107,7 @@ impl Capability for LlmCapability {
                             warn!(request_id = %req.request_id,
                                   "inference cancelled: connection dropped");
                         }
-                        res = llama::generate(&req.model_name, &req.prompt) => {
+                        res = llama::generate(&req.model_name, req.system_prompt.as_deref(), &req.prompt, req.max_tokens, req.temperature.unwrap_or(0.8)) => {
                             let result = match res {
                                 Ok((output, tokens, duration_ms)) => InferenceResult {
                                     request_id: req.request_id,
@@ -201,8 +201,10 @@ mod tests {
             request_id: "r3".into(),
             node_id: Some("node-1".into()),
             model_name: "qwen2.5:7b".into(),
+            system_prompt: None,
             prompt: "hello".into(),
             max_tokens: 64,
+            temperature: None,
             wire_version: WIRE_VERSION,
         });
         assert!(make_cap().handles(&msg));

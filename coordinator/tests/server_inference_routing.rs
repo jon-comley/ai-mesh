@@ -148,8 +148,10 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                     request_id: "infer-req-001".into(),
                     node_id: None,
                     model_name: "llama3".into(),
+                    system_prompt: None,
                     prompt: "hello world".into(),
                     max_tokens: 64,
+                    temperature: None,
                     wire_version: WIRE_VERSION,
                 }),
             )

@@ -597,6 +597,21 @@ update-llama node:
     just restart-node {{node}}
     echo "llama.cpp updated to $LATEST on {{node}}"
 
+# Auto-place a model — coordinator picks the best-fit node. No SSH needed.
+# Usage: just load qwen2.5:7b
+load model:
+    #!/usr/bin/env bash
+    set -e
+    case "{{model}}" in
+        qwen2.5:0.5b)  SIZE_MB=512 ;;
+        qwen2.5:1.5b)  SIZE_MB=1024 ;;
+        qwen2.5:7b)    SIZE_MB=4096 ;;
+        qwen2.5:14b)   SIZE_MB=8192 ;;
+        qwen2.5:32b)   SIZE_MB=20480 ;;
+        *) echo "Unknown model: {{model}} (supported: qwen2.5:0.5b 1.5b 7b 14b 32b)"; exit 1 ;;
+    esac
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" load "{{model}}" "$SIZE_MB"
+
 # Load a model on a named node (looks up live node ID from coordinator).
 # Usage: just load-model pi1 qwen2.5:1.5b
 #        just load-model beelink1 qwen2.5:7b
