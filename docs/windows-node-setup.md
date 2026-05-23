@@ -392,34 +392,38 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 ### Beelink SER8 — OS hang (power light on, no network response)
 
-**Symptom:** Machine appears powered on (front LED lit) but does not respond to ping or SSH. Recovered by holding the power button for a hard reset. Booted cleanly after. First observed 2026-05-23.
+**Symptom:** Machine appears powered on (front LED lit), monitor connected and also unresponsive (black/frozen screen), no ping or SSH response. Recovered by holding the power button for a hard reset. Booted cleanly after. First observed 2026-05-23.
 
-This is distinct from the CMOS/BIOS issue above — no BIOS screen, OS likely crashed or hung mid-run.
+This is distinct from the CMOS/BIOS issue above — no BIOS screen, system hung with display stack dead.
 
-**Suspected causes (most likely first):**
+**Confirmed not:** NIC power management (monitor was connected and also unresponsive, so the whole system was hung, not just the network).
 
-1. **NIC power management** — Windows can suspend the network adapter independently of system sleep. `powercfg` disables system sleep but not the NIC adapter's own power-save setting. The machine is running but unreachable.
-2. **GPU driver crash** — AMD Radeon 780M running Vulkan via llama-server. A driver TDR event or BSOD with no monitor attached can leave the system hung with no recovery path.
-3. **Fast Startup** — `powercfg /h off` disables hibernate but not Windows Fast Startup (hybrid shutdown). Can produce a half-suspended state.
+**Primary suspect: GPU driver crash (TDR).** AMD Radeon 780M running Vulkan at `LLAMA_GPU_LAYERS=99` via llama-server. Windows has a watchdog called TDR (Timeout Detection and Recovery) that kills and restarts the GPU driver if the GPU stops responding. On a sustained compute workload it sometimes fails to recover and takes the entire display stack down, leaving the system hung with a black screen and no way to recover except a hard reset.
+
+**Secondary suspect: Fast Startup.** `powercfg /h off` disables hibernate but not Windows Fast Startup (hybrid shutdown), which can produce a half-suspended state on restart.
 
 **Diagnostics — run after next recovery, before restarting agent:**
 
-Check Event Log for kernel-power (ID 41 = unexpected shutdown) or BugCheck (BSOD):
+Check for GPU TDR events and kernel-power (ID 41 = unexpected shutdown):
 ```bash
-ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.LevelDisplayName -eq 'Critical' -or \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
+ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 200 | Where-Object { \$_.LevelDisplayName -eq 'Critical' -or \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 } | Select-Object TimeCreated, Id, Message | Format-List\""
 ```
+Event ID 4101 = TDR (display driver stopped responding). Event ID 41 = unexpected power loss.
 
-Check whether NIC power management is on:
+Also check the AMD driver log:
 ```bash
-ssh jonno@192.168.1.14 "powershell -Command \"Get-NetAdapter | Get-NetAdapterPowerManagement | Select-Object Name, AllowComputerToTurnOffDevice\""
+ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName 'System' | Where-Object { \$_.ProviderName -like '*amd*' -or \$_.ProviderName -like '*display*' } | Select-Object -First 20 TimeCreated, Id, Message | Format-List\""
 ```
 
 **Mitigations (not yet applied — add to `install-node-windows.ps1`):**
 
 ```powershell
-# Disable NIC power management
-Get-NetAdapter | Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice Disabled
+# Increase TDR timeout from default 2s to 60s — gives AMD driver more time to recover
+# under sustained GPU load before Windows decides it's hung
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 60 /f
 
 # Disable Fast Startup (separate from hibernate)
 reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f
 ```
+
+If TDR events are confirmed in the logs, consider reducing `LLAMA_GPU_LAYERS` from 99 to a lower value (e.g. 20–30) to keep some compute on CPU and reduce sustained GPU pressure.
