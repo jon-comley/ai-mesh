@@ -116,13 +116,16 @@
 
 ---
 
-## Phase 10 — Security & Auth
+## Phase 10 — Security & Auth ✓ Complete
 
-- [x] TLS on coordinator TCP listener (self-signed cert, TOFU fingerprint via `MESH_TLS_FINGERPRINT`)
-- [x] Node authentication — `AuthToken` first-frame message, dual-token rotation (`MESH_AUTH_TOKEN` + `MESH_AUTH_TOKEN_NEXT`)
-- [x] Shared CLI connection helper (`cli/src/connection.rs`) — TLS + auth extracted from all 10 commands
-- [x] `MESH_INSECURE=1` explicit escape hatch with loud warnings
-- Signed wire messages (HMAC) — deferred, optional defence-in-depth (see `docs/phase10-security.md`)
+- **TLS on coordinator TCP listener** — self-signed cert generated with `rcgen`, persisted at `~/.config/ai-mesh/coordinator.crt`; SHA-256 fingerprint logged on startup
+- **TOFU fingerprint verification** — agents and CLI verify coordinator cert against `MESH_TLS_FINGERPRINT` env var; wrong fingerprint → hard connection failure; `MESH_INSECURE=1` escape hatch with loud warning
+- **Node authentication** — `AuthToken` first-frame message; dual-token rotation (`MESH_AUTH_TOKEN` + `MESH_AUTH_TOKEN_NEXT`) for zero-downtime key rotation
+- **Shared CLI connection helper** (`cli/src/connection.rs`) — TLS + auth extracted from all 10 commands
+- **`just set-fingerprint <node>`** — reads fingerprint from coordinator log, pushes to node (systemd override on Linux, NSSM AppEnvironmentExtra on Windows); called automatically by `just restart-coordinator`
+- **`just restart-coordinator`** auto-writes `MESH_TLS_FINGERPRINT` to `~/.bashrc` — no manual env var management on the controller machine
+- **Linux nodes** — `install-node-linux.sh` grants passwordless `sudo tee` + `sudo systemctl` via `/etc/sudoers.d/ai-mesh-agent` so fingerprint pushes work non-interactively
+- Signed wire messages (HMAC) — deferred, optional defence-in-depth
 
 ---
 

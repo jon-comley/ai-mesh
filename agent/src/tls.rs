@@ -153,3 +153,85 @@ pub fn make_connector() -> TlsConnector {
 
     TlsConnector::from(Arc::new(config))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use shared::tls::cert_fingerprint;
+    use std::time::Duration;
+
+    fn dummy_cert() -> CertificateDer<'static> {
+        CertificateDer::from(vec![0xDE, 0xAD, 0xBE, 0xEF])
+    }
+
+    fn dummy_server_name() -> ServerName<'static> {
+        ServerName::try_from("ai-mesh-coordinator")
+            .unwrap()
+            .to_owned()
+    }
+
+    fn epoch() -> UnixTime {
+        UnixTime::since_unix_epoch(Duration::ZERO)
+    }
+
+    #[test]
+    fn fingerprint_verifier_accepts_matching_cert() {
+        let cert = dummy_cert();
+        let expected = cert_fingerprint(&cert);
+        let verifier = FingerprintVerifier { expected };
+        assert!(
+            verifier
+                .verify_server_cert(&cert, &[], &dummy_server_name(), &[], epoch())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn fingerprint_verifier_rejects_wrong_fingerprint() {
+        let cert = dummy_cert();
+        let verifier = FingerprintVerifier {
+            expected: "AA:BB:CC:DD".to_string(),
+        };
+        assert!(
+            verifier
+                .verify_server_cert(&cert, &[], &dummy_server_name(), &[], epoch())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fingerprint_verifier_error_mentions_mismatch() {
+        let cert = dummy_cert();
+        let verifier = FingerprintVerifier {
+            expected: "XX:YY:ZZ".to_string(),
+        };
+        let err = verifier
+            .verify_server_cert(&cert, &[], &dummy_server_name(), &[], epoch())
+            .unwrap_err();
+        assert!(err.to_string().contains("mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn fingerprint_verifier_rejects_empty_expected() {
+        let cert = dummy_cert();
+        let verifier = FingerprintVerifier {
+            expected: String::new(),
+        };
+        assert!(
+            verifier
+                .verify_server_cert(&cert, &[], &dummy_server_name(), &[], epoch())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn no_verifier_accepts_any_cert() {
+        let cert = dummy_cert();
+        assert!(
+            NoVerifier
+                .verify_server_cert(&cert, &[], &dummy_server_name(), &[], epoch())
+                .is_ok()
+        );
+    }
+}

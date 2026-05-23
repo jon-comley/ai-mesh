@@ -987,6 +987,18 @@ restart-coordinator: update-portproxy
 
     cargo run -q -p cli -- reset-registry > /dev/null || true
 
+    # Write fingerprint to ~/.bashrc and current shell so the CLI works immediately.
+    FP=$(grep "TLS fingerprint" /tmp/mesh-coordinator.log 2>/dev/null | tail -1 | awk '{print $NF}')
+    if [ -n "$FP" ]; then
+        if grep -q "MESH_TLS_FINGERPRINT" "$HOME/.bashrc" 2>/dev/null; then
+            sed -i "s|export MESH_TLS_FINGERPRINT=.*|export MESH_TLS_FINGERPRINT=${FP}|" "$HOME/.bashrc"
+        else
+            echo "export MESH_TLS_FINGERPRINT=${FP}" >> "$HOME/.bashrc"
+        fi
+        export MESH_TLS_FINGERPRINT="${FP}"
+        echo ">>> MESH_TLS_FINGERPRINT set: ${FP}"
+    fi
+
     echo ">>> Pushing TLS fingerprint to all compute nodes..."
     for f in nodes/*.env; do
         source "$f"
