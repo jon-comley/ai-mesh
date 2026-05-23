@@ -8,13 +8,16 @@ use tracing::{info, warn};
 use shared::{LightAction, LightStateReport, LightTarget};
 
 use crate::command::{action_payload, target_topic};
-use crate::discovery::{DeviceInfo, DeviceRegistry};
+use crate::discovery::DeviceRegistry;
 use crate::error::ZigbeeError;
 
 #[derive(Debug, Clone)]
 pub enum ZigbeeEvent {
     StateChanged(LightStateReport),
-    DeviceDiscovered(DeviceInfo),
+    /// Fires once after `bridge/devices` is parsed — full list of device friendly names.
+    DeviceListUpdated(Vec<String>),
+    /// Fires once after `bridge/groups` is parsed — full list of group friendly names.
+    GroupListUpdated(Vec<String>),
     ConnectionLost,
     ConnectionRestored,
 }
@@ -37,44 +40,49 @@ impl ZigbeeClient {
         let (tx, _) = broadcast::channel::<ZigbeeEvent>(256);
         let registry = Arc::new(DeviceRegistry::new());
 
-        // Queue subscriptions before spawning the event loop. The requests are
-        // buffered in rumqttc's internal channel (cap 64) and processed on
-        // first poll — the event loop does not need to be running yet.
-        mqtt_client
-            .subscribe("zigbee2mqtt/+/state", QoS::AtMostOnce)
-            .await
-            .map_err(|e| ZigbeeError::Client(e.to_string()))?;
-        mqtt_client
-            .subscribe("zigbee2mqtt/+/availability", QoS::AtMostOnce)
-            .await
-            .map_err(|e| ZigbeeError::Client(e.to_string()))?;
-        mqtt_client
-            .subscribe("zigbee2mqtt/bridge/devices", QoS::AtMostOnce)
-            .await
-            .map_err(|e| ZigbeeError::Client(e.to_string()))?;
-
         let tx_loop = tx.clone();
         let registry_loop = Arc::clone(&registry);
+        let subscribe_client = mqtt_client.clone();
 
         tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
                         info!("zigbee: MQTT connected to broker");
+                        // Re-subscribe on every connect (not just the first) so that
+                        // subscriptions are restored after a Mosquitto restart or network blip.
+                        for topic in &[
+                            "zigbee2mqtt/+/state",
+                            "zigbee2mqtt/+/availability",
+                            "zigbee2mqtt/bridge/devices",
+                            "zigbee2mqtt/bridge/groups",
+                        ] {
+                            if let Err(e) =
+                                subscribe_client.subscribe(*topic, QoS::AtMostOnce).await
+                            {
+                                warn!("zigbee: re-subscribe failed for {topic}: {e}");
+                            }
+                        }
                         let _ = tx_loop.send(ZigbeeEvent::ConnectionRestored);
                     }
                     Ok(Event::Incoming(Packet::Publish(p))) => {
                         let topic = p.topic.as_str();
                         if topic == "zigbee2mqtt/bridge/devices" {
                             let devices = registry_loop.update_from_payload(p.payload.as_ref());
-                            for dev in devices {
+                            let names: Vec<String> =
+                                devices.iter().map(|d| d.friendly_name.clone()).collect();
+                            for dev in &devices {
                                 info!(
                                     friendly_name = %dev.friendly_name,
                                     ieee = %dev.ieee_address,
                                     "zigbee: device discovered"
                                 );
-                                let _ = tx_loop.send(ZigbeeEvent::DeviceDiscovered(dev));
                             }
+                            let _ = tx_loop.send(ZigbeeEvent::DeviceListUpdated(names));
+                        } else if topic == "zigbee2mqtt/bridge/groups" {
+                            let groups = parse_group_names(p.payload.as_ref());
+                            info!(count = groups.len(), "zigbee: groups updated");
+                            let _ = tx_loop.send(ZigbeeEvent::GroupListUpdated(groups));
                         } else if topic.ends_with("/state") {
                             match parse_state_report(topic, p.payload.as_ref(), &node_id) {
                                 Some(report) => {
@@ -124,6 +132,14 @@ impl ZigbeeClient {
     pub fn subscribe(&self) -> broadcast::Receiver<ZigbeeEvent> {
         self.events.subscribe()
     }
+}
+
+fn parse_group_names(payload: &[u8]) -> Vec<String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(payload).unwrap_or_default();
+    entries
+        .iter()
+        .filter_map(|e| e.get("friendly_name")?.as_str().map(String::from))
+        .collect()
 }
 
 fn parse_state_report(topic: &str, payload: &[u8], node_id: &str) -> Option<LightStateReport> {
@@ -233,6 +249,23 @@ mod tests {
     #[test]
     fn parse_malformed_json_returns_none() {
         assert!(parse_state_report("zigbee2mqtt/bulb/state", b"not json", "pi1").is_none());
+    }
+
+    #[test]
+    fn parse_group_names_extracts_friendly_names() {
+        let payload = br#"[{"id":1,"friendly_name":"all","members":[]},{"id":2,"friendly_name":"living_room","members":[]}]"#;
+        let names = parse_group_names(payload);
+        assert_eq!(names, vec!["all", "living_room"]);
+    }
+
+    #[test]
+    fn parse_group_names_empty_array() {
+        assert!(parse_group_names(b"[]").is_empty());
+    }
+
+    #[test]
+    fn parse_group_names_malformed_returns_empty() {
+        assert!(parse_group_names(b"not json").is_empty());
     }
 
     #[test]

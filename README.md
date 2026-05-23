@@ -78,7 +78,7 @@ and drops into live `mesh watch`. Ctrl+C stops local processes only.
 
 The coordinator schedules inference requests to whichever node has the requested model loaded and ready.
 
-**Lighting**: pi1 runs Mosquitto + Zigbee2MQTT with an SLZB-06 Zigbee coordinator. Natural language intents like `just intent "turn all lights off"` are routed through the LLM and executed as MQTT commands to Zigbee devices. See `docs/pi1-lighting-setup.md`.
+**Lighting**: pi1 runs Mosquitto + Zigbee2MQTT with an SLZB-06 Zigbee coordinator. Natural language intents like `just intent "turn all lights off"` are routed through the LLM and executed as MQTT commands to Zigbee devices. The coordinator receives the live device/group list from pi1 on connect (persisted across restarts), injects it into the LLM system prompt, and validates targets before dispatch — unknown device names return a clear error rather than a silent no-op. See `docs/pi1-lighting-setup.md`.
 
 ---
 

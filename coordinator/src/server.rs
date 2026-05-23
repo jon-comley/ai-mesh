@@ -430,6 +430,20 @@ async fn process_message(
             );
             MeshMessage::Acknowledge
         }
+        MeshMessage::LightDeviceList(report) => {
+            info!(
+                node_id = %report.node_id,
+                devices = ?report.devices,
+                groups = ?report.groups,
+                "light device list received"
+            );
+            registry.lock().unwrap().update_light_devices(
+                &report.node_id,
+                report.devices,
+                report.groups,
+            );
+            MeshMessage::Acknowledge
+        }
         MeshMessage::Admin(admin) => match admin {
             AdminMessage::ResetRegistry => {
                 registry.lock().unwrap().clear_all();

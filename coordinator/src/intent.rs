@@ -59,7 +59,8 @@ pub async fn handle_intent(
     };
 
     // 3. Build system prompt + conversation
-    let system_prompt = build_system_prompt(&schemas);
+    let (known_devices, known_groups) = registry.lock().unwrap().all_light_device_names();
+    let system_prompt = build_system_prompt(&schemas, &known_devices, &known_groups);
     let mut conversation = String::new();
     for turn in &request.context {
         match turn.role {
@@ -208,6 +209,26 @@ async fn dispatch_tool(
 
     match tool_name {
         "light_command" => {
+            // Validate target against known devices/groups (if any are registered).
+            if let Some(target) = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                let (devices, groups) = registry.lock().unwrap().all_light_device_names();
+                let known: Vec<&str> = devices
+                    .iter()
+                    .chain(groups.iter())
+                    .map(String::as_str)
+                    .collect();
+                if !known.is_empty() && !known.contains(&target) {
+                    return format!(
+                        "unknown target '{}' — known targets: {}",
+                        target,
+                        known.join(", ")
+                    );
+                }
+            }
             let cmd = build_light_command(request_id, &args);
             if lighting_tx
                 .send(MeshMessage::LightCommand(cmd))
@@ -271,7 +292,8 @@ fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightComma
     let command = match action_str {
         "off" => LightAction::Off,
         "toggle" => LightAction::Toggle,
-        "brightness" => LightAction::Brightness(value.unwrap_or(128.0) as u8),
+        // Zigbee brightness range is 0–254; 255 is reserved by the spec.
+        "brightness" => LightAction::Brightness(value.unwrap_or(128.0).clamp(0.0, 254.0) as u8),
         "color_temp" => {
             // Convert Kelvin → mireds (1_000_000 / K)
             let mireds = (1_000_000.0 / value.unwrap_or(4000.0)) as u16;
@@ -360,17 +382,41 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
     }
 }
 
-pub fn build_system_prompt(schemas: &[serde_json::Value]) -> String {
+pub fn build_system_prompt(
+    schemas: &[serde_json::Value],
+    known_devices: &[String],
+    known_groups: &[String],
+) -> String {
     if schemas.is_empty() {
         return "You are a helpful assistant. Answer the user's question directly.".into();
     }
 
     let schema_json = serde_json::to_string_pretty(schemas).unwrap_or_default();
+
+    let device_section = if known_devices.is_empty() && known_groups.is_empty() {
+        String::new()
+    } else {
+        let mut lines = Vec::new();
+        if !known_devices.is_empty() {
+            lines.push(format!("Known devices: {}", known_devices.join(", ")));
+        }
+        if !known_groups.is_empty() {
+            lines.push(format!(
+                "Known groups (control all members at once): {}",
+                known_groups.join(", ")
+            ));
+        }
+        format!("\n\n{}", lines.join("\n"))
+    };
+
     format!(
         r#"You are a smart home and general-purpose assistant.
 
 You have access to the following tools:
-{schema_json}
+{schema_json}{device_section}
+
+Use the exact device or group name from the known list when filling in the "target" field.
+If the user says "all" or "everything", use a group name if one exists.
 
 If the user's request maps to a tool, respond with ONLY a JSON object:
 {{"tool": "<name>", "args": {{ ... }}}}
@@ -386,7 +432,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_no_schemas_returns_plain() {
-        let p = build_system_prompt(&[]);
+        let p = build_system_prompt(&[], &[], &[]);
         assert!(!p.contains("tool"));
         assert!(p.contains("helpful assistant"));
     }
@@ -394,10 +440,31 @@ mod tests {
     #[test]
     fn build_system_prompt_with_schemas_includes_tool_section() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas);
+        let p = build_system_prompt(&schemas, &[], &[]);
         assert!(p.contains("light_command"));
         assert!(p.contains("scene_load"));
         assert!(p.contains(r#"{"tool":"#));
+    }
+
+    #[test]
+    fn build_system_prompt_injects_known_devices_and_groups() {
+        let schemas = tool_schemas_for_feature("lighting");
+        let devices = vec!["test_bulb".to_string(), "desk_lamp".to_string()];
+        let groups = vec!["all".to_string()];
+        let p = build_system_prompt(&schemas, &devices, &groups);
+        assert!(p.contains("test_bulb"));
+        assert!(p.contains("desk_lamp"));
+        assert!(p.contains("all"));
+        assert!(p.contains("Known devices"));
+        assert!(p.contains("Known groups"));
+    }
+
+    #[test]
+    fn build_system_prompt_no_devices_omits_device_section() {
+        let schemas = tool_schemas_for_feature("lighting");
+        let p = build_system_prompt(&schemas, &[], &[]);
+        assert!(!p.contains("Known devices"));
+        assert!(!p.contains("Known groups"));
     }
 
     #[test]
@@ -485,6 +552,13 @@ mod tests {
     }
 
     #[test]
+    fn build_light_command_brightness_clamped_to_254() {
+        let args = serde_json::json!({"target": "lounge", "action": "brightness", "value": 255});
+        let cmd = build_light_command("r3b", &args);
+        assert!(matches!(cmd.command, LightAction::Brightness(254)));
+    }
+
+    #[test]
     fn build_light_command_color_temp_kelvin_to_mireds() {
         // 4000K → 250 mireds
         let args = serde_json::json!({"target": "office", "action": "color_temp", "value": 4000});
@@ -497,5 +571,17 @@ mod tests {
         let args = serde_json::json!({"target": "hall", "action": "sparkle"});
         let cmd = build_light_command("r5", &args);
         assert!(matches!(cmd.command, LightAction::On));
+    }
+
+    #[test]
+    fn build_system_prompt_injects_device_list_into_target_description() {
+        let schemas = tool_schemas_for_feature("lighting");
+        let devices = vec!["test_bulb".to_string()];
+        let groups = vec!["all".to_string()];
+        let p = build_system_prompt(&schemas, &devices, &groups);
+        // LLM is told to use exact names
+        assert!(p.contains("exact device or group name"));
+        assert!(p.contains("test_bulb"));
+        assert!(p.contains("all"));
     }
 }
