@@ -9,19 +9,15 @@ use tracing::{info, warn};
 
 pub struct LightingCapability {
     zigbee: Arc<OnceCell<Arc<ZigbeeClient>>>,
+    node_id: String,
 }
 
 impl LightingCapability {
-    pub fn new() -> Self {
+    pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             zigbee: Arc::new(OnceCell::new()),
+            node_id: node_id.into(),
         }
-    }
-}
-
-impl Default for LightingCapability {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -47,7 +43,7 @@ impl Capability for LightingCapability {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1883);
-        let node_id = std::env::var("NODE_ID").unwrap_or_else(|_| "unknown".into());
+        let node_id = self.node_id.clone();
 
         let client = ZigbeeClient::connect(&host, port, node_id.clone())
             .await
@@ -202,17 +198,17 @@ mod tests {
 
     #[test]
     fn name_is_lighting() {
-        assert_eq!(LightingCapability::new().name(), "lighting");
+        assert_eq!(LightingCapability::new("test-node").name(), "lighting");
     }
 
     #[test]
     fn handles_light_command() {
-        assert!(LightingCapability::new().handles(&light_command()));
+        assert!(LightingCapability::new("test-node").handles(&light_command()));
     }
 
     #[test]
     fn handles_scene_load() {
-        assert!(LightingCapability::new().handles(&scene_load()));
+        assert!(LightingCapability::new("test-node").handles(&scene_load()));
     }
 
     #[test]
@@ -224,7 +220,7 @@ mod tests {
             ip: "127.0.0.1".into(),
             role: NodeRole::Compute,
         });
-        assert!(!LightingCapability::new().handles(&msg));
+        assert!(!LightingCapability::new("test-node").handles(&msg));
     }
 
     #[tokio::test]
@@ -233,12 +229,12 @@ mod tests {
         // SAFETY: single-threaded test, no concurrent env access
         unsafe { std::env::remove_var("MQTT_HOST") };
         let (tx, _rx) = mpsc::channel(8);
-        assert!(LightingCapability::new().start(tx).await.is_ok());
+        assert!(LightingCapability::new("test-node").start(tx).await.is_ok());
     }
 
     #[test]
     fn tools_returns_two_schemas() {
-        let tools = LightingCapability::new().tools();
+        let tools = LightingCapability::new("test-node").tools();
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].name, "light_command");
         assert_eq!(tools[1].name, "scene_load");
@@ -246,7 +242,7 @@ mod tests {
 
     #[test]
     fn tool_parameters_are_valid_json_schema() {
-        let tools = LightingCapability::new().tools();
+        let tools = LightingCapability::new("test-node").tools();
         for tool in &tools {
             assert!(tool.parameters.get("type").is_some());
             assert!(tool.parameters.get("properties").is_some());
@@ -257,7 +253,9 @@ mod tests {
     #[tokio::test]
     async fn scene_load_handle_sends_scene_loaded() {
         let (tx, mut rx) = mpsc::channel(8);
-        LightingCapability::new().handle(scene_load(), tx).await;
+        LightingCapability::new("test-node")
+            .handle(scene_load(), tx)
+            .await;
         let reply = rx.recv().await.expect("should receive SceneLoaded");
         match reply {
             MeshMessage::SceneLoaded(r) => {
@@ -275,7 +273,9 @@ mod tests {
         // SAFETY: single-threaded test, no concurrent env access
         unsafe { std::env::remove_var("MQTT_HOST") };
         let (tx, _rx) = mpsc::channel(8);
-        LightingCapability::new().handle(light_command(), tx).await;
+        LightingCapability::new("test-node")
+            .handle(light_command(), tx)
+            .await;
         // no panic = pass
     }
 }

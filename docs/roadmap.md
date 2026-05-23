@@ -80,16 +80,24 @@
 - **Multi-node routing validation** ✓ — `just validate-routing` confirms `qwen2.5:1.5b` → Pi and `qwen2.5:7b` → Beelink; `mesh infer` output now includes a `served-by:` line showing the serving node; load-balancing across identical-model nodes is a future concern when a second GPU node joins
 - **`just start-cluster` recipe** ✓ — starts coordinator + controller + all remote agents, then calls `auto-load-model` on every compute node; leaves mesh in a ready-to-use inference state
 - **`just auto-load-model <node>`** ✓ — SSHes into node, detects GPU VRAM or CPU RAM, selects best-fit model, loads it with hardware-filtered fallback hints
-- **Automatic model placement (coordinator side)** — wire `select_node_for_model(mb)` into the coordinator's `ModelLoad` handler so the coordinator picks the best-fit node automatically when `node_id` is absent from the `PullModel` request
+- **Automatic model placement (coordinator side)** ✓ — `ModelLoadRequest.node_id` is now `Option<String>`; when absent the coordinator calls `select_node_for_model(mb)` and picks the node with the most headroom; `mesh load <model> <size>` works without `--node-id`; `just load-model` still passes explicit node for predictable placement
+
+---
+
+## Lighting — Phase 2 ✓ Complete
+
+- **State report debounce** — 75ms per-device `JoinHandle` debounce in the Z2M event loop; Z2M burst updates (state/brightness/colour temp) collapse to one `StateChanged` per action
+- **`LightingCapability` node_id** — capability now receives `node_id` at construction (from `build_capabilities`) instead of reading a missing env var; device list reports correctly keyed by pi1's persistent UUID in the coordinator registry
 
 ---
 
 ## Lighting — Deferred Improvements
 
 - **Device availability tracking** — `zigbee2mqtt/+/availability` is subscribed but payloads (`{"state":"online"|"offline"}`) are not yet parsed. Add an `online: bool` field to `DeviceRegistry` entries, updated on each availability message. Two design choices to evaluate: (a) suppress offline devices from the LLM system prompt entirely so the model never attempts to control them; (b) include them but mark as `[offline]` so the model can report the device is unreachable. Option (a) is simpler but risks the LLM not knowing the device exists at all; option (b) gives better user feedback. Also affects target validation — an offline device should probably return a distinct error (`device 'test_bulb' is currently offline`) rather than the generic unknown-target error.
-- **State report debounce** — Z2M emits multiple partial updates per bulb action (state, brightness, colour temp arrive separately). Add a per-device 50–100 ms debounce before emitting `StateChanged` to avoid flooding the mesh with partial updates. Implement with a `HashMap<device_id, JoinHandle>` inside the event loop: cancel any pending handle for the device, spawn a new one that sleeps then fires.
 - **`bridge/event` subscription** — Subscribe to `zigbee2mqtt/bridge/event` for real-time device join/leave announcements. Currently `bridge/devices` (retained) covers discovery on connect, but live pairing events require this topic. Low priority until live-pair UX is needed.
-- **ZigbeeClient lifecycle hardening** — `connect()` spawns one event loop task internally and is safe via `OnceCell`. Future work: if multiple lighting nodes or dynamic reconnect logic is added, consider an explicit `shutdown()` signal to cleanly drop the task rather than relying on channel close.
+- **ZigbeeClient lifecycle hardening** — `connect()` spawns one event loop task internally and is safe via `OnceCell`. If multiple lighting nodes or dynamic reconnect logic is added, consider an explicit `shutdown()` signal and replacing `OnceCell<Arc<ZigbeeClient>>` with `ArcSwap<ZigbeeClient>` to allow reconnect without structural changes.
+- **Auto-placement structured error** — coordinator currently returns a silent `Acknowledge` when no node has sufficient headroom for a `ModelLoad`. Replace with a distinct `MeshMessage::Error { reason }` variant so the CLI can surface a clear "no node with enough VRAM" message instead of silently doing nothing.
+- **Debounce map pruning** — completed debounce tasks leave a dead `AbortHandle` in the map until the same device fires again. Low impact (map stays small), but a periodic sweep or a completion callback could keep it clean in long-running deployments.
 
 ---
 

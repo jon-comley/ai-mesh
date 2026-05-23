@@ -38,10 +38,12 @@ pub struct InferenceResult {
 }
 
 /// Coordinator instructs a node to load a model into memory.
+/// `node_id` is optional — if absent the coordinator picks the best-fit node automatically.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelLoadRequest {
     pub request_id: String,
-    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
     pub model_name: String,
     pub model_size_mb: u64,
     #[serde(default = "default_wire_version")]
@@ -485,12 +487,29 @@ mod tests {
     fn model_load_request_roundtrip() {
         let req = ModelLoadRequest {
             request_id: "req-2".into(),
-            node_id: "node-1".into(),
+            node_id: Some("node-1".into()),
             model_name: "llama3".into(),
             model_size_mb: 4096,
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ModelLoadRequest>(&json).unwrap(),
+            req
+        );
+    }
+
+    #[test]
+    fn model_load_request_no_node_id_roundtrip() {
+        let req = ModelLoadRequest {
+            request_id: "req-auto".into(),
+            node_id: None,
+            model_name: "qwen2.5:7b".into(),
+            model_size_mb: 4096,
+            wire_version: WIRE_VERSION,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("node_id"));
         assert_eq!(
             serde_json::from_str::<ModelLoadRequest>(&json).unwrap(),
             req

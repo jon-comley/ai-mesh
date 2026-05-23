@@ -95,7 +95,7 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just dev` | Start full cluster in dev mode |
 | `just deploy-node <node>` | First-time provision or re-provision a node |
 | `just update-node <node>` | OTA binary update only (no reprovisioning) |
-| `just load-model <node> <model>` | Load a specific model on a node (e.g. `qwen2.5:7b`) |
+| `just load-model <node> <model>` | Load a specific model on a node (e.g. `qwen2.5:7b`); coordinator also accepts `mesh load <model> <size_mb>` with no node — picks best-fit automatically |
 | `just auto-load-model <node>` | Detect node hardware and load the best-fit model automatically |
 | `just start-cluster` | Bring the full cluster up and load the best model on each compute node |
 | `just restart-coordinator` | Post-suspend recovery — restart coordinator + controller, reload models (use after opening laptop) |

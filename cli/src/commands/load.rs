@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-pub async fn run(coordinator: &str, node_id: String, model_name: String, size_mb: u64) {
+pub async fn run(coordinator: &str, node_id: Option<String>, model_name: String, size_mb: u64) {
     match send_load(coordinator, node_id, model_name, size_mb).await {
         Ok(()) => println!("Load request acknowledged"),
         Err(e) => println!("Error: {}", e),
@@ -12,7 +12,7 @@ pub async fn run(coordinator: &str, node_id: String, model_name: String, size_mb
 
 async fn send_load(
     coordinator: &str,
-    node_id: String,
+    node_id: Option<String>,
     model_name: String,
     size_mb: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {

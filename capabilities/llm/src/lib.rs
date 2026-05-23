@@ -176,7 +176,7 @@ mod tests {
     fn handles_model_load() {
         let msg = MeshMessage::ModelLoad(ModelLoadRequest {
             request_id: "r1".into(),
-            node_id: "node-1".into(),
+            node_id: Some("node-1".into()),
             model_name: "qwen2.5:7b".into(),
             model_size_mb: 4096,
             wire_version: WIRE_VERSION,
