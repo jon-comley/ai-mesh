@@ -70,13 +70,15 @@ and drops into live `mesh watch`. Ctrl+C stops local processes only.
 
 ## Cluster Nodes
 
-| Node | OS | Hardware | Model |
-|------|----|----------|-------|
-| Pi | Linux (ARM64) | ~4 GB RAM | `qwen2.5:1.5b` (fallback: `qwen2.5:0.5b`) |
-| Beelink SER8 | Windows 11 | AMD Radeon 780M, 8 GB VRAM | `qwen2.5:7b` |
-| Mac mini M4 | macOS (ARM64) | 48 GB unified, 16 CPU / 20 GPU cores | `qwen2.5:32b` |
+| Node | OS | Hardware | Model | Capabilities |
+|------|----|----------|-------|--------------|
+| pi1 | Linux (ARM64) | Raspberry Pi 5, 8 GB RAM | `qwen2.5:1.5b` | llm, lighting |
+| Beelink SER8 | Windows 11 | AMD Radeon 780M, 8 GB VRAM | `qwen2.5:7b` | llm |
+| Mac mini M4 | macOS (ARM64) | 48 GB unified, 16 CPU / 20 GPU cores | `qwen2.5:32b` | llm |
 
-The coordinator schedules inference requests to whichever node has the requested model loaded and ready. Automatic placement (picking the best node for a model based on hardware capacity) is planned for Phase 9.
+The coordinator schedules inference requests to whichever node has the requested model loaded and ready.
+
+**Lighting**: pi1 runs Mosquitto + Zigbee2MQTT with an SLZB-06 Zigbee coordinator. Natural language intents like `just intent "turn all lights off"` are routed through the LLM and executed as MQTT commands to Zigbee devices. See `docs/pi1-lighting-setup.md`.
 
 ---
 
@@ -104,6 +106,8 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just validate-routing` | Confirm each model routes to its correct node (run after `start-cluster` or `restart-coordinator`) |
 | `just logs-node <node>` | Tail live agent logs from a node |
 | `just logs` | Tail all logs simultaneously |
+| `just intent "<text>"` | Send a natural-language intent to the coordinator (LLM routes to tool or answers in free text) |
+| `just pair-bulb` | Open a 254-second Zigbee pairing window and stream join events |
 
 See `docs/commands.md` for full reference.
 

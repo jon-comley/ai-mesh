@@ -1,14 +1,16 @@
 # pi1 Lighting Infrastructure Setup
 
-One-time manual setup on pi1 to support the `lighting` capability. Run these steps before deploying the Phase C agent build.
+One-time manual setup on pi1 (192.168.1.11) to support the `lighting` capability.
+The agent binary handles MQTT automatically once Mosquitto and Z2M are running.
 
 ---
 
-## Prerequisites
+## Hardware
 
-- pi1 is reachable over SSH from OmniLink1
-- SLZB-06 Zigbee coordinator is on the LAN and its IP is known (e.g. `192.168.1.x`)
-- At least one Zigbee bulb to pair
+- **Raspberry Pi 5** — 8 GB RAM, runs Mosquitto + Z2M + ai-mesh agent
+- **SLZB-06** Zigbee coordinator — PoE device; power via USB-C, network via ethernet
+  - IP: `192.168.1.16`, port `6638`
+  - Firmware: EmberZNet 8.0.2 / EZSP v14 (Z2M adapter type: `ember`)
 
 ---
 
@@ -21,42 +23,50 @@ sudo apt install -y mosquitto mosquitto-clients
 sudo systemctl enable --now mosquitto
 ```
 
-Verify it's running:
+**Important — Mosquitto 2.x only listens on localhost by default.** Allow remote
+connections by creating `/etc/mosquitto/conf.d/remote.conf`:
 
 ```bash
-systemctl status mosquitto
+sudo nano /etc/mosquitto/conf.d/remote.conf
 ```
 
-Quick smoke test (two terminals on pi1):
+```
+listener 1883 0.0.0.0
+allow_anonymous true
+```
 
 ```bash
-# terminal 1
-mosquitto_sub -t 'test/#' -v
+sudo systemctl restart mosquitto
+```
 
-# terminal 2
-mosquitto_pub -t 'test/hello' -m 'world'
+Verify from OmniLink1:
+
+```bash
+mosquitto_pub -h 192.168.1.11 -t test -m hello
+mosquitto_sub -h 192.168.1.11 -t test -C 1   # should print "hello"
 ```
 
 ---
 
 ## 2. Install Zigbee2MQTT
 
-### 2a. Install Node.js (if not already)
+### 2a. Node.js
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
-node --version   # should print v20.x
+node --version   # v20.x
 ```
 
-### 2b. Install Zigbee2MQTT
+### 2b. Clone and install (use pnpm — Z2M has no package-lock.json)
 
 ```bash
 sudo mkdir -p /opt/zigbee2mqtt
 sudo chown jonno:jonno /opt/zigbee2mqtt
 git clone --depth 1 https://github.com/Koenkk/zigbee2mqtt.git /opt/zigbee2mqtt
 cd /opt/zigbee2mqtt
-npm ci
+sudo npm install -g pnpm
+pnpm install
 ```
 
 ### 2c. Configure
@@ -66,23 +76,21 @@ cp /opt/zigbee2mqtt/data/configuration.example.yaml /opt/zigbee2mqtt/data/config
 nano /opt/zigbee2mqtt/data/configuration.yaml
 ```
 
-Minimum required fields:
-
 ```yaml
 mqtt:
   server: mqtt://127.0.0.1
 
 serial:
-  port: tcp://192.168.1.x:6638   # replace x with the SLZB-06 IP
+  port: tcp://192.168.1.16:6638
+  adapter: ember          # required for EZSP v13+; was 'ezsp' on older firmware
 
-permit_join: true   # enable during initial pairing; set false after
+permit_join: false        # set true temporarily when pairing
 ```
 
-### 2d. Run Z2M manually first (verify it connects)
+### 2d. Verify it starts
 
 ```bash
-cd /opt/zigbee2mqtt
-npm start
+cd /opt/zigbee2mqtt && npm start
 ```
 
 Look for:
@@ -91,32 +99,15 @@ Zigbee2MQTT:info  Zigbee: coordinator ready
 Zigbee2MQTT:info  MQTT: connected to server
 ```
 
-If you see those two lines, the SLZB-06 and Mosquitto connections are working. Ctrl+C to stop.
+Ctrl+C to stop, then install as a service.
 
 ---
 
-## 3. Pair a Bulb
-
-With `permit_join: true` in the config and Z2M running:
-
-1. Power-cycle the bulb (off → on, or use the switch)
-2. Watch Z2M output for:
-   ```
-   Zigbee2MQTT:info  Successfully interviewed '0xXXXX', device has successfully been paired
-   ```
-3. Note the `friendly_name` assigned (default is the IEEE address; rename in config if desired)
-
-Once paired, set `permit_join: false` in `configuration.yaml` to prevent accidental joins.
-
----
-
-## 4. Install Z2M as a systemd service
+## 3. Z2M as a systemd service
 
 ```bash
 sudo nano /etc/systemd/system/zigbee2mqtt.service
 ```
-
-Paste:
 
 ```ini
 [Unit]
@@ -142,46 +133,113 @@ sudo systemctl status zigbee2mqtt
 
 ---
 
-## 5. Verify end-to-end (from OmniLink1)
+## 4. SLZB-06 Firmware
 
-Subscribe to all Z2M topics from OmniLink1 to confirm state messages are flowing:
+If Z2M reports EZSP version < 13, update the EFR32 radio firmware via the SLZB-06 web UI at `http://192.168.1.16`:
+
+1. Open the web UI → Firmware tab
+2. Select the latest EmberZNet release (v3.x.x) and flash
+3. Restart Z2M — it should now report EZSP v14
+
+---
+
+## 5. Pairing bulbs
+
+From OmniLink1:
 
 ```bash
-mosquitto_sub -h 192.168.1.11 -t 'zigbee2mqtt/#' -v
+just pair-bulb
 ```
 
-You should see periodic state messages for paired devices. Power-cycle a bulb and watch the `state` topic update.
+This opens a 254-second pairing window and streams join events. Power-cycle the
+bulb to trigger pairing. When it joins, Z2M will interview it and log the IEEE address.
 
-Check the device list (retained message — delivered immediately on subscribe):
+**Rename the device** after pairing:
 
 ```bash
-mosquitto_sub -h 192.168.1.11 -t 'zigbee2mqtt/bridge/devices' -C 1 | python3 -m json.tool
+mosquitto_pub -h 192.168.1.11 \
+  -t 'zigbee2mqtt/bridge/request/device/rename' \
+  -m '{"from":"0xXXXXXXXXXXXXXXXX","to":"my_bulb"}'
+```
+
+Confirm:
+
+```bash
+mosquitto_sub -h 192.168.1.11 -t 'zigbee2mqtt/bridge/devices' -C 1 \
+  | python3 -m json.tool | grep friendly_name
 ```
 
 ---
 
-## 6. Notes for the agent
+## 6. Z2M groups
 
-- `MQTT_HOST` and `MQTT_PORT` in `nodes/pi1.env` default to `127.0.0.1:1883` — no changes needed
-- The ai-mesh agent subscribes to `zigbee2mqtt/+/state`, `zigbee2mqtt/+/availability`, and `zigbee2mqtt/bridge/devices`
-- Device `friendly_name` values in Z2M `configuration.yaml` are what you use in `mesh intent` commands (e.g. `"turn the kitchen_bulb on"`)
+Groups let you control multiple bulbs with one command. Create an `all` group
+and add devices to it:
+
+```bash
+mosquitto_pub -h 192.168.1.11 \
+  -t 'zigbee2mqtt/bridge/request/group/add' \
+  -m '{"friendly_name":"all"}'
+
+mosquitto_pub -h 192.168.1.11 \
+  -t 'zigbee2mqtt/bridge/request/group/members/add' \
+  -m '{"group":"all","device":"my_bulb"}'
+```
+
+Add every new bulb to the group so `just intent "turn all lights off"` works.
+
+---
+
+## 7. Agent configuration
+
+`nodes/pi1.env` sets the MQTT connection for the agent:
+
+```
+MQTT_HOST=127.0.0.1
+MQTT_PORT=1883
+```
+
+These are injected into the systemd service by `just deploy-node pi1`. The agent
+connects on startup and subscribes to Z2M topics automatically.
+
+---
+
+## 8. Intent commands (from OmniLink1)
+
+```bash
+just intent "turn all lights off"
+just intent "turn my_bulb on"
+just intent "set my_bulb to 50% brightness"
+just intent "make it warm like candlelight"
+just intent "bright white light for working"
+```
+
+The LLM maps natural language to a `light_command` tool call. Device/group names
+must match what Z2M knows (use `zigbee2mqtt/bridge/devices` to list them).
 
 ---
 
 ## Troubleshooting
 
-**Z2M can't connect to SLZB-06**
-- Confirm the IP in `serial.port` is correct: `ping 192.168.1.x`
-- Check SLZB-06 web UI to confirm it's in Zigbee coordinator mode (not router mode)
+**Z2M: `Cannot permit join for more than 254 seconds`**
+Use `"time": 254` not `300` in the permit_join request.
 
-**Mosquitto refusing connections from OmniLink1**
-- By default Mosquitto 2.x only listens on localhost. Add to `/etc/mosquitto/mosquitto.conf`:
-  ```
-  listener 1883 0.0.0.0
-  allow_anonymous true
-  ```
-  Then `sudo systemctl restart mosquitto`.
+**Z2M: adapter version mismatch / EZSP < 13**
+Flash the SLZB-06 radio firmware to EmberZNet ≥ 8.x via the web UI.
 
-**Z2M crashes on startup**
-- Check logs: `journalctl -u zigbee2mqtt -n 50`
-- Usually a YAML syntax error in `configuration.yaml` or the SLZB-06 IP being wrong
+**Z2M uses pnpm, not npm**
+`npm ci` fails because there is no `package-lock.json`. Use `pnpm install`.
+
+**Mosquitto: connection refused from OmniLink1**
+Check `/etc/mosquitto/conf.d/remote.conf` exists with `listener 1883 0.0.0.0` and `allow_anonymous true`.
+
+**Agent: MQTT connect/disconnect storm in logs**
+This was caused by rumqttc reconnecting with zero delay. Fixed in `capability-zigbee`
+(5s reconnect delay + node-specific client ID). Redeploy if seen on an old binary.
+
+**SLZB-06 not found on network**
+The SLZB-06 needs power — use USB-C for power alongside ethernet (it is NOT PoE-powered from the ethernet port alone on all switches).
+
+**Beelink SER8 unrecoverable BIOS screen**
+Caused by Windows sleep/hibernate. Run `powercfg /h off` and set all sleep timeouts
+to 0. The install script does this automatically on first provision.
