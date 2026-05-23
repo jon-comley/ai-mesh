@@ -561,10 +561,9 @@ set-fingerprint node:
         "
         ;;
       windows)
-        NSSM="C:\\Users\\${NODE_USER}\\ai-mesh\\nssm.exe"
         DEFAULT_MODEL="${DEFAULT_MODEL:-qwen2.5:7b}"
         ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
-            \$nssm = '${NSSM}';\
+            \$nssm = (Get-Command nssm.exe -ErrorAction Stop).Source;\
             & \$nssm set ai-mesh-agent AppEnvironmentExtra \
                 'COORDINATOR_IP={{coordinator_ip}}' \
                 'AGENT_ROLE=${NODE_ROLE}' \
