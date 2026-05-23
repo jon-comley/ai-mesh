@@ -17,54 +17,72 @@ For full documentation, see the `docs/` directory.
 
 ## Quick Start
 
-### 1. Run the Coordinator (WSL / Linux)
+### 1. One-time controller setup
 
 ```
-just run-coordinator
+just setup-controller
 ```
 
-This starts the TCP server on port 9000 and hosts the in-memory node registry.
+Installs Rust, cross-compilation toolchains, git hooks, SSH keys, and Windows portproxy.
 
-### 2. Run the Controller Agent (local machine)
-
-```
-just run-controller
-```
-
-This registers the local machine as a **Controller** node.  
-Controllers never run inference.
-
-### 3. Provision a Compute Node
-
-Node config lives in `nodes/<name>.env`. Add an entry, then:
+### 2. Provision compute nodes
 
 ```
-just deploy-node <name>
+just deploy-node pi1
+just deploy-node beelink1
 ```
 
-This builds the correct binary for the node's OS, uploads it, installs
-llama-server, and registers a persistent service (systemd on Linux, NSSM on Windows).
+Builds the correct binary for the node's OS, uploads it, installs llama-server, and
+registers a persistent service (systemd on Linux, NSSM on Windows). Also configures
+passwordless sudo on Linux nodes so fingerprint pushes work non-interactively.
 
-### 4. Check Mesh State
-
-```
-just sanity-node <name>
-```
-
-Or for the full cluster:
+### 3. Start the cluster
 
 ```
-just sanity-full
+just restart-coordinator
 ```
 
-### 5. Day-to-day Development
+This starts the coordinator, **automatically generates a TLS certificate**, pushes the
+fingerprint to all compute nodes, starts the local controller, and loads the best model
+on each compute node. The TLS fingerprint is written to `~/.bashrc` automatically — no
+manual configuration needed.
+
+### 4. Check mesh state
 
 ```
-just dev
+just nodes          # current node table
+just validate-routing   # confirm inference routes to correct nodes
 ```
 
-Starts coordinator + controller locally, bounces all remote node services,
-and drops into live `mesh watch`. Ctrl+C stops local processes only.
+### 5. Day-to-day
+
+```
+just restart-coordinator   # after waking laptop or any coordinator restart
+just intent "turn the lights off"
+```
+
+---
+
+---
+
+## Security (TLS)
+
+All coordinator ↔ agent and coordinator ↔ CLI traffic runs over TLS. The coordinator
+generates a self-signed certificate on first start and persists it at
+`~/.config/ai-mesh/coordinator.crt`. Agents and the CLI verify the cert via its
+SHA-256 fingerprint (TOFU model — trust on first contact, reject any change).
+
+**`just restart-coordinator` handles everything automatically:**
+- Reads the fingerprint from the coordinator log
+- Writes `export MESH_TLS_FINGERPRINT=...` to `~/.bashrc` on the controller machine
+- Pushes the fingerprint to every compute node via `just set-fingerprint <node>`
+
+You never need to copy or paste a fingerprint manually.
+
+**To skip TLS verification** (dev/test only):
+```bash
+MESH_INSECURE=1 cargo run -p cli -- nodes
+```
 
 ---
 

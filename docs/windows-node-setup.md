@@ -123,32 +123,29 @@ The provision script does:
 
 Models are downloaded on first load — nothing is pre-cached during provisioning. The install script detects the GPU and logs the recommended model; use `just auto-load-model beelink1` to load it automatically after provisioning.
 
+The service is installed **without a TLS fingerprint** at this stage — that is expected. The fingerprint is pushed automatically when you run `just restart-coordinator` on the controller machine. Until then, the agent will log TLS handshake failures and retry every 5 seconds.
+
 ---
 
-## 5. Verify
+## 5. Start the coordinator (from WSL)
 
-From WSL, after provisioning completes:
-
-```bash
-just sanity-node beelink1
-```
-
-The node table should show the Windows machine as a Compute node:
-
-```
-| BEELINK1 | 192.168.1.14 | Compute | 1200 | - |
-```
-
-Then load the hardware-selected model:
+Run this from the controller machine after provisioning is done:
 
 ```bash
-just auto-load-model beelink1
+just restart-coordinator
 ```
 
-Or load a specific model manually:
+This starts the coordinator, pushes the TLS fingerprint to beelink1 (and all other
+compute nodes), and loads the best model automatically. The fingerprint is also written
+to `~/.bashrc` on the controller so the CLI works without extra configuration.
+
+After it completes, verify the node is registered and the model is ready:
 
 ```bash
-just load-model beelink1 qwen2.5:7b
+just nodes
+# BEELINK1 | 192.168.1.14 | Compute | ... | qwen2.5:7b (Ready)
+
+just validate-routing
 ```
 
 ---
