@@ -135,6 +135,21 @@ function Disable-Sleep {
     Write-Host ">>> Sleep and hibernate disabled."
 }
 
+function Harden-Stability {
+    # Three registry/driver fixes for the SER8 hang pattern:
+    #   1. TDR timeout — AMD Radeon 780M can miss the 2s default under heavy
+    #      Vulkan load; Windows kills the driver and the display stack dies.
+    #      60s gives the driver time to finish a large GPU dispatch.
+    #   2. Fast Startup — powercfg /h off disables hibernate but not Fast
+    #      Startup (hybrid shutdown); can produce a half-suspended state.
+    #   3. NIC power management — belt-and-braces; adapter should stay live
+    #      even if it wasn't the cause of the hang.
+    reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 60 /f | Out-Null
+    reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f | Out-Null
+    Get-NetAdapter | Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice Disabled -ErrorAction SilentlyContinue
+    Write-Host ">>> Stability hardening applied (TDR=60s, Fast Startup off, NIC power save off)."
+}
+
 function Enable-SshElevation {
     # LocalAccountTokenFilterPolicy = 1 allows SSH sessions for local admin
     # accounts to run with a full (elevated) token rather than the default
@@ -203,6 +218,7 @@ Ensure-Directory -Path $aiMeshRoot
 Ensure-Directory -Path $logDir
 
 Disable-Sleep
+Harden-Stability
 Enable-SshElevation
 
 Ensure-LlamaCpp
