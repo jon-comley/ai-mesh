@@ -533,6 +533,53 @@ update-node node:
     esac
     echo ">>> Node {{node}} updated."
 
+# Push the coordinator TLS fingerprint to a node's agent service and restart it.
+# Reads the fingerprint from /tmp/mesh-coordinator.log automatically.
+# Usage: just set-fingerprint pi1
+#        just set-fingerprint beelink1
+set-fingerprint node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+
+    FP=$(grep "TLS fingerprint" /tmp/mesh-coordinator.log 2>/dev/null | tail -1 | awk '{print $NF}')
+    if [ -z "$FP" ]; then
+        echo ">>> ERROR: could not read fingerprint from /tmp/mesh-coordinator.log"
+        echo ">>>        Is the coordinator running? Try: just restart-coordinator"
+        exit 1
+    fi
+    echo ">>> Setting MESH_TLS_FINGERPRINT=${FP} on {{node}}..."
+
+    case "$NODE_OS" in
+      linux)
+        ssh ${NODE_USER}@${NODE_HOST} "
+            sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
+            printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=${FP}\n' \
+                | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
+            sudo systemctl daemon-reload
+            sudo systemctl restart ai-mesh-agent
+        "
+        ;;
+      windows)
+        NSSM="C:\\Users\\${NODE_USER}\\ai-mesh\\nssm.exe"
+        DEFAULT_MODEL="${DEFAULT_MODEL:-qwen2.5:7b}"
+        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            \$nssm = '${NSSM}';\
+            & \$nssm set ai-mesh-agent AppEnvironmentExtra \
+                'COORDINATOR_IP={{coordinator_ip}}' \
+                'AGENT_ROLE=${NODE_ROLE}' \
+                'LLAMA_MODEL_DIR=C:\\Users\\${NODE_USER}\\.ai-mesh\\models' \
+                'LLAMA_SERVER_BIN=C:\\Users\\${NODE_USER}\\ai-mesh\\llama-server.exe' \
+                'LLAMA_GPU_LAYERS=99' \
+                'LLAMA_FLASH_ATTN=1' \
+                'DEFAULT_MODEL=${DEFAULT_MODEL}' \
+                'MESH_TLS_FINGERPRINT=${FP}';\
+            sc.exe restart ai-mesh-agent | Out-Null\
+        \""
+        ;;
+    esac
+    echo ">>> {{node}}: fingerprint set and agent restarted."
+
 # Remove the ai-mesh-agent service from a node.
 # Usage: just uninstall-node pi1
 uninstall-node node:
@@ -938,6 +985,15 @@ restart-coordinator: update-portproxy
     done
 
     cargo run -q -p cli -- reset-registry > /dev/null || true
+
+    echo ">>> Pushing TLS fingerprint to all compute nodes..."
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        [ "${NODE_ROLE}" = "compute" ] || continue
+        just set-fingerprint ${NODE_NAME} \
+            || echo ">>> Warning: could not set fingerprint on ${NODE_NAME} (skipping)"
+    done
 
     echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
     AGENT_ROLE=controller cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
