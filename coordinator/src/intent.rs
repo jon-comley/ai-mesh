@@ -299,7 +299,10 @@ pub fn try_parse_tool_call(output: &str) -> Option<serde_json::Value> {
         .trim_end_matches("```")
         .trim();
 
-    let v: serde_json::Value = serde_json::from_str(stripped).ok()?;
+    let parsed = serde_json::from_str::<serde_json::Value>(stripped)
+        .or_else(|_| serde_json::from_str::<serde_json::Value>(&format!("{stripped}}}")));
+
+    let v = parsed.ok()?;
     if v.get("tool").is_some() && v.get("args").is_some() {
         Some(v)
     } else {
@@ -418,6 +421,14 @@ mod tests {
     fn try_parse_tool_call_missing_args_returns_none() {
         let raw = r#"{"tool":"light_command"}"#;
         assert!(try_parse_tool_call(raw).is_none());
+    }
+
+    #[test]
+    fn try_parse_tool_call_truncated_json_repaired() {
+        let raw = r#"{"tool":"light_command","args":{"target":"test_bulb","action":"off"}"#;
+        let result = try_parse_tool_call(raw).unwrap();
+        assert_eq!(result["tool"], "light_command");
+        assert_eq!(result["args"]["action"], "off");
     }
 
     #[test]
