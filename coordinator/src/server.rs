@@ -633,7 +633,7 @@ mod tests {
     #[tokio::test]
     async fn test_server_receives_heartbeat() {
         let registry = Arc::new(Mutex::new(Registry::new()));
-        let mut server = Server::new("127.0.0.1:9001", registry.clone());
+        let mut server = Server::new("127.0.0.1:9020", registry.clone());
         server.auth_tokens = Arc::new(vec![]);
 
         tokio::spawn(async move {
@@ -650,7 +650,7 @@ mod tests {
         };
 
         let ack = send_message(
-            "127.0.0.1:9001",
+            "127.0.0.1:9020",
             &MeshMessage::Heartbeat(HeartbeatPayload {
                 identity: ident.clone(),
                 auth_token: String::new(),

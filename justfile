@@ -1689,6 +1689,8 @@ chaos: update-portproxy
     fi
 
     export MESH_COORDINATOR="{{coordinator_ip}}:{{coordinator_port}}"
+    # Dashboard runs in WSL2 — no portproxy for 9001, so connect via localhost.
+    export MESH_DASHBOARD_HOST=127.0.0.1
     cargo run -q --bin chaos -p cli
 
 # Verify that deploy-node pushes credentials automatically.

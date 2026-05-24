@@ -338,8 +338,9 @@ async fn scenario_valid_request(coordinator: &str, token: &str) -> bool {
 /// WebSocket upgrade request with a bogus token. Auth is checked before the
 /// upgrade, so the response must be 401, not 400.
 async fn scenario_dashboard_auth(dashboard: &str) -> bool {
-    let Ok(mut stream) = TcpStream::connect(dashboard).await else {
-        println!("      (TCP connect to {dashboard} failed — is the dashboard running?)");
+    let Ok(Ok(mut stream)) = timeout(Duration::from_secs(5), TcpStream::connect(dashboard)).await
+    else {
+        println!("      (TCP connect to {dashboard} failed/timed out — is the dashboard running?)");
         return false;
     };
     let req = format!(
@@ -389,10 +390,14 @@ async fn main() {
     let token = std::env::var("MESH_AUTH_TOKEN").unwrap_or_default();
     let token = token.trim().to_string();
     let http_port = std::env::var("MESH_HTTP_PORT").unwrap_or_else(|_| "9001".to_string());
-    let dashboard_host = coordinator
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(&coordinator);
+    // MESH_DASHBOARD_HOST lets the caller override the dashboard host independently of
+    // MESH_COORDINATOR — needed on WSL2 where only port 9000 has a portproxy.
+    let dashboard_host = std::env::var("MESH_DASHBOARD_HOST").unwrap_or_else(|_| {
+        coordinator
+            .rsplit_once(':')
+            .map(|(h, _)| h.to_string())
+            .unwrap_or_else(|| coordinator.clone())
+    });
     let dashboard = format!("{dashboard_host}:{http_port}");
 
     println!("=== ai-mesh HMAC chaos test ===");
