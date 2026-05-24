@@ -216,9 +216,9 @@ Agent Startup
 ├── Heartbeat(HeartbeatPayload)
 │   ├── NodeIdentity (flattened)
 │   ├── auth_token            — per-heartbeat defence-in-depth
-│   ├── cpu_usage_pct?        — Phase C+: all-core CPU %
-│   ├── ram_used_gb?          — Phase C+: RAM in use
-│   └── ram_total_gb?         — Phase C+: total RAM
+│   ├── cpu_usage_pct         — all-core CPU % (required since C2; pre-C2 agents rejected)
+│   ├── ram_used_gb           — RAM in use, GiB (required since C2)
+│   └── ram_total_gb          — total RAM, GiB (required since C2)
 ├── HardwareReport(HardwareSpec)
 ├── Capabilities(NodeCapabilities)
 └── Heartbeat Loop (every N seconds, interval adjustable via SetHeartbeatInterval)
@@ -245,9 +245,15 @@ Coordinator (HealthStore in DashboardState)               ← C3 ✓
 ├── Ring buffer per node: Mutex<HashMap<node_id, VecDeque<HealthSample>>> capped at 60
 └── Broadcast DashboardEvent::HealthUpdate { node_id, samples } over WebSocket
 
-Dashboard (health.js)                                      ← C5
-├── SVG sparkline: CPU % and RAM % derived from raw gb fields (last 60 samples)
-└── Interval control button → POST /api/nodes/{id}/heartbeat-interval  ← C4
+WebSocket connect                                           ← C5 ✓
+└── coordinator calls get_all_health_snapshots() and pushes HealthUpdate per node
+    so sparklines populate immediately without waiting for the next heartbeat
+
+Dashboard (health.js)                                      ← C5 ✓
+├── Health panel: SVG sparklines (CPU %, RAM %) per node + current values
+├── Nodes panel: mini CPU sparkline in each node card
+├── repaintAll() refills mini sparklines after every TopologyUpdate
+└── Interval control button → POST /api/nodes/{id}/heartbeat-interval  ← C4 ✓
                             → coordinator pushes SetHeartbeatInterval to agent
 ```
 

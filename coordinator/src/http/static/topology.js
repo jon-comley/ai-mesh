@@ -37,6 +37,7 @@ function nodeCard(n) {
         <span class="node-ip">${esc(n.ip)}</span>
         <span class="node-age ${healthClass}">${age}</span>
       </div>
+      <div class="node-sparkline" id="ms-${esc(n.id)}"></div>
     </div>`;
 }
 

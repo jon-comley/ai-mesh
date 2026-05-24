@@ -336,7 +336,7 @@ Broadcast on every heartbeat. Replaces the full node list on the client.
 { "type": "HealthUpdate", "node_id": "abc123", "samples": [ { "ts_ms": 1716543000000, "cpu_pct": 42.5, "ram_used_gb": 6.1, "ram_total_gb": 15.9 }, ... ] }
 ```
 
-Broadcast on every heartbeat, immediately after `TopologyUpdate`. Contains the full rolling window (up to 60 entries) of health samples for the named node.
+Broadcast on every heartbeat, immediately after `TopologyUpdate`. Also sent once per node to each new WebSocket client on connect (warm-start), so sparklines populate immediately without waiting for the next heartbeat. Contains the full rolling window (up to 60 entries) of health samples for the named node.
 
 | Field | Type | Description |
 |-------|------|-------------|

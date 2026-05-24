@@ -179,7 +179,7 @@ Full design spec: `plans/phase11-dashboard.md`
 - **C2 ✓** — Agent `sysinfo` metrics: `refresh_cpu_usage()` + `refresh_memory()` on each heartbeat; `Arc<AtomicU64>` interval updated live when coordinator pushes `SetHeartbeatInterval`; backward compat removed (`Option<f32>` → `f32`; pre-C2 agents now fail fast); 278 tests
 - **C3 ✓** — Coordinator `HealthStore` (`HashMap<node_id, VecDeque<HealthSample>>`, capped at 60); coordinator-stamped `ts_ms`; `push_health()` broadcasts `DashboardEvent::HealthUpdate` on every heartbeat; 288 tests
 - **C4 ✓** — `POST /api/nodes/{id}/heartbeat-interval` HTTP endpoint; `NodeConnections` shared between TCP server and HTTP layer via `DashboardState`; `send_to_node()` uses `try_send` with `warn!` on full channel; 9 new unit tests; 297 tests passing
-- **C5** — `health.js`: SVG sparklines for CPU % and RAM % per node card; interval control button calls `POST /api/nodes/{id}/heartbeat-interval`; push current `HealthStore` snapshot to new WS clients on connect (so sparklines populate immediately, not after the next heartbeat)
+- **C5 ✓** — `health.js` ES module: SVG sparklines (CPU %, RAM %) per node in the Health panel; mini CPU sparkline in each Nodes-panel node card; "Set interval" button per node calls `POST /api/nodes/{id}/heartbeat-interval`; `get_all_health_snapshots()` on `DashboardState` pushes the full HealthStore to new WS clients on connect so sparklines populate immediately; `repaintAll()` refills mini sparklines after each `TopologyUpdate`; 5 new tests (point-in-time copy, sample values, single-sample, order, content-type); 304 tests passing
 - **C6** — `mesh set-heartbeat <node> <secs>` CLI command + `just set-heartbeat` recipe
 
 ### Phase D — Model management panel
@@ -191,6 +191,15 @@ Full design spec: `plans/phase11-dashboard.md`
 ### Phase G — Security panel
 
 ### Phase H — Polish, icons, desktop layout pass
+
+### Deferred dashboard polish (raised post-C5)
+
+These are non-blocking UX improvements for after C6 ships:
+
+- **RAM% / CPU% colour thresholds** — colour the metric-value text amber (> 75%) or red (> 90%) so overloaded nodes stand out without reading the number.
+- **Sparkline tooltip with exact timestamp** — on `mouseover` a `<title>` element or a floating tooltip shows `cpu: X.X%  ram: Y.Y%  at HH:MM:SS` for the hovered data point; helps operators correlate a spike with a specific inference request.
+- **Per-node collapse/expand in Health panel** — each health card has a `▾ / ▸` toggle; collapsed cards show only the last value, not the full sparkline; useful when the cluster grows beyond 4–5 nodes and the panel gets long.
+- **Sparkline fill area** — shade the area under the CPU sparkline with a low-opacity accent fill for faster visual triage.
 
 ### Deferred chaos / QA scenarios (raised post-Phase B)
 

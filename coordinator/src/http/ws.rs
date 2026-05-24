@@ -33,6 +33,22 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
     let mut rx: broadcast::Receiver<DashboardEvent> = state.tx.subscribe();
     debug!("dashboard WebSocket client connected");
 
+    // Push current health windows so sparklines populate immediately on connect.
+    for (node_id, samples) in state.get_all_health_snapshots() {
+        if samples.is_empty() {
+            continue;
+        }
+        let evt = DashboardEvent::HealthUpdate { node_id, samples };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot HealthUpdate: {e}"),
+        }
+    }
+
     loop {
         tokio::select! {
             event = rx.recv() => match event {
