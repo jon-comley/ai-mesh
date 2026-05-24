@@ -60,6 +60,14 @@ enum Commands {
         node_id: String,
         model_name: String,
     },
+    /// Set the heartbeat interval for a connected node.
+    SetHeartbeat {
+        /// Node UUID (from `mesh nodes`).
+        node_id: String,
+        /// New interval in seconds (1–3600).
+        #[arg(value_parser = clap::value_parser!(u64).range(1..=3600))]
+        secs: u64,
+    },
 }
 
 #[tokio::main]
@@ -100,5 +108,8 @@ async fn main() {
             node_id,
             model_name,
         } => commands::unload::run(addr, node_id, model_name).await,
+        Commands::SetHeartbeat { node_id, secs } => {
+            commands::set_heartbeat::run(addr, node_id, secs).await
+        }
     }
 }

@@ -92,8 +92,8 @@ function Ensure-LlamaCpp {
 
     Write-Host ">>> Installing llama.cpp $llamaVersion (Vulkan) from ZIP..."
     $zipPath = Join-Path $env:TEMP "llama-win-vulkan.zip"
-    Write-Host ">>> Downloading $llamaZipUrl..."
-    Invoke-WebRequest -Uri $llamaZipUrl -OutFile $zipPath -UseBasicParsing
+    Write-Host ">>> Downloading $llamaZipUrl (this may take a few minutes)..."
+    Invoke-WebRequest -Uri $llamaZipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
 
     Ensure-Directory -Path $llamaInstallDir
     Write-Host ">>> Extracting to $llamaInstallDir..."

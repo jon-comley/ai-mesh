@@ -243,6 +243,16 @@ nodes:
     if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN; fi
     cargo run -q -p cli -- nodes
 
+# Set heartbeat interval for a node. Accepts hostname, IP, or UUID.
+# Usage: just set-heartbeat beelink1 10
+# Usage: just set-heartbeat 192.168.1.14 30
+set-heartbeat node secs:
+    #!/usr/bin/env bash
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN MESH_HTTP_PORT; fi
+    cargo run -q -p cli -- --coordinator "127.0.0.1:{{coordinator_port}}" \
+        set-heartbeat {{node}} {{secs}}
+
 # ── Local sanity (coordinator + controller only) ──────────────────────────────
 
 sanity:
