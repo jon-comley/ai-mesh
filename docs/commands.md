@@ -117,6 +117,7 @@ Models are downloaded as GGUF shards from Hugging Face on first `load-model`. No
 |---------|-------------|
 | `just hardware-report` | Print hardware + capability summary for every registered node. Starts coordinator in the background if not running, starts remote agents, then streams each node's block as it registers over a 20 s scan window |
 | `just start-agents` | Start `ai-mesh-agent` on all remote nodes without touching the local coordinator. Safe to call when agents are already running (`systemctl start` is idempotent) |
+| `just set-heartbeat <node> <secs>` | Set the heartbeat interval on a live node. `<node>` can be a hostname, IP, or UUID. `<secs>` must be 1–3600. Equivalent to `mesh set-heartbeat <node> <secs>` |
 
 ---
 

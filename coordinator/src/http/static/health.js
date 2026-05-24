@@ -2,6 +2,7 @@
 
 const samplesMap   = new Map(); // nodeId -> HealthSample[]
 const hostnamesMap = new Map(); // nodeId -> hostname
+const intervalsMap = new Map(); // nodeId -> secs (last successfully set)
 
 const healthChartsEl = document.getElementById('health-charts');
 
@@ -73,7 +74,7 @@ function healthCard(nodeId, samp) {
   return `<div class="health-card">
   <div class="health-card-header">
     <span class="health-node-name">${esc(name)}</span>
-    <button class="interval-btn" data-interval-node="${esc(nodeId)}">Set interval</button>
+    <button class="interval-btn" data-interval-node="${esc(nodeId)}">Set interval · ${intervalsMap.get(nodeId) ?? 30}s</button>
   </div>
   <div class="health-metric">
     <div class="metric-row">
@@ -129,7 +130,8 @@ function sparklineSvg(data, h, color) {
 // ── Interval prompt ───────────────────────────────────────────────────────────
 
 function promptHeartbeatInterval(nodeId) {
-  const raw = window.prompt('New heartbeat interval (1–3600 seconds):', '30');
+  const current = intervalsMap.get(nodeId) ?? 30;
+  const raw = window.prompt('New heartbeat interval (1–3600 seconds):', String(current));
   if (raw === null) return;
   const secs = parseInt(raw, 10);
   if (!Number.isFinite(secs) || secs < 1 || secs > 3600) {
@@ -145,7 +147,14 @@ function promptHeartbeatInterval(nodeId) {
       body: JSON.stringify({ secs }),
     }
   )
-    .then(r => { if (!r.ok) window.alert(`Failed: HTTP ${r.status}`); })
+    .then(r => {
+      if (r.ok) {
+        intervalsMap.set(nodeId, secs);
+        renderHealthPanel();
+      } else {
+        window.alert(`Failed: HTTP ${r.status}`);
+      }
+    })
     .catch(e => window.alert(`Error: ${e}`));
 }
 

@@ -53,6 +53,9 @@ When stdout is a TTY, displays a live ratatui table with per-node status, a colo
 ### mesh find-node <host-or-ip>
 Return the node ID of the registered node matching the given hostname or IP. Used internally by `just reload-node` and `just load-model` to resolve a node name to its UUID without requiring the user to look it up manually.
 
+### mesh set-heartbeat \<node\> \<secs\>
+Set the heartbeat interval for a connected node. `<node>` may be a hostname, IP, or UUID; the CLI resolves it to the node's UUID before sending. `<secs>` must be 1–3600. The coordinator pushes a `SetHeartbeatInterval` message to the node over its existing TCP connection.
+
 ### mesh reset-registry
 Send `AdminMessage::ResetRegistry` to the coordinator. Clears all registered nodes without restarting.
 

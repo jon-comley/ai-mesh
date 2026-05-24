@@ -5,6 +5,7 @@ pub mod intent;
 pub mod load;
 pub mod nodes;
 pub mod reset;
+pub mod set_heartbeat;
 pub mod status;
 pub mod unload;
 pub mod wait_ready;
