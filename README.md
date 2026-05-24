@@ -34,7 +34,9 @@ just deploy-node beelink1
 
 Builds the correct binary for the node's OS, uploads it, installs llama-server, and
 registers a persistent service (systemd on Linux, NSSM on Windows). Also configures
-passwordless sudo on Linux nodes so fingerprint pushes work non-interactively.
+passwordless sudo on Linux nodes so fingerprint pushes work non-interactively. If the
+coordinator is already running, credentials (TLS fingerprint + auth token) are pushed to
+the node automatically at the end of provisioning — no separate `set-fingerprint` step needed.
 
 ### 3. Start the cluster
 
@@ -78,10 +80,11 @@ Each agent includes `MESH_AUTH_TOKEN` in its startup `AuthToken` frame (connecti
 ### Coordinator state file
 On startup the coordinator writes `~/.config/ai-mesh/coordinator.state` (0600, shell-sourceable KEY=VALUE) containing the current fingerprint and auth token. All justfile recipes source this file — no log-grepping, no race conditions.
 
-**`just start-cluster` and `just restart-coordinator` handle everything automatically:**
+**`just start-cluster`, `just restart-coordinator`, and `just deploy-node` handle everything automatically:**
 - Source `~/.config/ai-mesh/coordinator.state` for fingerprint + auth token
-- Write `export MESH_TLS_FINGERPRINT=...` to `~/.bashrc` on the controller machine
+- Write `export MESH_TLS_FINGERPRINT=...` and `export MESH_AUTH_TOKEN=...` to `~/.bashrc` on the controller machine
 - Call `just set-fingerprint <node>` for every compute node, which pushes **both** `MESH_TLS_FINGERPRINT` and `MESH_AUTH_TOKEN` in one SSH operation
+- `deploy-node` additionally pushes credentials immediately after provisioning if the coordinator is already running
 
 You never need to copy or paste credentials manually.
 

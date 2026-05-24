@@ -120,7 +120,7 @@ This makes "first connect" clearly distinguishable from "key changed".
 
 **Justfile:**
 - `gen-token` recipe — runs `openssl rand -hex 32` and prints the result
-- `deploy-node` — already propagates env vars from `nodes/<name>.env`; just add `MESH_AUTH_TOKEN` to the template
+- `deploy-node` — pushes credentials (fingerprint + auth token) automatically at the end of provisioning when the coordinator is already running; prints a reminder to run `just set-fingerprint <node>` when the coordinator is not yet started
 
 ---
 
@@ -151,15 +151,13 @@ The HMAC key is the same `MESH_AUTH_TOKEN` value used for Heartbeat validation.
 
 ---
 
-## Rollout Order
+## Rollout Order (as implemented)
 
-1. Deploy Step 1 (coordinator TLS) + Step 2 (agent TLS) together — all nodes must update at the same time since the protocol changes from plain TCP to TLS
-2. `just run-coordinator` prints the fingerprint on startup
-3. Add `MESH_TLS_FINGERPRINT` to each `nodes/<name>.env`
-4. `just update-node <name>` for each node
-5. Generate token: `just gen-token` → add `MESH_AUTH_TOKEN` to coordinator env and each `nodes/<name>.env`
-6. `just update-node <name>` again (or include in same deployment as Step 1)
-7. Deploy Step 4 (HMAC) independently — optional field, backwards compatible
+1. Deploy coordinator TLS + agent TLS together — protocol changes from plain TCP to TLS
+2. On first `just start-cluster` or `just restart-coordinator`: coordinator auto-generates `MESH_AUTH_TOKEN` if unset, writes to `coordinator.state`, and pushes fingerprint + token to all compute nodes via `set-fingerprint` — no manual steps
+3. `just deploy-node <name>` for new nodes: credentials pushed automatically at end of provisioning if coordinator is running
+4. `just rotate-token` for zero-downtime key rotation at any time
+5. Step 4 (HMAC) — deferred; optional defence-in-depth, backwards compatible
 
 ---
 
