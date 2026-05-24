@@ -122,6 +122,7 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just run-coordinator` | Start coordinator on port 9000 |
 | `just run-controller` | Start controller agent |
 | `just reset` | Clear all nodes from the live coordinator |
+| `just nodes` | Show the current node table |
 | `just dev` | Start full cluster in dev mode |
 | `just deploy-node <node>` | First-time provision or re-provision a node |
 | `just update-node <node>` | OTA binary update only (no reprovisioning) |
