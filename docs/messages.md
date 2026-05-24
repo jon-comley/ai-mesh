@@ -59,8 +59,11 @@ Sent by agents periodically to indicate liveness.
 | `cpu_usage_pct` | f32 | All-core average CPU utilisation 0.0–100.0 (required since Phase C2) |
 | `ram_used_gb` | f32 | RAM currently in use, gibibytes (required since Phase C2) |
 | `ram_total_gb` | f32 | Total physical RAM, gibibytes (required since Phase C2) |
+| `gpu_usage_pct` | Option\<f32\> | GPU utilisation 0.0–100.0; omitted on CPU-only nodes (added Phase C7) |
+| `gpu_vram_used_gb` | Option\<f32\> | GPU VRAM in use, gibibytes; omitted on CPU-only nodes (added Phase C7) |
+| `gpu_vram_total_gb` | Option\<f32\> | Total GPU VRAM, gibibytes; omitted on CPU-only nodes (added Phase C7) |
 
-All three health fields are required. Pre-C2 agents that omit them fail deserialization and are rejected.
+The three CPU/RAM fields are required. The three GPU fields are optional (`serde(default)` → `None` when absent); pre-C7 agents that omit them remain compatible. Pre-C2 agents that omit the CPU/RAM fields fail deserialization and are rejected.
 
 The coordinator validates `auth_token` on every heartbeat (defence-in-depth on top of the connection-level `AuthToken` check). An empty or wrong token is rejected when auth is configured.
 
@@ -333,7 +336,7 @@ Broadcast on every heartbeat. Replaces the full node list on the client.
 ### HealthUpdate
 
 ```json
-{ "type": "HealthUpdate", "node_id": "abc123", "samples": [ { "ts_ms": 1716543000000, "cpu_pct": 42.5, "ram_used_gb": 6.1, "ram_total_gb": 15.9 }, ... ] }
+{ "type": "HealthUpdate", "node_id": "abc123", "samples": [ { "ts_ms": 1716543000000, "cpu_pct": 42.5, "ram_used_gb": 6.1, "ram_total_gb": 15.9, "gpu_pct": 12.0, "gpu_vram_used_gb": 3.7, "gpu_vram_total_gb": 4.0 }, ... ] }
 ```
 
 Broadcast on every heartbeat, immediately after `TopologyUpdate`. Also sent once per node to each new WebSocket client on connect (warm-start), so sparklines populate immediately without waiting for the next heartbeat. Contains the full rolling window (up to 60 entries) of health samples for the named node.
@@ -345,8 +348,11 @@ Broadcast on every heartbeat, immediately after `TopologyUpdate`. Also sent once
 | `samples[].cpu_pct` | f32 | All-core average CPU utilisation 0.0–100.0 |
 | `samples[].ram_used_gb` | f32 | RAM in use, gibibytes |
 | `samples[].ram_total_gb` | f32 | Total RAM, gibibytes |
+| `samples[].gpu_pct` | f32? | GPU utilisation 0.0–100.0; absent on CPU-only nodes |
+| `samples[].gpu_vram_used_gb` | f32? | GPU VRAM in use, gibibytes; absent on CPU-only nodes |
+| `samples[].gpu_vram_total_gb` | f32? | Total GPU VRAM, gibibytes; absent on CPU-only nodes |
 
-Timestamps are set by the coordinator on receipt to avoid clock-skew across nodes.
+Timestamps are set by the coordinator on receipt to avoid clock-skew across nodes. GPU fields are omitted from JSON when `None` (`skip_serializing_if`); the dashboard hides the GPU row when all samples lack GPU data.
 
 ---
 
