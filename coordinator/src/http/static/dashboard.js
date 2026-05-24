@@ -1,4 +1,5 @@
 import * as topology from '/static/topology.js';
+import * as health from '/static/health.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -47,7 +48,11 @@ function setConnState(state) {
 
 // ── Event dispatch ──────────────────────────────────────────────────────────
 const handlers = {
-  TopologyUpdate: evt => topology.handleEvent(evt),
+  TopologyUpdate: evt => {
+    topology.handleEvent(evt);
+    health.handleTopology(evt.nodes);
+  },
+  HealthUpdate: evt => health.handleHealth(evt),
 };
 
 function dispatch(evt) {

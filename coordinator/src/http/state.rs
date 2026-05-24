@@ -90,6 +90,15 @@ impl DashboardState {
         self.auth_tokens.is_empty() || self.auth_tokens.iter().any(|t| t == token)
     }
 
+    /// Return a snapshot of all stored health windows — used to warm-start new WS clients.
+    pub fn get_all_health_snapshots(&self) -> Vec<(String, Vec<HealthSample>)> {
+        let store = self.health_store.lock().unwrap();
+        store
+            .iter()
+            .map(|(id, deque)| (id.clone(), deque.iter().cloned().collect()))
+            .collect()
+    }
+
     /// Build and broadcast a TopologyUpdate from a fresh node list.
     pub fn push_topology(&self, nodes: &[NodeRecordLite]) {
         // No receivers — nothing to do.
@@ -405,6 +414,95 @@ mod tests {
             json.contains("\"ts_ms\""),
             "missing ts_ms in sample: {json}"
         );
+    }
+
+    #[test]
+    fn get_all_health_snapshots_returns_all_nodes() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_health("n1", 10.0, 1.0, 8.0);
+        state.push_health("n2", 20.0, 2.0, 8.0);
+        state.push_health("n1", 15.0, 1.5, 8.0);
+        let mut snaps = state.get_all_health_snapshots();
+        snaps.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].0, "n1");
+        assert_eq!(snaps[0].1.len(), 2);
+        assert_eq!(snaps[1].0, "n2");
+        assert_eq!(snaps[1].1.len(), 1);
+    }
+
+    #[test]
+    fn get_all_health_snapshots_empty_when_no_data() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        assert!(state.get_all_health_snapshots().is_empty());
+    }
+
+    #[test]
+    fn get_all_health_snapshots_is_point_in_time_copy() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_health("n1", 10.0, 1.0, 8.0);
+        let snap = state.get_all_health_snapshots();
+        // Push more data after snapshot — snapshot must not change.
+        state.push_health("n1", 99.0, 7.0, 8.0);
+        assert_eq!(
+            snap[0].1.len(),
+            1,
+            "snapshot should not reflect post-snapshot pushes"
+        );
+        assert_eq!(snap[0].1[0].cpu_pct, 10.0);
+    }
+
+    #[test]
+    fn get_all_health_snapshots_preserves_sample_values() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_health("n1", 33.3, 4.5, 16.0);
+        let snaps = state.get_all_health_snapshots();
+        let s = &snaps[0].1[0];
+        assert_eq!(s.cpu_pct, 33.3);
+        assert_eq!(s.ram_used_gb, 4.5);
+        assert_eq!(s.ram_total_gb, 16.0);
+        assert!(s.ts_ms > 0);
+    }
+
+    #[test]
+    fn get_all_health_snapshots_includes_single_sample_node() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_health("solo", 50.0, 2.0, 8.0);
+        let snaps = state.get_all_health_snapshots();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].0, "solo");
+        assert_eq!(snaps[0].1.len(), 1);
+    }
+
+    #[test]
+    fn get_all_health_snapshots_preserves_sample_order() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_health("n1", 10.0, 1.0, 8.0);
+        state.push_health("n1", 20.0, 2.0, 8.0);
+        state.push_health("n1", 30.0, 3.0, 8.0);
+        let snaps = state.get_all_health_snapshots();
+        let samp = &snaps[0].1;
+        assert_eq!(samp[0].cpu_pct, 10.0, "oldest first");
+        assert_eq!(samp[1].cpu_pct, 20.0);
+        assert_eq!(samp[2].cpu_pct, 30.0, "newest last");
     }
 
     #[test]

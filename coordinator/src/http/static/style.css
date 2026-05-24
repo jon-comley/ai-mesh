@@ -185,6 +185,71 @@ body {
   color: var(--text-muted);
 }
 
+/* ── Health cards ──────────────────────────────────────────────────────────── */
+.health-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+
+.health-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.health-node-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.interval-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.interval-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.health-metric {
+  margin-bottom: 8px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.metric-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.metric-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.sparkline {
+  display: block;
+}
+
+/* ── Mini sparkline in node cards ──────────────────────────────────────────── */
+.node-sparkline {
+  margin-top: 8px;
+}
+
 /* ── Desktop layout (≥ 900px) ──────────────────────────────────────────────── */
 @media (min-width: 900px) {
   body { overflow: auto; }
