@@ -237,6 +237,12 @@ reset: update-portproxy
     cargo run -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" reset-registry
     echo "Registry cleared. Nodes will re-register on their next heartbeat."
 
+nodes:
+    #!/usr/bin/env bash
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN; fi
+    cargo run -q -p cli -- nodes
+
 # ── Local sanity (coordinator + controller only) ──────────────────────────────
 
 sanity:
