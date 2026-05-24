@@ -58,7 +58,7 @@ just validate-routing   # confirm inference routes to correct nodes
 ```
 just restart-coordinator        # after waking laptop or any coordinator restart
 just intent "turn the lights off"
-just set-auth-token <token>     # rotate the shared auth secret across all nodes
+just rotate-token               # zero-downtime auth token rotation (no inference drop)
 ```
 
 ---
@@ -73,7 +73,7 @@ All coordinator ↔ agent and coordinator ↔ CLI traffic runs over **TLS** with
 The coordinator generates a self-signed certificate on first start, persisted at `~/.config/ai-mesh/coordinator.crt`. Agents and the CLI verify the cert via its SHA-256 fingerprint (TOFU model — trust on first contact, reject any change).
 
 ### Auth token (application layer)
-Each agent includes `MESH_AUTH_TOKEN` in its startup `AuthToken` frame (connection-level) and in every `Heartbeat` (per-message defence-in-depth). The coordinator rejects any connection or heartbeat with a missing or wrong token when auth is configured. Dual-token rotation (`MESH_AUTH_TOKEN` + `MESH_AUTH_TOKEN_NEXT`) allows zero-downtime key rotation.
+Each agent includes `MESH_AUTH_TOKEN` in its startup `AuthToken` frame (connection-level) and in every `Heartbeat` (per-message defence-in-depth). The coordinator rejects any connection or heartbeat with a missing or wrong token when auth is configured. Dual-token rotation (`MESH_AUTH_TOKEN` + `MESH_AUTH_TOKEN_NEXT`) allows zero-downtime key rotation — use `just rotate-token` to rotate automatically.
 
 ### Coordinator state file
 On startup the coordinator writes `~/.config/ai-mesh/coordinator.state` (0600, shell-sourceable KEY=VALUE) containing the current fingerprint and auth token. All justfile recipes source this file — no log-grepping, no race conditions.
@@ -133,8 +133,9 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just load <model>` | Auto-place a model via coordinator (no SSH needed, e.g. `just load qwen2.5:7b`) |
 | `just intent "<text>"` | Send a natural-language intent to the coordinator (LLM routes to tool or answers in free text) |
 | `just pair-bulb` | Open a 254-second Zigbee pairing window and stream join events |
+| `just rotate-token` | **Zero-downtime auth token rotation** — dual-token window, distributes new token to all nodes, revokes old token, reloads models |
 | `just set-fingerprint <node>` | Push TLS fingerprint **and** auth token from coordinator state file to a single node |
-| `just set-auth-token <token>` | Rotate shared auth secret — pushes to all compute nodes and updates `~/.bashrc` |
+| `just set-auth-token <token>` | Low-level: push a specific token to all compute nodes and update `~/.bashrc` (prefer `just rotate-token`) |
 
 See `docs/commands.md` for full reference.
 

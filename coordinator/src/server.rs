@@ -791,4 +791,55 @@ mod tests {
 
         assert!(matches!(ack, MeshMessage::Acknowledge));
     }
+
+    /// During token rotation the coordinator accepts both the old and new token.
+    /// A node carrying the old token and a node carrying the new token should
+    /// both be registered successfully in the same rotation window.
+    #[tokio::test]
+    async fn test_both_rotation_tokens_accepted() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let mut server = Server::new("127.0.0.1:9013", registry.clone());
+        server.auth_tokens = Arc::new(vec!["old-token".into(), "new-token".into()]);
+
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Node carrying the old token — should be accepted.
+        let ack = authenticated_send(
+            "127.0.0.1:9013",
+            "old-token",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: NodeIdentity {
+                    id: "old-token-node".into(),
+                    hostname: "pi1".into(),
+                    ip: "127.0.0.1".into(),
+                    role: NodeRole::Compute,
+                },
+                auth_token: "old-token".into(),
+            }),
+        )
+        .await;
+        assert_eq!(ack, MeshMessage::Acknowledge);
+        assert!(registry.lock().unwrap().get("old-token-node").is_some());
+
+        // Node already updated to the new token — should also be accepted.
+        let ack2 = authenticated_send(
+            "127.0.0.1:9013",
+            "new-token",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: NodeIdentity {
+                    id: "new-token-node".into(),
+                    hostname: "beelink1".into(),
+                    ip: "127.0.0.1".into(),
+                    role: NodeRole::Compute,
+                },
+                auth_token: "new-token".into(),
+            }),
+        )
+        .await;
+        assert_eq!(ack2, MeshMessage::Acknowledge);
+        assert!(registry.lock().unwrap().get("new-token-node").is_some());
+    }
 }

@@ -699,6 +699,58 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // Regression test for the rotate-token bug: after a coordinator restart the
+    // SQLite-persisted Ready state makes select_node_for_inference return a node
+    // whose llama-server is not actually running.  clear_all() (called via
+    // reset-registry after Phase 3) must erase that stale state so that
+    // wait-ready blocks until the agent reports Ready for real.
+    #[test]
+    fn clear_all_removes_stale_ready_state_after_coordinator_restart() {
+        use crate::scheduler::Scheduler;
+
+        let path = "/tmp/ai_mesh_stale_ready_regression_test.db";
+        let _ = std::fs::remove_file(path);
+
+        // Simulate pre-rotation run: node connects and loads a model.
+        {
+            let mut reg = Registry::open(path).expect("open db");
+            reg.update_heartbeat(NodeIdentity {
+                id: "beelink1".into(),
+                hostname: "BEELINK1".into(),
+                ip: "192.168.1.14".into(),
+                role: NodeRole::Compute,
+            });
+            reg.update_capabilities(
+                "beelink1",
+                NodeCapabilities {
+                    features: vec!["llm".into()],
+                    max_model_size_gb: 8.0,
+                    ..NodeCapabilities::default()
+                },
+            );
+            reg.update_model_status("beelink1", "qwen2.5:7b", 4096, ModelLifecycleState::Ready);
+        }
+
+        // Coordinator restarts (rotate-token Phase 3): SQLite reload brings
+        // stale Ready back into memory — this is the bug without the fix.
+        let mut reg = Registry::open(path).expect("reopen after simulated restart");
+        let selected = Scheduler::new(&reg).select_node_for_inference("qwen2.5:7b");
+        assert!(
+            selected.is_some(),
+            "stale Ready from SQLite must be visible (documents the pre-fix behaviour)"
+        );
+
+        // reset-registry (the fix) clears the stale state.
+        reg.clear_all();
+        let selected_after = Scheduler::new(&reg).select_node_for_inference("qwen2.5:7b");
+        assert!(
+            selected_after.is_none(),
+            "after clear_all, no node should be returned for inference"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn nodes_with_feature_finds_lighting_nodes() {
         let mut reg = Registry::new();
