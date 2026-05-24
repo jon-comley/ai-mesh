@@ -286,6 +286,7 @@ async fn process_message(
         MeshMessage::Heartbeat(HeartbeatPayload {
             identity,
             auth_token,
+            ..
         }) => {
             // When tokens are configured, require the heartbeat token to match exactly.
             if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
@@ -654,6 +655,9 @@ mod tests {
             &MeshMessage::Heartbeat(HeartbeatPayload {
                 identity: ident.clone(),
                 auth_token: String::new(),
+                cpu_usage_pct: None,
+                ram_used_gb: None,
+                ram_total_gb: None,
             }),
         )
         .await;
@@ -730,6 +734,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: "wrong-token".into(),
+                cpu_usage_pct: None,
+                ram_used_gb: None,
+                ram_total_gb: None,
             }),
         )
         .await;
@@ -760,6 +767,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: String::new(),
+                cpu_usage_pct: None,
+                ram_used_gb: None,
+                ram_total_gb: None,
             }),
         )
         .await;
@@ -789,6 +799,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: "good-token".into(),
+                cpu_usage_pct: None,
+                ram_used_gb: None,
+                ram_total_gb: None,
             }),
         )
         .await;
@@ -820,6 +833,9 @@ mod tests {
             &MeshMessage::Heartbeat(HeartbeatPayload {
                 identity: ident.clone(),
                 auth_token: String::new(),
+                cpu_usage_pct: None,
+                ram_used_gb: None,
+                ram_total_gb: None,
             }),
         )
         .await;
@@ -893,6 +909,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: "old-token".into(),
+                cpu_usage_pct: None,
+                ram_used_gb: None,
+                ram_total_gb: None,
             }),
         )
         .await;
@@ -911,6 +930,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: "new-token".into(),
+                cpu_usage_pct: None,
+                ram_used_gb: None,
+                ram_total_gb: None,
             }),
         )
         .await;

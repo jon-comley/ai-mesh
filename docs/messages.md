@@ -47,7 +47,7 @@ When `MESH_AUTH_TOKEN` is set on the coordinator, the first frame must be `AuthT
 ## Heartbeat(HeartbeatPayload)
 Sent by agents periodically to indicate liveness.
 
-`HeartbeatPayload` wraps `NodeIdentity` (flattened in JSON) plus a per-message auth token:
+`HeartbeatPayload` wraps `NodeIdentity` (flattened in JSON) plus a per-message auth token and optional health metrics:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -56,10 +56,26 @@ Sent by agents periodically to indicate liveness.
 | `ip` | String | LAN IP address |
 | `role` | NodeRole | `Controller` or `Compute` |
 | `auth_token` | String | `MESH_AUTH_TOKEN` value; empty string when not configured |
+| `cpu_usage_pct` | Option\<f32\> | All-core average CPU utilisation 0.0–100.0; omitted by agents < Phase C |
+| `ram_used_gb` | Option\<f32\> | RAM currently in use, gibibytes; omitted by agents < Phase C |
+| `ram_total_gb` | Option\<f32\> | Total physical RAM, gibibytes; omitted by agents < Phase C |
+
+The three health fields use `#[serde(default, skip_serializing_if = "Option::is_none")]` so older agents that don't send them are still accepted (backward-compatible).
 
 The coordinator validates `auth_token` on every heartbeat (defence-in-depth on top of the connection-level `AuthToken` check). An empty or wrong token is rejected when auth is configured.
 
-Coordinator updates last-seen timestamp on successful validation.
+Coordinator updates last-seen timestamp on successful validation and, from Phase C onwards, appends a `HealthSample` (coordinator-stamped timestamp + metrics) to a per-node ring buffer.
+
+---
+
+## SetHeartbeatInterval { secs: u64 }
+Sent **coordinator → agent** to dynamically change how often the agent sends heartbeats.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `secs` | u64 | New interval in seconds (e.g. 5, 30, 60) |
+
+Pushed by the coordinator when the operator calls `POST /api/nodes/{id}/heartbeat-interval` or `mesh set-heartbeat <node> <secs>`. The agent applies the new interval immediately without restarting.
 
 ---
 

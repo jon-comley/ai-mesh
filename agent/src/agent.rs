@@ -61,6 +61,9 @@ impl Agent {
                 .unwrap_or_default()
                 .trim()
                 .to_string(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
         }
     }
 

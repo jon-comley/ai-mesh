@@ -173,7 +173,14 @@ Full design spec: `plans/phase11-dashboard.md`
 - 9 new unit tests: `auth_ok` logic, health colour thresholds, `push_topology` no-op, WS endpoint 400
 - Chaos binary extended: scenario 7 verifies dashboard `/ws` returns 401 for a wrong token (plain TCP, no new deps)
 
-### Phase C — Health timeline (next)
+### Phase C — Health timeline (In Progress)
+
+- **C1 ✓** — Wire protocol: `cpu_usage_pct`, `ram_used_gb`, `ram_total_gb` (`Option<f32>`, backward-compatible) added to `HeartbeatPayload`; `SetHeartbeatInterval { secs }` added to `MeshMessage`; 5 new tests
+- **C2** — Agent `sysinfo` metrics collection + handle `SetHeartbeatInterval` to change loop interval at runtime
+- **C3** — Coordinator `HealthStore` (`HashMap<node_id, VecDeque<HealthSample>>`, capped at 60); push `DashboardEvent::HealthUpdate` on every heartbeat
+- **C4** — `POST /api/nodes/{id}/heartbeat-interval` HTTP endpoint; coordinator pushes `SetHeartbeatInterval` to the agent over its open TCP connection
+- **C5** — `health.js`: SVG sparklines for CPU % and RAM %; interval control button per node card
+- **C6** — `mesh set-heartbeat <node> <secs>` CLI command + `just set-heartbeat` recipe
 
 ### Phase D — Model management panel
 

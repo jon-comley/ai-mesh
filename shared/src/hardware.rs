@@ -27,6 +27,15 @@ pub struct HeartbeatPayload {
     #[serde(flatten)]
     pub identity: NodeIdentity,
     pub auth_token: String,
+    /// All-core average CPU utilisation, 0.0–100.0. None for agents < Phase C.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_usage_pct: Option<f32>,
+    /// RAM currently in use on the node, in gibibytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_used_gb: Option<f32>,
+    /// Total physical RAM on the node, in gibibytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_total_gb: Option<f32>,
 }
 
 impl From<NodeIdentity> for HeartbeatPayload {
@@ -34,6 +43,9 @@ impl From<NodeIdentity> for HeartbeatPayload {
         HeartbeatPayload {
             identity,
             auth_token: String::new(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
         }
     }
 }
@@ -194,10 +206,68 @@ mod tests {
                 role: NodeRole::Controller,
             },
             auth_token: "tok123".into(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back, payload);
         assert!(json.contains("auth_token"));
+    }
+
+    #[test]
+    fn heartbeat_payload_health_fields_roundtrip() {
+        let payload = HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "n3".into(),
+                hostname: "beelink1".into(),
+                ip: "192.168.1.14".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: "tok".into(),
+            cpu_usage_pct: Some(42.5),
+            ram_used_gb: Some(6.1),
+            ram_total_gb: Some(15.9),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, payload);
+        assert!(json.contains("cpu_usage_pct"));
+        assert!(json.contains("ram_used_gb"));
+        assert!(json.contains("ram_total_gb"));
+    }
+
+    #[test]
+    fn heartbeat_payload_old_agent_missing_health_fields_defaults_to_none() {
+        // Simulates a pre-Phase-C agent that doesn't send health fields.
+        let json = r#"{
+            "id": "old", "hostname": "legacy", "ip": "10.0.0.16",
+            "role": "Compute", "auth_token": ""
+        }"#;
+        let payload: HeartbeatPayload = serde_json::from_str(json).unwrap();
+        assert!(payload.cpu_usage_pct.is_none());
+        assert!(payload.ram_used_gb.is_none());
+        assert!(payload.ram_total_gb.is_none());
+    }
+
+    #[test]
+    fn heartbeat_payload_health_fields_omitted_when_none() {
+        let payload = HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "n4".into(),
+                hostname: "pi1".into(),
+                ip: "192.168.1.11".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(!json.contains("cpu_usage_pct"));
+        assert!(!json.contains("ram_used_gb"));
+        assert!(!json.contains("ram_total_gb"));
     }
 }
