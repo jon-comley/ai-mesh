@@ -65,3 +65,78 @@ pub async fn start(port: u16) {
         error!("Dashboard HTTP server error: {e}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn get(uri: &str) -> (StatusCode, String) {
+        let resp = router()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        // Drain the body so the connection closes cleanly.
+        let _ = to_bytes(resp.into_body(), usize::MAX).await;
+        (status, ct)
+    }
+
+    #[tokio::test]
+    async fn index_returns_200() {
+        let (status, ct) = get("/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.contains("text/html"), "expected text/html, got {ct}");
+    }
+
+    #[tokio::test]
+    async fn css_returns_correct_content_type() {
+        let (status, ct) = get("/static/style.css").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(ct.contains("text/css"), "expected text/css, got {ct}");
+    }
+
+    #[tokio::test]
+    async fn dashboard_js_returns_correct_content_type() {
+        let (status, ct) = get("/static/dashboard.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            ct.contains("javascript"),
+            "expected application/javascript, got {ct}"
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_returns_correct_content_type() {
+        let (status, ct) = get("/manifest.json").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            ct.contains("manifest+json"),
+            "expected application/manifest+json, got {ct}"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_worker_returns_correct_content_type() {
+        // Browsers silently reject service workers with a non-JS content-type.
+        let (status, ct) = get("/service-worker.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            ct.contains("javascript"),
+            "expected application/javascript, got {ct}"
+        );
+    }
+}

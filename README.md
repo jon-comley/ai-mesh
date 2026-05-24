@@ -67,6 +67,18 @@ just rotate-token               # zero-downtime auth token rotation (no inferenc
 
 ---
 
+## Dashboard
+
+The coordinator serves a web dashboard on **port 9001** (override with `MESH_HTTP_PORT`):
+
+```
+http://localhost:9001
+```
+
+A Progressive Web App — open in Chrome/Safari and use "Add to Home Screen" to install it on mobile. Six panels: Nodes, Health, Models, Lighting, Security, Errors. Real-time data via WebSocket arrives in Phase B; the shell is live now.
+
+---
+
 ## Security
 
 All coordinator ↔ agent and coordinator ↔ CLI traffic runs over **TLS** with a **shared auth token**.

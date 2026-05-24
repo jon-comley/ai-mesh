@@ -24,3 +24,4 @@ axum = { version = "0.8", features = ["ws"] }
 
 [dev-dependencies]
 tempfile = "3"
+tower = "0.5"

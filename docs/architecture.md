@@ -19,7 +19,7 @@ This document captures the foundational design principles, workflows, and engine
 ai-mesh/
   shared/                    # Shared types, messages, HMAC wire protocol
   agent/                     # Node agent: hardware detection, heartbeats, inference
-  coordinator/               # Central orchestrator: TLS server, registry, scheduler
+  coordinator/               # Central orchestrator: TLS server, registry, scheduler, HTTP dashboard
   cli/                       # CLI + chaos security-test binary
   capabilities/
     core/                    # Capability trait and dispatch
