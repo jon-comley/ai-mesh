@@ -1,0 +1,190 @@
+/* ── Design tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --bg:          #0d1117;
+  --surface:     #161b22;
+  --surface-2:   #21262d;
+  --border:      #30363d;
+  --text:        #e6edf3;
+  --text-muted:  #8b949e;
+  --accent:      #58a6ff;
+  --green:       #3fb950;
+  --amber:       #d29922;
+  --red:         #f85149;
+  --tab-h:       64px;
+  --header-h:    48px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── App header ────────────────────────────────────────────────────────────── */
+.app-header {
+  height: var(--header-h);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  flex-shrink: 0;
+}
+
+.app-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+}
+
+.conn-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transition: background 0.3s;
+}
+.conn-dot.connected    { background: var(--green); }
+.conn-dot.connecting   { background: var(--amber); }
+.conn-dot.disconnected { background: var(--red); }
+
+/* ── Panels ────────────────────────────────────────────────────────────────── */
+.panels {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.panel {
+  display: none;
+  height: 100%;
+  overflow-y: auto;
+  padding: 16px;
+}
+.panel.active { display: block; }
+
+.panel h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--text);
+}
+
+.placeholder {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 24px 0;
+  text-align: center;
+}
+
+/* ── Tab bar ───────────────────────────────────────────────────────────────── */
+.tab-bar {
+  height: calc(var(--tab-h) + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-shrink: 0;
+}
+
+.tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 8px 4px;
+  transition: color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tab svg {
+  width: 22px;
+  height: 22px;
+}
+
+.tab span {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.tab.active {
+  color: var(--accent);
+}
+
+.tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ── Utility ───────────────────────────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.badge-green  { background: color-mix(in srgb, var(--green) 20%, transparent); color: var(--green); }
+.badge-amber  { background: color-mix(in srgb, var(--amber) 20%, transparent); color: var(--amber); }
+.badge-red    { background: color-mix(in srgb, var(--red)   20%, transparent); color: var(--red); }
+.badge-muted  { background: var(--surface-2); color: var(--text-muted); }
+
+/* ── Desktop layout (≥ 900px) ──────────────────────────────────────────────── */
+@media (min-width: 900px) {
+  body { overflow: auto; }
+
+  .app-header { position: sticky; top: 0; z-index: 10; }
+
+  /* Hide mobile tab bar; show desktop sidebar nav instead */
+  .tab-bar {
+    position: fixed;
+    top: var(--header-h);
+    left: 0;
+    bottom: 0;
+    width: 80px;
+    height: auto;
+    flex-direction: column;
+    border-top: none;
+    border-right: 1px solid var(--border);
+    padding-bottom: 0;
+  }
+
+  .tab {
+    height: 72px;
+    flex: none;
+    width: 100%;
+  }
+
+  .panels {
+    margin-left: 80px;
+    overflow: auto;
+    height: auto;
+    min-height: calc(100vh - var(--header-h));
+  }
+
+  .panel {
+    display: block;
+    height: auto;
+    overflow-y: visible;
+  }
+
+  /* On desktop all panels scroll together — tab bar highlights current view */
+  .panel { padding: 24px; }
+}

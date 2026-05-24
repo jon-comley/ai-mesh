@@ -13,6 +13,12 @@ async fn main() {
 
     let _mdns = coordinator::mdns::advertise(9000);
 
+    let http_port: u16 = std::env::var("MESH_HTTP_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9001);
+    tokio::spawn(coordinator::http::start(http_port));
+
     println!("Coordinator is running. Press Ctrl+C to stop.");
 
     // Keep the process alive forever

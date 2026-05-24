@@ -151,7 +151,34 @@ The existing TLS + token auth stops unauthenticated connections. HMAC goes one l
 
 ---
 
-## Phase 11 — Web Dashboard & Health Reporter
+## Phase 11 — Web Dashboard & Health Reporter (In Progress)
+
+Full design spec: `plans/phase11-dashboard.md`
+
+### Phase A — axum shell + PWA ✓ Complete
+
+- `axum` 0.8 HTTP server embedded in coordinator, default port 9001 (`MESH_HTTP_PORT` to override)
+- 6 tab panels: Nodes, Health, Models, Lighting, Security, Errors
+- Mobile-first CSS with bottom tab bar; CSS grid desktop sidebar at ≥ 900 px
+- `manifest.json` + service worker — installable as PWA today
+- All static assets embedded via `include_str!` (single binary, zero runtime file I/O)
+- `DashboardModule` trait in plan for per-capability panel extensibility
+
+### Phase B — WebSocket + live topology (next)
+
+### Phase C — Health timeline
+
+### Phase D — Model management panel
+
+### Phase E — Error feed + diagnostic panel
+
+### Phase F — Lighting panel
+
+### Phase G — Security panel
+
+### Phase H — Polish, icons, desktop layout pass
+
+---
 
 A lightweight web interface embedded in the coordinator process (no separate service). Primary goal: **observable mesh** — operators can see the state of the cluster at a glance and drill into errors without SSHing into nodes.
 

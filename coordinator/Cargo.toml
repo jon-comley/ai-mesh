@@ -20,6 +20,7 @@ rustls-pemfile = "2"
 sha2 = "0.10"
 dirs = "5"
 getrandom = "0.2"
+axum = { version = "0.8", features = ["ws"] }
 
 [dev-dependencies]
 tempfile = "3"
