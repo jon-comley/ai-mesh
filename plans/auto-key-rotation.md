@@ -3,6 +3,8 @@
 > Status: **Complete.** Implemented, end-to-end validated (fresh install → rotation → inference), reviewed and approved by Bing and Gemini.
 >
 > Bug fixed during validation: after Phase 3 coordinator restart, stale SQLite Ready state caused `wait-ready` to return a false positive before llama-server was running. Fixed by calling `reset-registry` after Phase 3 and restarting the local controller agent with the new token. Regression test added in `coordinator/src/registry.rs`.
+>
+> Follow-up (2026-05-24): `deploy-node` updated to push credentials automatically when the coordinator is already running, closing the last manual step. Live test recipe: `just test-deploy-creds <node>`.
 
 ---
 

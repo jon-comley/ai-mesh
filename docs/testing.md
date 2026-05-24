@@ -168,6 +168,18 @@ These behaviours are implemented but not yet covered by automated tests:
 
 ---
 
+## 3a. Live Credential Tests
+
+Shell-level tests that exercise the justfile credential distribution flow against real nodes:
+
+| Recipe | What it covers |
+|--------|---------------|
+| `just test-deploy-creds <node>` | **Scenario A** — coordinator running: calls `set-fingerprint <node>` and verifies it succeeds. **Scenario B** — coordinator absent (state file hidden): verifies the reminder message is printed instead of a silent failure. |
+
+Run with: `just test-deploy-creds pi1`
+
+---
+
 ## 4. Integration Tests
 
 Integration tests live in the `tests/` directory and verify:

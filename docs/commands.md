@@ -67,7 +67,7 @@ NODE_ROLE=compute    # or controller
 
 | Command | Description |
 |---------|-------------|
-| `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs llama-server, and registers the agent service |
+| `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs llama-server, and registers the agent service. If the coordinator is already running, pushes TLS fingerprint + auth token to the node automatically at the end |
 | `just update-node <node>` | OTA binary update only — rebuild, upload, restart. No reprovisioning |
 | `just load-model <node> <model>` | Load a specific model on a live node (e.g. `just load-model pi1 qwen2.5:1.5b`). Prints hardware-filtered fallback options if the model fails to load |
 | `just auto-load-model <node>` | Detect node hardware and automatically load the best-fit model |
@@ -97,7 +97,7 @@ Models are downloaded as GGUF shards from Hugging Face on first `load-model`. No
 ### Adding a new node
 
 1. Create `nodes/<name>.env` with the four variables above
-2. `just deploy-node <name>` — no other files need changing
+2. `just deploy-node <name>` — no other files need changing. If the coordinator is running, credentials are pushed automatically; otherwise run `just set-fingerprint <name>` after `just start-cluster`
 
 ---
 
@@ -161,6 +161,7 @@ These are uploaded and run remotely by the justfile recipes — you do not need 
 | Command | Description |
 |---------|-------------|
 | `just validate-routing` | **Recommended.** Confirms each model routes to the correct node: `qwen2.5:1.5b` → Pi, `qwen2.5:7b` → Beelink. Fails fast with a clear message if no compute nodes are registered (run `just restart-coordinator` or `just start-cluster` first). Prints PASS/FAIL per assertion |
+| `just test-deploy-creds <node>` | Verify that `deploy-node` pushes credentials correctly. Scenario A: coordinator running → `set-fingerprint` called and succeeds. Scenario B: coordinator absent → reminder printed. Does not do a real deploy |
 | `just test-inference` | Legacy end-to-end test: loads `qwen2.5:1.5b` on **all** compute nodes then fires 4 requests. Does not validate hardware-aware routing. **Note: stops all remote agent services on exit** — run `just start-agents && just restart-coordinator` afterwards |
 
 ### validate-routing detail

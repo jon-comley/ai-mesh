@@ -147,4 +147,43 @@ mod tests {
         assert!(!content.contains("FP1"));
         assert!(!content.contains("tok1"));
     }
+
+    /// Every line must be KEY=VALUE with no quotes, spaces, or other shell syntax.
+    /// bash `source` is strict: quoted values or spaces around `=` break parsing.
+    #[test]
+    fn state_lines_are_bare_key_equals_value() {
+        let dir = TempDir::new().unwrap();
+        let content = run(&dir, "AA:BB:CC", &["mytoken".into()], Some("nexttoken"));
+        for line in content.lines() {
+            assert!(
+                line.contains('='),
+                "every line must be KEY=VALUE, got: {line:?}"
+            );
+            let (key, value) = line.split_once('=').unwrap();
+            assert!(!key.contains(' '), "key must have no spaces: {key:?}");
+            assert!(
+                !value.starts_with('"') && !value.starts_with('\''),
+                "value must not be quoted (bash source reads bare): {value:?}"
+            );
+        }
+    }
+
+    /// Only the three known keys are written; no extra lines should appear.
+    #[test]
+    fn state_contains_only_known_keys() {
+        let dir = TempDir::new().unwrap();
+        let content = run(&dir, "FP", &["tok".into()], Some("next"));
+        let known = [
+            "MESH_TLS_FINGERPRINT",
+            "MESH_AUTH_TOKEN",
+            "MESH_AUTH_TOKEN_NEXT",
+        ];
+        for line in content.lines() {
+            let key = line.split_once('=').map(|(k, _)| k).unwrap_or(line);
+            assert!(
+                known.contains(&key),
+                "unexpected key in state file: {key:?}"
+            );
+        }
+    }
 }

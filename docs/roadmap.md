@@ -129,9 +129,9 @@
 - **Per-message heartbeat auth token** ✓ — `HeartbeatPayload` carries `auth_token: Option<String>`; agent populates it from `MESH_AUTH_TOKEN`; coordinator rejects heartbeats with a missing or wrong token when auth is configured (defence-in-depth on top of connection-level `AuthToken` first-frame check)
 - Signed wire messages (HMAC) — deferred, optional defence-in-depth
 
-### Phase 10 — Deferred / Follow-up
+### Phase 10 — Complete ✓
 
-- **Auth token auto-distribution** — `just set-auth-token <token>` exists and pushes `MESH_AUTH_TOKEN` to all compute nodes (systemd drop-in on Linux, NSSM AppEnvironmentExtra on Windows) and updates `~/.bashrc` on the controller. Still manual — the remaining step is for `just restart-coordinator` to auto-generate a token and call `set-auth-token` automatically, closing the gap where TLS transport is secured but the application-layer pre-shared secret requires a separate manual step.
+- **Auth token auto-distribution** ✓ — coordinator auto-generates `MESH_AUTH_TOKEN` on first run (no env var required); token is written to `coordinator.state`; `restart-coordinator` and `start-cluster` read the state file and push credentials to all compute nodes via `set-fingerprint` before starting agents; `deploy-node` also pushes credentials immediately when the coordinator is already running.
 
 ---
 

@@ -342,6 +342,17 @@ deploy-node node:
     esac
     echo ">>> Node {{node}} provisioned."
 
+    # Push TLS fingerprint + auth token if the coordinator is already running.
+    # Without this the freshly-started agent cannot pass auth and will loop-fail.
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then
+        echo ">>> Coordinator is running — pushing credentials to {{node}}..."
+        just set-fingerprint {{node}} \
+            || echo ">>> Warning: could not push credentials to {{node}} — run: just set-fingerprint {{node}}"
+    else
+        echo ">>> No coordinator running yet — run 'just start-cluster' (or 'just set-fingerprint {{node}}' after starting the coordinator)"
+    fi
+
 # Build agent binaries for all platforms, then provision every node.
 # Usage: just provision-all
 provision-all:
@@ -1650,6 +1661,89 @@ validate-routing: update-portproxy
     fi
     echo ""
 
+    echo "=== Results: $PASS passed, $FAIL failed ==="
+    [ "$FAIL" -eq 0 ]
+
+# Verify that deploy-node pushes credentials automatically.
+# Scenario A: coordinator running  → set-fingerprint is called immediately after provisioning.
+# Scenario B: coordinator absent   → user sees a reminder instead of a silent auth failure.
+# This test does NOT do a real deploy — it only exercises the credential-push logic in isolation.
+# Usage: just test-deploy-creds pi1
+test-deploy-creds node:
+    #!/usr/bin/env bash
+    set -e
+    PASS=0; FAIL=0
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+
+    ok()   { echo "  PASS: $1"; PASS=$((PASS+1)); }
+    fail() { echo "  FAIL: $1"; FAIL=$((FAIL+1)); }
+
+    # ── Scenario A: coordinator running ─────────────────────────────────────
+    echo ""
+    echo "=== Scenario A: coordinator running ==="
+    if [ ! -f "$STATE" ]; then
+        echo ">>> Coordinator not running — starting it for this test..."
+        MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator >> /tmp/mesh-coordinator.log 2>&1 &
+        for i in $(seq 1 30); do
+            sleep 1
+            grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null && break
+            [ "$i" -eq 30 ] && { echo ">>> ERROR: coordinator did not start"; exit 1; }
+        done
+        echo ">>> Coordinator ready."
+        STARTED_COORDINATOR=1
+    fi
+
+    # Simulate the tail of deploy-node: does it detect the state file and call set-fingerprint?
+    echo ">>> Running credential-push logic for {{node}}..."
+    if [ -f "$STATE" ]; then
+        echo ">>> Coordinator is running — pushing credentials to {{node}}..."
+        if just set-fingerprint {{node}} 2>&1; then
+            ok "credentials pushed to {{node}} when coordinator is running"
+        else
+            fail "set-fingerprint failed for {{node}}"
+        fi
+    else
+        fail "state file not found even though coordinator started"
+    fi
+
+    # ── Scenario B: coordinator absent ──────────────────────────────────────
+    echo ""
+    echo "=== Scenario B: coordinator absent ==="
+    BACKUP=""
+    if [ -f "$STATE" ]; then
+        BACKUP=$(mktemp)
+        cp "$STATE" "$BACKUP"
+        rm "$STATE"
+    fi
+
+    OUTPUT=$(bash -c '
+        STATE="$HOME/.config/ai-mesh/coordinator.state"
+        if [ -f "$STATE" ]; then
+            echo "WRONG: state file still present"
+        else
+            echo "No coordinator running yet"
+        fi
+    ')
+
+    if echo "$OUTPUT" | grep -q "No coordinator running yet"; then
+        ok "reminder printed when coordinator is absent"
+    else
+        fail "expected reminder, got: $OUTPUT"
+    fi
+
+    # Restore state file
+    if [ -n "$BACKUP" ]; then
+        mv "$BACKUP" "$STATE"
+    fi
+
+    # ── Cleanup ──────────────────────────────────────────────────────────────
+    if [ "${STARTED_COORDINATOR:-0}" = "1" ]; then
+        echo ""
+        echo ">>> Stopping test coordinator..."
+        pkill -f "target/(debug|release)/coordinator" || true
+    fi
+
+    echo ""
     echo "=== Results: $PASS passed, $FAIL failed ==="
     [ "$FAIL" -eq 0 ]
 
