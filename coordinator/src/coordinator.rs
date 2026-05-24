@@ -5,6 +5,13 @@ use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+/// Generate a cryptographically random 64-character lowercase hex auth token (32 bytes).
+pub(crate) fn generate_auth_token() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::getrandom(&mut buf).expect("failed to generate auth token");
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 pub struct CoordinatorConfig {
     pub listen_addr: String,
 }
@@ -66,23 +73,31 @@ impl Coordinator {
                     tokens.push(t);
                 }
             }
-            if let Ok(t) = std::env::var("MESH_AUTH_TOKEN_NEXT") {
-                let t = t.trim().to_string();
-                if !t.is_empty() {
-                    tokens.push(t);
-                }
+            let next_token: Option<String> =
+                std::env::var("MESH_AUTH_TOKEN_NEXT").ok().and_then(|t| {
+                    let t = t.trim().to_string();
+                    if t.is_empty() { None } else { Some(t) }
+                });
+            if let Some(ref t) = next_token {
+                tokens.push(t.clone());
             }
+
+            // Auto-generate a token when none is configured so the cluster is
+            // always authenticated. The generated token is written to
+            // coordinator.state and distributed to nodes by restart-coordinator.
             if tokens.is_empty() {
-                warn!(
-                    "MESH_AUTH_TOKEN not set — connections will not be authenticated. Set MESH_INSECURE=1 to suppress this warning."
+                let token = generate_auth_token();
+                info!(
+                    "auth token auto-generated — run 'just restart-coordinator' to distribute to nodes"
                 );
+                tokens.push(token);
             } else {
                 info!(
                     "auth token validation enabled ({} token(s) accepted)",
                     tokens.len()
                 );
             }
-            crate::state::write(&fingerprint, &tokens);
+            crate::state::write(&fingerprint, &tokens, next_token.as_deref());
             server.auth_tokens = Arc::new(tokens);
             return tokio::spawn(async move {
                 let _ = server.run().await;
@@ -121,6 +136,23 @@ mod tests {
     use shared::{HeartbeatPayload, MeshMessage, NodeIdentity, NodeRole};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    #[test]
+    fn generated_token_is_64_hex_chars() {
+        let token = generate_auth_token();
+        assert_eq!(token.len(), 64, "token should be 64 hex chars (32 bytes)");
+        assert!(
+            token.chars().all(|c| c.is_ascii_hexdigit()),
+            "token should be lowercase hex"
+        );
+    }
+
+    #[test]
+    fn generated_tokens_are_unique() {
+        let a = generate_auth_token();
+        let b = generate_auth_token();
+        assert_ne!(a, b, "consecutive tokens should differ");
+    }
 
     async fn send_message(addr: &str, msg: &MeshMessage) -> MeshMessage {
         let mut stream = TcpStream::connect(addr).await.unwrap();

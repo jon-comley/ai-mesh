@@ -111,7 +111,7 @@ This makes "first connect" clearly distinguishable from "key changed".
 - If the list is non-empty and the message token is absent or not in the list: send an error response and close the connection
 - If the accepted list is empty and `MESH_INSECURE=1` is set: skip validation (dev mode); otherwise treat as misconfiguration and refuse connection
 
-**Token list for rotation:** the coordinator accepts a `MESH_AUTH_TOKEN` (current) and optionally `MESH_AUTH_TOKEN_NEXT` (next). This allows a rolling rotation — add the new token to the coordinator first, then update nodes one by one, then remove the old token — without a full cluster stop. Blast radius note: a compromised shared token grants access to the whole mesh; rotation procedure is: generate new token, deploy to coordinator, update each node via `just update-node`, remove old token.
+**Token list for rotation:** the coordinator accepts a `MESH_AUTH_TOKEN` (current) and optionally `MESH_AUTH_TOKEN_NEXT` (next). This allows a rolling rotation without a full cluster stop. Use `just rotate-token` for automated zero-downtime rotation — it opens the dual-token window, distributes the new token to all compute nodes, waits for reconnection, then revokes the old token. Blast radius note: a compromised shared token grants access to the whole mesh; rotate immediately with `just rotate-token`.
 
 **Modified file:** `agent/src/agent.rs`
 - Read `MESH_AUTH_TOKEN` from env; include in every `Heartbeat`
@@ -195,6 +195,6 @@ The HMAC key is the same `MESH_AUTH_TOKEN` value used for Heartbeat validation.
 
 - **CLI cert trust — SSH known_hosts TOFU.** On first connect to an unknown coordinator, the CLI prints the fingerprint and prompts `Trust this coordinator? [y/N]`. If accepted, the fingerprint is written to `~/.config/ai-mesh/known-coordinators`. Subsequent connections verify silently. `--insecure-skip-tls-verify` and `MESH_FINGERPRINT` env var override for CI/scripts. This is the SSH mental model — familiar and explicit.
 
-- **Token rotation — dual token, graduated rollout.** Coordinator accepts `MESH_AUTH_TOKEN` (current) + `MESH_AUTH_TOKEN_NEXT` (optional next). Rotation procedure: (1) set `MESH_AUTH_TOKEN_NEXT` on coordinator and restart; (2) update nodes one by one via `just update-node`, each connecting with the new token; (3) once all nodes migrated, promote next → current and remove next. No flag day required.
+- **Token rotation — dual token, automated.** Coordinator accepts `MESH_AUTH_TOKEN` (current) + `MESH_AUTH_TOKEN_NEXT` (optional next). `just rotate-token` automates the full procedure: open the dual-token window, distribute new token to all compute nodes and the local controller, wait for all nodes to reconnect, close the window (revoke old token), clear stale SQLite model state, then reload models. No flag day, no inference drop. A regression test (`clear_all_removes_stale_ready_state_after_coordinator_restart`) guards against the stale-Ready race where SQLite-persisted Ready state causes `wait-ready` to return a false positive before llama-server is actually running.
 
 - **mTLS as a future upgrade.** The TLS infrastructure from Steps 1/2 is fully compatible with adding client cert verification later. Per-node certs would enable individual revocation without rotating the shared secret. Deferred until the cluster grows to warrant the cert management overhead.

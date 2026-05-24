@@ -680,6 +680,107 @@ set-auth-token token:
     done
     echo ">>> Auth token push complete."
 
+# Zero-downtime auth token rotation using the dual-token window.
+# Coordinator accepts both old and new tokens while nodes are updated,
+# then restarts with the new token only once all nodes have reconnected.
+# Usage: just rotate-token
+rotate-token:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Inline helper: restart only the coordinator binary.
+    # Does not touch models, fingerprints, or the controller agent.
+    # Args: $1=MESH_AUTH_TOKEN  $2=MESH_AUTH_TOKEN_NEXT (optional)
+    restart_coordinator_binary() {
+        local primary="$1"
+        local next="${2:-}"
+        pkill -f "target/(debug|release)/coordinator" || true
+        sleep 0.3
+        rm -f /tmp/mesh-coordinator.log
+        if [ -n "$next" ]; then
+            MDNS_ADVERTISE_IP={{coordinator_ip}} \
+                MESH_AUTH_TOKEN="$primary" \
+                MESH_AUTH_TOKEN_NEXT="$next" \
+                cargo run -q -p coordinator >> /tmp/mesh-coordinator.log 2>&1 &
+        else
+            MDNS_ADVERTISE_IP={{coordinator_ip}} \
+                MESH_AUTH_TOKEN="$primary" \
+                cargo run -q -p coordinator >> /tmp/mesh-coordinator.log 2>&1 &
+        fi
+        for i in $(seq 1 60); do
+            sleep 1
+            grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null && { echo ">>> Coordinator ready."; return 0; }
+            [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
+        done
+    }
+
+    # Step 1: Load current primary token and fingerprint.
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    [ -f "$STATE" ] || { echo ">>> ERROR: $STATE not found — is the coordinator running?"; exit 1; }
+    source "$STATE"
+    export MESH_TLS_FINGERPRINT
+    OLD_TOKEN="${MESH_AUTH_TOKEN:-}"
+    [ -n "$OLD_TOKEN" ] || { echo ">>> ERROR: MESH_AUTH_TOKEN not set in coordinator state — run 'just restart-coordinator' first"; exit 1; }
+
+    # Step 2: Generate new token.
+    NEW_TOKEN=$(openssl rand -hex 32)
+    echo ">>> New token generated."
+
+    # Step 3: Restart coordinator accepting both old and new tokens.
+    echo ">>> Phase 1/3 — opening rotation window (both tokens accepted)..."
+    restart_coordinator_binary "$OLD_TOKEN" "$NEW_TOKEN"
+
+    # Step 4: Push new token to all compute nodes.
+    # set-auth-token handles Linux (systemd drop-in) and Windows (NSSM AppEnvironmentExtra).
+    echo ">>> Phase 2/3 — distributing new token to all nodes..."
+    just set-auth-token "$NEW_TOKEN"
+
+    # Step 5: Wait for all nodes to reconnect with the new token before revoking the old.
+    # Export the new token so the CLI can authenticate — coordinator accepts both at this point.
+    # Exits non-zero on timeout — old token remains active, safe to re-run.
+    export MESH_AUTH_TOKEN="$NEW_TOKEN"
+    WAIT_IPS=()
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        [ "${NODE_ROLE}" = "compute" ] || continue
+        WAIT_IPS+=("${NODE_HOST}")
+    done
+    echo ">>> Waiting for all nodes to reconnect..."
+    cargo run -q -p cli -- wait-ready "${WAIT_IPS[@]}" --timeout 120 \
+        || { echo ">>> ERROR: nodes did not reconnect in time — old token still active, rotation aborted"; exit 1; }
+
+    # Step 6: Restart coordinator with new token only — rotation window closed.
+    echo ">>> Phase 3/3 — revoking old token..."
+    restart_coordinator_binary "$NEW_TOKEN"
+
+    # Clear stale SQLite model state so wait-ready doesn't see a false Ready
+    # from the pre-rotation registry. Mirrors what restart-coordinator does.
+    cargo run -q -p cli -- reset-registry > /dev/null || true
+
+    # Restart the local controller with the new token (set-auth-token only pushes
+    # to remote compute nodes; the local agent process keeps the old token otherwise).
+    pkill -f "target/(debug|release)/agent" || true
+    sleep 0.3
+    AGENT_ROLE=controller cargo run -q -p agent >> /tmp/mesh-agent.log 2>&1 &
+
+    # Reload models on all compute nodes — agent service restarts during rotation
+    # kill llama-server, so the models must be reloaded explicitly.
+    echo ">>> Reloading models on compute nodes..."
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        [ "${NODE_ROLE}" = "compute" ] || continue
+        just auto-load-model ${NODE_NAME} \
+            || echo ">>> Warning: could not reload model on ${NODE_NAME} (skipping)"
+    done
+
+    cargo run -q -p cli -- wait-ready "${WAIT_IPS[@]}" --timeout 120 \
+        || { echo ">>> WARNING: nodes slow after model reload — run: just restart-coordinator"; }
+
+    echo ">>> Token rotation complete."
+    echo ">>> New token is live in ~/.config/ai-mesh/coordinator.state and ~/.bashrc"
+
 # Remove the ai-mesh-agent service from a node.
 # Usage: just uninstall-node pi1
 uninstall-node node:
@@ -1049,6 +1150,23 @@ start-cluster: update-portproxy
         export MESH_TLS_FINGERPRINT="${FP}"
         echo ">>> MESH_TLS_FINGERPRINT set: ${FP}"
     fi
+
+    # Sync auth token (may have been auto-generated by the coordinator) to ~/.bashrc.
+    TOKEN="${MESH_AUTH_TOKEN:-}"
+    if [ -n "$TOKEN" ]; then
+        if grep -q "MESH_AUTH_TOKEN" "$HOME/.bashrc" 2>/dev/null; then
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+                sed -i '' "s|export MESH_AUTH_TOKEN=.*|export MESH_AUTH_TOKEN=${TOKEN}|" "$HOME/.bashrc"
+            else
+                sed -i "s|export MESH_AUTH_TOKEN=.*|export MESH_AUTH_TOKEN=${TOKEN}|" "$HOME/.bashrc"
+            fi
+        else
+            printf '\n# ai-mesh auth token — managed by just start-cluster\nexport MESH_AUTH_TOKEN=%s\n' "${TOKEN}" >> "$HOME/.bashrc"
+        fi
+        export MESH_AUTH_TOKEN="${TOKEN}"
+        echo ">>> MESH_AUTH_TOKEN set from coordinator state"
+    fi
+
     echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
     for f in nodes/*.env; do
         source "$f"
@@ -1137,6 +1255,22 @@ restart-coordinator: update-portproxy
         fi
         export MESH_TLS_FINGERPRINT="${FP}"
         echo ">>> MESH_TLS_FINGERPRINT set: ${FP}"
+    fi
+
+    # Sync auth token (may have been auto-generated by the coordinator) to ~/.bashrc.
+    TOKEN="${MESH_AUTH_TOKEN:-}"
+    if [ -n "$TOKEN" ]; then
+        if grep -q "MESH_AUTH_TOKEN" "$HOME/.bashrc" 2>/dev/null; then
+            if [[ "$(uname -s)" == "Darwin" ]]; then
+                sed -i '' "s|export MESH_AUTH_TOKEN=.*|export MESH_AUTH_TOKEN=${TOKEN}|" "$HOME/.bashrc"
+            else
+                sed -i "s|export MESH_AUTH_TOKEN=.*|export MESH_AUTH_TOKEN=${TOKEN}|" "$HOME/.bashrc"
+            fi
+        else
+            printf '\n# ai-mesh auth token — managed by just restart-coordinator\nexport MESH_AUTH_TOKEN=%s\n' "${TOKEN}" >> "$HOME/.bashrc"
+        fi
+        export MESH_AUTH_TOKEN="${TOKEN}"
+        echo ">>> MESH_AUTH_TOKEN set from coordinator state"
     fi
 
     echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
@@ -1425,6 +1559,12 @@ pair-bulb:
 # Usage: just intent "turn test_bulb on"
 #        just intent "what is the capital of France"
 intent text:
+    #!/usr/bin/env bash
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then
+        source "$STATE"
+        export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
+    fi
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
         intent "{{text}}"
 
@@ -1436,6 +1576,14 @@ intent text:
 validate-routing: update-portproxy
     #!/usr/bin/env bash
     set -e
+
+    # Load credentials from coordinator state so this works immediately after
+    # restart-coordinator without needing to source ~/.bashrc first.
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then
+        source "$STATE"
+        export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
+    fi
 
     COORD="{{coordinator_ip}}:{{coordinator_port}}"
     PASS=0
