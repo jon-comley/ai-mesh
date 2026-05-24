@@ -801,8 +801,16 @@ mod tests {
     }
 
     #[test]
+    fn set_heartbeat_interval_wire_format() {
+        // Pin the exact JSON shape so the agent parser never silently drifts.
+        let msg = MeshMessage::SetHeartbeatInterval { secs: 30 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"SetHeartbeatInterval":{"secs":30}}"#);
+    }
+
+    #[test]
     fn set_heartbeat_interval_boundary_values() {
-        for secs in [1u64, 300] {
+        for secs in [0u64, 1, 300, u64::MAX] {
             let msg = MeshMessage::SetHeartbeatInterval { secs };
             let json = serde_json::to_string(&msg).unwrap();
             assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
