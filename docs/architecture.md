@@ -210,17 +210,52 @@ All three are active whenever `MESH_AUTH_TOKEN` is configured (the normal produc
 
 ## 10. Agent → Coordinator Message Flow (Current)
 
-The system currently supports the following outbound flow from agent to coordinator:
-
 ```
 Agent Startup
-├── Heartbeat(NodeIdentity)
+├── AuthToken(token)          — first frame, connection-level auth
+├── Heartbeat(HeartbeatPayload)
+│   ├── NodeIdentity (flattened)
+│   ├── auth_token            — per-heartbeat defence-in-depth
+│   ├── cpu_usage_pct?        — Phase C+: all-core CPU %
+│   ├── ram_used_gb?          — Phase C+: RAM in use
+│   └── ram_total_gb?         — Phase C+: total RAM
 ├── HardwareReport(HardwareSpec)
 ├── Capabilities(NodeCapabilities)
-└── Heartbeat Loop (every N seconds)
+└── Heartbeat Loop (every N seconds, interval adjustable via SetHeartbeatInterval)
+
+Coordinator → Agent
+├── ModelLoad / ModelUnload / RequestModelInference
+└── SetHeartbeatInterval { secs }   — Phase C+: dynamically change heartbeat period
 ```
 
-Coordinator behaviour will be implemented in Phase 4.
+All frames after `AuthToken` are wrapped in `SignedFrame { ts, payload, sig }` when `MESH_AUTH_TOKEN` is set (HMAC-SHA256, HKDF key derivation).
+
+---
+
+## 16. Health Timeline Architecture (Phase 11C)
+
+Health metrics flow from agent → coordinator → dashboard:
+
+```
+Agent (sysinfo crate)
+└── HeartbeatPayload { cpu_usage_pct, ram_used_gb, ram_total_gb }
+
+Coordinator (HealthStore in DashboardState)
+├── On each Heartbeat: stamp coordinator timestamp, append HealthSample
+├── Ring buffer per node: VecDeque<HealthSample> capped at 60 samples
+└── Push DashboardEvent::HealthUpdate { node_id, name, samples } over WS broadcast
+
+Dashboard (health.js)
+├── SVG sparkline: CPU % and RAM % (last 60 samples)
+└── Interval control button → POST /api/nodes/{id}/heartbeat-interval
+                            → coordinator pushes SetHeartbeatInterval to agent
+```
+
+**Design decisions:**
+- Timestamps are stamped by the coordinator (not the agent) to avoid clock-skew issues across nodes.
+- `HealthSample` is a coordinator-only struct — not part of the shared wire protocol.
+- RAM% is derived by the coordinator: `ram_used_gb / ram_total_gb * 100.0`.
+- `SetHeartbeatInterval` is pushed over the agent's existing open TCP connection — no extra endpoint needed on the agent.
 
 ---
 

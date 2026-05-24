@@ -221,6 +221,9 @@ mod tests {
                 role: NodeRole::Compute,
             },
             auth_token: String::new(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
         });
         assert!(!make_cap().handles(&msg));
     }

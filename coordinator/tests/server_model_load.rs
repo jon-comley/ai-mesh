@@ -89,6 +89,9 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
                 role: NodeRole::Compute,
             },
             auth_token: String::new(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
         }),
     )
     .await;

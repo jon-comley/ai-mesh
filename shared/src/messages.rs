@@ -241,6 +241,8 @@ pub enum MeshMessage {
     IntentResponse(IntentResponse),
     // Phase 10 — auth: sent as the first message on every new connection
     AuthToken(String),
+    // Phase 11C — coordinator pushes a new heartbeat interval to a specific node
+    SetHeartbeatInterval { secs: u64 },
 }
 
 /// Structured admin messages for coordinator control.
@@ -265,6 +267,9 @@ mod tests {
         let payload = HeartbeatPayload {
             identity: identity.clone(),
             auth_token: String::new(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
         };
 
         let msg = MeshMessage::Heartbeat(payload.clone());
@@ -284,6 +289,9 @@ mod tests {
                 role: NodeRole::Compute,
             },
             auth_token: "secret-token".into(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
         };
         let msg = MeshMessage::Heartbeat(payload.clone());
         let json = serde_json::to_string(&msg).unwrap();
@@ -301,6 +309,9 @@ mod tests {
                 role: NodeRole::Compute,
             },
             auth_token: String::new(),
+            cpu_usage_pct: None,
+            ram_used_gb: None,
+            ram_total_gb: None,
         };
         let json = serde_json::to_string(&MeshMessage::Heartbeat(payload)).unwrap();
         assert!(
@@ -777,5 +788,24 @@ mod tests {
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn set_heartbeat_interval_roundtrip() {
+        let msg = MeshMessage::SetHeartbeatInterval { secs: 10 };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: MeshMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+        assert!(json.contains("SetHeartbeatInterval"));
+        assert!(json.contains("10"));
+    }
+
+    #[test]
+    fn set_heartbeat_interval_boundary_values() {
+        for secs in [1u64, 300] {
+            let msg = MeshMessage::SetHeartbeatInterval { secs };
+            let json = serde_json::to_string(&msg).unwrap();
+            assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+        }
     }
 }
