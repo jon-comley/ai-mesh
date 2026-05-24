@@ -270,6 +270,9 @@ mod tests {
             cpu_usage_pct: 0.0,
             ram_used_gb: 0.0,
             ram_total_gb: 0.0,
+            gpu_usage_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         };
 
         let msg = MeshMessage::Heartbeat(payload.clone());
@@ -292,6 +295,9 @@ mod tests {
             cpu_usage_pct: 0.0,
             ram_used_gb: 0.0,
             ram_total_gb: 0.0,
+            gpu_usage_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         };
         let msg = MeshMessage::Heartbeat(payload.clone());
         let json = serde_json::to_string(&msg).unwrap();
@@ -312,6 +318,9 @@ mod tests {
             cpu_usage_pct: 0.0,
             ram_used_gb: 0.0,
             ram_total_gb: 0.0,
+            gpu_usage_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         };
         let json = serde_json::to_string(&MeshMessage::Heartbeat(payload)).unwrap();
         assert!(

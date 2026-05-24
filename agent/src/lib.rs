@@ -3,6 +3,7 @@ pub mod capabilities;
 pub mod config;
 pub mod discovery;
 pub mod dispatch;
+pub mod gpu;
 pub mod hardware;
 pub mod identity;
 pub mod tls;

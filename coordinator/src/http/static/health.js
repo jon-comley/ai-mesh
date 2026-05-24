@@ -58,6 +58,17 @@ function healthCard(nodeId, samp) {
   const cpuData = samp.map(s => s.cpu_pct);
   const ramData = samp.map(s => s.ram_total_gb > 0
     ? (s.ram_used_gb / s.ram_total_gb) * 100 : 0);
+  const hasGpu  = samp.some(s => s.gpu_pct != null);
+  const gpuData  = hasGpu ? samp.map(s => s.gpu_pct ?? 0) : [];
+  const vramData = hasGpu ? samp.map(s =>
+    (s.gpu_vram_total_gb ?? 0) > 0
+      ? ((s.gpu_vram_used_gb ?? 0) / s.gpu_vram_total_gb) * 100 : 0
+  ) : [];
+  const lastGpu = hasGpu ? samp.findLast(s => s.gpu_pct != null) : null;
+  const gpuPct  = lastGpu ? lastGpu.gpu_pct.toFixed(1) : '—';
+  const vramStr = lastGpu && lastGpu.gpu_vram_total_gb > 0
+    ? `${(lastGpu.gpu_vram_used_gb ?? 0).toFixed(1)} / ${lastGpu.gpu_vram_total_gb.toFixed(1)} GB`
+    : '—';
 
   return `<div class="health-card">
   <div class="health-card-header">
@@ -78,6 +89,18 @@ function healthCard(nodeId, samp) {
     </div>
     ${sparklineSvg(ramData, 52, 'var(--green)')}
   </div>
+  ${hasGpu ? `<div class="health-metric">
+    <div class="metric-row">
+      <span class="metric-label">GPU</span>
+      <span class="metric-value">${gpuPct}%</span>
+    </div>
+    ${sparklineSvg(gpuData, 52, 'var(--amber)')}
+    <div class="metric-row" style="margin-top:4px">
+      <span class="metric-label">VRAM</span>
+      <span class="metric-value">${vramStr}</span>
+    </div>
+    ${sparklineSvg(vramData, 28, 'var(--amber)')}
+  </div>` : ''}
 </div>`;
 }
 

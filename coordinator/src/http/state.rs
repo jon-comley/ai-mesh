@@ -34,6 +34,15 @@ pub struct HealthSample {
     pub cpu_pct: f32,
     pub ram_used_gb: f32,
     pub ram_total_gb: f32,
+    /// GPU utilisation 0.0–100.0; None on CPU-only nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_pct: Option<f32>,
+    /// GPU VRAM in use, gibibytes; None on CPU-only nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_vram_used_gb: Option<f32>,
+    /// Total GPU VRAM, gibibytes; None on CPU-only nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_vram_total_gb: Option<f32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -113,7 +122,17 @@ impl DashboardState {
 
     /// Record a health sample for `node_id`, capped at HEALTH_WINDOW entries,
     /// then broadcast a HealthUpdate with the full window to connected clients.
-    pub fn push_health(&self, node_id: &str, cpu_pct: f32, ram_used_gb: f32, ram_total_gb: f32) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_health(
+        &self,
+        node_id: &str,
+        cpu_pct: f32,
+        ram_used_gb: f32,
+        ram_total_gb: f32,
+        gpu_pct: Option<f32>,
+        gpu_vram_used_gb: Option<f32>,
+        gpu_vram_total_gb: Option<f32>,
+    ) {
         let ts_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -123,6 +142,9 @@ impl DashboardState {
             cpu_pct,
             ram_used_gb,
             ram_total_gb,
+            gpu_pct,
+            gpu_vram_used_gb,
+            gpu_vram_total_gb,
         };
         let samples = {
             let mut store = self.health_store.lock().unwrap();
@@ -274,7 +296,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
         let mut rx = state.tx.subscribe();
-        state.push_health("n1", 42.5, 6.1, 15.9);
+        state.push_health("n1", 42.5, 6.1, 15.9, None, None, None);
         let evt = rx.try_recv().unwrap();
         match evt {
             DashboardEvent::HealthUpdate { node_id, samples } => {
@@ -296,9 +318,9 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
         let mut rx = state.tx.subscribe();
-        state.push_health("n1", 10.0, 1.0, 16.0);
-        state.push_health("n1", 20.0, 2.0, 16.0);
-        state.push_health("n1", 30.0, 3.0, 16.0);
+        state.push_health("n1", 10.0, 1.0, 16.0, None, None, None);
+        state.push_health("n1", 20.0, 2.0, 16.0, None, None, None);
+        state.push_health("n1", 30.0, 3.0, 16.0, None, None, None);
         // Drain; last event has all 3 samples.
         let mut last = None;
         while let Ok(e) = rx.try_recv() {
@@ -318,7 +340,7 @@ mod tests {
         );
         let mut rx = state.tx.subscribe();
         for i in 0..=60u32 {
-            state.push_health("n1", i as f32, 0.0, 16.0);
+            state.push_health("n1", i as f32, 0.0, 16.0, None, None, None);
         }
         let mut last = None;
         while let Ok(e) = rx.try_recv() {
@@ -342,9 +364,9 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
         let mut rx = state.tx.subscribe();
-        state.push_health("n1", 10.0, 1.0, 8.0);
-        state.push_health("n2", 50.0, 4.0, 8.0);
-        state.push_health("n1", 15.0, 1.5, 8.0);
+        state.push_health("n1", 10.0, 1.0, 8.0, None, None, None);
+        state.push_health("n2", 50.0, 4.0, 8.0, None, None, None);
+        state.push_health("n1", 15.0, 1.5, 8.0, None, None, None);
         let mut events: Vec<DashboardEvent> = vec![];
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -370,7 +392,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
         // No panic — store still updates, broadcast skipped
-        state.push_health("n1", 0.0, 0.0, 0.0);
+        state.push_health("n1", 0.0, 0.0, 0.0, None, None, None);
     }
 
     #[test]
@@ -380,6 +402,9 @@ mod tests {
             cpu_pct: 33.3,
             ram_used_gb: 4.0,
             ram_total_gb: 16.0,
+            gpu_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"ts_ms\""));
@@ -398,6 +423,9 @@ mod tests {
                 cpu_pct: 10.0,
                 ram_used_gb: 2.0,
                 ram_total_gb: 8.0,
+                gpu_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();
@@ -422,9 +450,9 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        state.push_health("n1", 10.0, 1.0, 8.0);
-        state.push_health("n2", 20.0, 2.0, 8.0);
-        state.push_health("n1", 15.0, 1.5, 8.0);
+        state.push_health("n1", 10.0, 1.0, 8.0, None, None, None);
+        state.push_health("n2", 20.0, 2.0, 8.0, None, None, None);
+        state.push_health("n1", 15.0, 1.5, 8.0, None, None, None);
         let mut snaps = state.get_all_health_snapshots();
         snaps.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(snaps.len(), 2);
@@ -449,10 +477,10 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        state.push_health("n1", 10.0, 1.0, 8.0);
+        state.push_health("n1", 10.0, 1.0, 8.0, None, None, None);
         let snap = state.get_all_health_snapshots();
         // Push more data after snapshot — snapshot must not change.
-        state.push_health("n1", 99.0, 7.0, 8.0);
+        state.push_health("n1", 99.0, 7.0, 8.0, None, None, None);
         assert_eq!(
             snap[0].1.len(),
             1,
@@ -467,7 +495,7 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        state.push_health("n1", 33.3, 4.5, 16.0);
+        state.push_health("n1", 33.3, 4.5, 16.0, None, None, None);
         let snaps = state.get_all_health_snapshots();
         let s = &snaps[0].1[0];
         assert_eq!(s.cpu_pct, 33.3);
@@ -482,7 +510,7 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        state.push_health("solo", 50.0, 2.0, 8.0);
+        state.push_health("solo", 50.0, 2.0, 8.0, None, None, None);
         let snaps = state.get_all_health_snapshots();
         assert_eq!(snaps.len(), 1);
         assert_eq!(snaps[0].0, "solo");
@@ -495,9 +523,9 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        state.push_health("n1", 10.0, 1.0, 8.0);
-        state.push_health("n1", 20.0, 2.0, 8.0);
-        state.push_health("n1", 30.0, 3.0, 8.0);
+        state.push_health("n1", 10.0, 1.0, 8.0, None, None, None);
+        state.push_health("n1", 20.0, 2.0, 8.0, None, None, None);
+        state.push_health("n1", 30.0, 3.0, 8.0, None, None, None);
         let snaps = state.get_all_health_snapshots();
         let samp = &snaps[0].1;
         assert_eq!(samp[0].cpu_pct, 10.0, "oldest first");
@@ -512,8 +540,8 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
         let mut rx = state.tx.subscribe();
-        state.push_health("n1", 10.0, 1.0, 8.0);
-        state.push_health("n1", 20.0, 2.0, 8.0);
+        state.push_health("n1", 10.0, 1.0, 8.0, None, None, None);
+        state.push_health("n1", 20.0, 2.0, 8.0, None, None, None);
         let mut last = None;
         while let Ok(e) = rx.try_recv() {
             last = Some(e);
