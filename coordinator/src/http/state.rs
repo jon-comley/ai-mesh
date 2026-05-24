@@ -1,10 +1,15 @@
 use serde::Serialize;
+use shared::MeshMessage;
 use shared::hardware::NodeRole;
 use shared::messages::NodeRecordLite;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
+use tracing::warn;
+
+/// Live TCP sender channels keyed by node ID — shared between the TCP server and the HTTP API.
+pub type NodeConnections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
 
 const HEALTH_WINDOW: usize = 60;
 
@@ -48,16 +53,36 @@ pub struct DashboardState {
     /// Valid auth tokens — mirrors the mesh server's token list. Empty = no auth (dev mode).
     pub auth_tokens: Arc<Vec<String>>,
     health_store: Mutex<HashMap<String, VecDeque<HealthSample>>>,
+    /// Live TCP sender channels — used by the HTTP API to push commands to agents.
+    pub connections: NodeConnections,
 }
 
 impl DashboardState {
-    pub fn new(auth_tokens: Arc<Vec<String>>) -> Arc<Self> {
+    pub fn new(auth_tokens: Arc<Vec<String>>, connections: NodeConnections) -> Arc<Self> {
         let (tx, _) = broadcast::channel(128);
         Arc::new(Self {
             tx,
             auth_tokens,
             health_store: Mutex::new(HashMap::new()),
+            connections,
         })
+    }
+
+    /// Send `msg` to the named node's open TCP channel.
+    /// Returns `true` if the message was queued, `false` if the node is not connected.
+    pub fn send_to_node(&self, node_id: &str, msg: MeshMessage) -> bool {
+        let guard = self.connections.lock().unwrap();
+        match guard.get(node_id) {
+            Some(tx) => match tx.try_send(msg) {
+                Ok(()) => true,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    warn!(node_id, "send_to_node: channel full, message dropped");
+                    false
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+            },
+            None => false,
+        }
     }
 
     /// Returns true when the supplied token is acceptable.
@@ -154,7 +179,10 @@ mod tests {
 
     #[test]
     fn auth_ok_dev_mode_accepts_any_token() {
-        let state = DashboardState::new(Arc::new(vec![]));
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         assert!(state.auth_ok(""));
         assert!(state.auth_ok("any-token"));
         assert!(state.auth_ok("completely-random"));
@@ -162,20 +190,29 @@ mod tests {
 
     #[test]
     fn auth_ok_accepts_matching_token() {
-        let state = DashboardState::new(Arc::new(vec!["secret".into()]));
+        let state = DashboardState::new(
+            Arc::new(vec!["secret".into()]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         assert!(state.auth_ok("secret"));
     }
 
     #[test]
     fn auth_ok_rejects_wrong_and_empty_token() {
-        let state = DashboardState::new(Arc::new(vec!["secret".into()]));
+        let state = DashboardState::new(
+            Arc::new(vec!["secret".into()]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         assert!(!state.auth_ok("wrong"));
         assert!(!state.auth_ok(""));
     }
 
     #[test]
     fn auth_ok_accepts_any_configured_token() {
-        let state = DashboardState::new(Arc::new(vec!["alpha".into(), "beta".into()]));
+        let state = DashboardState::new(
+            Arc::new(vec!["alpha".into(), "beta".into()]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         assert!(state.auth_ok("alpha"));
         assert!(state.auth_ok("beta"));
         assert!(!state.auth_ok("gamma"));
@@ -210,7 +247,10 @@ mod tests {
 
     #[test]
     fn push_topology_with_no_receivers_is_noop() {
-        let state = DashboardState::new(Arc::new(vec![]));
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         // No panic, no side-effects — just verifies the early-return path.
         state.push_topology(&[]);
         state.push_topology(&[lite(1_000)]);
@@ -220,7 +260,10 @@ mod tests {
 
     #[test]
     fn push_health_broadcasts_health_update() {
-        let state = DashboardState::new(Arc::new(vec![]));
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         let mut rx = state.tx.subscribe();
         state.push_health("n1", 42.5, 6.1, 15.9);
         let evt = rx.try_recv().unwrap();
@@ -239,7 +282,10 @@ mod tests {
 
     #[test]
     fn push_health_accumulates_samples() {
-        let state = DashboardState::new(Arc::new(vec![]));
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         let mut rx = state.tx.subscribe();
         state.push_health("n1", 10.0, 1.0, 16.0);
         state.push_health("n1", 20.0, 2.0, 16.0);
@@ -257,7 +303,10 @@ mod tests {
 
     #[test]
     fn push_health_caps_window_at_60() {
-        let state = DashboardState::new(Arc::new(vec![]));
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         let mut rx = state.tx.subscribe();
         for i in 0..=60u32 {
             state.push_health("n1", i as f32, 0.0, 16.0);
@@ -279,7 +328,10 @@ mod tests {
 
     #[test]
     fn push_health_independent_per_node() {
-        let state = DashboardState::new(Arc::new(vec![]));
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         let mut rx = state.tx.subscribe();
         state.push_health("n1", 10.0, 1.0, 8.0);
         state.push_health("n2", 50.0, 4.0, 8.0);
@@ -304,7 +356,10 @@ mod tests {
 
     #[test]
     fn push_health_with_no_receivers_is_noop() {
-        let state = DashboardState::new(Arc::new(vec![]));
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         // No panic — store still updates, broadcast skipped
         state.push_health("n1", 0.0, 0.0, 0.0);
     }
@@ -354,7 +409,10 @@ mod tests {
 
     #[test]
     fn push_health_ts_ms_monotonically_nondecreasing() {
-        let state = DashboardState::new(Arc::new(vec![]));
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         let mut rx = state.tx.subscribe();
         state.push_health("n1", 10.0, 1.0, 8.0);
         state.push_health("n1", 20.0, 2.0, 8.0);

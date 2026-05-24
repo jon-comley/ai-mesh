@@ -14,7 +14,7 @@ use tokio::time::{Duration, timeout};
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
-pub type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
+pub use crate::http::state::NodeConnections as Connections;
 /// Maps request_id → (reply_channel, node_id_that_was_selected)
 pub type PendingInferences = Arc<Mutex<HashMap<String, (oneshot::Sender<MeshMessage>, String)>>>;
 
@@ -30,7 +30,7 @@ pub enum ServerError {
 pub struct Server {
     pub addr: String,
     pub registry: Arc<Mutex<Registry>>,
-    connections: Connections,
+    pub connections: Connections,
     pending_inferences: PendingInferences,
     pending_intents: PendingIntents,
     /// Valid auth tokens. Empty = no authentication (dev/test mode).
@@ -713,7 +713,10 @@ mod tests {
         use crate::http::state::{DashboardEvent, DashboardState};
 
         let registry = Arc::new(Mutex::new(Registry::new()));
-        let dashboard = DashboardState::new(Arc::new(vec![]));
+        let dashboard = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         let mut rx = dashboard.tx.subscribe();
 
         let mut server = Server::new("127.0.0.1:9025", registry.clone());
@@ -768,7 +771,10 @@ mod tests {
         use crate::http::state::{DashboardEvent, DashboardState};
 
         let registry = Arc::new(Mutex::new(Registry::new()));
-        let dashboard = DashboardState::new(Arc::new(vec!["correct-token".into()]));
+        let dashboard = DashboardState::new(
+            Arc::new(vec!["correct-token".into()]),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
         let mut rx = dashboard.tx.subscribe();
 
         let mut server = Server::new("127.0.0.1:9026", registry.clone());
