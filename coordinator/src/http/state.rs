@@ -414,6 +414,69 @@ mod tests {
     }
 
     #[test]
+    fn health_sample_gpu_fields_omitted_when_none() {
+        let s = HealthSample {
+            ts_ms: 1_000,
+            cpu_pct: 10.0,
+            ram_used_gb: 1.0,
+            ram_total_gb: 8.0,
+            gpu_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            !json.contains("gpu_pct"),
+            "None gpu_pct should be absent: {json}"
+        );
+        assert!(
+            !json.contains("gpu_vram"),
+            "None gpu_vram fields should be absent: {json}"
+        );
+    }
+
+    #[test]
+    fn health_sample_gpu_fields_present_when_some() {
+        let s = HealthSample {
+            ts_ms: 1_000,
+            cpu_pct: 10.0,
+            ram_used_gb: 1.0,
+            ram_total_gb: 8.0,
+            gpu_pct: Some(42.0),
+            gpu_vram_used_gb: Some(3.7),
+            gpu_vram_total_gb: Some(4.0),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"gpu_pct\":42.0"), "gpu_pct missing: {json}");
+        assert!(
+            json.contains("\"gpu_vram_used_gb\""),
+            "gpu_vram_used_gb missing: {json}"
+        );
+        assert!(
+            json.contains("\"gpu_vram_total_gb\""),
+            "gpu_vram_total_gb missing: {json}"
+        );
+    }
+
+    #[test]
+    fn push_health_with_gpu_data_broadcasts_gpu_fields() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut rx = state.tx.subscribe();
+        state.push_health("n1", 55.0, 4.0, 16.0, Some(42.0), Some(3.7), Some(4.0));
+        match rx.try_recv().unwrap() {
+            DashboardEvent::HealthUpdate { samples, .. } => {
+                assert_eq!(samples[0].gpu_pct, Some(42.0));
+                assert_eq!(samples[0].gpu_vram_used_gb, Some(3.7));
+                assert_eq!(samples[0].gpu_vram_total_gb, Some(4.0));
+            }
+            _ => panic!("expected HealthUpdate"),
+        }
+    }
+
+    #[test]
     fn health_update_event_wire_format() {
         // Pins the exact JSON shape the dashboard JS expects.
         let evt = DashboardEvent::HealthUpdate {
