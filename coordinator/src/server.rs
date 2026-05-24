@@ -1,3 +1,4 @@
+use crate::http::state::DashboardState;
 use crate::intent::PendingIntents;
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
@@ -36,6 +37,8 @@ pub struct Server {
     pub auth_tokens: Arc<Vec<String>>,
     /// TLS acceptor. None = plain TCP (tests and MESH_INSECURE=1 mode).
     pub tls: Option<TlsAcceptor>,
+    /// Dashboard broadcast state. None = no dashboard (tests).
+    pub dashboard: Option<Arc<DashboardState>>,
 }
 
 impl Server {
@@ -48,6 +51,7 @@ impl Server {
             pending_intents: Arc::new(Mutex::new(HashMap::new())),
             auth_tokens: Arc::new(vec![]),
             tls: None,
+            dashboard: None,
         }
     }
 
@@ -61,6 +65,7 @@ impl Server {
             let pending_inferences = self.pending_inferences.clone();
             let pending_intents = self.pending_intents.clone();
             let auth_tokens = self.auth_tokens.clone();
+            let dashboard = self.dashboard.clone();
 
             if let Some(acceptor) = &self.tls {
                 let acceptor = acceptor.clone();
@@ -74,6 +79,7 @@ impl Server {
                                 pending_inferences,
                                 pending_intents,
                                 auth_tokens,
+                                dashboard,
                             )
                             .await;
                         }
@@ -89,6 +95,7 @@ impl Server {
                         pending_inferences,
                         pending_intents,
                         auth_tokens,
+                        dashboard,
                     )
                     .await;
                 });
@@ -104,6 +111,7 @@ pub async fn handle_connection<S>(
     pending_inferences: PendingInferences,
     pending_intents: PendingIntents,
     auth_tokens: Arc<Vec<String>>,
+    dashboard: Option<Arc<DashboardState>>,
 ) -> Result<(), ServerError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -226,6 +234,7 @@ where
             &tx,
             &mut node_id,
             &auth_tokens,
+            dashboard.as_deref(),
         )
         .await;
 
@@ -271,6 +280,7 @@ async fn process_message(
     tx: &mpsc::Sender<MeshMessage>,
     node_id: &mut Option<String>,
     auth_tokens: &Arc<Vec<String>>,
+    dashboard: Option<&DashboardState>,
 ) -> MeshMessage {
     match msg {
         MeshMessage::Heartbeat(HeartbeatPayload {
@@ -284,8 +294,15 @@ async fn process_message(
             }
             info!(node_id = %identity.id, hostname = %identity.hostname, "heartbeat");
             *node_id = Some(identity.id.clone());
-            registry.lock().unwrap().update_heartbeat(identity.clone());
+            let nodes = {
+                let mut reg = registry.lock().unwrap();
+                reg.update_heartbeat(identity.clone());
+                reg.list_nodes()
+            };
             connections.lock().unwrap().insert(identity.id, tx.clone());
+            if let Some(dash) = dashboard {
+                dash.push_topology(&nodes);
+            }
             MeshMessage::Acknowledge
         }
         MeshMessage::HardwareReport(hw) => {

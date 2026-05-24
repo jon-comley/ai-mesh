@@ -333,6 +333,49 @@ async fn scenario_valid_request(coordinator: &str, token: &str) -> bool {
     expect_acknowledge(&mut stream, &key).await
 }
 
+/// HTTP dashboard: a wrong token on /ws must return 401 Unauthorized.
+/// Connects via plain TCP (the dashboard has no TLS) and sends a proper
+/// WebSocket upgrade request with a bogus token. Auth is checked before the
+/// upgrade, so the response must be 401, not 400.
+async fn scenario_dashboard_auth(dashboard: &str) -> bool {
+    let Ok(mut stream) = TcpStream::connect(dashboard).await else {
+        println!("      (TCP connect to {dashboard} failed — is the dashboard running?)");
+        return false;
+    };
+    let req = format!(
+        "GET /ws?token=definitely-wrong-token HTTP/1.1\r\n\
+         Host: {dashboard}\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).await.is_err() {
+        println!("      (write failed)");
+        return false;
+    }
+    let mut buf = vec![0u8; 512];
+    match timeout(Duration::from_secs(3), stream.read(&mut buf)).await {
+        Err(_) => {
+            println!("      (no response within 3s)");
+            false
+        }
+        Ok(Err(_)) => {
+            println!("      (read error)");
+            false
+        }
+        Ok(Ok(n)) => {
+            let response = String::from_utf8_lossy(&buf[..n]);
+            let got_401 = response.contains("401");
+            if !got_401 {
+                let first_line = response.lines().next().unwrap_or("(empty)");
+                println!("      (unexpected response: {first_line})");
+            }
+            got_401
+        }
+    }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -345,9 +388,16 @@ async fn main() {
         std::env::var("MESH_COORDINATOR").unwrap_or_else(|_| "192.168.1.15:9000".to_string());
     let token = std::env::var("MESH_AUTH_TOKEN").unwrap_or_default();
     let token = token.trim().to_string();
+    let http_port = std::env::var("MESH_HTTP_PORT").unwrap_or_else(|_| "9001".to_string());
+    let dashboard_host = coordinator
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(&coordinator);
+    let dashboard = format!("{dashboard_host}:{http_port}");
 
     println!("=== ai-mesh HMAC chaos test ===");
     println!("Coordinator: {coordinator}");
+    println!("Dashboard:   {dashboard}");
     if token.is_empty() {
         eprintln!("\nERROR: MESH_AUTH_TOKEN is not set.");
         eprintln!("The chaos test requires a coordinator with HMAC auth enabled.");
@@ -387,6 +437,11 @@ async fn main() {
             "A legitimate request must succeed and return a signed Acknowledge.",
             true,  // this one expects success
         ),
+        (
+            "Dashboard HTTP: wrong token on /ws must return 401",
+            "The dashboard WebSocket endpoint must reject unauthenticated connections with 401.",
+            false,
+        ),
     ];
 
     let mut passed = 0usize;
@@ -403,6 +458,7 @@ async fn main() {
             3 => scenario_bad_hmac(&coordinator, &token).await,
             4 => scenario_stale_timestamp(&coordinator, &token).await,
             5 => scenario_valid_request(&coordinator, &token).await,
+            6 => scenario_dashboard_auth(&dashboard).await,
             _ => unreachable!(),
         };
 

@@ -146,6 +146,45 @@ body {
 .badge-red    { background: color-mix(in srgb, var(--red)   20%, transparent); color: var(--red); }
 .badge-muted  { background: var(--surface-2); color: var(--text-muted); }
 
+/* ── Node cards ────────────────────────────────────────────────────────────── */
+.node-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+
+.node-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.node-health {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.node-health.green { background: var(--green); }
+.node-health.amber { background: var(--amber); }
+.node-health.red   { background: var(--red); }
+
+.node-name {
+  font-weight: 600;
+  font-size: 15px;
+  flex: 1;
+}
+
+.node-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ── Desktop layout (≥ 900px) ──────────────────────────────────────────────── */
 @media (min-width: 900px) {
   body { overflow: auto; }

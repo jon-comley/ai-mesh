@@ -1,3 +1,4 @@
+use crate::http::state::DashboardState;
 use crate::registry::Registry;
 use crate::server::Server;
 use crate::tls as coord_tls;
@@ -48,7 +49,7 @@ impl Coordinator {
         }
     }
 
-    pub async fn start(&self) -> JoinHandle<()> {
+    pub async fn start(&self) -> (JoinHandle<()>, Arc<DashboardState>) {
         let mut server = Server::new(self.config.listen_addr.clone(), self.registry.clone());
 
         let insecure = !self.tls_enabled || std::env::var("MESH_INSECURE").as_deref() == Ok("1");
@@ -98,10 +99,14 @@ impl Coordinator {
                 );
             }
             crate::state::write(&fingerprint, &tokens, next_token.as_deref());
-            server.auth_tokens = Arc::new(tokens);
-            return tokio::spawn(async move {
+            let tokens = Arc::new(tokens);
+            server.auth_tokens = tokens.clone();
+            let dashboard = DashboardState::new(tokens);
+            server.dashboard = Some(dashboard.clone());
+            let handle = tokio::spawn(async move {
                 let _ = server.run().await;
             });
+            return (handle, dashboard);
         }
 
         // Insecure path — collect tokens without writing state (no fingerprint to record).
@@ -118,11 +123,15 @@ impl Coordinator {
                 tokens.push(t);
             }
         }
-        server.auth_tokens = Arc::new(tokens);
+        let tokens = Arc::new(tokens);
+        server.auth_tokens = tokens.clone();
+        let dashboard = DashboardState::new(tokens);
+        server.dashboard = Some(dashboard.clone());
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let _ = server.run().await;
-        })
+        });
+        (handle, dashboard)
     }
 
     pub fn node_count(&self) -> usize {
