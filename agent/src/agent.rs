@@ -3,6 +3,11 @@ use crate::config::AgentConfig;
 use crate::hardware::detect_hardware;
 use crate::identity::detect_identity;
 use shared::{HeartbeatPayload, MeshMessage, NodeIdentity, NodeRole};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use sysinfo::System;
 use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
@@ -25,6 +30,9 @@ pub struct Agent {
     // for Heartbeats and for any outbound ModelStatus messages stamped by main.rs.
     identity: NodeIdentity,
     tx: Sender<MeshMessage>,
+    sys: Arc<Mutex<System>>,
+    // Coordinator can push SetHeartbeatInterval to change this at runtime.
+    interval_secs: Arc<AtomicU64>,
 }
 
 impl Agent {
@@ -43,10 +51,13 @@ impl Agent {
             ip: "unknown".into(),
             role: config.role.clone(),
         });
+        let interval_secs = Arc::new(AtomicU64::new(config.heartbeat_interval_secs));
         Self {
             config,
             identity,
             tx,
+            sys: Arc::new(Mutex::new(System::new())),
+            interval_secs,
         }
     }
 
@@ -54,16 +65,30 @@ impl Agent {
         &self.identity.id
     }
 
+    /// Returns a handle the reader task can use to update the heartbeat interval.
+    pub fn interval_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.interval_secs)
+    }
+
     fn heartbeat_payload(&self) -> HeartbeatPayload {
+        let (cpu_usage_pct, ram_used_gb, ram_total_gb) = {
+            let mut sys = self.sys.lock().unwrap();
+            sys.refresh_cpu_usage();
+            sys.refresh_memory();
+            let cpu = sys.global_cpu_usage();
+            let used = sys.used_memory() as f32 / 1_073_741_824.0;
+            let total = sys.total_memory() as f32 / 1_073_741_824.0;
+            (cpu, used, total)
+        };
         HeartbeatPayload {
             identity: self.identity.clone(),
             auth_token: std::env::var("MESH_AUTH_TOKEN")
                 .unwrap_or_default()
                 .trim()
                 .to_string(),
-            cpu_usage_pct: None,
-            ram_used_gb: None,
-            ram_total_gb: None,
+            cpu_usage_pct,
+            ram_used_gb,
+            ram_total_gb,
         }
     }
 
@@ -116,7 +141,10 @@ impl Agent {
         }
 
         loop {
-            sleep(Duration::from_secs(self.config.heartbeat_interval_secs)).await;
+            sleep(Duration::from_secs(
+                self.interval_secs.load(Ordering::Relaxed),
+            ))
+            .await;
             if self
                 .tx
                 .send(MeshMessage::Heartbeat(self.heartbeat_payload()))

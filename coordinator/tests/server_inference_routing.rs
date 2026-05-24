@@ -94,9 +94,9 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                 role: NodeRole::Compute,
             },
             auth_token: String::new(),
-            cpu_usage_pct: None,
-            ram_used_gb: None,
-            ram_total_gb: None,
+            cpu_usage_pct: 0.0,
+            ram_used_gb: 0.0,
+            ram_total_gb: 0.0,
         }),
     )
     .await;

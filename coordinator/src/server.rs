@@ -286,7 +286,9 @@ async fn process_message(
         MeshMessage::Heartbeat(HeartbeatPayload {
             identity,
             auth_token,
-            ..
+            cpu_usage_pct: _,
+            ram_used_gb: _,
+            ram_total_gb: _,
         }) => {
             // When tokens are configured, require the heartbeat token to match exactly.
             if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
@@ -655,9 +657,9 @@ mod tests {
             &MeshMessage::Heartbeat(HeartbeatPayload {
                 identity: ident.clone(),
                 auth_token: String::new(),
-                cpu_usage_pct: None,
-                ram_used_gb: None,
-                ram_total_gb: None,
+                cpu_usage_pct: 0.0,
+                ram_used_gb: 0.0,
+                ram_total_gb: 0.0,
             }),
         )
         .await;
@@ -693,9 +695,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: String::new(),
-                cpu_usage_pct: Some(42.5),
-                ram_used_gb: Some(6.1),
-                ram_total_gb: Some(15.9),
+                cpu_usage_pct: 42.5,
+                ram_used_gb: 6.1,
+                ram_total_gb: 15.9,
             }),
         )
         .await;
@@ -767,9 +769,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: "wrong-token".into(),
-                cpu_usage_pct: None,
-                ram_used_gb: None,
-                ram_total_gb: None,
+                cpu_usage_pct: 0.0,
+                ram_used_gb: 0.0,
+                ram_total_gb: 0.0,
             }),
         )
         .await;
@@ -800,9 +802,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: String::new(),
-                cpu_usage_pct: None,
-                ram_used_gb: None,
-                ram_total_gb: None,
+                cpu_usage_pct: 0.0,
+                ram_used_gb: 0.0,
+                ram_total_gb: 0.0,
             }),
         )
         .await;
@@ -832,9 +834,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: "good-token".into(),
-                cpu_usage_pct: None,
-                ram_used_gb: None,
-                ram_total_gb: None,
+                cpu_usage_pct: 0.0,
+                ram_used_gb: 0.0,
+                ram_total_gb: 0.0,
             }),
         )
         .await;
@@ -866,9 +868,9 @@ mod tests {
             &MeshMessage::Heartbeat(HeartbeatPayload {
                 identity: ident.clone(),
                 auth_token: String::new(),
-                cpu_usage_pct: None,
-                ram_used_gb: None,
-                ram_total_gb: None,
+                cpu_usage_pct: 0.0,
+                ram_used_gb: 0.0,
+                ram_total_gb: 0.0,
             }),
         )
         .await;
@@ -942,9 +944,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: "old-token".into(),
-                cpu_usage_pct: None,
-                ram_used_gb: None,
-                ram_total_gb: None,
+                cpu_usage_pct: 0.0,
+                ram_used_gb: 0.0,
+                ram_total_gb: 0.0,
             }),
         )
         .await;
@@ -963,9 +965,9 @@ mod tests {
                     role: NodeRole::Compute,
                 },
                 auth_token: "new-token".into(),
-                cpu_usage_pct: None,
-                ram_used_gb: None,
-                ram_total_gb: None,
+                cpu_usage_pct: 0.0,
+                ram_used_gb: 0.0,
+                ram_total_gb: 0.0,
             }),
         )
         .await;

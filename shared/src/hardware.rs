@@ -27,15 +27,12 @@ pub struct HeartbeatPayload {
     #[serde(flatten)]
     pub identity: NodeIdentity,
     pub auth_token: String,
-    /// All-core average CPU utilisation, 0.0–100.0. None for agents < Phase C.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_usage_pct: Option<f32>,
+    /// All-core average CPU utilisation, 0.0–100.0.
+    pub cpu_usage_pct: f32,
     /// RAM currently in use on the node, in gibibytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ram_used_gb: Option<f32>,
+    pub ram_used_gb: f32,
     /// Total physical RAM on the node, in gibibytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ram_total_gb: Option<f32>,
+    pub ram_total_gb: f32,
 }
 
 impl From<NodeIdentity> for HeartbeatPayload {
@@ -43,9 +40,9 @@ impl From<NodeIdentity> for HeartbeatPayload {
         HeartbeatPayload {
             identity,
             auth_token: String::new(),
-            cpu_usage_pct: None,
-            ram_used_gb: None,
-            ram_total_gb: None,
+            cpu_usage_pct: 0.0,
+            ram_used_gb: 0.0,
+            ram_total_gb: 0.0,
         }
     }
 }
@@ -206,9 +203,9 @@ mod tests {
                 role: NodeRole::Controller,
             },
             auth_token: "tok123".into(),
-            cpu_usage_pct: None,
-            ram_used_gb: None,
-            ram_total_gb: None,
+            cpu_usage_pct: 0.0,
+            ram_used_gb: 0.0,
+            ram_total_gb: 0.0,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
@@ -226,9 +223,9 @@ mod tests {
                 role: NodeRole::Compute,
             },
             auth_token: "tok".into(),
-            cpu_usage_pct: Some(42.5),
-            ram_used_gb: Some(6.1),
-            ram_total_gb: Some(15.9),
+            cpu_usage_pct: 42.5,
+            ram_used_gb: 6.1,
+            ram_total_gb: 15.9,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
@@ -239,33 +236,17 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_payload_old_agent_missing_health_fields_defaults_to_none() {
-        // Simulates a pre-Phase-C agent that doesn't send health fields.
+    fn heartbeat_payload_missing_health_fields_fails_to_deserialize() {
+        // Pre-Phase-C agents no longer accepted — fields are now required.
         let json = r#"{
             "id": "old", "hostname": "legacy", "ip": "10.0.0.16",
             "role": "Compute", "auth_token": ""
         }"#;
-        let payload: HeartbeatPayload = serde_json::from_str(json).unwrap();
-        assert!(payload.cpu_usage_pct.is_none());
-        assert!(payload.ram_used_gb.is_none());
-        assert!(payload.ram_total_gb.is_none());
+        assert!(serde_json::from_str::<HeartbeatPayload>(json).is_err());
     }
 
     #[test]
-    fn heartbeat_payload_partial_health_fields_default_missing_to_none() {
-        // Only cpu_usage_pct present — ram fields absent — all three should deserialize.
-        let json = r#"{
-            "id": "partial", "hostname": "node", "ip": "10.0.0.1",
-            "role": "Compute", "auth_token": "", "cpu_usage_pct": 55.0
-        }"#;
-        let payload: HeartbeatPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.cpu_usage_pct, Some(55.0));
-        assert!(payload.ram_used_gb.is_none());
-        assert!(payload.ram_total_gb.is_none());
-    }
-
-    #[test]
-    fn heartbeat_payload_health_fields_omitted_when_none() {
+    fn heartbeat_payload_health_fields_always_serialized() {
         let payload = HeartbeatPayload {
             identity: NodeIdentity {
                 id: "n4".into(),
@@ -274,13 +255,13 @@ mod tests {
                 role: NodeRole::Compute,
             },
             auth_token: String::new(),
-            cpu_usage_pct: None,
-            ram_used_gb: None,
-            ram_total_gb: None,
+            cpu_usage_pct: 0.0,
+            ram_used_gb: 0.0,
+            ram_total_gb: 0.0,
         };
         let json = serde_json::to_string(&payload).unwrap();
-        assert!(!json.contains("cpu_usage_pct"));
-        assert!(!json.contains("ram_used_gb"));
-        assert!(!json.contains("ram_total_gb"));
+        assert!(json.contains("cpu_usage_pct"));
+        assert!(json.contains("ram_used_gb"));
+        assert!(json.contains("ram_total_gb"));
     }
 }

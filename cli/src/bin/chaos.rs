@@ -229,9 +229,9 @@ fn dummy_heartbeat(token: &str) -> MeshMessage {
             role: NodeRole::Compute,
         },
         auth_token: token.to_string(),
-        cpu_usage_pct: None,
-        ram_used_gb: None,
-        ram_total_gb: None,
+        cpu_usage_pct: 0.0,
+        ram_used_gb: 0.0,
+        ram_total_gb: 0.0,
     })
 }
 
