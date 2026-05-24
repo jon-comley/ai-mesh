@@ -252,6 +252,19 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_payload_partial_health_fields_default_missing_to_none() {
+        // Only cpu_usage_pct present — ram fields absent — all three should deserialize.
+        let json = r#"{
+            "id": "partial", "hostname": "node", "ip": "10.0.0.1",
+            "role": "Compute", "auth_token": "", "cpu_usage_pct": 55.0
+        }"#;
+        let payload: HeartbeatPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.cpu_usage_pct, Some(55.0));
+        assert!(payload.ram_used_gb.is_none());
+        assert!(payload.ram_total_gb.is_none());
+    }
+
+    #[test]
     fn heartbeat_payload_health_fields_omitted_when_none() {
         let payload = HeartbeatPayload {
             identity: NodeIdentity {

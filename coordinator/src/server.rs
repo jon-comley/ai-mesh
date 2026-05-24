@@ -671,6 +671,39 @@ mod tests {
         assert!(reg.get("node1").is_some());
     }
 
+    #[tokio::test]
+    async fn test_server_accepts_heartbeat_with_health_values() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let mut server = Server::new("127.0.0.1:9021", registry.clone());
+        server.auth_tokens = Arc::new(vec![]);
+
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let ack = send_message(
+            "127.0.0.1:9021",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: NodeIdentity {
+                    id: "health-node".into(),
+                    hostname: "beelink1".into(),
+                    ip: "192.168.1.14".into(),
+                    role: NodeRole::Compute,
+                },
+                auth_token: String::new(),
+                cpu_usage_pct: Some(42.5),
+                ram_used_gb: Some(6.1),
+                ram_total_gb: Some(15.9),
+            }),
+        )
+        .await;
+
+        assert_eq!(ack, MeshMessage::Acknowledge);
+        assert!(registry.lock().unwrap().get("health-node").is_some());
+    }
+
     /// Open a raw TCP connection, send `AuthToken` then `msg`, read one signed reply.
     /// Used to test scenarios that require the connection-level AuthToken first frame.
     async fn authenticated_send(addr: &str, auth_token: &str, msg: &MeshMessage) -> MeshMessage {
