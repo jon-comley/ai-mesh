@@ -185,6 +185,14 @@ Full design spec: `plans/phase11-dashboard.md`
 
 ### Phase H — Polish, icons, desktop layout pass
 
+### Deferred chaos / QA scenarios (raised post-Phase B)
+
+These are not blocking but should be added to the chaos binary before Phase 11 ships as complete:
+
+- **WS auth edge cases** — token rotation mid-session (valid token replaced; existing WS connections should remain alive until they close naturally), simultaneous connect with old and new token during rotation window
+- **Lagged broadcast receiver** — connect N WS clients, then flood the coordinator with heartbeats faster than clients can consume; verify no panics, no disconnects, just the `Lagged(n)` path in `ws.rs` firing and clients catching back up cleanly
+- **Phase B chaos coverage audit** — walk every branch in `ws.rs` and `state.rs` and confirm each has either a unit test or a chaos scenario; the `Channel closed` arm (coordinator shutdown mid-session) is the main gap
+
 ---
 
 A lightweight web interface embedded in the coordinator process (no separate service). Primary goal: **observable mesh** — operators can see the state of the cluster at a glance and drill into errors without SSHing into nodes.
