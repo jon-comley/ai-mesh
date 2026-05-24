@@ -47,7 +47,7 @@ When `MESH_AUTH_TOKEN` is set on the coordinator, the first frame must be `AuthT
 ## Heartbeat(HeartbeatPayload)
 Sent by agents periodically to indicate liveness.
 
-`HeartbeatPayload` wraps `NodeIdentity` (flattened in JSON) plus a per-message auth token and optional health metrics:
+`HeartbeatPayload` wraps `NodeIdentity` (flattened in JSON) plus a per-message auth token and health metrics:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -56,15 +56,15 @@ Sent by agents periodically to indicate liveness.
 | `ip` | String | LAN IP address |
 | `role` | NodeRole | `Controller` or `Compute` |
 | `auth_token` | String | `MESH_AUTH_TOKEN` value; empty string when not configured |
-| `cpu_usage_pct` | Option\<f32\> | All-core average CPU utilisation 0.0–100.0; omitted by agents < Phase C |
-| `ram_used_gb` | Option\<f32\> | RAM currently in use, gibibytes; omitted by agents < Phase C |
-| `ram_total_gb` | Option\<f32\> | Total physical RAM, gibibytes; omitted by agents < Phase C |
+| `cpu_usage_pct` | f32 | All-core average CPU utilisation 0.0–100.0 (required since Phase C2) |
+| `ram_used_gb` | f32 | RAM currently in use, gibibytes (required since Phase C2) |
+| `ram_total_gb` | f32 | Total physical RAM, gibibytes (required since Phase C2) |
 
-The three health fields use `#[serde(default, skip_serializing_if = "Option::is_none")]` so older agents that don't send them are still accepted (backward-compatible).
+All three health fields are required. Pre-C2 agents that omit them fail deserialization and are rejected.
 
 The coordinator validates `auth_token` on every heartbeat (defence-in-depth on top of the connection-level `AuthToken` check). An empty or wrong token is rejected when auth is configured.
 
-Coordinator updates last-seen timestamp on successful validation and, from Phase C onwards, appends a `HealthSample` (coordinator-stamped timestamp + metrics) to a per-node ring buffer.
+On a valid heartbeat the coordinator updates last-seen timestamp, appends a coordinator-stamped `HealthSample` to a per-node ring buffer (capped at 60 entries), and broadcasts `DashboardEvent::HealthUpdate` over WebSocket to connected dashboard clients.
 
 ---
 
@@ -312,6 +312,44 @@ Fields:
 - `error: Option<String>`
 
 ---
+---
+
+## Dashboard WebSocket Events
+
+These are **not** `MeshMessage` types. They are sent by the coordinator over the dashboard WebSocket (port 9001 `/ws`) to connected browser clients. Defined in `coordinator::http::state::DashboardEvent`.
+
+All events are tagged with a `"type"` field (`#[serde(tag = "type")]`).
+
+### TopologyUpdate
+
+```json
+{ "type": "TopologyUpdate", "nodes": [ { "id": "...", "name": "...", "role": "Compute", "ip": "...", "last_seen_secs": 3, "health": "green" } ] }
+```
+
+Broadcast on every heartbeat. Replaces the full node list on the client.
+
+`health` is `"green"` (< 10 s), `"amber"` (10–29 s), or `"red"` (≥ 30 s).
+
+### HealthUpdate
+
+```json
+{ "type": "HealthUpdate", "node_id": "abc123", "samples": [ { "ts_ms": 1716543000000, "cpu_pct": 42.5, "ram_used_gb": 6.1, "ram_total_gb": 15.9 }, ... ] }
+```
+
+Broadcast on every heartbeat, immediately after `TopologyUpdate`. Contains the full rolling window (up to 60 entries) of health samples for the named node.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `node_id` | String | Node UUID |
+| `samples[].ts_ms` | u64 | Coordinator-stamped Unix timestamp in milliseconds |
+| `samples[].cpu_pct` | f32 | All-core average CPU utilisation 0.0–100.0 |
+| `samples[].ram_used_gb` | f32 | RAM in use, gibibytes |
+| `samples[].ram_total_gb` | f32 | Total RAM, gibibytes |
+
+Timestamps are set by the coordinator on receipt to avoid clock-skew across nodes.
+
+---
+
 ## Versioning and Compatibility
 
 All Phase 6 messages use explicit version tagging.  

@@ -240,21 +240,21 @@ Health metrics flow from agent → coordinator → dashboard:
 Agent (sysinfo crate)
 └── HeartbeatPayload { cpu_usage_pct, ram_used_gb, ram_total_gb }
 
-Coordinator (HealthStore in DashboardState)
-├── On each Heartbeat: stamp coordinator timestamp, append HealthSample
-├── Ring buffer per node: VecDeque<HealthSample> capped at 60 samples
-└── Push DashboardEvent::HealthUpdate { node_id, name, samples } over WS broadcast
+Coordinator (HealthStore in DashboardState)               ← C3 ✓
+├── On each Heartbeat: stamp coordinator ts_ms, append HealthSample
+├── Ring buffer per node: Mutex<HashMap<node_id, VecDeque<HealthSample>>> capped at 60
+└── Broadcast DashboardEvent::HealthUpdate { node_id, samples } over WebSocket
 
-Dashboard (health.js)
-├── SVG sparkline: CPU % and RAM % (last 60 samples)
-└── Interval control button → POST /api/nodes/{id}/heartbeat-interval
+Dashboard (health.js)                                      ← C5
+├── SVG sparkline: CPU % and RAM % derived from raw gb fields (last 60 samples)
+└── Interval control button → POST /api/nodes/{id}/heartbeat-interval  ← C4
                             → coordinator pushes SetHeartbeatInterval to agent
 ```
 
 **Design decisions:**
-- Timestamps are stamped by the coordinator (not the agent) to avoid clock-skew issues across nodes.
-- `HealthSample` is a coordinator-only struct — not part of the shared wire protocol.
-- RAM% is derived by the coordinator: `ram_used_gb / ram_total_gb * 100.0`.
+- Timestamps are stamped by the coordinator on receipt to avoid clock-skew across nodes.
+- `HealthSample` is a coordinator-only struct — not part of the `shared` wire protocol.
+- RAM% is derived by the dashboard JS (`ram_used_gb / ram_total_gb * 100`), not by the coordinator.
 - `SetHeartbeatInterval` is pushed over the agent's existing open TCP connection — no extra endpoint needed on the agent.
 
 ---

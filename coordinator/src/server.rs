@@ -286,9 +286,9 @@ async fn process_message(
         MeshMessage::Heartbeat(HeartbeatPayload {
             identity,
             auth_token,
-            cpu_usage_pct: _,
-            ram_used_gb: _,
-            ram_total_gb: _,
+            cpu_usage_pct,
+            ram_used_gb,
+            ram_total_gb,
         }) => {
             // When tokens are configured, require the heartbeat token to match exactly.
             if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
@@ -296,7 +296,8 @@ async fn process_message(
                 return MeshMessage::Acknowledge;
             }
             info!(node_id = %identity.id, hostname = %identity.hostname, "heartbeat");
-            *node_id = Some(identity.id.clone());
+            let this_id = identity.id.clone();
+            *node_id = Some(this_id.clone());
             let nodes = {
                 let mut reg = registry.lock().unwrap();
                 reg.update_heartbeat(identity.clone());
@@ -305,6 +306,7 @@ async fn process_message(
             connections.lock().unwrap().insert(identity.id, tx.clone());
             if let Some(dash) = dashboard {
                 dash.push_topology(&nodes);
+                dash.push_health(&this_id, cpu_usage_pct, ram_used_gb, ram_total_gb);
             }
             MeshMessage::Acknowledge
         }
@@ -704,6 +706,114 @@ mod tests {
 
         assert_eq!(ack, MeshMessage::Acknowledge);
         assert!(registry.lock().unwrap().get("health-node").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_pushes_health_update_to_dashboard() {
+        use crate::http::state::{DashboardEvent, DashboardState};
+
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let dashboard = DashboardState::new(Arc::new(vec![]));
+        let mut rx = dashboard.tx.subscribe();
+
+        let mut server = Server::new("127.0.0.1:9025", registry.clone());
+        server.auth_tokens = Arc::new(vec![]);
+        server.dashboard = Some(dashboard);
+
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        send_message(
+            "127.0.0.1:9025",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: NodeIdentity {
+                    id: "dash-node".into(),
+                    hostname: "beelink1".into(),
+                    ip: "192.168.1.14".into(),
+                    role: NodeRole::Compute,
+                },
+                auth_token: String::new(),
+                cpu_usage_pct: 55.0,
+                ram_used_gb: 7.5,
+                ram_total_gb: 15.9,
+            }),
+        )
+        .await;
+
+        // The broadcast channel may carry a TopologyUpdate first, then a HealthUpdate.
+        let mut health_evt = None;
+        for _ in 0..5 {
+            match rx.try_recv() {
+                Ok(DashboardEvent::HealthUpdate { node_id, samples }) => {
+                    health_evt = Some((node_id, samples));
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        let (node_id, samples) = health_evt.expect("expected HealthUpdate");
+        assert_eq!(node_id, "dash-node");
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].cpu_pct, 55.0);
+        assert_eq!(samples[0].ram_used_gb, 7.5);
+        assert_eq!(samples[0].ram_total_gb, 15.9);
+    }
+
+    #[tokio::test]
+    async fn test_rejected_heartbeat_does_not_emit_health_update() {
+        use crate::http::state::{DashboardEvent, DashboardState};
+
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let dashboard = DashboardState::new(Arc::new(vec!["correct-token".into()]));
+        let mut rx = dashboard.tx.subscribe();
+
+        let mut server = Server::new("127.0.0.1:9026", registry.clone());
+        server.auth_tokens = Arc::new(vec!["correct-token".into()]);
+        server.dashboard = Some(dashboard);
+
+        tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Connection-level auth is correct ("correct-token"), but the Heartbeat
+        // payload carries a wrong per-message auth_token — the per-message check
+        // must reject it and must not call push_health.
+        authenticated_send(
+            "127.0.0.1:9026",
+            "correct-token",
+            &MeshMessage::Heartbeat(HeartbeatPayload {
+                identity: NodeIdentity {
+                    id: "bad-node".into(),
+                    hostname: "rogue".into(),
+                    ip: "10.0.0.18".into(),
+                    role: NodeRole::Compute,
+                },
+                auth_token: "wrong-token".into(),
+                cpu_usage_pct: 99.0,
+                ram_used_gb: 15.0,
+                ram_total_gb: 16.0,
+            }),
+        )
+        .await;
+
+        // No HealthUpdate should have been broadcast.
+        let mut got_health = false;
+        while let Ok(evt) = rx.try_recv() {
+            if matches!(evt, DashboardEvent::HealthUpdate { .. }) {
+                got_health = true;
+            }
+        }
+        assert!(
+            !got_health,
+            "HealthUpdate must not be broadcast for rejected heartbeat"
+        );
+        assert!(registry.lock().unwrap().get("bad-node").is_none());
     }
 
     /// Open a raw TCP connection, send `AuthToken` then `msg`, read one signed reply.
