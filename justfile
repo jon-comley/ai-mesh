@@ -592,7 +592,7 @@ set-fingerprint node:
     case "$NODE_OS" in
       linux)
         ssh ${NODE_USER}@${NODE_HOST} "
-            sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
+            sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d 2>/dev/null || true
             printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=${FP}\n' \
                 | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
             printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}\n' \
@@ -603,7 +603,7 @@ set-fingerprint node:
         ;;
       windows)
         DEFAULT_MODEL="${DEFAULT_MODEL:-qwen2.5:7b}"
-        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+        ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
             \$nssm = (Get-Command nssm.exe -ErrorAction Stop).Source;\
             & \$nssm set ai-mesh-agent AppEnvironmentExtra \
                 'COORDINATOR_IP={{coordinator_ip}}' \
@@ -614,7 +614,7 @@ set-fingerprint node:
                 'LLAMA_FLASH_ATTN=1' \
                 'DEFAULT_MODEL=${DEFAULT_MODEL}' \
                 'MESH_TLS_FINGERPRINT=${FP}' \
-                'MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}';\
+                'MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}' | Out-Null;\
             taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
             \$svcpid = (Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
             if (\$svcpid -gt 0) { Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue };\
@@ -975,7 +975,7 @@ load-model node model:
             echo ">>>   just load-model {{node}} ${MODEL_NAMES[$i]}"
         done
     fi
-    cargo run -q -p cli -- load --node-id "${NODE_ID}" "${MODEL}" "${SIZE_MB}"
+    cargo run -q -p cli -- load --node-id "${NODE_ID}" "${MODEL}" "${SIZE_MB}" | sed 's/^/>>> /'
 
 # Detect hardware on a node and load the best-fit model automatically.
 # Usage: just auto-load-model pi1
@@ -1186,6 +1186,11 @@ start-cluster: update-portproxy
         fi
         export MESH_AUTH_TOKEN="${TOKEN}"
         echo ">>> MESH_AUTH_TOKEN set from coordinator state"
+        echo ""
+        echo "    ┌─ Dashboard login token ──────────────────────────────────────┐"
+        echo "    │  ${TOKEN}  │"
+        echo "    └──────────────────────────────────────────────────────────────┘"
+        echo ""
     fi
 
     echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
@@ -1292,6 +1297,11 @@ restart-coordinator: update-portproxy
         fi
         export MESH_AUTH_TOKEN="${TOKEN}"
         echo ">>> MESH_AUTH_TOKEN set from coordinator state"
+        echo ""
+        echo "    ┌─ Dashboard login token ──────────────────────────────────────┐"
+        echo "    │  ${TOKEN}  │"
+        echo "    └──────────────────────────────────────────────────────────────┘"
+        echo ""
     fi
 
     echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
