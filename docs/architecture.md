@@ -237,11 +237,17 @@ All frames after `AuthToken` are wrapped in `SignedFrame { ts, payload, sig }` w
 Health metrics flow from agent → coordinator → dashboard:
 
 ```
-Agent (sysinfo crate)
-└── HeartbeatPayload { cpu_usage_pct, ram_used_gb, ram_total_gb }
+Agent (sysinfo crate + gpu.rs)                             ← C2 ✓ / C7 ✓
+└── HeartbeatPayload { cpu_usage_pct, ram_used_gb, ram_total_gb,
+                       gpu_usage_pct?, gpu_vram_used_gb?, gpu_vram_total_gb? }
+    Linux GPU: amdgpu sysfs (/sys/class/drm/card0/device/gpu_busy_percent etc.)
+    Windows GPU: PowerShell perf counter query (no extra crates)
+    CPU-only nodes: GPU fields omitted (serde(default) → None on coordinator)
 
-Coordinator (HealthStore in DashboardState)               ← C3 ✓
+Coordinator (HealthStore in DashboardState)               ← C3 ✓ / C7 ✓
 ├── On each Heartbeat: stamp coordinator ts_ms, append HealthSample
+├── HealthSample: { ts_ms, cpu_pct, ram_used_gb, ram_total_gb,
+│                   gpu_pct?, gpu_vram_used_gb?, gpu_vram_total_gb? }
 ├── Ring buffer per node: Mutex<HashMap<node_id, VecDeque<HealthSample>>> capped at 60
 └── Broadcast DashboardEvent::HealthUpdate { node_id, samples } over WebSocket
 
@@ -249,8 +255,9 @@ WebSocket connect                                           ← C5 ✓
 └── coordinator calls get_all_health_snapshots() and pushes HealthUpdate per node
     so sparklines populate immediately without waiting for the next heartbeat
 
-Dashboard (health.js)                                      ← C5 ✓
+Dashboard (health.js)                                      ← C5 ✓ / C7 ✓
 ├── Health panel: SVG sparklines (CPU %, RAM %) per node + current values
+├── Health panel: GPU% + VRAM sparklines shown only when node reports GPU data
 ├── Nodes panel: mini CPU sparkline in each node card
 ├── repaintAll() refills mini sparklines after every TopologyUpdate
 └── Interval control button → POST /api/nodes/{id}/heartbeat-interval  ← C4 ✓
@@ -260,7 +267,9 @@ Dashboard (health.js)                                      ← C5 ✓
 **Design decisions:**
 - Timestamps are stamped by the coordinator on receipt to avoid clock-skew across nodes.
 - `HealthSample` is a coordinator-only struct — not part of the `shared` wire protocol.
-- RAM% is derived by the dashboard JS (`ram_used_gb / ram_total_gb * 100`), not by the coordinator.
+- RAM% and VRAM% are derived by the dashboard JS, not the coordinator.
+- GPU fields are `Option<f32>` with `serde(default)` — CPU-only nodes omit them; pre-C7 agents remain compatible.
+- Windows GPU reads via PowerShell subprocess (~1 s overhead per heartbeat); acceptable at 30 s cadence and avoids the `wmi` crate.
 - `SetHeartbeatInterval` is pushed over the agent's existing open TCP connection — no extra endpoint needed on the agent.
 
 ---
