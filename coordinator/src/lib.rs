@@ -1,4 +1,5 @@
 pub mod coordinator;
+pub mod http;
 pub mod intent;
 pub mod mdns;
 pub mod model_lifecycle;
