@@ -193,5 +193,6 @@ Defined at the top of `justfile`:
 |----------|---------|-------------|
 | `coordinator_ip` | `192.168.1.15` | Windows host LAN IP — remote nodes connect here via portproxy. Update when moving to a new machine, then run `just provision-all` |
 | `coordinator_port` | `9000` | Coordinator TCP port |
+| `MESH_HTTP_PORT` | `9001` | Dashboard HTTP port (env var, not a justfile variable) |
 
 Per-node config (host, user, OS, role) lives in `nodes/<name>.env`, not in the justfile.
