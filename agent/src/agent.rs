@@ -1,5 +1,6 @@
 use crate::capabilities::detect_capabilities;
 use crate::config::AgentConfig;
+use crate::gpu::read_gpu_sample;
 use crate::hardware::detect_hardware;
 use crate::identity::detect_identity;
 use shared::{HeartbeatPayload, MeshMessage, NodeIdentity, NodeRole};
@@ -80,6 +81,7 @@ impl Agent {
             let total = sys.total_memory() as f32 / 1_073_741_824.0;
             (cpu, used, total)
         };
+        let gpu = read_gpu_sample();
         HeartbeatPayload {
             identity: self.identity.clone(),
             auth_token: std::env::var("MESH_AUTH_TOKEN")
@@ -89,6 +91,9 @@ impl Agent {
             cpu_usage_pct,
             ram_used_gb,
             ram_total_gb,
+            gpu_usage_pct: gpu.as_ref().map(|g| g.usage_pct),
+            gpu_vram_used_gb: gpu.as_ref().map(|g| g.vram_used_gb),
+            gpu_vram_total_gb: gpu.map(|g| g.vram_total_gb),
         }
     }
 

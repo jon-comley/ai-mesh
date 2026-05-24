@@ -224,6 +224,9 @@ mod tests {
             cpu_usage_pct: 0.0,
             ram_used_gb: 0.0,
             ram_total_gb: 0.0,
+            gpu_usage_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         });
         assert!(!make_cap().handles(&msg));
     }

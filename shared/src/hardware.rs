@@ -33,6 +33,15 @@ pub struct HeartbeatPayload {
     pub ram_used_gb: f32,
     /// Total physical RAM on the node, in gibibytes.
     pub ram_total_gb: f32,
+    /// GPU utilisation 0.0–100.0; None on CPU-only nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_usage_pct: Option<f32>,
+    /// GPU VRAM in use, gibibytes; None on CPU-only nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_vram_used_gb: Option<f32>,
+    /// Total GPU VRAM, gibibytes; None on CPU-only nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_vram_total_gb: Option<f32>,
 }
 
 impl From<NodeIdentity> for HeartbeatPayload {
@@ -43,6 +52,9 @@ impl From<NodeIdentity> for HeartbeatPayload {
             cpu_usage_pct: 0.0,
             ram_used_gb: 0.0,
             ram_total_gb: 0.0,
+            gpu_usage_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         }
     }
 }
@@ -206,6 +218,9 @@ mod tests {
             cpu_usage_pct: 0.0,
             ram_used_gb: 0.0,
             ram_total_gb: 0.0,
+            gpu_usage_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
@@ -226,6 +241,9 @@ mod tests {
             cpu_usage_pct: 42.5,
             ram_used_gb: 6.1,
             ram_total_gb: 15.9,
+            gpu_usage_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
@@ -233,6 +251,60 @@ mod tests {
         assert!(json.contains("cpu_usage_pct"));
         assert!(json.contains("ram_used_gb"));
         assert!(json.contains("ram_total_gb"));
+    }
+
+    #[test]
+    fn heartbeat_payload_gpu_fields_roundtrip_with_data() {
+        let payload = HeartbeatPayload {
+            identity: NodeIdentity {
+                id: "g1".into(),
+                hostname: "beelink1".into(),
+                ip: "192.168.1.14".into(),
+                role: NodeRole::Compute,
+            },
+            auth_token: String::new(),
+            cpu_usage_pct: 30.0,
+            ram_used_gb: 8.0,
+            ram_total_gb: 16.0,
+            gpu_usage_pct: Some(75.0),
+            gpu_vram_used_gb: Some(3.5),
+            gpu_vram_total_gb: Some(8.0),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, payload);
+        assert_eq!(back.gpu_usage_pct, Some(75.0));
+        assert_eq!(back.gpu_vram_used_gb, Some(3.5));
+        assert_eq!(back.gpu_vram_total_gb, Some(8.0));
+    }
+
+    #[test]
+    fn heartbeat_payload_gpu_fields_absent_deserializes_as_none() {
+        // A CPU-only node (or pre-C7 agent) omits the GPU fields entirely.
+        let json = r#"{
+            "id":"pi1","hostname":"pi1","ip":"192.168.1.11",
+            "role":"Compute","auth_token":"",
+            "cpu_usage_pct":10.0,"ram_used_gb":1.0,"ram_total_gb":8.0
+        }"#;
+        let payload: HeartbeatPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.gpu_usage_pct, None);
+        assert_eq!(payload.gpu_vram_used_gb, None);
+        assert_eq!(payload.gpu_vram_total_gb, None);
+    }
+
+    #[test]
+    fn heartbeat_payload_gpu_fields_none_omitted_from_json() {
+        let payload = HeartbeatPayload::from(NodeIdentity {
+            id: "pi1".into(),
+            hostname: "pi1".into(),
+            ip: "192.168.1.11".into(),
+            role: NodeRole::Compute,
+        });
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(
+            !json.contains("gpu_usage_pct"),
+            "None GPU fields should be omitted"
+        );
     }
 
     #[test]
@@ -258,6 +330,9 @@ mod tests {
             cpu_usage_pct: 0.0,
             ram_used_gb: 0.0,
             ram_total_gb: 0.0,
+            gpu_usage_pct: None,
+            gpu_vram_used_gb: None,
+            gpu_vram_total_gb: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("cpu_usage_pct"));

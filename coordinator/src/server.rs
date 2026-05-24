@@ -289,6 +289,9 @@ async fn process_message(
             cpu_usage_pct,
             ram_used_gb,
             ram_total_gb,
+            gpu_usage_pct,
+            gpu_vram_used_gb,
+            gpu_vram_total_gb,
         }) => {
             // When tokens are configured, require the heartbeat token to match exactly.
             if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
@@ -306,7 +309,15 @@ async fn process_message(
             connections.lock().unwrap().insert(identity.id, tx.clone());
             if let Some(dash) = dashboard {
                 dash.push_topology(&nodes);
-                dash.push_health(&this_id, cpu_usage_pct, ram_used_gb, ram_total_gb);
+                dash.push_health(
+                    &this_id,
+                    cpu_usage_pct,
+                    ram_used_gb,
+                    ram_total_gb,
+                    gpu_usage_pct,
+                    gpu_vram_used_gb,
+                    gpu_vram_total_gb,
+                );
             }
             MeshMessage::Acknowledge
         }
@@ -662,6 +673,9 @@ mod tests {
                 cpu_usage_pct: 0.0,
                 ram_used_gb: 0.0,
                 ram_total_gb: 0.0,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -700,6 +714,9 @@ mod tests {
                 cpu_usage_pct: 42.5,
                 ram_used_gb: 6.1,
                 ram_total_gb: 15.9,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -742,6 +759,9 @@ mod tests {
                 cpu_usage_pct: 55.0,
                 ram_used_gb: 7.5,
                 ram_total_gb: 15.9,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -804,6 +824,9 @@ mod tests {
                 cpu_usage_pct: 99.0,
                 ram_used_gb: 15.0,
                 ram_total_gb: 16.0,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -888,6 +911,9 @@ mod tests {
                 cpu_usage_pct: 0.0,
                 ram_used_gb: 0.0,
                 ram_total_gb: 0.0,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -921,6 +947,9 @@ mod tests {
                 cpu_usage_pct: 0.0,
                 ram_used_gb: 0.0,
                 ram_total_gb: 0.0,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -953,6 +982,9 @@ mod tests {
                 cpu_usage_pct: 0.0,
                 ram_used_gb: 0.0,
                 ram_total_gb: 0.0,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -987,6 +1019,9 @@ mod tests {
                 cpu_usage_pct: 0.0,
                 ram_used_gb: 0.0,
                 ram_total_gb: 0.0,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -1063,6 +1098,9 @@ mod tests {
                 cpu_usage_pct: 0.0,
                 ram_used_gb: 0.0,
                 ram_total_gb: 0.0,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;
@@ -1084,6 +1122,9 @@ mod tests {
                 cpu_usage_pct: 0.0,
                 ram_used_gb: 0.0,
                 ram_total_gb: 0.0,
+                gpu_usage_pct: None,
+                gpu_vram_used_gb: None,
+                gpu_vram_total_gb: None,
             }),
         )
         .await;

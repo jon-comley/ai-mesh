@@ -33,3 +33,4 @@ sha2 = "0.10"
 
 [dev-dependencies]
 async-trait = "0.1"
+tempfile = "3"
