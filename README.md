@@ -77,6 +77,9 @@ The coordinator generates a self-signed certificate on first start, persisted at
 ### Auth token (application layer)
 Each agent includes `MESH_AUTH_TOKEN` in its startup `AuthToken` frame (connection-level) and in every `Heartbeat` (per-message defence-in-depth). The coordinator rejects any connection or heartbeat with a missing or wrong token when auth is configured. Dual-token rotation (`MESH_AUTH_TOKEN` + `MESH_AUTH_TOKEN_NEXT`) allows zero-downtime key rotation — use `just rotate-token` to rotate automatically.
 
+### HMAC message integrity (Phase 10.5)
+Every wire message after the initial `AuthToken` handshake is wrapped in a `SignedFrame` (HMAC-SHA256). The signing key is derived from `MESH_AUTH_TOKEN` via HKDF-SHA256 — no new credentials needed. The coordinator rejects frames with a wrong signature, stale timestamp (>30s skew), or no `SignedFrame` wrapper at all after auth. This closes the residual window where a rogue process that obtained a valid token could inject arbitrary messages. Use `just chaos` to adversarially verify the full security stack.
+
 ### Coordinator state file
 On startup the coordinator writes `~/.config/ai-mesh/coordinator.state` (0600, shell-sourceable KEY=VALUE) containing the current fingerprint and auth token. All justfile recipes source this file — no log-grepping, no race conditions.
 
@@ -130,6 +133,7 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just uninstall-node <node>` | Remove agent service from a node |
 | `just sanity-node <node>` | Check service state + node table |
 | `just sanity-full` | Full cluster validation (all nodes) |
+| `just chaos` | Fire 6 adversarial HMAC security scenarios at the live coordinator (run automatically by `just validate-routing`) |
 | `just validate-routing` | Confirm each model routes to its correct node (run after `start-cluster` or `restart-coordinator`) |
 | `just logs-node <node>` | Tail live agent logs from a node |
 | `just logs` | Tail all logs simultaneously |

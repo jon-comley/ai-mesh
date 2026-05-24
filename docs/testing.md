@@ -120,7 +120,20 @@ These tests pin the contract: a closed channel is a normal condition (the TCP co
 | `test_heartbeat_wrong_token_not_registered` | Heartbeat with wrong token silently rejected (Acknowledge returned, node absent from registry) |
 | `test_heartbeat_empty_token_not_registered` | Empty `auth_token` string rejected when coordinator has tokens configured |
 
-These tests use `authenticated_send` — a helper that sends the connection-level `AuthToken` first frame, then the `Heartbeat`, to correctly simulate the two-layer auth flow.
+These tests use `authenticated_send` — a helper that sends the connection-level `AuthToken` first frame (unsigned), then sends the `Heartbeat` wrapped in a `SignedFrame`, and verifies the signed reply. Correctly simulates the full three-layer auth + HMAC flow.
+
+---
+
+### Shared — `frame.rs` — HMAC signing and replay protection
+
+| Test | What it pins |
+|------|-------------|
+| `sign_verify_roundtrip` | A signed frame verifies correctly with the same key |
+| `wrong_key_fails_verification` | Frame signed with key A fails verification under key B |
+| `tampered_payload_fails_verification` | Modifying `payload` after signing causes signature mismatch |
+| `stale_timestamp_fails_verification` | Frame with `ts − 60s` (even with a valid sig for that ts) is rejected |
+| `different_tokens_produce_different_keys` | Two distinct `MESH_AUTH_TOKEN` values produce distinct HMAC keys |
+| `derive_key_is_deterministic` | Same token always produces the same HMAC key (HKDF is deterministic) |
 
 ---
 
@@ -168,15 +181,16 @@ These behaviours are implemented but not yet covered by automated tests:
 
 ---
 
-## 3a. Live Credential Tests
+## 3a. Live Security Tests
 
-Shell-level tests that exercise the justfile credential distribution flow against real nodes:
+Shell-level tests that exercise the security stack against the live coordinator:
 
 | Recipe | What it covers |
 |--------|---------------|
+| `just chaos` | **6 adversarial scenarios** against the live coordinator: (1) no auth token sent, (2) wrong token, (3) valid token then unsigned plain frame, (4) valid token then corrupted HMAC, (5) valid token then stale timestamp, (6) valid token with correct signed frame (sanity check). All 6 must pass; exit code 1 on any failure. Automatically run as a prerequisite of `just validate-routing`. |
 | `just test-deploy-creds <node>` | **Scenario A** — coordinator running: calls `set-fingerprint <node>` and verifies it succeeds. **Scenario B** — coordinator absent (state file hidden): verifies the reminder message is printed instead of a silent failure. |
 
-Run with: `just test-deploy-creds pi1`
+Run with: `just chaos` or `just test-deploy-creds pi1`
 
 ---
 

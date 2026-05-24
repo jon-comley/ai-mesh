@@ -226,16 +226,16 @@ run-coordinator: update-portproxy
 run-controller:
     AGENT_ROLE=controller cargo run -p agent
 
-reset:
+reset: update-portproxy
     #!/usr/bin/env bash
     set -e
-    pkill -f "target/(debug|release)/coordinator" || true
-    sleep 0.3
-    cargo run -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
-    COORD_PID=$!
-    trap 'kill $COORD_PID 2>/dev/null || true' EXIT
-    sleep 1
-    cargo run -p cli -- reset-registry
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then
+        source "$STATE"
+        export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
+    fi
+    cargo run -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" reset-registry
+    echo "Registry cleared. Nodes will re-register on their next heartbeat."
 
 # ── Local sanity (coordinator + controller only) ──────────────────────────────
 
@@ -878,6 +878,8 @@ load-model node model:
     #!/usr/bin/env bash
     set -e
     source nodes/{{node}}.env
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    [ -f "$STATE" ] && source "$STATE" && export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
     MODEL="{{model}}"
     case "$MODEL" in
         qwen2.5:0.5b)  SIZE_MB=512 ;;
@@ -976,6 +978,8 @@ auto-load-model node:
     #!/usr/bin/env bash
     set -e
     source nodes/{{node}}.env
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    [ -f "$STATE" ] && source "$STATE" && export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
     case "$NODE_OS" in
       linux)
         HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} '
@@ -1584,7 +1588,7 @@ intent text:
 # (i.e. run `just start-cluster` first).
 # Pi (192.168.1.11) should serve qwen2.5:1.5b; Beelink (192.168.1.14) should serve qwen2.5:7b.
 # Usage: just validate-routing
-validate-routing: update-portproxy
+validate-routing: update-portproxy chaos
     #!/usr/bin/env bash
     set -e
 
@@ -1663,6 +1667,23 @@ validate-routing: update-portproxy
 
     echo "=== Results: $PASS passed, $FAIL failed ==="
     [ "$FAIL" -eq 0 ]
+
+# Fire six attack scenarios at the live coordinator to verify HMAC security.
+# Each rejection scenario must cause the coordinator to close the connection.
+# The final scenario checks that a valid signed request still works.
+# Usage: just chaos
+chaos: update-portproxy
+    #!/usr/bin/env bash
+    set -e
+
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then
+        source "$STATE"
+        export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
+    fi
+
+    export MESH_COORDINATOR="{{coordinator_ip}}:{{coordinator_port}}"
+    cargo run -q --bin chaos -p cli
 
 # Verify that deploy-node pushes credentials automatically.
 # Scenario A: coordinator running  → set-fingerprint is called immediately after provisioning.

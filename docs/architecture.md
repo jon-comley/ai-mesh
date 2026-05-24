@@ -15,16 +15,22 @@ This document captures the foundational design principles, workflows, and engine
 
 ## 2. Workspace Structure
 
-The project uses a Rust workspace with four crates:
-
 ```
 ai-mesh/
-  shared/        # Shared types, messages, versioning, hardware specs
-  agent/         # Node agent: hardware detection, heartbeats, updates
-  coordinator/   # Central orchestrator: registry, updates, scheduling
-  cli/           # Command-line interface (added later)
-  docs/          # Documentation mesh
-  Cargo.toml     # Workspace manifest
+  shared/                    # Shared types, messages, HMAC wire protocol
+  agent/                     # Node agent: hardware detection, heartbeats, inference
+  coordinator/               # Central orchestrator: TLS server, registry, scheduler
+  cli/                       # CLI + chaos security-test binary
+  capabilities/
+    core/                    # Capability trait and dispatch
+    llm/                     # llama-server integration (GGUF download, inference)
+    lighting/                # Zigbee2MQTT MQTT client (pi1)
+    zigbee/                  # Zigbee device/group discovery
+  docs/                      # Documentation
+  nodes/                     # Per-node config files (nodes/<name>.env)
+  scripts/                   # Provisioning scripts (OS-dispatched)
+  plans/                     # Design docs for specific features
+  Cargo.toml                 # Workspace manifest
 ```
 
 ---
@@ -185,6 +191,20 @@ The following components are now fully implemented and tested:
 - Documentation mesh
 
 This forms a stable foundation for distributed behaviour.
+
+---
+
+## 15. Security Architecture (Phase 10 / 10.5)
+
+Three independent layers, each independently useful:
+
+| Layer | Mechanism | What it stops |
+|-------|-----------|---------------|
+| TLS | Self-signed cert + SHA-256 fingerprint TOFU | Eavesdropping, MITM |
+| AuthToken | First-frame `AuthToken(token)` + per-heartbeat field | Unauthenticated connections, rogue nodes |
+| HMAC | `SignedFrame { ts, payload, sig }` — HKDF-SHA256 key | Message forgery, replay attacks (±30 s window) |
+
+All three are active whenever `MESH_AUTH_TOKEN` is configured (the normal production case). Dev mode (`MESH_AUTH_TOKEN` unset) skips auth and HMAC but keeps TLS optional via `MESH_INSECURE=1`.
 
 ---
 

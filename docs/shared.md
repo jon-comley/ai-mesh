@@ -32,6 +32,14 @@ Defines the message protocol used for communication between nodes:
 
 These messages are serialized using JSON for simplicity and cross-language compatibility.
 
+### `frame.rs`
+Wire-level HMAC signing envelope (Phase 10.5):
+
+- `SignedFrame { ts: u64, payload: Vec<u8>, sig: Vec<u8> }` — wraps every `MeshMessage` when auth is configured. `payload` holds the JSON-encoded message bytes; `sig` is a 32-byte HMAC-SHA256 over `ts_le_bytes || payload`.
+- `derive_hmac_key(token: &str) -> [u8; 32]` — HKDF-SHA256 from the auth token with label `"ai-mesh-hmac-v1"`. Both coordinator and client call this with the same token to arrive at the same key.
+- `SignedFrame::sign(key, payload)` / `sign_at(key, ts, payload)` — builds and signs a frame.
+- `SignedFrame::verify(key)` — checks timestamp skew (±30 seconds) then verifies the HMAC. Returns the payload on success.
+
 ### `hardware.rs`
 Defines:
 
@@ -122,7 +130,6 @@ These tests ensure:
 
 Potential future additions:
 
-- Cryptographic signatures for messages
 - Binary serialization for performance
 - Compression for large payloads
 - Extended hardware metrics (thermal, power, load)
