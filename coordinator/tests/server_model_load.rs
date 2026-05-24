@@ -45,6 +45,7 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
                     pending,
                     pending_intents,
                     Arc::new(vec![]),
+                    None,
                 )
                 .await;
             }
@@ -68,6 +69,7 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
                     pending,
                     pending_intents,
                     Arc::new(vec![]),
+                    None,
                 )
                 .await;
             }

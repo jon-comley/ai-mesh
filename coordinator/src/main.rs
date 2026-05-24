@@ -9,7 +9,7 @@ async fn main() {
     println!("Starting AI Mesh Coordinator on 0.0.0.0:9000...");
 
     let coord = Coordinator::new_persistent("0.0.0.0:9000", "ai_mesh.db");
-    let _handle = coord.start().await;
+    let (_handle, dashboard) = coord.start().await;
 
     let _mdns = coordinator::mdns::advertise(9000);
 
@@ -17,7 +17,7 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(9001);
-    tokio::spawn(coordinator::http::start(http_port));
+    tokio::spawn(coordinator::http::start(http_port, dashboard));
 
     println!("Coordinator is running. Press Ctrl+C to stop.");
 

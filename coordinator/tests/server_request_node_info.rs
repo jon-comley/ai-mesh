@@ -24,6 +24,7 @@ async fn server_handles_request_node_info() {
             pending,
             pending_intents,
             Arc::new(vec![]),
+            None,
         )
         .await
         .unwrap();

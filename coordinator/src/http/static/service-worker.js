@@ -3,6 +3,7 @@ const PRECACHE = [
   '/',
   '/static/style.css',
   '/static/dashboard.js',
+  '/static/topology.js',
   '/manifest.json',
 ];
 

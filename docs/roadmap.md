@@ -164,9 +164,16 @@ Full design spec: `plans/phase11-dashboard.md`
 - All static assets embedded via `include_str!` (single binary, zero runtime file I/O)
 - `DashboardModule` trait in plan for per-capability panel extensibility
 
-### Phase B — WebSocket + live topology (next)
+### Phase B ✓ Complete — WebSocket + live topology
 
-### Phase C — Health timeline
+- `/ws` WebSocket endpoint with `?token=` Bearer auth; `DashboardState` wraps a `tokio::sync::broadcast` channel
+- `DashboardEvent::TopologyUpdate` pushed on every heartbeat from `process_message`
+- `NodeDashInfo` fields: id, name, role, ip, last_seen_secs, health ("green" / "amber" / "red")
+- Nodes panel in `topology.js` renders live node cards; health dot + role badge + IP + age
+- 9 new unit tests: `auth_ok` logic, health colour thresholds, `push_topology` no-op, WS endpoint 400
+- Chaos binary extended: scenario 7 verifies dashboard `/ws` returns 401 for a wrong token (plain TCP, no new deps)
+
+### Phase C — Health timeline (next)
 
 ### Phase D — Model management panel
 
