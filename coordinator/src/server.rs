@@ -1,6 +1,7 @@
 use crate::intent::PendingIntents;
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
+use shared::frame::{FrameVerifyError, SignedFrame, derive_hmac_key};
 use shared::{AdminMessage, HeartbeatPayload, MeshMessage, NodeRecordFull, NodeRole};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -111,7 +112,9 @@ where
     let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
 
     // Auth check: if tokens are configured, the first message must be AuthToken.
-    if !auth_tokens.is_empty() {
+    // On success, derive the per-connection HMAC key from the validated token.
+    // All subsequent frames in both directions are HMAC-signed SignedFrames.
+    let hmac_key: Option<[u8; 32]> = if !auth_tokens.is_empty() {
         let mut len_buf = [0u8; 4];
         if reader.read_exact(&mut len_buf).await.is_err() {
             return Ok(());
@@ -123,7 +126,7 @@ where
         }
         match serde_json::from_slice::<MeshMessage>(&buf) {
             Ok(MeshMessage::AuthToken(token)) if auth_tokens.contains(&token) => {
-                // Valid token — continue to normal message loop.
+                Some(derive_hmac_key(&token))
             }
             Ok(MeshMessage::AuthToken(_)) => {
                 warn!("rejected connection: invalid auth token");
@@ -138,17 +141,33 @@ where
                 return Ok(());
             }
         }
-    }
+    } else {
+        None
+    };
 
     // Tracks the node ID once a Heartbeat has been received, for cleanup on disconnect.
     let mut node_id: Option<String> = None;
 
     // Writer task: drain the outbound channel onto the TCP write half.
+    // When HMAC is active, every outgoing message is wrapped in a SignedFrame.
+    let writer_key = hmac_key;
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let data = match serde_json::to_vec(&msg) {
-                Ok(d) => d,
-                Err(_) => break,
+            let data = if let Some(key) = &writer_key {
+                let payload = match serde_json::to_vec(&msg) {
+                    Ok(d) => d,
+                    Err(_) => break,
+                };
+                let frame = SignedFrame::sign(key, payload);
+                match serde_json::to_vec(&frame) {
+                    Ok(d) => d,
+                    Err(_) => break,
+                }
+            } else {
+                match serde_json::to_vec(&msg) {
+                    Ok(d) => d,
+                    Err(_) => break,
+                }
             };
             let len = (data.len() as u32).to_le_bytes();
             if writer.write_all(&len).await.is_err() {
@@ -170,9 +189,32 @@ where
         if reader.read_exact(&mut buf).await.is_err() {
             break;
         }
-        let msg: MeshMessage = match serde_json::from_slice(&buf) {
-            Ok(m) => m,
-            Err(e) => return Err(ServerError::Json(e)),
+        let msg: MeshMessage = if let Some(key) = &hmac_key {
+            match serde_json::from_slice::<SignedFrame>(&buf) {
+                Ok(frame) => match frame.verify(key) {
+                    Ok(payload) => match serde_json::from_slice(payload) {
+                        Ok(m) => m,
+                        Err(e) => return Err(ServerError::Json(e)),
+                    },
+                    Err(e) => {
+                        if matches!(e, FrameVerifyError::Stale { .. }) {
+                            warn!(
+                                "dropping frame: {} — check that node clock is NTP-synced",
+                                e
+                            );
+                        } else {
+                            warn!("dropping frame: {}", e);
+                        }
+                        return Ok(());
+                    }
+                },
+                Err(e) => return Err(ServerError::Json(e)),
+            }
+        } else {
+            match serde_json::from_slice(&buf) {
+                Ok(m) => m,
+                Err(e) => return Err(ServerError::Json(e)),
+            }
         };
 
         let reply = process_message(
@@ -608,28 +650,44 @@ mod tests {
         assert!(reg.get("node1").is_some());
     }
 
-    /// Open a raw TCP connection, send `auth_frame` then `msg`, read one reply.
+    /// Open a raw TCP connection, send `AuthToken` then `msg`, read one signed reply.
     /// Used to test scenarios that require the connection-level AuthToken first frame.
     async fn authenticated_send(addr: &str, auth_token: &str, msg: &MeshMessage) -> MeshMessage {
+        use shared::frame::{SignedFrame, derive_hmac_key};
         use tokio::io::AsyncWriteExt;
+
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        let write_frame = |_stream: &mut TcpStream, m: &MeshMessage| -> Vec<u8> {
+        let key = derive_hmac_key(auth_token);
+
+        // Send AuthToken (unsigned) as the first frame.
+        let raw_frame = |m: &MeshMessage| -> Vec<u8> {
             let data = serde_json::to_vec(m).unwrap();
             let mut out = (data.len() as u32).to_le_bytes().to_vec();
             out.extend_from_slice(&data);
             out
         };
-        let auth_bytes = write_frame(&mut stream, &MeshMessage::AuthToken(auth_token.into()));
-        stream.write_all(&auth_bytes).await.unwrap();
-        let msg_bytes = write_frame(&mut stream, msg);
-        stream.write_all(&msg_bytes).await.unwrap();
+        stream
+            .write_all(&raw_frame(&MeshMessage::AuthToken(auth_token.into())))
+            .await
+            .unwrap();
 
+        // Send the actual message as a signed frame.
+        let payload = serde_json::to_vec(msg).unwrap();
+        let signed = SignedFrame::sign(&key, payload);
+        let signed_bytes = serde_json::to_vec(&signed).unwrap();
+        let len = (signed_bytes.len() as u32).to_le_bytes();
+        stream.write_all(&len).await.unwrap();
+        stream.write_all(&signed_bytes).await.unwrap();
+
+        // Read the signed reply and verify it.
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf).await.unwrap();
         let msg_len = u32::from_le_bytes(len_buf) as usize;
         let mut buf = vec![0u8; msg_len];
         stream.read_exact(&mut buf).await.unwrap();
-        serde_json::from_slice(&buf).unwrap()
+        let frame: SignedFrame = serde_json::from_slice(&buf).unwrap();
+        let payload = frame.verify(&key).expect("reply signature must be valid");
+        serde_json::from_slice(payload).unwrap()
     }
 
     #[tokio::test]

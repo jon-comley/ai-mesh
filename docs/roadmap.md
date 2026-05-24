@@ -127,7 +127,7 @@
 - **Linux nodes** — `install-node-linux.sh` grants passwordless `sudo tee` + `sudo systemctl` via `/etc/sudoers.d/ai-mesh-agent` so fingerprint pushes work non-interactively
 - **Coordinator state file** ✓ — coordinator writes `~/.config/ai-mesh/coordinator.state` (shell-sourceable KEY=VALUE, `0600`) on startup with `MESH_TLS_FINGERPRINT` and `MESH_AUTH_TOKEN`; `set-fingerprint`, `set-auth-token`, and `restart-coordinator` source this file instead of grepping `/tmp/mesh-coordinator.log`, eliminating the log-rotation race condition
 - **Per-message heartbeat auth token** ✓ — `HeartbeatPayload` carries `auth_token: Option<String>`; agent populates it from `MESH_AUTH_TOKEN`; coordinator rejects heartbeats with a missing or wrong token when auth is configured (defence-in-depth on top of connection-level `AuthToken` first-frame check)
-- Signed wire messages (HMAC) — deferred, optional defence-in-depth
+- Signed wire messages (HMAC) ✓ — implemented as Phase 10.5 (`shared/src/frame.rs`, `SignedFrame` + HKDF key derivation)
 
 ### Phase 10 — Complete ✓
 
@@ -135,11 +135,86 @@
 
 ---
 
-## Phase 11 — Web Dashboard
+## Phase 10.5 — HMAC Message Signing (Defence-in-Depth) ✓ Complete
 
-- Live mesh view
-- Node health monitoring
-- Model deployment UI
+The existing TLS + token auth stops unauthenticated connections. HMAC goes one layer deeper: every wire message is signed with a shared secret so that even a rogue process with a valid token cannot forge arbitrary messages (e.g., a compromised agent cannot send a crafted `ModelLoad` to another node).
+
+### Implementation
+
+- **Signing key** — derived from `MESH_AUTH_TOKEN` via HKDF-SHA256 (label `"ai-mesh-hmac-v1"`); no new credential distribution needed.
+- **Wire envelope** — `SignedFrame { ts: u64, payload: Vec<u8>, sig: Vec<u8> }` wraps every `MeshMessage` after the initial `AuthToken` handshake. The `AuthToken` first-frame is always sent unsigned (it IS the key establishment step).
+- **Timestamp replay protection** — receiver rejects frames whose timestamp differs from now by more than 30 seconds.
+- **All paths covered** — coordinator (reader + writer tasks), agent (reader task + writer loop), CLI (`send_recv`). HMAC is active whenever `MESH_AUTH_TOKEN` is configured; dev mode (no token) sends plain frames.
+- **Protocol downgrade protection** — coordinator rejects plain `MeshMessage` JSON after auth (fails `from_slice::<SignedFrame>`); old agents fail fast with a clear error.
+- **Key rotation** — inherits existing dual-token rotation; HMAC key re-derived from the active token.
+- **Chaos validation** — `just chaos` fires 6 adversarial scenarios against the live coordinator (no-auth, wrong token, unsigned frame after auth, corrupted HMAC, stale timestamp, valid request sanity check); all must pass before `just validate-routing` proceeds.
+
+---
+
+## Phase 11 — Web Dashboard & Health Reporter
+
+A lightweight web interface embedded in the coordinator process (no separate service). Primary goal: **observable mesh** — operators can see the state of the cluster at a glance and drill into errors without SSHing into nodes.
+
+### Core views
+
+- **Topology** — live graph of connected nodes, their model assignments, and heartbeat latency; nodes colour-coded (green / amber / red) by health status.
+- **Health timeline** — time-series strip per node showing CPU %, GPU %, RAM %, heartbeat jitter. Data sourced from the existing heartbeat `HardwareStatus` payloads; stored in a small ring buffer in the coordinator (no extra DB writes for MVP).
+- **Error feed** — structured error log; whenever a node reports an error (inference failure, model load failure, Zigbee disconnect, etc.) an entry is created with: timestamp, node, error kind, severity.
+- **Diagnostic panel** — clicking an error entry triggers the coordinator to request a log snapshot from the affected node (`DiagRequest` mesh message); the node responds with its last N lines of stderr/stdout and the web UI renders them inline. This avoids the operator having to SSH just to read a log.
+
+### Model management UI
+
+- Load / unload models on any ready node via button; mirrors `mesh load` / `mesh unload` CLI.
+- Node capacity bars (VRAM / RAM) update live so the operator can see headroom before choosing a model.
+
+### Tech choices (tentative)
+
+- **HTTP server** — `axum` (already familiar in the Rust ecosystem; lightweight); single binary, no Node.js build step.
+- **Real-time updates** — WebSocket endpoint (`/ws`) that streams `DashboardEvent` JSON; front-end subscribes and patches the DOM.
+- **Front-end** — plain HTML + vanilla JS (no framework) for MVP; keeps build complexity at zero. A Svelte/React layer can be added later if the UI grows.
+- **Auth** — dashboard protected by the same `MESH_AUTH_TOKEN`; pass as a Bearer token in the WebSocket upgrade or a session cookie set on first visit.
+
+### Security panel (HMAC failure metrics)
+
+Surface authentication anomalies in real time — the error feed alone is not enough once the cluster grows beyond two nodes.
+
+**Coordinator-side counters (in-memory, per peer socket address):**
+
+```rust
+struct PeerSecurityStats {
+    invalid_signature: u64,   // HMAC mismatch — bad key or tampering
+    stale_frame: u64,          // timestamp skew > 30 s — likely clock drift
+    downgrade_attempt: u64,    // plain MeshMessage JSON after auth — old binary or probe
+    last_event_ts: u64,        // Unix seconds of most-recent incident
+}
+```
+
+Keyed by `SocketAddr`; evicted when the connection closes. Incremented in the existing `FrameVerifyError` match arms in `coordinator/src/server.rs`.
+
+**New wire messages (future):**
+
+- `AdminMessage::RequestSecurityMetrics` → `SecurityMetrics(Vec<PeerReport>)` — CLI/dashboard polls on demand.
+- `DashboardEvent::SecurityIncident { peer, kind, ts }` — pushed over the WebSocket on every HMAC rejection so the dashboard error feed updates without polling.
+
+**Dashboard security panel:**
+
+- Table: peer IP, node name (if registered), failure kind, count, last seen.
+- Stale-frame rows highlighted amber with a "check NTP" tooltip.
+- Downgrade-attempt rows highlighted red — indicates a node running an old binary or an active probe.
+- Row clears automatically when the peer's connection closes cleanly (expected reconnect) or stays for the session if the connection was forcibly dropped (anomaly).
+
+**CLI:**
+
+```
+mesh security-report        # one-shot snapshot of current failure counts
+```
+
+### Deferred / stretch
+
+- Alert rules (e.g., node offline > 60s → webhook / email).
+- Historical inference latency per model.
+- Live intent log (query, routed-to node, latency, response preview).
+- Mobile-friendly layout.
 
 ---
 

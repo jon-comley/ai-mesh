@@ -109,7 +109,7 @@ This step **must be done locally on the Windows machine** (not over SSH) because
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp 192.168.1.12
+& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp 192.168.1.15
 ```
 
 The provision script does:
@@ -244,7 +244,7 @@ Prevention: the agent must **not spawn child processes** during normal operation
 Check in order:
 1. Is the service RUNNING? `ssh user@host "sc.exe query ai-mesh-agent"`
 2. Is the portproxy current? `just update-portproxy`
-3. Can the Windows machine reach the coordinator? On the Windows machine: `Test-NetConnection 192.168.1.12 -Port 9000`
+3. Can the Windows machine reach the coordinator? On the Windows machine: `Test-NetConnection 192.168.1.15 -Port 9000`
 4. Are there stale registry entries obscuring the new entry? `just reset` clears them.
 5. Check the agent log: `just logs-node beelink1`
 
@@ -285,10 +285,10 @@ just reset          # calls: cargo run -p cli -- reset-registry
 NSSM `AppEnvironmentExtra` requires each variable as a **separate argument**, not semicolon-separated:
 ```powershell
 # CORRECT
-nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.12" "AGENT_ROLE=compute"
+nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.15" "AGENT_ROLE=compute"
 
 # WRONG — produces a single malformed variable
-nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.12;AGENT_ROLE=compute"
+nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.15;AGENT_ROLE=compute"
 ```
 
 Verify what NSSM has stored:
@@ -300,11 +300,11 @@ nssm get ai-mesh-agent AppEnvironmentExtra
 
 When setting env vars inline in cmd.exe, it is easy to include a trailing space:
 ```cmd
-REM WRONG — COORDINATOR_IP = "192.168.1.12 " (note trailing space)
-set COORDINATOR_IP=192.168.1.12 && agent.exe
+REM WRONG — COORDINATOR_IP = "192.168.1.15 " (note trailing space)
+set COORDINATOR_IP=192.168.1.15 && agent.exe
 
 REM RIGHT — quotes prevent trailing space
-set "COORDINATOR_IP=192.168.1.12" && agent.exe
+set "COORDINATOR_IP=192.168.1.15" && agent.exe
 ```
 
 ### AMD GPU not detected / llama-server crashes during inference

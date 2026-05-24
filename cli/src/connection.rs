@@ -2,6 +2,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error, SignatureScheme};
+use shared::frame::{derive_hmac_key, SignedFrame};
 use shared::tls::cert_fingerprint;
 use shared::MeshMessage;
 use std::sync::Arc;
@@ -162,19 +163,58 @@ pub async fn connect(coordinator: &str) -> std::io::Result<CoordinatorStream> {
 }
 
 /// Send a single framed message and receive a single framed reply.
+///
+/// When `MESH_AUTH_TOKEN` is set the `AuthToken` first-frame is sent unsigned,
+/// then the request and response are HMAC-signed `SignedFrame`s.
 pub async fn send_recv(
     stream: &mut CoordinatorStream,
     msg: &MeshMessage,
 ) -> std::io::Result<MeshMessage> {
-    // Send auth token first if configured.
-    if let Ok(token) = std::env::var("MESH_AUTH_TOKEN") {
-        let token = token.trim().to_string();
-        if !token.is_empty() {
-            write_frame(stream, &MeshMessage::AuthToken(token)).await?;
-        }
+    let token = std::env::var("MESH_AUTH_TOKEN").unwrap_or_default();
+    let token = token.trim().to_string();
+    if !token.is_empty() {
+        write_frame(stream, &MeshMessage::AuthToken(token.clone())).await?;
+        let key = derive_hmac_key(&token);
+        write_signed_frame(stream, msg, &key).await?;
+        read_signed_frame(stream, &key).await
+    } else {
+        write_frame(stream, msg).await?;
+        read_frame(stream).await
     }
-    write_frame(stream, msg).await?;
-    read_frame(stream).await
+}
+
+pub async fn write_signed_frame(
+    stream: &mut CoordinatorStream,
+    msg: &MeshMessage,
+    key: &[u8; 32],
+) -> std::io::Result<()> {
+    let payload = serde_json::to_vec(msg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let frame = SignedFrame::sign(key, payload);
+    let data = serde_json::to_vec(&frame)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let len = (data.len() as u32).to_le_bytes();
+    stream.write_all(&len).await?;
+    stream.write_all(&data).await?;
+    Ok(())
+}
+
+pub async fn read_signed_frame(
+    stream: &mut CoordinatorStream,
+    key: &[u8; 32],
+) -> std::io::Result<MeshMessage> {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let msg_len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; msg_len];
+    stream.read_exact(&mut buf).await?;
+    let frame: SignedFrame = serde_json::from_slice(&buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let payload = frame
+        .verify(key)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))?;
+    serde_json::from_slice(payload)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 pub async fn write_frame(stream: &mut CoordinatorStream, msg: &MeshMessage) -> std::io::Result<()> {

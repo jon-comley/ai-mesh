@@ -61,9 +61,12 @@ Send `AdminMessage::ResetRegistry` to the coordinator. Clears all registered nod
 ## 3. Communication Protocol
 
 The CLI communicates with the coordinator using:
-- TCP
-- Length-prefixed JSON messages
-- MeshMessage protocol from the shared crate
+- **TLS** — coordinator cert verified by SHA-256 fingerprint (`MESH_TLS_FINGERPRINT`); `MESH_INSECURE=1` for dev bypass
+- **Auth token** — `AuthToken(token)` sent as the first (unsigned) frame when `MESH_AUTH_TOKEN` is set
+- **HMAC-signed frames** — all subsequent messages wrapped in `SignedFrame` (HMAC-SHA256, HKDF key from auth token)
+- 4-byte little-endian length prefix + JSON body
+
+All connection setup is handled by `cli/src/connection.rs`; individual commands call `send_recv(stream, msg)`.
 
 ---
 
@@ -75,12 +78,10 @@ The CLI communicates with the coordinator using:
 
 ---
 
-## 5. Next Steps
+## 5. Additional Binaries
 
-- `mesh infer <model-name> <prompt>` — send `RequestModelInference` and display result
-- `mesh models` — list models currently loaded across all nodes
-- `mesh deploy <model>` — trigger scheduler-selected placement
-- Update management
+### chaos (security validation)
+`cli/src/bin/chaos.rs` — a standalone binary that fires 6 adversarial scenarios at the live coordinator to verify the HMAC security stack. Run via `just chaos`. Results are exit-code 0 on full pass, 1 on any failure. Automatically invoked by `just validate-routing` as a prerequisite gate.
 
 ---
 

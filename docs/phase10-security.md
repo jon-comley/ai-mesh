@@ -157,7 +157,13 @@ The HMAC key is the same `MESH_AUTH_TOKEN` value used for Heartbeat validation.
 2. On first `just start-cluster` or `just restart-coordinator`: coordinator auto-generates `MESH_AUTH_TOKEN` if unset, writes to `coordinator.state`, and pushes fingerprint + token to all compute nodes via `set-fingerprint` — no manual steps
 3. `just deploy-node <name>` for new nodes: credentials pushed automatically at end of provisioning if coordinator is running
 4. `just rotate-token` for zero-downtime key rotation at any time
-5. Step 4 (HMAC) — deferred; optional defence-in-depth, backwards compatible
+5. Step 4 (HMAC) — **implemented as Phase 10.5**; see `shared/src/frame.rs`. The actual implementation differs from the draft above: `SignedFrame { ts, payload, sig }` (no optional field on `MeshMessage`), HKDF-SHA256 key derivation from `MESH_AUTH_TOKEN`, ±30s timestamp window. All paths (coordinator, agent, CLI) are covered. `just chaos` validates the implementation against the live coordinator.
+
+### Operational notes
+
+**Clock skew** — the ±30s timestamp window means nodes whose clocks differ by more than 30 seconds will be silently disconnected with a "stale frame" warning. If you see this in coordinator logs, check NTP on the offending node: `sudo systemctl restart systemd-timesyncd` (Linux) or `w32tm /resync` (Windows). The coordinator log message for stale frames now includes "check that node clock is NTP-synced".
+
+**CLI HMAC** — the CLI signs messages with the same `MESH_AUTH_TOKEN` as agents. When `MESH_AUTH_TOKEN` is unset the CLI sends plain frames and expects a plain coordinator (dev mode). There is no "debug CLI against a secured coordinator without a token" path — this is intentional; use `MESH_INSECURE=1` only for TLS bypass (not auth bypass).
 
 ---
 
@@ -172,7 +178,7 @@ The HMAC key is the same `MESH_AUTH_TOKEN` value used for Heartbeat validation.
 - Agent with wrong TLS fingerprint fails to connect
 - Agent with correct fingerprint but wrong auth token is disconnected after first Heartbeat
 - Legitimate agent (correct fingerprint + correct token) connects and registers successfully
-- Existing 182 tests continue to pass (tests use in-memory registries and do not go through TLS)
+- Existing tests continue to pass (tests use in-memory registries and do not go through TLS)
 
 ---
 

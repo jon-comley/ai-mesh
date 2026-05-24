@@ -46,6 +46,8 @@ Implements:
 - Message sending through an async MPSC channel
 
 ### main.rs (runtime)
+- **TLS connection** — connects via `tokio-rustls`; verifies coordinator cert against `MESH_TLS_FINGERPRINT` (SHA-256 TOFU). Falls back to permissive mode when `MESH_INSECURE=1` is set (logged loudly).
+- **Auth + HMAC** — sends `AuthToken(token)` as the first (unsigned) frame when `MESH_AUTH_TOKEN` is set, then wraps all subsequent outgoing messages in `SignedFrame` (HMAC-SHA256, HKDF-derived key). Verifies and unwraps `SignedFrame` on all inbound messages; drops frames with bad signatures or stale timestamps.
 - **TCP keepalive** — after connecting, `socket2::SockRef` sets `SO_KEEPALIVE` with a 10 s idle probe and 5 s retry interval. Prevents NIC power management or network idle timeouts from silently dropping long-running inference connections.
 - **Process-wide inference semaphore** — `static INFER_SEM: OnceLock<Semaphore>` with capacity 1. A second inference request queues here rather than launching a concurrent llama-server call that would double GPU memory usage and risk an OOM freeze.
 - **Cancellation on disconnect** — inference is wrapped in `tokio::select! { _ = tx2.closed() => cancel, res = llama::generate() => ... }`. If the TCP connection drops mid-inference, the HTTP request to llama-server is cancelled immediately, freeing the GPU without waiting for the 120 s timeout.
@@ -63,11 +65,8 @@ Implements:
 
 ## 3. Future Extensions
 
-- Update system
-- Model loading
-- Local inference
-- GPU benchmarking
-- Secure message signing
+- Update system (OTA manifest distribution)
+- GPU benchmarking (inference tokens/sec reporting)
 
 ---
 
@@ -113,13 +112,16 @@ As of this stage of development, the agent crate includes fully implemented and 
 
 ## 5. Message Flow
 
-The agent currently emits the following sequence when started:
+The agent emits the following sequence when started:
 
-1. `MeshMessage::Heartbeat(NodeIdentity)`
-2. `MeshMessage::HardwareReport(HardwareSpec)`
-3. `MeshMessage::Capabilities(NodeCapabilities)`
-4. Enters heartbeat loop:
-   - Periodically sends `MeshMessage::Heartbeat(NodeIdentity)`
+1. (TLS handshake — cert fingerprint verified)
+2. `MeshMessage::AuthToken(token)` — unsigned, sent as the first plain frame when `MESH_AUTH_TOKEN` is set
+3. `SignedFrame(MeshMessage::Heartbeat(HeartbeatPayload))` — includes `auth_token` field for per-message defence-in-depth
+4. `SignedFrame(MeshMessage::HardwareReport(HardwareSpec))`
+5. `SignedFrame(MeshMessage::Capabilities(NodeCapabilities))`
+6. Enters heartbeat loop — periodic `SignedFrame(MeshMessage::Heartbeat(...))`
+
+When `MESH_AUTH_TOKEN` is unset (dev mode), plain `MeshMessage` JSON is sent without a `SignedFrame` wrapper.
 
 This flow is validated by async unit tests.
 

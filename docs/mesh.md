@@ -38,28 +38,31 @@ The node will appear in the node table with role `Compute`.
 
 The coordinator is the central hub of the mesh. It:
 
-- Accepts TCP connections from agents and CLI clients
-- Maintains an in-memory registry of nodes
+- Accepts **TLS-encrypted** TCP connections (self-signed cert, SHA-256 fingerprint TOFU)
+- Validates `AuthToken` first-frame and HMAC-signed `SignedFrame` messages
+- Maintains a **SQLite-backed** registry of nodes (survives restarts)
 - Tracks heartbeats and last-seen timestamps
-- Stores hardware and capability reports
-- Responds to CLI queries
+- Routes model load, inference, lighting, and intent commands to the correct agent
+- Writes `~/.config/ai-mesh/coordinator.state` on startup
 
-The coordinator binds to `0.0.0.0:9000` to accept connections from all
-network interfaces, including remote compute nodes.
+The coordinator binds to `0.0.0.0:9000`. On WSL2, a Windows portproxy forwards the controller machine's LAN IP to WSL2.
 
 ### Message Handling
 
 | Message | Action |
 |---------|--------|
-| `Heartbeat` | Updates last-seen timestamp; registers agent tx in connections map |
+| `Heartbeat` | Updates last-seen; validates per-heartbeat auth token; registers agent tx |
 | `HardwareReport` | Stores hardware specification |
 | `Capabilities` | Stores capability information |
 | `RequestNodes` | Returns `NodeList(Vec<NodeRecordLite>)` |
 | `RequestNodeInfo(id)` | Returns `NodeInfo(NodeRecordFull)` including model allocations |
 | `ModelLoad` | Forwards to target agent via connections map |
 | `ModelStatus` | Updates model allocation state in registry |
-| `ModelUnload` | Logged; forwarding pending |
-| `RequestModelInference` | Logged; scheduler dispatch pending |
+| `ModelUnload` | Forwards to target agent; agent kills llama-server |
+| `RequestModelInference` | Selects ready node via scheduler; forwards; awaits result (up to 300 s) |
+| `LightCommand` | Forwards to lighting node's tx channel |
+| `LightDeviceList` | Persists device/group names to SQLite |
+| `IntentRequest` | LLM routing + tool-call dispatch (lighting, inference) |
 | `Admin(ResetRegistry)` | Clears all nodes from registry |
 
 ### Concurrency Model

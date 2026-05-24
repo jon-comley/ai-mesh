@@ -6,6 +6,7 @@ use agent::tls::make_connector;
 use rustls::crypto::ring;
 use rustls::pki_types::ServerName;
 use shared::MeshMessage;
+use shared::frame::{FrameVerifyError, SignedFrame, derive_hmac_key};
 use shared::hardware::NodeRole;
 use socket2::{SockRef, TcpKeepalive};
 use std::sync::Arc;
@@ -88,19 +89,25 @@ async fn main() {
 
         let (mut reader, mut writer) = tokio::io::split(tls_stream);
 
-        // Send AuthToken as the first message if configured.
-        if let Ok(token) = std::env::var("MESH_AUTH_TOKEN") {
+        // Send AuthToken (unsigned) as the first frame if configured.
+        // Derive the per-connection HMAC key from the same token for all subsequent frames.
+        let hmac_key: Option<[u8; 32]> = if let Ok(token) = std::env::var("MESH_AUTH_TOKEN") {
             let token = token.trim().to_string();
             if !token.is_empty() {
-                let data = serde_json::to_vec(&MeshMessage::AuthToken(token)).unwrap();
+                let data = serde_json::to_vec(&MeshMessage::AuthToken(token.clone())).unwrap();
                 let len = (data.len() as u32).to_le_bytes();
                 if writer.write_all(&len).await.is_err() || writer.write_all(&data).await.is_err() {
                     warn!("Failed to send AuthToken. Retrying in 5s...");
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     continue;
                 }
+                Some(derive_hmac_key(&token))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
         let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
 
         // Heartbeat loop.
@@ -130,6 +137,7 @@ async fn main() {
         // Reader task — routes inbound coordinator commands to capabilities.
         let tx_in = tx.clone();
         let caps_reader = caps.clone();
+        let reader_key = hmac_key;
         tokio::spawn(async move {
             loop {
                 let mut len_buf = [0u8; 4];
@@ -141,9 +149,29 @@ async fn main() {
                 if reader.read_exact(&mut buf).await.is_err() {
                     break;
                 }
-                let msg: MeshMessage = match serde_json::from_slice(&buf) {
-                    Ok(m) => m,
-                    Err(_) => continue,
+                let msg: MeshMessage = if let Some(key) = &reader_key {
+                    match serde_json::from_slice::<SignedFrame>(&buf) {
+                        Ok(frame) => match frame.verify(key) {
+                            Ok(payload) => match serde_json::from_slice(payload) {
+                                Ok(m) => m,
+                                Err(_) => continue,
+                            },
+                            Err(e) => {
+                                if matches!(e, FrameVerifyError::Stale { .. }) {
+                                    warn!("dropping inbound frame: {} — check NTP sync", e);
+                                } else {
+                                    warn!("dropping inbound frame: {}", e);
+                                }
+                                break;
+                            }
+                        },
+                        Err(_) => continue,
+                    }
+                } else {
+                    match serde_json::from_slice(&buf) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    }
                 };
 
                 dispatch(msg, &caps_reader, tx_in.clone()).await;
@@ -151,9 +179,16 @@ async fn main() {
         });
 
         // Writer loop — drains the outbound mpsc channel onto the TCP stream.
+        // When HMAC is active, every outgoing message is wrapped in a SignedFrame.
         loop {
             if let Some(msg) = rx.recv().await {
-                let data = serde_json::to_vec(&msg).unwrap();
+                let data = if let Some(key) = &hmac_key {
+                    let payload = serde_json::to_vec(&msg).unwrap();
+                    let frame = SignedFrame::sign(key, payload);
+                    serde_json::to_vec(&frame).unwrap()
+                } else {
+                    serde_json::to_vec(&msg).unwrap()
+                };
                 let len = (data.len() as u32).to_le_bytes();
 
                 if let Err(e) = writer.write_all(&len).await {

@@ -50,7 +50,8 @@ just start-cluster    # bring the full cluster up
 | `just dev` | **Start here.** Kills stale local processes, starts coordinator + controller, verifies portproxy, bounces all remote node services, drops into live `mesh watch`. Ctrl+C stops local services only — remote nodes keep running |
 | `just run-coordinator` | Start coordinator on `0.0.0.0:9000` (foreground) |
 | `just run-controller` | Start controller agent (foreground) |
-| `just reset` | Send `AdminMessage::ResetRegistry` — spins up a temporary coordinator, clears all nodes, then shuts it down |
+| `just reset` | Clear all nodes from the **running** coordinator (sources `coordinator.state` for auth credentials; coordinator must already be running) |
+| `just chaos` | Fire 6 adversarial HMAC security scenarios at the live coordinator; exits 1 on any failure. Run automatically as a prerequisite of `just validate-routing` |
 
 ---
 
