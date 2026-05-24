@@ -1,7 +1,13 @@
+mod api;
 pub mod state;
 mod ws;
 
-use axum::{Router, http::header, response::Html, routing::get};
+use axum::{
+    Router,
+    http::header,
+    response::Html,
+    routing::{get, post},
+};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -73,6 +79,10 @@ pub fn router(dashboard: Arc<DashboardState>) -> Router {
                 )
             }),
         )
+        .route(
+            "/api/nodes/{id}/heartbeat-interval",
+            post(api::set_heartbeat_interval),
+        )
         .with_state(dashboard)
 }
 
@@ -95,7 +105,10 @@ mod tests {
     use tower::ServiceExt;
 
     async fn get(uri: &str) -> (StatusCode, String) {
-        let dashboard = DashboardState::new(Arc::new(vec![]));
+        let dashboard = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
         let resp = router(dashboard)
             .oneshot(
                 Request::builder()

@@ -101,7 +101,7 @@ impl Coordinator {
             crate::state::write(&fingerprint, &tokens, next_token.as_deref());
             let tokens = Arc::new(tokens);
             server.auth_tokens = tokens.clone();
-            let dashboard = DashboardState::new(tokens);
+            let dashboard = DashboardState::new(tokens, server.connections.clone());
             server.dashboard = Some(dashboard.clone());
             let handle = tokio::spawn(async move {
                 let _ = server.run().await;
@@ -125,7 +125,7 @@ impl Coordinator {
         }
         let tokens = Arc::new(tokens);
         server.auth_tokens = tokens.clone();
-        let dashboard = DashboardState::new(tokens);
+        let dashboard = DashboardState::new(tokens, server.connections.clone());
         server.dashboard = Some(dashboard.clone());
 
         let handle = tokio::spawn(async move {

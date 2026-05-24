@@ -178,8 +178,8 @@ Full design spec: `plans/phase11-dashboard.md`
 - **C1 ✓** — Wire protocol: `cpu_usage_pct`, `ram_used_gb`, `ram_total_gb` added to `HeartbeatPayload`; `SetHeartbeatInterval { secs }` added to `MeshMessage`; backward-compat shims subsequently removed in C2
 - **C2 ✓** — Agent `sysinfo` metrics: `refresh_cpu_usage()` + `refresh_memory()` on each heartbeat; `Arc<AtomicU64>` interval updated live when coordinator pushes `SetHeartbeatInterval`; backward compat removed (`Option<f32>` → `f32`; pre-C2 agents now fail fast); 278 tests
 - **C3 ✓** — Coordinator `HealthStore` (`HashMap<node_id, VecDeque<HealthSample>>`, capped at 60); coordinator-stamped `ts_ms`; `push_health()` broadcasts `DashboardEvent::HealthUpdate` on every heartbeat; 288 tests
-- **C4** — `POST /api/nodes/{id}/heartbeat-interval` HTTP endpoint; coordinator pushes `SetHeartbeatInterval` to the agent over its open TCP connection
-- **C5** — `health.js`: SVG sparklines for CPU % and RAM %; interval control button per node card
+- **C4 ✓** — `POST /api/nodes/{id}/heartbeat-interval` HTTP endpoint; `NodeConnections` shared between TCP server and HTTP layer via `DashboardState`; `send_to_node()` uses `try_send` with `warn!` on full channel; 9 new unit tests; 297 tests passing
+- **C5** — `health.js`: SVG sparklines for CPU % and RAM % per node card; interval control button calls `POST /api/nodes/{id}/heartbeat-interval`; push current `HealthStore` snapshot to new WS clients on connect (so sparklines populate immediately, not after the next heartbeat)
 - **C6** — `mesh set-heartbeat <node> <secs>` CLI command + `just set-heartbeat` recipe
 
 ### Phase D — Model management panel
