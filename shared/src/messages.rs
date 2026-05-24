@@ -267,9 +267,9 @@ mod tests {
         let payload = HeartbeatPayload {
             identity: identity.clone(),
             auth_token: String::new(),
-            cpu_usage_pct: None,
-            ram_used_gb: None,
-            ram_total_gb: None,
+            cpu_usage_pct: 0.0,
+            ram_used_gb: 0.0,
+            ram_total_gb: 0.0,
         };
 
         let msg = MeshMessage::Heartbeat(payload.clone());
@@ -289,9 +289,9 @@ mod tests {
                 role: NodeRole::Compute,
             },
             auth_token: "secret-token".into(),
-            cpu_usage_pct: None,
-            ram_used_gb: None,
-            ram_total_gb: None,
+            cpu_usage_pct: 0.0,
+            ram_used_gb: 0.0,
+            ram_total_gb: 0.0,
         };
         let msg = MeshMessage::Heartbeat(payload.clone());
         let json = serde_json::to_string(&msg).unwrap();
@@ -309,9 +309,9 @@ mod tests {
                 role: NodeRole::Compute,
             },
             auth_token: String::new(),
-            cpu_usage_pct: None,
-            ram_used_gb: None,
-            ram_total_gb: None,
+            cpu_usage_pct: 0.0,
+            ram_used_gb: 0.0,
+            ram_total_gb: 0.0,
         };
         let json = serde_json::to_string(&MeshMessage::Heartbeat(payload)).unwrap();
         assert!(

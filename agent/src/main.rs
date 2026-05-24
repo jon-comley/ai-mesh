@@ -116,6 +116,7 @@ async fn main() {
             heartbeat_interval_secs: 5,
         };
         let agent = Agent::new_with_config(config, tx.clone());
+        let interval_handle = agent.interval_handle();
         tokio::spawn(async move {
             if let Err(e) = agent.run().await {
                 warn!("agent run loop exited: {}", e);
@@ -135,10 +136,13 @@ async fn main() {
         }
 
         // Reader task — routes inbound coordinator commands to capabilities.
+        // SetHeartbeatInterval is handled here; everything else goes to dispatch().
         let tx_in = tx.clone();
         let caps_reader = caps.clone();
         let reader_key = hmac_key;
+        let reader_interval = interval_handle.clone();
         tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
             loop {
                 let mut len_buf = [0u8; 4];
                 if reader.read_exact(&mut len_buf).await.is_err() {
@@ -174,7 +178,13 @@ async fn main() {
                     }
                 };
 
-                dispatch(msg, &caps_reader, tx_in.clone()).await;
+                match msg {
+                    MeshMessage::SetHeartbeatInterval { secs } => {
+                        info!(secs, "heartbeat interval updated");
+                        reader_interval.store(secs, Ordering::Relaxed);
+                    }
+                    other => dispatch(other, &caps_reader, tx_in.clone()).await,
+                }
             }
         });
 

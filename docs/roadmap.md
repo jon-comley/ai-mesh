@@ -175,8 +175,8 @@ Full design spec: `plans/phase11-dashboard.md`
 
 ### Phase C — Health timeline (In Progress)
 
-- **C1 ✓** — Wire protocol: `cpu_usage_pct`, `ram_used_gb`, `ram_total_gb` (`Option<f32>`, backward-compatible) added to `HeartbeatPayload`; `SetHeartbeatInterval { secs }` added to `MeshMessage`; 5 new tests
-- **C2** — Agent `sysinfo` metrics collection + handle `SetHeartbeatInterval` to change loop interval at runtime
+- **C1 ✓** — Wire protocol: `cpu_usage_pct`, `ram_used_gb`, `ram_total_gb` added to `HeartbeatPayload`; `SetHeartbeatInterval { secs }` added to `MeshMessage`; backward-compat shims subsequently removed in C2
+- **C2 ✓** — Agent `sysinfo` metrics: `refresh_cpu_usage()` + `refresh_memory()` on each heartbeat; `Arc<AtomicU64>` interval updated live when coordinator pushes `SetHeartbeatInterval`; backward compat removed (`Option<f32>` → `f32`; pre-C2 agents now fail fast); 278 tests
 - **C3** — Coordinator `HealthStore` (`HashMap<node_id, VecDeque<HealthSample>>`, capped at 60); push `DashboardEvent::HealthUpdate` on every heartbeat
 - **C4** — `POST /api/nodes/{id}/heartbeat-interval` HTTP endpoint; coordinator pushes `SetHeartbeatInterval` to the agent over its open TCP connection
 - **C5** — `health.js`: SVG sparklines for CPU % and RAM %; interval control button per node card
