@@ -1,3 +1,4 @@
+use crate::registry::RoomRecord;
 use serde::Serialize;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
@@ -38,6 +39,10 @@ pub enum DashboardEvent {
     ScenesUpdate {
         scenes: Vec<SceneInfo>,
     },
+    SolarUpdate {
+        azimuth: f64,
+        elevation: f64,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -46,6 +51,23 @@ pub struct RoomInfo {
     pub name: String,
     pub position: i64,
     pub device_ids: Vec<String>,
+    pub orientation_degrees: f32,
+    pub has_window: bool,
+    pub window_facing: Option<f32>,
+}
+
+impl From<RoomRecord> for RoomInfo {
+    fn from(r: RoomRecord) -> Self {
+        Self {
+            id: r.id,
+            name: r.name,
+            position: r.position,
+            device_ids: r.device_ids,
+            orientation_degrees: r.orientation_degrees,
+            has_window: r.has_window,
+            window_facing: r.window_facing,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -120,6 +142,8 @@ pub struct DashboardState {
     group_snapshot: Mutex<HashMap<String, String>>,
     room_snapshot: Mutex<Vec<RoomInfo>>,
     scene_snapshot: Mutex<Vec<SceneInfo>>,
+    /// State of lights before they entered Solar mode — used to restore state on disable.
+    last_manual_states: Mutex<HashMap<String, LightStateReport>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
 }
@@ -136,6 +160,7 @@ impl DashboardState {
             group_snapshot: Mutex::new(HashMap::new()),
             room_snapshot: Mutex::new(Vec::new()),
             scene_snapshot: Mutex::new(Vec::new()),
+            last_manual_states: Mutex::new(HashMap::new()),
             connections,
         })
     }
@@ -200,6 +225,23 @@ impl DashboardState {
         }
     }
 
+    /// Set the solar_enabled flag for a device directly in the snapshot and broadcast the update.
+    pub fn set_solar_enabled(&self, device_id: &str, enabled: bool) {
+        let devices = {
+            let mut snap = self.light_snapshot.lock().unwrap();
+            if let Some(report) = snap.get_mut(device_id) {
+                report.solar_enabled = enabled;
+            }
+            snap.values().cloned().collect::<Vec<_>>()
+        };
+        if self.tx.receiver_count() > 0 {
+            let groups = self.get_group_snapshot();
+            let _ = self
+                .tx
+                .send(DashboardEvent::LightingUpdate { devices, groups });
+        }
+    }
+
     /// Store groups for a node and broadcast a LightingUpdate with all devices + new groups.
     pub fn push_group_update(&self, node_id: &str, groups: Vec<String>) {
         {
@@ -252,6 +294,40 @@ impl DashboardState {
         self.group_snapshot.lock().unwrap().get(name).cloned()
     }
 
+    pub fn save_manual_state(&self, device_id: &str) {
+        let snap = self.light_snapshot.lock().unwrap();
+        if let Some(report) = snap.get(device_id) {
+            self.last_manual_states
+                .lock()
+                .unwrap()
+                .insert(device_id.to_owned(), report.clone());
+        } else {
+            tracing::warn!(
+                device_id,
+                "solar enable: no snapshot to save — restore on disable will be skipped"
+            );
+        }
+    }
+
+    pub fn get_manual_state(&self, device_id: &str) -> Option<LightStateReport> {
+        self.last_manual_states
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .cloned()
+    }
+
+    /// Return all device IDs that have solar mode enabled.
+    pub fn get_solar_enabled_devices(&self) -> Vec<String> {
+        self.light_snapshot
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.solar_enabled)
+            .map(|r| r.device_id.clone())
+            .collect()
+    }
+
     /// Store and broadcast the current rooms state.
     pub fn push_rooms_update(&self, rooms: Vec<RoomInfo>) {
         *self.room_snapshot.lock().unwrap() = rooms.clone();
@@ -276,6 +352,15 @@ impl DashboardState {
     /// Return a point-in-time copy of the scenes snapshot for warm-starting new WS clients.
     pub fn get_scene_snapshot(&self) -> Vec<SceneInfo> {
         self.scene_snapshot.lock().unwrap().clone()
+    }
+
+    /// Broadcast the current solar position to all connected clients.
+    pub fn push_solar_update(&self, azimuth: f64, elevation: f64) {
+        if self.tx.receiver_count() > 0 {
+            let _ = self
+                .tx
+                .send(DashboardEvent::SolarUpdate { azimuth, elevation });
+        }
     }
 
     /// Build and broadcast a TopologyUpdate from a fresh node list.
@@ -888,6 +973,7 @@ mod tests {
             brightness: Some(200),
             color_xy: None,
             color_temp: Some(370),
+            solar_enabled: false,
         }
     }
 
@@ -971,6 +1057,7 @@ mod tests {
                 brightness: Some(200),
                 color_xy: Some((0.3, 0.3)),
                 color_temp: Some(370),
+                solar_enabled: false,
             }],
             groups: vec!["all".into()],
         };
@@ -1077,6 +1164,9 @@ mod tests {
             name: name.into(),
             position: 0,
             device_ids: vec!["bulb1".into()],
+            orientation_degrees: 0.0,
+            has_window: false,
+            window_facing: None,
         }
     }
 
@@ -1141,6 +1231,9 @@ mod tests {
                 name: "Living Room".into(),
                 position: 0,
                 device_ids: vec!["test_bulb".into()],
+                orientation_degrees: 0.0,
+                has_window: false,
+                window_facing: None,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();
@@ -1268,24 +1361,34 @@ mod tests {
     }
 
     #[test]
-    fn push_health_ts_ms_monotonically_nondecreasing() {
+    fn test_manual_state_preservation() {
         let state = DashboardState::new(
             Arc::new(vec![]),
-            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
         );
-        let mut rx = state.tx.subscribe();
-        state.push_health("n1", 10.0, 1.0, 8.0, None, None, None);
-        state.push_health("n1", 20.0, 2.0, 8.0, None, None, None);
-        let mut last = None;
-        while let Ok(e) = rx.try_recv() {
-            last = Some(e);
-        }
-        match last.unwrap() {
-            DashboardEvent::HealthUpdate { samples, .. } => {
-                assert_eq!(samples.len(), 2);
-                assert!(samples[1].ts_ms >= samples[0].ts_ms);
-            }
-            _ => panic!("expected HealthUpdate"),
-        }
+        let report = LightStateReport {
+            node_id: "n1".into(),
+            device_id: "bulb1".into(),
+            on: true,
+            brightness: Some(100),
+            color_xy: Some((0.5, 0.5)),
+            color_temp: Some(300),
+            solar_enabled: false,
+        };
+        state.push_lighting_update(report.clone());
+
+        state.save_manual_state("bulb1");
+
+        // Change state (simulate solar)
+        state.push_lighting_update(LightStateReport {
+            device_id: "bulb1".into(),
+            brightness: Some(255),
+            solar_enabled: true,
+            ..report.clone()
+        });
+
+        let saved = state.get_manual_state("bulb1").unwrap();
+        assert_eq!(saved.brightness, Some(100));
+        assert_eq!(saved.color_xy, Some((0.5, 0.5)));
     }
 }

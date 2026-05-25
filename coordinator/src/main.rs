@@ -13,6 +13,10 @@ async fn main() {
 
     let _mdns = coordinator::mdns::advertise(9000);
 
+    let spatial =
+        coordinator::spatial::SpatialEngine::new(dashboard.clone(), coord.registry.clone());
+    tokio::spawn(spatial.run());
+
     let http_port: u16 = std::env::var("MESH_HTTP_PORT")
         .ok()
         .and_then(|v| v.parse().ok())

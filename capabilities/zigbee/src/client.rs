@@ -254,6 +254,7 @@ fn parse_state_report(topic: &str, payload: &[u8], node_id: &str) -> Option<Ligh
         brightness,
         color_xy,
         color_temp,
+        solar_enabled: false,
     })
 }
 
