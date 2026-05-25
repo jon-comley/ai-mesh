@@ -1221,7 +1221,7 @@ start-cluster: update-portproxy
     done
 
     echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
-    AGENT_ROLE=controller cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
+    AGENT_ROLE=controller COORDINATOR_IP=127.0.0.1 cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
 
     echo ">>> Starting remote compute agents..."
     just start-agents
@@ -1339,7 +1339,7 @@ restart-coordinator: update-portproxy
     done
 
     echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
-    AGENT_ROLE=controller cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
+    AGENT_ROLE=controller COORDINATOR_IP=127.0.0.1 cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
 
     echo ">>> Reloading hardware-selected models on compute nodes..."
     COMPUTE_NODES=()

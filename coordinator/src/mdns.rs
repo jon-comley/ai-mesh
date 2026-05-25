@@ -112,6 +112,8 @@ mod tests {
     fn test_advertise_does_not_panic() {
         // Smoke test: must return without panicking on any system.
         // Returns Some on systems where mDNS works, None gracefully otherwise.
-        let _daemon = advertise(19996);
+        // Drop the daemon immediately — avoids leaving a stale mDNS record that
+        // confuses the local controller agent's discovery.
+        drop(advertise(19996));
     }
 }
