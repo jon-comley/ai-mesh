@@ -17,7 +17,11 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(9001);
-    tokio::spawn(coordinator::http::start(http_port, dashboard));
+    tokio::spawn(coordinator::http::start(
+        http_port,
+        dashboard,
+        coord.registry.clone(),
+    ));
 
     println!("Coordinator is running. Press Ctrl+C to stop.");
 
