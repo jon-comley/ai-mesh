@@ -96,6 +96,8 @@ pub fn router(dashboard: Arc<DashboardState>) -> Router {
             "/api/nodes/{id}/heartbeat-interval",
             post(api::set_heartbeat_interval),
         )
+        .route("/api/models/load", post(api::load_model))
+        .route("/api/models/unload", post(api::unload_model))
         .with_state(dashboard)
 }
 
