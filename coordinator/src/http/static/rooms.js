@@ -8,6 +8,59 @@ let scenesData = [];
 let dragSrc = null;     // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;  // room reorder drag: room id being dragged
 
+// ── Bulb-identify pulse (triggered on drag-grab) ─────────────────────────────
+// Pulses the grabbed bulb full→dim so you know which physical unit you're holding.
+// Restores original state on release.
+
+let activePulse = null; // { deviceId, timerId, preGrabState }
+
+function startPulse(deviceId) {
+  if (activePulse) stopPulse(false); // cancel previous without restoring
+  const preGrabState = devicesMap.get(deviceId) ?? null;
+  if (!preGrabState) return; // device not yet known — can't pulse safely
+
+  sendDeviceCommand(deviceId, { action: 'on' });
+  // Candle temperature (500 mireds ≈ 2000 K) on any colour-capable bulb
+  if (preGrabState.color_xy != null || preGrabState.color_temp != null) {
+    sendDeviceCommand(deviceId, { action: 'color_temp', value: 500 });
+  }
+  sendDeviceCommand(deviceId, { action: 'brightness', value: 254, transition_secs: 0.6 });
+
+  let step = 0;
+  const timerId = setInterval(() => {
+    step++;
+    const phase = step * Math.PI / 2;
+    const bri = Math.round(80 + 174 * (0.5 + 0.5 * Math.cos(phase)));
+    sendDeviceCommand(deviceId, { action: 'brightness', value: bri, transition_secs: 0.6 });
+  }, 700);
+
+  activePulse = { deviceId, timerId, preGrabState };
+}
+
+function stopPulse(restore = true) {
+  if (!activePulse) return;
+  const { deviceId, timerId, preGrabState } = activePulse;
+  clearInterval(timerId);
+  activePulse = null;
+  if (!restore || !preGrabState) return;
+  if (!preGrabState.on) {
+    sendDeviceCommand(deviceId, { action: 'off' });
+  } else {
+    // Restore original colour first, then brightness
+    if (preGrabState.color_xy != null) {
+      const [x, y] = preGrabState.color_xy;
+      sendDeviceCommand(deviceId, { action: 'color_xy', x, y });
+    } else if (preGrabState.color_temp != null) {
+      sendDeviceCommand(deviceId, { action: 'color_temp', value: preGrabState.color_temp });
+    }
+    if (preGrabState.brightness != null) {
+      sendDeviceCommand(deviceId, { action: 'brightness', value: preGrabState.brightness });
+    } else {
+      sendDeviceCommand(deviceId, { action: 'on' });
+    }
+  }
+}
+
 export function handleRoomsUpdate(evt) {
   roomsData = evt.rooms ?? [];
   render();
@@ -514,13 +567,14 @@ function wireDeviceDrag(card, deviceId, roomId) {
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', deviceId);
     requestAnimationFrame(() => card.classList.add('dragging'));
+    startPulse(deviceId);
   });
   card.addEventListener('dragend', () => {
     card.classList.remove('dragging');
     dragSrc = null;
     card.setAttribute('draggable', 'true');
-    // Re-enable parent room card which was disabled by its own pointerdown guard
     card.closest('.room-card')?.setAttribute('draggable', 'true');
+    stopPulse();
   });
 }
 
@@ -607,6 +661,11 @@ function renderChip(deviceId, fromRoomId, showRemove) {
   chip.dataset.deviceId = deviceId;
   chip.title = deviceId;
 
+  const dot = document.createElement('span');
+  dot.className = 'room-chip-dot' + (dev?.on ? ' room-chip-dot-on' : '');
+  dot.setAttribute('aria-hidden', 'true');
+  chip.appendChild(dot);
+
   const label = document.createElement('span');
   label.className = 'room-chip-label';
   label.textContent = formatDeviceName(deviceId);
@@ -623,10 +682,12 @@ function renderChip(deviceId, fromRoomId, showRemove) {
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', deviceId);
     requestAnimationFrame(() => chip.classList.add('dragging'));
+    startPulse(deviceId);
   });
   chip.addEventListener('dragend', () => {
     chip.classList.remove('dragging');
     dragSrc = null;
+    stopPulse();
   });
 
   return chip;

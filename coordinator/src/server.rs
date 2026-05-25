@@ -648,6 +648,7 @@ async fn process_message(
                 on = %report.on,
                 "light state report received"
             );
+            registry.lock().unwrap().save_light_state(&report);
             if let Some(dash) = dashboard {
                 dash.push_lighting_update(report.clone());
             }

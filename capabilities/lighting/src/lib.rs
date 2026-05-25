@@ -134,7 +134,8 @@ impl Capability for LightingCapability {
         vec![
             ToolSchema {
                 name: "light_command".into(),
-                description: "Turn lights on/off, set brightness or colour temperature".into(),
+                description: "Turn lights on/off, set brightness, colour temperature, or colour"
+                    .into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -144,11 +145,15 @@ impl Capability for LightingCapability {
                         },
                         "action": {
                             "type": "string",
-                            "enum": ["on", "off", "toggle", "brightness", "color_temp"]
+                            "enum": ["on", "off", "toggle", "brightness", "color_temp", "color"]
                         },
                         "value": {
                             "type": "number",
-                            "description": "Brightness 0–255 or colour temp in Kelvin"
+                            "description": "Brightness 0–255 or colour temp in Kelvin (for brightness/color_temp actions)"
+                        },
+                        "color": {
+                            "type": "string",
+                            "description": "CSS colour for the color action: hex (#FF0000) or named (red, green, blue, yellow, orange, purple, pink, cyan, white…)"
                         }
                     },
                     "required": ["target", "action"]

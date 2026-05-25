@@ -286,6 +286,76 @@ async fn dispatch_tool(
     }
 }
 
+fn rgb_to_xy(r: f32, g: f32, b: f32) -> (f32, f32) {
+    let linearize = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let r = linearize(r);
+    let g = linearize(g);
+    let b = linearize(b);
+    // Wide-gamut D65 matrix
+    let cx = r * 0.664511 + g * 0.154324 + b * 0.162028;
+    let cy = r * 0.283881 + g * 0.668433 + b * 0.047685;
+    let cz = r * 0.000088 + g * 0.072310 + b * 0.986039;
+    let sum = cx + cy + cz;
+    if sum < 1e-6 {
+        (0.0, 0.0)
+    } else {
+        (cx / sum, cy / sum)
+    }
+}
+
+fn css_color_to_xy(s: &str) -> Option<(f32, f32)> {
+    let lower = s.trim().to_lowercase();
+    let hex: &str = match lower.as_str() {
+        "red" => "ff0000",
+        "green" => "00ff00",
+        "blue" => "0000ff",
+        "white" => "ffffff",
+        "yellow" => "ffff00",
+        "orange" => "ff8000",
+        "purple" => "8000ff",
+        "pink" => "ff69b4",
+        "cyan" => "00ffff",
+        "magenta" => "ff00ff",
+        "teal" => "008080",
+        "coral" => "ff6347",
+        "gold" => "ffd700",
+        "indigo" => "4b0082",
+        "violet" => "ee82ee",
+        "turquoise" => "40e0d0",
+        "salmon" => "fa8072",
+        "lime" => "bfff00",
+        other => other.trim_start_matches('#'),
+    };
+    let h = hex.trim();
+    if h.len() == 6 {
+        let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+        Some(rgb_to_xy(
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+        ))
+    } else if h.len() == 3 {
+        let r = u8::from_str_radix(&h[0..1].repeat(2), 16).ok()?;
+        let g = u8::from_str_radix(&h[1..2].repeat(2), 16).ok()?;
+        let b = u8::from_str_radix(&h[2..3].repeat(2), 16).ok()?;
+        Some(rgb_to_xy(
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+        ))
+    } else {
+        None
+    }
+}
+
 fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightCommandRequest {
     let action_str = args.get("action").and_then(|v| v.as_str()).unwrap_or("on");
     let value = args.get("value").and_then(|v| v.as_f64());
@@ -299,6 +369,16 @@ fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightComma
             // Convert Kelvin → mireds (1_000_000 / K)
             let mireds = (1_000_000.0 / value.unwrap_or(4000.0)) as u16;
             LightAction::ColorTemp(mireds)
+        }
+        "color" => {
+            let color_str = args
+                .get("color")
+                .and_then(|v| v.as_str())
+                .unwrap_or("white");
+            match css_color_to_xy(color_str) {
+                Some((x, y)) => LightAction::ColorXY { x, y },
+                None => LightAction::On,
+            }
         }
         _ => LightAction::On,
     };
@@ -342,7 +422,7 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
         "lighting" => vec![
             serde_json::json!({
                 "name": "light_command",
-                "description": "Turn lights on/off, set brightness or colour temperature",
+                "description": "Turn lights on/off, set brightness, colour temperature, or colour",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -352,11 +432,15 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         },
                         "action": {
                             "type": "string",
-                            "enum": ["on", "off", "toggle", "brightness", "color_temp"]
+                            "enum": ["on", "off", "toggle", "brightness", "color_temp", "color"]
                         },
                         "value": {
                             "type": "number",
-                            "description": "Brightness 0–255 or colour temp in Kelvin"
+                            "description": "Brightness 0–255 or colour temp in Kelvin (for brightness/color_temp actions)"
+                        },
+                        "color": {
+                            "type": "string",
+                            "description": "CSS colour for the color action: hex (#FF0000) or named (red, green, blue, yellow, orange, purple, pink, cyan, white…)"
                         }
                     },
                     "required": ["target", "action"]
@@ -585,6 +669,76 @@ mod tests {
         let args = serde_json::json!({"target": "", "action": "on"});
         let cmd = build_light_command("r7", &args);
         assert!(matches!(cmd.target, LightTarget::Group(ref g) if g == "all"));
+    }
+
+    #[test]
+    fn build_light_command_color_named_green() {
+        let args = serde_json::json!({"target": "test_bulb", "action": "color", "color": "green"});
+        let cmd = build_light_command("r8", &args);
+        assert!(matches!(cmd.command, LightAction::ColorXY { .. }));
+    }
+
+    #[test]
+    fn build_light_command_color_hex() {
+        let args =
+            serde_json::json!({"target": "test_bulb", "action": "color", "color": "#FF0000"});
+        let cmd = build_light_command("r9", &args);
+        assert!(matches!(cmd.command, LightAction::ColorXY { .. }));
+    }
+
+    #[test]
+    fn build_light_command_color_invalid_falls_back_to_on() {
+        let args =
+            serde_json::json!({"target": "test_bulb", "action": "color", "color": "not-a-color"});
+        let cmd = build_light_command("r10", &args);
+        assert!(matches!(cmd.command, LightAction::On));
+    }
+
+    #[test]
+    fn css_color_to_xy_named_red_has_high_x() {
+        let (x, _y) = css_color_to_xy("red").unwrap();
+        assert!(x > 0.5, "red x should be > 0.5, got {x}");
+    }
+
+    #[test]
+    fn css_color_to_xy_named_blue_has_low_y() {
+        let (_x, y) = css_color_to_xy("blue").unwrap();
+        assert!(y < 0.1, "blue y should be < 0.1, got {y}");
+    }
+
+    #[test]
+    fn css_color_to_xy_hex_without_hash() {
+        assert!(css_color_to_xy("00ff00").is_some());
+    }
+
+    #[test]
+    fn css_color_to_xy_hex_with_hash() {
+        assert!(css_color_to_xy("#00ff00").is_some());
+    }
+
+    #[test]
+    fn css_color_to_xy_short_hex() {
+        assert!(css_color_to_xy("#f00").is_some());
+    }
+
+    #[test]
+    fn css_color_to_xy_invalid_returns_none() {
+        assert!(css_color_to_xy("not-a-color").is_none());
+    }
+
+    #[test]
+    fn rgb_to_xy_pure_red_produces_correct_xy() {
+        let (x, y) = rgb_to_xy(1.0, 0.0, 0.0);
+        // Wide-gamut D65: pure red → x≈0.7, y≈0.3
+        assert!((x - 0.700).abs() < 0.01, "red x got {x}");
+        assert!((y - 0.300).abs() < 0.01, "red y got {y}");
+    }
+
+    #[test]
+    fn rgb_to_xy_black_returns_zero() {
+        let (x, y) = rgb_to_xy(0.0, 0.0, 0.0);
+        assert_eq!(x, 0.0);
+        assert_eq!(y, 0.0);
     }
 
     #[test]

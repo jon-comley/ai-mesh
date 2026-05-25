@@ -1,4 +1,5 @@
 use rusqlite::{Connection, params};
+use shared::messages::LightStateReport;
 use shared::{
     HardwareSpec, ModelAllocationFull, ModelLifecycleState, NodeCapabilities, NodeIdentity,
     NodeRecordFull, NodeRecordLite, NodeRole,
@@ -126,6 +127,11 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             room_id     TEXT REFERENCES rooms(id) ON DELETE CASCADE,
             created_at  INTEGER NOT NULL,
             states_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS light_states (
+            device_id  TEXT PRIMARY KEY,
+            node_id    TEXT NOT NULL,
+            state_json TEXT NOT NULL
         );",
     )
 }
@@ -784,6 +790,43 @@ impl Registry {
                 |_| Ok(()),
             )
             .is_ok()
+    }
+
+    // ── Light state persistence ───────────────────────────────────────────────
+
+    /// Upsert the last-known state for a device so it survives coordinator restarts.
+    pub fn save_light_state(&mut self, report: &LightStateReport) {
+        let state_json = match serde_json::to_string(report) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(error = %e, "save_light_state: serialize failed");
+                return;
+            }
+        };
+        if let Err(e) = self.conn.execute(
+            "INSERT OR REPLACE INTO light_states (device_id, node_id, state_json) VALUES (?1, ?2, ?3)",
+            params![report.device_id, report.node_id, state_json],
+        ) {
+            warn!(error = %e, "save_light_state: db write failed");
+        }
+    }
+
+    /// Return all persisted device light states — used to warm-start the dashboard on boot.
+    pub fn load_light_states(&self) -> Vec<LightStateReport> {
+        let mut stmt = match self.conn.prepare("SELECT state_json FROM light_states") {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "load_light_states: prepare failed");
+                return vec![];
+            }
+        };
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map(|rows| {
+                rows.filter_map(|r| r.ok())
+                    .filter_map(|json| serde_json::from_str::<LightStateReport>(&json).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -1492,6 +1535,74 @@ mod tests {
         assert_eq!(scene.name, "Bright");
         assert_eq!(scene.states.len(), 1);
         assert_eq!(scene.states[0].device_id, "hall_bulb");
+        let _ = std::fs::remove_file(path);
+    }
+
+    // ── Light state persistence ───────────────────────────────────────────────
+
+    fn make_light_state(device_id: &str, node_id: &str, on: bool) -> LightStateReport {
+        LightStateReport {
+            device_id: device_id.into(),
+            node_id: node_id.into(),
+            on,
+            brightness: Some(200),
+            color_xy: Some((0.3, 0.4)),
+            color_temp: None,
+        }
+    }
+
+    #[test]
+    fn save_and_load_light_state_round_trips() {
+        let mut reg = Registry::new();
+        let report = make_light_state("bulb1", "pi1", true);
+        reg.save_light_state(&report);
+        let loaded = reg.load_light_states();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].device_id, "bulb1");
+        assert_eq!(loaded[0].node_id, "pi1");
+        assert!(loaded[0].on);
+        assert_eq!(loaded[0].brightness, Some(200));
+        assert_eq!(loaded[0].color_xy, Some((0.3, 0.4)));
+        assert!(loaded[0].color_temp.is_none());
+    }
+
+    #[test]
+    fn save_light_state_upserts_same_device() {
+        let mut reg = Registry::new();
+        reg.save_light_state(&make_light_state("bulb1", "pi1", true));
+        reg.save_light_state(&make_light_state("bulb1", "pi1", false));
+        let loaded = reg.load_light_states();
+        assert_eq!(loaded.len(), 1, "upsert should not accumulate");
+        assert!(!loaded[0].on, "latest state should win");
+    }
+
+    #[test]
+    fn load_light_states_returns_all_devices() {
+        let mut reg = Registry::new();
+        reg.save_light_state(&make_light_state("bulb1", "pi1", true));
+        reg.save_light_state(&make_light_state("bulb2", "pi1", false));
+        assert_eq!(reg.load_light_states().len(), 2);
+    }
+
+    #[test]
+    fn load_light_states_empty_when_none_saved() {
+        let reg = Registry::new();
+        assert!(reg.load_light_states().is_empty());
+    }
+
+    #[test]
+    fn light_states_persist_across_open() {
+        let path = "/tmp/test-light-states-registry.db";
+        let _ = std::fs::remove_file(path);
+        {
+            let mut reg = Registry::open(path).unwrap();
+            reg.save_light_state(&make_light_state("living_room_bulb", "pi2", true));
+        }
+        let reg = Registry::open(path).unwrap();
+        let states = reg.load_light_states();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].device_id, "living_room_bulb");
+        assert!(states[0].on);
         let _ = std::fs::remove_file(path);
     }
 }
