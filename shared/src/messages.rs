@@ -111,7 +111,7 @@ pub struct NodeRecordFull {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LightTarget {
-    Group(u16),
+    Group(String),
     Device(String),
 }
 
@@ -650,7 +650,7 @@ mod tests {
     fn light_command_on_roundtrip() {
         let msg = MeshMessage::LightCommand(LightCommandRequest {
             request_id: "lc-1".into(),
-            target: LightTarget::Group(1),
+            target: LightTarget::Group("all".into()),
             command: LightAction::On,
         });
         let json = serde_json::to_string(&msg).unwrap();
@@ -685,7 +685,7 @@ mod tests {
     fn light_command_brightness_roundtrip() {
         let msg = MeshMessage::LightCommand(LightCommandRequest {
             request_id: "lc-3".into(),
-            target: LightTarget::Group(2),
+            target: LightTarget::Group("living_room".into()),
             command: LightAction::Brightness(128),
         });
         let json = serde_json::to_string(&msg).unwrap();

@@ -660,6 +660,9 @@ async fn process_message(
                 groups = ?report.groups,
                 "light device list received"
             );
+            if let Some(dash) = dashboard {
+                dash.push_group_update(&report.node_id, report.groups.clone());
+            }
             registry.lock().unwrap().update_light_devices(
                 &report.node_id,
                 report.devices,

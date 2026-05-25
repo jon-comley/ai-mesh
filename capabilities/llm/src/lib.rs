@@ -235,7 +235,7 @@ mod tests {
     fn does_not_handle_light_command() {
         let msg = MeshMessage::LightCommand(shared::LightCommandRequest {
             request_id: "lc-1".into(),
-            target: shared::LightTarget::Group(1),
+            target: shared::LightTarget::Group("all".into()),
             command: shared::LightAction::On,
         });
         assert!(!make_cap().handles(&msg));

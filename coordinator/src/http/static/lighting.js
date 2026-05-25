@@ -3,6 +3,7 @@
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
+let groupsSet = new Set();
 let dragSrc = null;
 
 export function handleLightingUpdate(evt) {
@@ -10,6 +11,7 @@ export function handleLightingUpdate(evt) {
   for (const dev of evt.devices) {
     devicesMap.set(dev.device_id, dev);
   }
+  groupsSet = new Set(evt.groups ?? []);
   render();
 }
 
@@ -17,15 +19,25 @@ function render() {
   const container = document.getElementById('lighting-list');
   if (!container || dragSrc) return;
 
-  if (devicesMap.size === 0) {
+  if (devicesMap.size === 0 && groupsSet.size === 0) {
     container.innerHTML = '<p class="placeholder">No lighting devices.</p>';
     return;
   }
 
+  container.innerHTML = '';
+
+  // Group cards first
+  for (const name of [...groupsSet].sort()) {
+    const card = document.createElement('div');
+    card.className = 'light-card light-group-card';
+    card.innerHTML = groupCard(name);
+    container.appendChild(card);
+    wireGroupControls(card, name);
+  }
+
+  // Individual device cards
   const items = [...devicesMap.values()];
   const sorted = applyOrder(items, d => d.device_id);
-
-  container.innerHTML = '';
   for (const dev of sorted) {
     const card = document.createElement('div');
     card.className = 'light-card';
@@ -190,6 +202,73 @@ function wireControls(card, dev) {
   if (hue) { hue.addEventListener('input', syncColourUI); hue.addEventListener('change', sendColour); }
   if (sat) { sat.addEventListener('input', syncColourUI); sat.addEventListener('change', sendColour); }
   if (hue || sat) syncColourUI();
+}
+
+function groupCard(name) {
+  const displayName = formatDeviceName(name);
+  return `
+    <div class="light-card-header">
+      <div class="light-name-group">
+        <span class="light-name">${esc(displayName)}</span>
+        <span class="light-node-badge">group</span>
+      </div>
+      <div class="light-card-header-right">
+        <button class="light-toggle-btn" data-ctrl="group-on"  aria-label="Turn ${esc(displayName)} on">
+          <span class="badge badge-green">On</span>
+        </button>
+        <button class="light-toggle-btn" data-ctrl="group-off" aria-label="Turn ${esc(displayName)} off">
+          <span class="badge badge-muted">Off</span>
+        </button>
+      </div>
+    </div>
+    <div class="light-card-details">
+      <div class="light-detail-row">
+        <span class="light-detail-label">Brightness</span>
+        <input class="light-slider" type="range" min="0" max="255" value="254"
+               data-ctrl="group-brightness" aria-label="Group brightness">
+        <span class="light-detail-value">100%</span>
+      </div>
+    </div>
+  `;
+}
+
+function wireGroupControls(card, name) {
+  const onBtn = card.querySelector('[data-ctrl="group-on"]');
+  const offBtn = card.querySelector('[data-ctrl="group-off"]');
+  if (onBtn) onBtn.addEventListener('click', () => sendGroupCommand(name, { action: 'on' }));
+  if (offBtn) offBtn.addEventListener('click', () => sendGroupCommand(name, { action: 'off' }));
+
+  const bri = card.querySelector('[data-ctrl="group-brightness"]');
+  if (bri) {
+    bri.addEventListener('input', () => {
+      const pct = Math.round((bri.value / 255) * 100);
+      const label = bri.parentElement.querySelector('.light-detail-value');
+      if (label) label.textContent = `${pct}%`;
+    });
+    bri.addEventListener('change', () => {
+      sendGroupCommand(name, { action: 'brightness', value: parseInt(bri.value, 10) });
+    });
+  }
+}
+
+async function sendGroupCommand(groupName, body) {
+  const token = localStorage.getItem('meshToken') ?? '';
+  try {
+    const res = await fetch(
+      `/api/lights/group/${encodeURIComponent(groupName)}/command?token=${encodeURIComponent(token)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      showToast(`Group command failed (${res.status})${text ? ': ' + text : ''}`, true);
+    }
+  } catch (e) {
+    showToast(`Group command error: ${e.message}`, true);
+  }
 }
 
 async function sendCommand(deviceId, body) {
