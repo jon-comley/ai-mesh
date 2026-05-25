@@ -183,7 +183,7 @@ mod tests {
     fn light_command() -> MeshMessage {
         MeshMessage::LightCommand(LightCommandRequest {
             request_id: "r1".into(),
-            target: LightTarget::Group(1),
+            target: LightTarget::Group("all".into()),
             command: LightAction::On,
         })
     }

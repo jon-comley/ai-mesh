@@ -197,6 +197,37 @@ pub async fn light_command(
     }
 }
 
+pub async fn group_light_command(
+    Path(group): Path<String>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<LightCommandBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(node_id) = state.get_node_for_group(&group) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(command) = build_light_action(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unknown action or missing required fields",
+        )
+            .into_response();
+    };
+    let cmd = LightCommandRequest {
+        request_id: gen_request_id(),
+        target: LightTarget::Group(group),
+        command,
+    };
+    if state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +640,82 @@ mod tests {
         let state = make_state(vec![], connections);
         seed_light(&state, "bulb1", "pi1");
         let status = post_light_cmd(state, "bulb1", "", r#"{"action":"color_xy","x":0.3}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ── group_light_command ───────────────────────────────────────────────────
+
+    fn seed_group(state: &Arc<DashboardState>, group: &str, node_id: &str) {
+        state.push_group_update(node_id, vec![group.into()]);
+    }
+
+    async fn post_group_cmd(
+        state: Arc<DashboardState>,
+        group: &str,
+        token: &str,
+        body: &str,
+    ) -> StatusCode {
+        let router: Router = Router::new()
+            .route(
+                "/api/lights/group/{group}/command",
+                post(group_light_command),
+            )
+            .with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/lights/group/{group}/command?token={token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let _ = to_bytes(resp.into_body(), usize::MAX).await;
+        status
+    }
+
+    #[tokio::test]
+    async fn group_light_command_ok_queues_message() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_group(&state, "all", "pi1");
+
+        let status = post_group_cmd(state, "all", "", r#"{"action":"off"}"#).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        match rx.try_recv().unwrap() {
+            MeshMessage::LightCommand(req) => {
+                assert!(matches!(req.command, LightAction::Off));
+                assert!(matches!(req.target, LightTarget::Group(ref g) if g == "all"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn group_light_command_returns_404_for_unknown_group() {
+        let state = make_state(vec![], empty_connections());
+        let status = post_group_cmd(state, "ghost_group", "", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn group_light_command_returns_401_for_wrong_token() {
+        let state = make_state(vec!["secret".into()], empty_connections());
+        seed_group(&state, "all", "pi1");
+        let status = post_group_cmd(state, "all", "wrong", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn group_light_command_returns_400_for_unknown_action() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_group(&state, "all", "pi1");
+        let status = post_group_cmd(state, "all", "", r#"{"action":"dance"}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 

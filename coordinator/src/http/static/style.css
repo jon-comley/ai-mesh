@@ -401,6 +401,15 @@ body {
   padding: 12px 14px;
 }
 
+.light-group-card {
+  border-color: var(--accent);
+  border-width: 2px;
+}
+
+.light-group-card .light-card-header-right {
+  gap: 6px;
+}
+
 .light-card-header {
   display: flex;
   align-items: center;

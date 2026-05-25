@@ -309,7 +309,7 @@ fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightComma
         .filter(|s| !s.is_empty())
     {
         Some(name) => LightTarget::Device(name.to_string()),
-        None => LightTarget::Group(1),
+        None => LightTarget::Group("all".into()),
     };
 
     LightCommandRequest {
@@ -534,7 +534,7 @@ mod tests {
     fn build_light_command_no_target_falls_back_to_group() {
         let args = serde_json::json!({"action": "on"});
         let cmd = build_light_command("r0", &args);
-        assert!(matches!(cmd.target, LightTarget::Group(1)));
+        assert!(matches!(cmd.target, LightTarget::Group(ref g) if g == "all"));
     }
 
     #[test]
@@ -584,7 +584,7 @@ mod tests {
     fn build_light_command_empty_target_falls_back_to_group() {
         let args = serde_json::json!({"target": "", "action": "on"});
         let cmd = build_light_command("r7", &args);
-        assert!(matches!(cmd.target, LightTarget::Group(1)));
+        assert!(matches!(cmd.target, LightTarget::Group(ref g) if g == "all"));
     }
 
     #[test]

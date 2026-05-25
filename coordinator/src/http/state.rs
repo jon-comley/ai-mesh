@@ -29,6 +29,8 @@ pub enum DashboardEvent {
     },
     LightingUpdate {
         devices: Vec<LightStateReport>,
+        #[serde(default)]
+        groups: Vec<String>,
     },
 }
 
@@ -91,6 +93,8 @@ pub struct DashboardState {
     health_store: Mutex<HashMap<String, VecDeque<HealthSample>>>,
     model_snapshot: Mutex<Vec<NodeModelInfo>>,
     light_snapshot: Mutex<HashMap<String, LightStateReport>>,
+    /// Group friendly name → node_id that owns it.
+    group_snapshot: Mutex<HashMap<String, String>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
 }
@@ -104,6 +108,7 @@ impl DashboardState {
             health_store: Mutex::new(HashMap::new()),
             model_snapshot: Mutex::new(Vec::new()),
             light_snapshot: Mutex::new(HashMap::new()),
+            group_snapshot: Mutex::new(HashMap::new()),
             connections,
         })
     }
@@ -153,7 +158,7 @@ impl DashboardState {
         self.model_snapshot.lock().unwrap().clone()
     }
 
-    /// Store the latest state for one device and broadcast a LightingUpdate with all devices.
+    /// Store the latest state for one device and broadcast a LightingUpdate with all devices + groups.
     pub fn push_lighting_update(&self, report: LightStateReport) {
         let devices = {
             let mut snap = self.light_snapshot.lock().unwrap();
@@ -161,7 +166,28 @@ impl DashboardState {
             snap.values().cloned().collect::<Vec<_>>()
         };
         if self.tx.receiver_count() > 0 {
-            let _ = self.tx.send(DashboardEvent::LightingUpdate { devices });
+            let groups = self.get_group_snapshot();
+            let _ = self
+                .tx
+                .send(DashboardEvent::LightingUpdate { devices, groups });
+        }
+    }
+
+    /// Store groups for a node and broadcast a LightingUpdate with all devices + new groups.
+    pub fn push_group_update(&self, node_id: &str, groups: Vec<String>) {
+        {
+            let mut snap = self.group_snapshot.lock().unwrap();
+            snap.retain(|_, v| v != node_id);
+            for g in groups {
+                snap.insert(g, node_id.to_owned());
+            }
+        }
+        if self.tx.receiver_count() > 0 {
+            let devices = self.get_light_snapshot();
+            let groups = self.get_group_snapshot();
+            let _ = self
+                .tx
+                .send(DashboardEvent::LightingUpdate { devices, groups });
         }
     }
 
@@ -175,6 +201,16 @@ impl DashboardState {
             .collect()
     }
 
+    /// Return all known group friendly names — used to warm-start new WS clients.
+    pub fn get_group_snapshot(&self) -> Vec<String> {
+        self.group_snapshot
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     /// Return the node_id that last reported state for a given device — used to route commands.
     pub fn get_node_for_device(&self, device_id: &str) -> Option<String> {
         self.light_snapshot
@@ -182,6 +218,11 @@ impl DashboardState {
             .unwrap()
             .get(device_id)
             .map(|r| r.node_id.clone())
+    }
+
+    /// Return the node_id responsible for a given group — used to route group commands.
+    pub fn get_node_for_group(&self, name: &str) -> Option<String> {
+        self.group_snapshot.lock().unwrap().get(name).cloned()
     }
 
     /// Build and broadcast a TopologyUpdate from a fresh node list.
@@ -819,7 +860,7 @@ mod tests {
         let mut rx = state.tx.subscribe();
         state.push_lighting_update(make_light_report("bulb1", true));
         match rx.try_recv().unwrap() {
-            DashboardEvent::LightingUpdate { devices } => {
+            DashboardEvent::LightingUpdate { devices, .. } => {
                 assert_eq!(devices.len(), 1);
                 assert_eq!(devices[0].device_id, "bulb1");
                 assert!(devices[0].on);
@@ -878,6 +919,7 @@ mod tests {
                 color_xy: Some((0.3, 0.3)),
                 color_temp: Some(370),
             }],
+            groups: vec!["all".into()],
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(
@@ -897,6 +939,59 @@ mod tests {
             json.contains("\"color_temp\":370"),
             "missing color_temp: {json}"
         );
+        assert!(json.contains("\"groups\""), "missing groups field: {json}");
+        assert!(json.contains("\"all\""), "missing group name: {json}");
+    }
+
+    // ── push_group_update / get_group_snapshot ───────────────────────────────
+
+    #[test]
+    fn push_group_update_stores_groups() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_group_update("pi1", vec!["all".into(), "living_room".into()]);
+        let snap = state.get_group_snapshot();
+        assert_eq!(snap.len(), 2);
+        assert!(snap.contains(&"all".to_string()));
+        assert!(snap.contains(&"living_room".to_string()));
+    }
+
+    #[test]
+    fn push_group_update_replaces_groups_for_same_node() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_group_update("pi1", vec!["all".into(), "old_group".into()]);
+        state.push_group_update("pi1", vec!["all".into()]);
+        let snap = state.get_group_snapshot();
+        assert_eq!(
+            snap.len(),
+            1,
+            "old_group should be replaced, not accumulated"
+        );
+        assert!(snap.contains(&"all".to_string()));
+    }
+
+    #[test]
+    fn get_node_for_group_returns_node_id() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_group_update("pi1", vec!["all".into()]);
+        assert_eq!(state.get_node_for_group("all"), Some("pi1".into()));
+    }
+
+    #[test]
+    fn get_node_for_group_returns_none_for_unknown() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        assert!(state.get_node_for_group("nonexistent").is_none());
     }
 
     #[test]

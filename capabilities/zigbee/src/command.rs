@@ -2,7 +2,7 @@ use shared::{LightAction, LightTarget};
 
 pub fn target_topic(target: &LightTarget) -> String {
     match target {
-        LightTarget::Group(id) => format!("zigbee2mqtt/group_{id}/set"),
+        LightTarget::Group(name) => format!("zigbee2mqtt/{name}/set"),
         LightTarget::Device(name) => format!("zigbee2mqtt/{name}/set"),
     }
 }
@@ -25,12 +25,12 @@ mod tests {
     #[test]
     fn group_topic() {
         assert_eq!(
-            target_topic(&LightTarget::Group(1)),
-            "zigbee2mqtt/group_1/set"
+            target_topic(&LightTarget::Group("all".into())),
+            "zigbee2mqtt/all/set"
         );
         assert_eq!(
-            target_topic(&LightTarget::Group(42)),
-            "zigbee2mqtt/group_42/set"
+            target_topic(&LightTarget::Group("living_room".into())),
+            "zigbee2mqtt/living_room/set"
         );
     }
 
