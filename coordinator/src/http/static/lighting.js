@@ -71,12 +71,17 @@ function deviceCard(dev) {
       </div>`;
   }
 
+  const displayName = formatDeviceName(dev.device_id);
+
   return `
     <div class="light-card-header">
-      <span class="light-name">${esc(dev.device_id)}</span>
+      <div class="light-name-group">
+        <span class="light-name">${esc(displayName)}</span>
+        <span class="light-node-badge">${esc(dev.node_id)}</span>
+      </div>
       <div class="light-card-header-right">
         ${swatch}
-        <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(dev.device_id)}">
+        <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(displayName)}">
           <span class="badge ${badgeClass}">${badgeLabel}</span>
         </button>
       </div>
@@ -176,6 +181,10 @@ function xyToRgb(x, y, bri = 254) {
   if (max > 1) { r /= max; g /= max; b /= max; }
   const gc = v => v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
   return { r: Math.round(gc(r) * 255), g: Math.round(gc(g) * 255), b: Math.round(gc(b) * 255) };
+}
+
+function formatDeviceName(id) {
+  return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function esc(s) {
