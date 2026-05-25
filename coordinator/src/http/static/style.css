@@ -133,6 +133,11 @@ body {
   outline-offset: -2px;
 }
 
+/* ── Drag-to-reorder ───────────────────────────────────────────────────────── */
+[draggable="true"] { cursor: grab; }
+[draggable="true"]:active { cursor: grabbing; }
+.dragging { opacity: 0.35; box-shadow: 0 0 0 2px var(--accent); }
+
 /* ── Utility ───────────────────────────────────────────────────────────────── */
 .badge {
   display: inline-block;
@@ -248,6 +253,143 @@ body {
 /* ── Mini sparkline in node cards ──────────────────────────────────────────── */
 .node-sparkline {
   margin-top: 8px;
+}
+
+/* ── Model cards ───────────────────────────────────────────────────────────── */
+.model-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+
+.model-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.model-node-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.capacity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.capacity-label {
+  color: var(--text-muted);
+  font-weight: 500;
+  width: 34px;
+  flex-shrink: 0;
+}
+
+.capacity-track {
+  flex: 1;
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.capacity-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.capacity-value {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.model-rows {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 6px;
+}
+
+.model-row-item {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.model-row-item:last-child {
+  border-bottom: none;
+}
+
+.model-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.model-name {
+  font-weight: 500;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.model-row-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.model-size {
+  color: var(--text-muted);
+}
+
+.model-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 8px 0 4px;
+}
+
+.unload-btn {
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--red) 40%, transparent);
+  border-radius: 6px;
+  color: var(--red);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.unload-btn:hover {
+  background: color-mix(in srgb, var(--red) 25%, transparent);
+}
+
+.model-card-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.load-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 10px;
+}
+
+.load-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 /* ── Desktop layout (≥ 900px) ──────────────────────────────────────────────── */
