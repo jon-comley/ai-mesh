@@ -24,6 +24,30 @@ pub enum DashboardEvent {
         node_id: String,
         samples: Vec<HealthSample>,
     },
+    ModelUpdate {
+        nodes: Vec<NodeModelInfo>,
+    },
+}
+
+/// Per-model entry in a `ModelUpdate` event — one per non-Unloaded allocation.
+#[derive(Clone, Serialize)]
+pub struct ModelEntry {
+    pub name: String,
+    pub size_mb: u64,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Per-node model summary — one per Compute node in a `ModelUpdate` event.
+#[derive(Clone, Serialize)]
+pub struct NodeModelInfo {
+    pub node_id: String,
+    pub hostname: String,
+    pub role: String,
+    /// Static RAM ceiling from HardwareSpec; 0.0 if hardware not yet reported.
+    pub ram_gb: f32,
+    pub models: Vec<ModelEntry>,
 }
 
 /// One health data point, coordinator-stamped.
@@ -62,6 +86,7 @@ pub struct DashboardState {
     /// Valid auth tokens — mirrors the mesh server's token list. Empty = no auth (dev mode).
     pub auth_tokens: Arc<Vec<String>>,
     health_store: Mutex<HashMap<String, VecDeque<HealthSample>>>,
+    model_snapshot: Mutex<Vec<NodeModelInfo>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
 }
@@ -73,6 +98,7 @@ impl DashboardState {
             tx,
             auth_tokens,
             health_store: Mutex::new(HashMap::new()),
+            model_snapshot: Mutex::new(Vec::new()),
             connections,
         })
     }
@@ -106,6 +132,20 @@ impl DashboardState {
             .iter()
             .map(|(id, deque)| (id.clone(), deque.iter().cloned().collect()))
             .collect()
+    }
+
+    /// Store and broadcast a model snapshot. Always stores (for snapshot-on-connect);
+    /// broadcasts only when at least one WS client is connected.
+    pub fn push_model_update(&self, nodes: Vec<NodeModelInfo>) {
+        *self.model_snapshot.lock().unwrap() = nodes.clone();
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::ModelUpdate { nodes });
+        }
+    }
+
+    /// Return a point-in-time copy of the model snapshot for warm-starting new WS clients.
+    pub fn get_model_snapshot(&self) -> Vec<NodeModelInfo> {
+        self.model_snapshot.lock().unwrap().clone()
     }
 
     /// Build and broadcast a TopologyUpdate from a fresh node list.
@@ -594,6 +634,118 @@ mod tests {
         assert_eq!(samp[0].cpu_pct, 10.0, "oldest first");
         assert_eq!(samp[1].cpu_pct, 20.0);
         assert_eq!(samp[2].cpu_pct, 30.0, "newest last");
+    }
+
+    // ── push_model_update / get_model_snapshot ───────────────────────────────
+
+    fn make_node_model_info(node_id: &str) -> NodeModelInfo {
+        NodeModelInfo {
+            node_id: node_id.into(),
+            hostname: "host".into(),
+            role: "Compute".into(),
+            ram_gb: 16.0,
+            models: vec![ModelEntry {
+                name: "qwen2.5:7b".into(),
+                size_mb: 4000,
+                state: "Ready".into(),
+                reason: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn push_model_update_stores_snapshot() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_model_update(vec![make_node_model_info("n1")]);
+        let snap = state.get_model_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].node_id, "n1");
+        assert_eq!(snap[0].models[0].name, "qwen2.5:7b");
+    }
+
+    #[test]
+    fn push_model_update_broadcasts_event() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut rx = state.tx.subscribe();
+        state.push_model_update(vec![make_node_model_info("n1")]);
+        match rx.try_recv().unwrap() {
+            DashboardEvent::ModelUpdate { nodes } => {
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(nodes[0].node_id, "n1");
+                assert_eq!(nodes[0].ram_gb, 16.0);
+            }
+            _ => panic!("expected ModelUpdate"),
+        }
+    }
+
+    #[test]
+    fn push_model_update_with_no_receivers_stores_snapshot_anyway() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        // No subscriber — snapshot must still be stored for future connects.
+        state.push_model_update(vec![make_node_model_info("n1")]);
+        assert_eq!(state.get_model_snapshot().len(), 1);
+    }
+
+    #[test]
+    fn get_model_snapshot_is_point_in_time_copy() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_model_update(vec![make_node_model_info("n1")]);
+        let snap = state.get_model_snapshot();
+        state.push_model_update(vec![make_node_model_info("n2")]);
+        assert_eq!(
+            snap.len(),
+            1,
+            "snapshot should not reflect post-snapshot updates"
+        );
+        assert_eq!(snap[0].node_id, "n1");
+    }
+
+    #[test]
+    fn model_update_event_wire_format() {
+        let evt = DashboardEvent::ModelUpdate {
+            nodes: vec![NodeModelInfo {
+                node_id: "abc".into(),
+                hostname: "beelink1".into(),
+                role: "Compute".into(),
+                ram_gb: 32.0,
+                models: vec![ModelEntry {
+                    name: "qwen2.5:7b".into(),
+                    size_mb: 4000,
+                    state: "Ready".into(),
+                    reason: None,
+                }],
+            }],
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(
+            json.contains("\"type\":\"ModelUpdate\""),
+            "missing type tag: {json}"
+        );
+        assert!(
+            json.contains("\"node_id\":\"abc\""),
+            "missing node_id: {json}"
+        );
+        assert!(json.contains("\"ram_gb\":32.0"), "missing ram_gb: {json}");
+        assert!(
+            json.contains("\"state\":\"Ready\""),
+            "missing state: {json}"
+        );
+        assert!(
+            !json.contains("\"reason\""),
+            "reason should be absent when None: {json}"
+        );
     }
 
     #[test]
