@@ -32,6 +32,17 @@ pub enum DashboardEvent {
         #[serde(default)]
         groups: Vec<String>,
     },
+    RoomsUpdate {
+        rooms: Vec<RoomInfo>,
+    },
+}
+
+#[derive(Clone, Serialize)]
+pub struct RoomInfo {
+    pub id: String,
+    pub name: String,
+    pub position: i64,
+    pub device_ids: Vec<String>,
 }
 
 /// Per-model entry in a `ModelUpdate` event — one per non-Unloaded allocation.
@@ -95,6 +106,7 @@ pub struct DashboardState {
     light_snapshot: Mutex<HashMap<String, LightStateReport>>,
     /// Group friendly name → node_id that owns it.
     group_snapshot: Mutex<HashMap<String, String>>,
+    room_snapshot: Mutex<Vec<RoomInfo>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
 }
@@ -109,6 +121,7 @@ impl DashboardState {
             model_snapshot: Mutex::new(Vec::new()),
             light_snapshot: Mutex::new(HashMap::new()),
             group_snapshot: Mutex::new(HashMap::new()),
+            room_snapshot: Mutex::new(Vec::new()),
             connections,
         })
     }
@@ -223,6 +236,19 @@ impl DashboardState {
     /// Return the node_id responsible for a given group — used to route group commands.
     pub fn get_node_for_group(&self, name: &str) -> Option<String> {
         self.group_snapshot.lock().unwrap().get(name).cloned()
+    }
+
+    /// Store and broadcast the current rooms state.
+    pub fn push_rooms_update(&self, rooms: Vec<RoomInfo>) {
+        *self.room_snapshot.lock().unwrap() = rooms.clone();
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::RoomsUpdate { rooms });
+        }
+    }
+
+    /// Return a point-in-time copy of the rooms snapshot for warm-starting new WS clients.
+    pub fn get_room_snapshot(&self) -> Vec<RoomInfo> {
+        self.room_snapshot.lock().unwrap().clone()
     }
 
     /// Build and broadcast a TopologyUpdate from a fresh node list.
@@ -1014,6 +1040,96 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
         assert!(state.get_node_for_device("no-such-bulb").is_none());
+    }
+
+    // ── push_rooms_update / get_room_snapshot ─────────────────────────────────
+
+    fn make_room_info(id: &str, name: &str) -> RoomInfo {
+        RoomInfo {
+            id: id.into(),
+            name: name.into(),
+            position: 0,
+            device_ids: vec!["bulb1".into()],
+        }
+    }
+
+    #[test]
+    fn push_rooms_update_stores_snapshot() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_rooms_update(vec![make_room_info("r1", "Living Room")]);
+        let snap = state.get_room_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].id, "r1");
+        assert_eq!(snap[0].name, "Living Room");
+    }
+
+    #[test]
+    fn push_rooms_update_replaces_snapshot() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_rooms_update(vec![make_room_info("r1", "Old")]);
+        state.push_rooms_update(vec![make_room_info("r2", "New")]);
+        let snap = state.get_room_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].id, "r2");
+    }
+
+    #[test]
+    fn push_rooms_update_broadcasts_event() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut rx = state.tx.subscribe();
+        state.push_rooms_update(vec![make_room_info("r1", "Bedroom")]);
+        match rx.try_recv().unwrap() {
+            DashboardEvent::RoomsUpdate { rooms } => {
+                assert_eq!(rooms.len(), 1);
+                assert_eq!(rooms[0].name, "Bedroom");
+            }
+            _ => panic!("expected RoomsUpdate"),
+        }
+    }
+
+    #[test]
+    fn push_rooms_update_with_no_receivers_stores_snapshot_anyway() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_rooms_update(vec![make_room_info("r1", "Hall")]);
+        assert_eq!(state.get_room_snapshot().len(), 1);
+    }
+
+    #[test]
+    fn rooms_update_event_wire_format() {
+        let evt = DashboardEvent::RoomsUpdate {
+            rooms: vec![RoomInfo {
+                id: "abc-123".into(),
+                name: "Living Room".into(),
+                position: 0,
+                device_ids: vec!["test_bulb".into()],
+            }],
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(
+            json.contains("\"type\":\"RoomsUpdate\""),
+            "missing type tag: {json}"
+        );
+        assert!(json.contains("\"id\":\"abc-123\""), "missing id: {json}");
+        assert!(
+            json.contains("\"name\":\"Living Room\""),
+            "missing name: {json}"
+        );
+        assert!(
+            json.contains("\"device_ids\""),
+            "missing device_ids: {json}"
+        );
     }
 
     #[test]

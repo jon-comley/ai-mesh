@@ -271,13 +271,17 @@ When the intent handler routes `Group("all")`, it uses the existing Z2M group me
 
 ## Implementation sub-phases
 
-### F-Rooms-1 — Coordinator storage + WS event
-- Add `rooms` and `room_devices` tables to `init_schema()`
-- Implement `list_rooms`, `create_room`, `delete_room`, `rename_room`, `add_device_to_room`, `remove_device_from_room`, `get_room_for_device` on `Registry`
-- Add `RoomsUpdate` to `DashboardEvent`
-- Add `RoomInfo` struct, `room_snapshot`, `push_rooms_update`, `get_room_snapshot` to `DashboardState`
-- Wire snapshot-on-connect in `ws.rs`
-- Tests: CRUD operations, cascade delete, device uniqueness across rooms
+### F-Rooms-1 ✓ — Coordinator storage + WS event
+- `rooms` + `room_devices` tables in `init_schema()` with `PRAGMA foreign_keys = ON` and `ON DELETE CASCADE`
+- `RoomRecord` struct; `gen_uuid()` UUID v4 generator (reuses `getrandom`)
+- Registry methods: `list_rooms`, `create_room`, `room_exists`, `delete_room`, `rename_room`, `add_device_to_room`, `remove_device_from_room`, `get_room_for_device`
+  - `add_device_to_room` enforces one-room-per-device by evicting from previous room before inserting
+- `RoomsUpdate { rooms: Vec<RoomInfo> }` added to `DashboardEvent`
+- `RoomInfo` struct (Serialize), `room_snapshot: Mutex<Vec<RoomInfo>>` added to `DashboardState`
+- `push_rooms_update` / `get_room_snapshot` on `DashboardState`
+- Snapshot-on-connect in `ws.rs` (same pattern as `LightingUpdate`)
+- `warm_start_rooms()` in `coordinator.rs` — populates room snapshot from SQLite on startup (both TLS and insecure paths)
+- 15 new tests: 10 registry (CRUD, cascade, cross-room move, persistence) + 5 state (broadcast, snapshot, wire format). 378 tests total.
 
 ### F-Rooms-2 — HTTP API
 - Implement all five endpoints in `api.rs`
