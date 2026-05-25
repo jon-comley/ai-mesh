@@ -1074,3 +1074,217 @@ body {
 .room-scene-delete-btn:hover {
   color: var(--red);
 }
+
+/* ── Layout canvas view ─────────────────────────────────────────────────────── */
+
+/* When layout is open, panel becomes a flex column so canvas fills the height */
+#panel-lighting.layout-open {
+  overflow: hidden;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+#panel-lighting.layout-open #lighting-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#panel-lighting.layout-open .layout-view {
+  flex: 1;
+  min-height: 0;
+}
+
+.room-layout-btn {
+  font-size: 15px;
+  padding: 2px 6px;
+  opacity: 0.7;
+}
+.room-layout-btn:hover { opacity: 1; }
+
+.layout-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 8px;
+  gap: 8px;
+}
+
+.layout-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.layout-back-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.layout-back-btn:hover { background: var(--border); }
+
+.layout-title {
+  font-size: 16px;
+  font-weight: 600;
+  flex: 1;
+}
+
+.layout-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.layout-toggle {
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.layout-auto-btn,
+.layout-undo-btn,
+.layout-redo-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.layout-auto-btn:hover,
+.layout-undo-btn:hover,
+.layout-redo-btn:hover { background: var(--border); }
+
+.layout-body {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.layout-sidebar {
+  width: 150px;
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.layout-sidebar-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.layout-sidebar-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.layout-chip {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: grab;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-left: 3px solid var(--chip-color, var(--accent));
+}
+.layout-chip:hover { background: var(--border); }
+.layout-chip:active { cursor: grabbing; }
+
+.layout-sidebar-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.layout-canvas-wrap {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  align-items: stretch;
+}
+
+#layout-canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* Live state transitions on canvas bulb shapes */
+#lc-bulbs circle,
+#lc-bulbs rect {
+  transition: fill 0.8s ease, opacity 0.8s ease;
+}
+
+/* Popover */
+.layout-popover {
+  position: fixed;
+  z-index: 1000;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+}
+
+.layout-popover-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.layout-popover-select {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 4px;
+  font-size: 13px;
+}
+
+.layout-popover-slider {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.layout-popover-remove {
+  background: none;
+  border: 1px solid var(--red);
+  color: var(--red);
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.layout-popover-remove:hover { background: var(--red); color: #fff; }

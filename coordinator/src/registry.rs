@@ -35,6 +35,15 @@ fn gen_uuid() -> String {
 }
 
 #[derive(Debug, Clone)]
+pub struct LightPosition {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub room_id: Option<String>,
+    pub fixture_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RoomRecord {
     pub id: String,
     pub name: String,
@@ -89,8 +98,8 @@ pub struct Registry {
     conn: Connection,
     /// Known Zigbee devices and groups per lighting node, keyed by node_id.
     light_devices: HashMap<String, (Vec<String>, Vec<String>)>,
-    /// Physical coordinates (x, y, z) and optional room association for lighting devices.
-    light_positions: HashMap<String, (f32, f32, f32, Option<String>)>,
+    /// Physical coordinates (x, y, z), optional room association, and fixture type for lighting devices.
+    light_positions: HashMap<String, LightPosition>,
 }
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -197,6 +206,12 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !columns.contains(&"room_id".to_string()) {
         conn.execute(
             "ALTER TABLE light_positions ADD COLUMN room_id TEXT REFERENCES rooms(id)",
+            [],
+        )?;
+    }
+    if !columns.contains(&"fixture_type".to_string()) {
+        conn.execute(
+            "ALTER TABLE light_positions ADD COLUMN fixture_type TEXT",
             [],
         )?;
     }
@@ -358,10 +373,11 @@ impl Registry {
         }
 
         // ── light_positions ────────────────────────────────────────────────
-        let pos_rows: Vec<(String, f32, f32, f32, Option<String>)> = {
+        type PosRow = (String, f32, f32, f32, Option<String>, Option<String>);
+        let pos_rows: Vec<PosRow> = {
             let mut stmt = self
                 .conn
-                .prepare("SELECT device_id, x, y, z, room_id FROM light_positions")?;
+                .prepare("SELECT device_id, x, y, z, room_id, fixture_type FROM light_positions")?;
             stmt.query_map([], |row| {
                 Ok((
                     row.get(0)?,
@@ -369,13 +385,23 @@ impl Registry {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<_>>()?
         };
 
-        for (device_id, x, y, z, room_id) in pos_rows {
-            self.light_positions.insert(device_id, (x, y, z, room_id));
+        for (device_id, x, y, z, room_id, fixture_type) in pos_rows {
+            self.light_positions.insert(
+                device_id,
+                LightPosition {
+                    x,
+                    y,
+                    z,
+                    room_id,
+                    fixture_type,
+                },
+            );
         }
 
         Ok(())
@@ -950,12 +976,20 @@ impl Registry {
 
     // ── Light positions ──────────────────────────────────────────────────────
 
-    pub fn get_all_light_positions(&self) -> HashMap<String, (f32, f32, f32, Option<String>)> {
+    pub fn get_all_light_positions(&self) -> HashMap<String, LightPosition> {
         self.light_positions.clone()
     }
 
-    pub fn get_light_position(&self, device_id: &str) -> Option<(f32, f32, f32, Option<String>)> {
+    pub fn get_light_position(&self, device_id: &str) -> Option<LightPosition> {
         self.light_positions.get(device_id).cloned()
+    }
+
+    pub fn get_positions_for_room(&self, room_id: &str) -> Vec<(String, LightPosition)> {
+        self.light_positions
+            .iter()
+            .filter(|(_, p)| p.room_id.as_deref() == Some(room_id))
+            .map(|(id, p)| (id.clone(), p.clone()))
+            .collect()
     }
 
     pub fn update_light_position(
@@ -965,6 +999,7 @@ impl Registry {
         y: f32,
         z: f32,
         mut room_id: Option<String>,
+        fixture_type: Option<String>,
     ) {
         // If room_id not provided, try to infer it from existing room membership.
         if room_id.is_none() {
@@ -972,14 +1007,22 @@ impl Registry {
         }
 
         if let Err(e) = self.conn.execute(
-            "INSERT OR REPLACE INTO light_positions (device_id, x, y, z, room_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![device_id, x, y, z, room_id],
+            "INSERT OR REPLACE INTO light_positions (device_id, x, y, z, room_id, fixture_type) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![device_id, x, y, z, room_id, fixture_type],
         ) {
             warn!(error = %e, "update_light_position failed");
             return;
         }
-        self.light_positions
-            .insert(device_id.to_owned(), (x, y, z, room_id));
+        self.light_positions.insert(
+            device_id.to_owned(),
+            LightPosition {
+                x,
+                y,
+                z,
+                room_id,
+                fixture_type,
+            },
+        );
     }
 }
 
@@ -1777,12 +1820,13 @@ mod tests {
     #[test]
     fn update_and_get_light_position_round_trips() {
         let mut reg = Registry::new();
-        reg.update_light_position("bulb1", 1.0, 2.0, 0.5, None);
+        reg.update_light_position("bulb1", 1.0, 2.0, 0.5, None, None);
         let pos = reg.get_light_position("bulb1").unwrap();
-        assert!((pos.0 - 1.0).abs() < 1e-4);
-        assert!((pos.1 - 2.0).abs() < 1e-4);
-        assert!((pos.2 - 0.5).abs() < 1e-4);
-        assert!(pos.3.is_none());
+        assert!((pos.x - 1.0).abs() < 1e-4);
+        assert!((pos.y - 2.0).abs() < 1e-4);
+        assert!((pos.z - 0.5).abs() < 1e-4);
+        assert!(pos.room_id.is_none());
+        assert!(pos.fixture_type.is_none());
     }
 
     #[test]
@@ -1794,8 +1838,8 @@ mod tests {
     #[test]
     fn get_all_light_positions_returns_all_entries() {
         let mut reg = Registry::new();
-        reg.update_light_position("bulb1", 0.0, 0.0, 0.0, None);
-        reg.update_light_position("bulb2", 1.0, 1.0, 0.0, None);
+        reg.update_light_position("bulb1", 0.0, 0.0, 0.0, None, None);
+        reg.update_light_position("bulb2", 1.0, 1.0, 0.0, None, None);
         let all = reg.get_all_light_positions();
         assert_eq!(all.len(), 2);
         assert!(all.contains_key("bulb1"));
@@ -1805,11 +1849,19 @@ mod tests {
     #[test]
     fn update_light_position_upserts() {
         let mut reg = Registry::new();
-        reg.update_light_position("bulb1", 1.0, 2.0, 0.0, None);
-        reg.update_light_position("bulb1", 3.0, 4.0, 0.0, None);
+        reg.update_light_position("bulb1", 1.0, 2.0, 0.0, None, None);
+        reg.update_light_position("bulb1", 3.0, 4.0, 0.0, None, None);
         let pos = reg.get_light_position("bulb1").unwrap();
-        assert!((pos.0 - 3.0).abs() < 1e-4);
-        assert!((pos.1 - 4.0).abs() < 1e-4);
+        assert!((pos.x - 3.0).abs() < 1e-4);
+        assert!((pos.y - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn update_light_position_persists_fixture_type() {
+        let mut reg = Registry::new();
+        reg.update_light_position("bulb1", 0.5, 0.5, 1.0, None, Some("pendant".into()));
+        let pos = reg.get_light_position("bulb1").unwrap();
+        assert_eq!(pos.fixture_type.as_deref(), Some("pendant"));
     }
 
     #[test]
@@ -1818,9 +1870,9 @@ mod tests {
         let room_id = reg.create_room("Study").id;
         reg.add_device_to_room(&room_id, "bulb1");
         // No room_id passed — should be inferred from membership
-        reg.update_light_position("bulb1", 1.0, 1.0, 0.0, None);
+        reg.update_light_position("bulb1", 1.0, 1.0, 0.0, None, None);
         let pos = reg.get_light_position("bulb1").unwrap();
-        assert_eq!(pos.3.as_deref(), Some(room_id.as_str()));
+        assert_eq!(pos.room_id.as_deref(), Some(room_id.as_str()));
     }
 
     // ── Room spatial fields ───────────────────────────────────────────────────

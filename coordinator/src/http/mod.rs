@@ -23,6 +23,7 @@ const HEALTH_JS: &str = include_str!("static/health.js");
 const MODELS_JS: &str = include_str!("static/models.js");
 const LIGHTING_JS: &str = include_str!("static/lighting.js");
 const ROOMS_JS: &str = include_str!("static/rooms.js");
+const LAYOUT_JS: &str = include_str!("static/layout.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
@@ -112,6 +113,18 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
             }),
         )
         .route(
+            "/static/layout.js",
+            get(|| async {
+                (
+                    [(
+                        header::CONTENT_TYPE,
+                        "application/javascript; charset=utf-8",
+                    )],
+                    LAYOUT_JS,
+                )
+            }),
+        )
+        .route(
             "/manifest.json",
             get(|| async {
                 (
@@ -152,6 +165,7 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
         .route("/api/rooms/{id}", delete(api::delete_room))
         .route("/api/rooms/{id}/name", patch(api::rename_room))
         .route("/api/rooms/{id}/devices", patch(api::modify_room_devices))
+        .route("/api/rooms/{id}/positions", get(api::get_room_positions))
         .route("/api/rooms/{id}/command", post(api::room_command))
         .route("/api/scenes", post(api::save_scene))
         .route("/api/scenes/{id}/recall", post(api::recall_scene))
