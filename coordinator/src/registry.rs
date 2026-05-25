@@ -7,6 +7,40 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::warn;
 
+fn gen_uuid() -> String {
+    let mut b = [0u8; 16];
+    getrandom::getrandom(&mut b).expect("rng failed");
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant RFC 4122
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct RoomRecord {
+    pub id: String,
+    pub name: String,
+    pub position: i64,
+    pub device_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelAllocation {
     pub model_name: String,
@@ -34,7 +68,8 @@ pub struct Registry {
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS nodes (
+        "PRAGMA foreign_keys = ON;
+        CREATE TABLE IF NOT EXISTS nodes (
             id            TEXT PRIMARY KEY,
             hostname      TEXT NOT NULL,
             ip            TEXT NOT NULL,
@@ -55,6 +90,16 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             node_id  TEXT PRIMARY KEY,
             devices  TEXT NOT NULL,
             groups   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS rooms (
+            id       TEXT PRIMARY KEY,
+            name     TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS room_devices (
+            room_id   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            device_id TEXT NOT NULL,
+            PRIMARY KEY (room_id, device_id)
         );",
     )
 }
@@ -457,6 +502,133 @@ impl Registry {
                     .map(|m| m.state == ModelLifecycleState::Loading)
                     .unwrap_or(false)
         })
+    }
+
+    // ── Rooms ─────────────────────────────────────────────────────────────────
+
+    fn room_device_ids(&self, room_id: &str) -> Vec<String> {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT device_id FROM room_devices WHERE room_id = ?1 ORDER BY device_id")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "room_device_ids prepare failed");
+                return vec![];
+            }
+        };
+        stmt.query_map(params![room_id], |row| row.get(0))
+            .map(|rows| {
+                rows.collect::<rusqlite::Result<Vec<String>>>()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn list_rooms(&self) -> Vec<RoomRecord> {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT id, name, position FROM rooms ORDER BY position, name")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "list_rooms prepare failed");
+                return vec![];
+            }
+        };
+        let rows: Vec<(String, String, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map(|r| r.collect::<rusqlite::Result<_>>().unwrap_or_default())
+            .unwrap_or_default();
+        rows.into_iter()
+            .map(|(id, name, position)| {
+                let device_ids = self.room_device_ids(&id);
+                RoomRecord {
+                    id,
+                    name,
+                    position,
+                    device_ids,
+                }
+            })
+            .collect()
+    }
+
+    pub fn create_room(&mut self, name: &str) -> RoomRecord {
+        let id = gen_uuid();
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO rooms (id, name, position) VALUES (?1, ?2, 0)",
+            params![id, name],
+        ) {
+            warn!(error = %e, "create_room failed");
+        }
+        RoomRecord {
+            id,
+            name: name.to_owned(),
+            position: 0,
+            device_ids: vec![],
+        }
+    }
+
+    /// Returns true if a room with this id exists.
+    pub fn room_exists(&self, id: &str) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM rooms WHERE id = ?1", params![id], |_| Ok(()))
+            .is_ok()
+    }
+
+    pub fn delete_room(&mut self, id: &str) {
+        // CASCADE in room_devices handles membership cleanup.
+        if let Err(e) = self
+            .conn
+            .execute("DELETE FROM rooms WHERE id = ?1", params![id])
+        {
+            warn!(error = %e, "delete_room failed");
+        }
+    }
+
+    pub fn rename_room(&mut self, id: &str, name: &str) {
+        if let Err(e) = self.conn.execute(
+            "UPDATE rooms SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        ) {
+            warn!(error = %e, "rename_room failed");
+        }
+    }
+
+    /// Move a device into a room, removing it from any other room first.
+    pub fn add_device_to_room(&mut self, room_id: &str, device_id: &str) {
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM room_devices WHERE device_id = ?1",
+            params![device_id],
+        ) {
+            warn!(error = %e, "add_device_to_room evict failed");
+        }
+        if let Err(e) = self.conn.execute(
+            "INSERT OR IGNORE INTO room_devices (room_id, device_id) VALUES (?1, ?2)",
+            params![room_id, device_id],
+        ) {
+            warn!(error = %e, "add_device_to_room insert failed");
+        }
+    }
+
+    pub fn remove_device_from_room(&mut self, room_id: &str, device_id: &str) {
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM room_devices WHERE room_id = ?1 AND device_id = ?2",
+            params![room_id, device_id],
+        ) {
+            warn!(error = %e, "remove_device_from_room failed");
+        }
+    }
+
+    /// Returns the room_id the device is currently assigned to, if any.
+    pub fn get_room_for_device(&self, device_id: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT room_id FROM room_devices WHERE device_id = ?1",
+                params![device_id],
+                |row| row.get(0),
+            )
+            .ok()
     }
 }
 
@@ -880,5 +1052,122 @@ mod tests {
         let (devices, groups) = reg.all_light_device_names();
         assert_eq!(devices.len(), 1);
         assert_eq!(groups.len(), 1);
+    }
+
+    // ── Rooms ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn create_room_appears_in_list() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Living Room");
+        assert!(!r.id.is_empty());
+        assert_eq!(r.name, "Living Room");
+        assert_eq!(r.position, 0);
+        assert!(r.device_ids.is_empty());
+
+        let rooms = reg.list_rooms();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].id, r.id);
+        assert_eq!(rooms[0].name, "Living Room");
+    }
+
+    #[test]
+    fn delete_room_removes_from_list() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Bedroom");
+        reg.delete_room(&r.id);
+        assert!(reg.list_rooms().is_empty());
+    }
+
+    #[test]
+    fn delete_room_cascades_device_memberships() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Lounge");
+        reg.add_device_to_room(&r.id, "test_bulb");
+        assert_eq!(reg.get_room_for_device("test_bulb"), Some(r.id.clone()));
+
+        reg.delete_room(&r.id);
+        assert!(reg.get_room_for_device("test_bulb").is_none());
+    }
+
+    #[test]
+    fn rename_room_updates_name() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Old Name");
+        reg.rename_room(&r.id, "New Name");
+        let rooms = reg.list_rooms();
+        assert_eq!(rooms[0].name, "New Name");
+    }
+
+    #[test]
+    fn add_device_to_room_stores_membership() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Kitchen");
+        reg.add_device_to_room(&r.id, "ceiling_spot");
+        assert_eq!(reg.get_room_for_device("ceiling_spot"), Some(r.id.clone()));
+        let rooms = reg.list_rooms();
+        assert!(rooms[0].device_ids.contains(&"ceiling_spot".to_string()));
+    }
+
+    #[test]
+    fn add_device_moves_it_between_rooms() {
+        let mut reg = Registry::new();
+        let a = reg.create_room("Room A");
+        let b = reg.create_room("Room B");
+        reg.add_device_to_room(&a.id, "desk_lamp");
+        assert_eq!(reg.get_room_for_device("desk_lamp"), Some(a.id.clone()));
+
+        reg.add_device_to_room(&b.id, "desk_lamp");
+        assert_eq!(reg.get_room_for_device("desk_lamp"), Some(b.id.clone()));
+        // Must no longer be in room A
+        let rooms = reg.list_rooms();
+        let room_a = rooms.iter().find(|r| r.id == a.id).unwrap();
+        assert!(!room_a.device_ids.contains(&"desk_lamp".to_string()));
+    }
+
+    #[test]
+    fn remove_device_from_room_clears_membership() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Office");
+        reg.add_device_to_room(&r.id, "floor_lamp");
+        reg.remove_device_from_room(&r.id, "floor_lamp");
+        assert!(reg.get_room_for_device("floor_lamp").is_none());
+    }
+
+    #[test]
+    fn get_room_for_device_returns_none_for_unassigned() {
+        let reg = Registry::new();
+        assert!(reg.get_room_for_device("unassigned_bulb").is_none());
+    }
+
+    #[test]
+    fn room_exists_returns_correct_values() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Test");
+        assert!(reg.room_exists(&r.id));
+        assert!(!reg.room_exists("nonexistent-id"));
+    }
+
+    #[test]
+    fn rooms_persist_across_open() {
+        let path = "/tmp/test-rooms-registry.db";
+        let _ = std::fs::remove_file(path);
+
+        let room_id;
+        {
+            let mut reg = Registry::open(path).unwrap();
+            let r = reg.create_room("Hall");
+            room_id = r.id.clone();
+            reg.add_device_to_room(&r.id, "hall_bulb");
+        }
+
+        let reg = Registry::open(path).unwrap();
+        let rooms = reg.list_rooms();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].name, "Hall");
+        assert_eq!(rooms[0].id, room_id);
+        assert!(rooms[0].device_ids.contains(&"hall_bulb".to_string()));
+
+        let _ = std::fs::remove_file(path);
     }
 }

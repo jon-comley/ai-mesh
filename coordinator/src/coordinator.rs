@@ -1,4 +1,4 @@
-use crate::http::state::DashboardState;
+use crate::http::state::{DashboardState, RoomInfo};
 use crate::registry::Registry;
 use crate::server::Server;
 use crate::tls as coord_tls;
@@ -15,6 +15,20 @@ pub(crate) fn generate_auth_token() -> String {
 
 pub struct CoordinatorConfig {
     pub listen_addr: String,
+}
+
+fn warm_start_rooms(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
+    let rooms = registry.lock().unwrap().list_rooms();
+    let room_infos: Vec<RoomInfo> = rooms
+        .into_iter()
+        .map(|r| RoomInfo {
+            id: r.id,
+            name: r.name,
+            position: r.position,
+            device_ids: r.device_ids,
+        })
+        .collect();
+    dashboard.push_rooms_update(room_infos);
 }
 
 pub struct Coordinator {
@@ -103,6 +117,7 @@ impl Coordinator {
             server.auth_tokens = tokens.clone();
             let dashboard = DashboardState::new(tokens, server.connections.clone());
             server.dashboard = Some(dashboard.clone());
+            warm_start_rooms(&self.registry, &dashboard);
             let handle = tokio::spawn(async move {
                 let _ = server.run().await;
             });
@@ -127,6 +142,7 @@ impl Coordinator {
         server.auth_tokens = tokens.clone();
         let dashboard = DashboardState::new(tokens, server.connections.clone());
         server.dashboard = Some(dashboard.clone());
+        warm_start_rooms(&self.registry, &dashboard);
 
         let handle = tokio::spawn(async move {
             let _ = server.run().await;
