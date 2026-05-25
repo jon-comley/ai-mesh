@@ -408,12 +408,25 @@ body {
   gap: 8px;
 }
 
+.light-name-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
 .light-name {
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.light-node-badge {
+  font-size: 10px;
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
