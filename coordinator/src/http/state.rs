@@ -175,6 +175,15 @@ impl DashboardState {
             .collect()
     }
 
+    /// Return the node_id that last reported state for a given device — used to route commands.
+    pub fn get_node_for_device(&self, device_id: &str) -> Option<String> {
+        self.light_snapshot
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .map(|r| r.node_id.clone())
+    }
+
     /// Build and broadcast a TopologyUpdate from a fresh node list.
     pub fn push_topology(&self, nodes: &[NodeRecordLite]) {
         // No receivers — nothing to do.
@@ -888,6 +897,28 @@ mod tests {
             json.contains("\"color_temp\":370"),
             "missing color_temp: {json}"
         );
+    }
+
+    #[test]
+    fn get_node_for_device_returns_node_id() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_lighting_update(make_light_report("bulb1", true));
+        assert_eq!(
+            state.get_node_for_device("bulb1"),
+            Some("lighting-node".into())
+        );
+    }
+
+    #[test]
+    fn get_node_for_device_returns_none_for_unknown() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        assert!(state.get_node_for_device("no-such-bulb").is_none());
     }
 
     #[test]

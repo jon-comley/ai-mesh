@@ -1,5 +1,5 @@
 // ── Lighting panel ──────────────────────────────────────────────────────────
-// Renders per-device light state cards from LightingUpdate events.
+// Renders per-device light state cards with interactive controls.
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
@@ -34,31 +34,13 @@ function render() {
     card.innerHTML = deviceCard(dev);
     container.appendChild(card);
     enableDrag(card);
+    wireControls(card, dev);
   }
 }
 
 function deviceCard(dev) {
   const badgeClass = dev.on ? 'badge-green' : 'badge-muted';
   const badgeLabel = dev.on ? 'On' : 'Off';
-
-  let details = '';
-  if (dev.brightness != null) {
-    const pct = Math.round((dev.brightness / 255) * 100);
-    details += `
-      <div class="light-detail-row">
-        <span class="light-detail-label">Brightness</span>
-        <div class="light-bar-track"><div class="light-bar-fill" style="width:${pct}%"></div></div>
-        <span class="light-detail-value">${pct}%</span>
-      </div>`;
-  }
-  if (dev.color_temp != null) {
-    const kelvin = Math.round(1_000_000 / dev.color_temp);
-    details += `
-      <div class="light-detail-row">
-        <span class="light-detail-label">Color temp</span>
-        <span class="light-detail-value">${kelvin} K</span>
-      </div>`;
-  }
 
   let swatch = '';
   if (dev.color_xy != null) {
@@ -67,16 +49,116 @@ function deviceCard(dev) {
     swatch = `<span class="color-swatch" style="background:rgb(${r},${g},${b})" title="XY (${x.toFixed(3)}, ${y.toFixed(3)})"></span>`;
   }
 
+  let controls = '';
+  if (dev.brightness != null) {
+    const pct = Math.round((dev.brightness / 255) * 100);
+    controls += `
+      <div class="light-detail-row">
+        <span class="light-detail-label">Brightness</span>
+        <input class="light-slider" type="range" min="0" max="255" value="${dev.brightness}"
+               data-ctrl="brightness" title="${pct}%" aria-label="Brightness">
+        <span class="light-detail-value">${pct}%</span>
+      </div>`;
+  }
+  if (dev.color_temp != null) {
+    const kelvin = Math.round(1_000_000 / dev.color_temp);
+    controls += `
+      <div class="light-detail-row">
+        <span class="light-detail-label">Color temp</span>
+        <input class="light-slider" type="range" min="154" max="500" value="${dev.color_temp}"
+               data-ctrl="color_temp" title="${kelvin} K" aria-label="Color temperature">
+        <span class="light-detail-value">${kelvin} K</span>
+      </div>`;
+  }
+
   return `
     <div class="light-card-header">
       <span class="light-name">${esc(dev.device_id)}</span>
       <div class="light-card-header-right">
         ${swatch}
-        <span class="badge ${badgeClass}">${badgeLabel}</span>
+        <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(dev.device_id)}">
+          <span class="badge ${badgeClass}">${badgeLabel}</span>
+        </button>
       </div>
     </div>
-    ${details ? `<div class="light-card-details">${details}</div>` : ''}
+    ${controls ? `<div class="light-card-details">${controls}</div>` : ''}
   `;
+}
+
+function wireControls(card, dev) {
+  const toggleBtn = card.querySelector('[data-ctrl="toggle"]');
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      devicesMap.set(dev.device_id, { ...dev, on: !dev.on });
+      render();
+      sendCommand(dev.device_id, { action: 'toggle' });
+    });
+  }
+
+  const bri = card.querySelector('[data-ctrl="brightness"]');
+  if (bri) {
+    bri.addEventListener('input', () => {
+      const pct = Math.round((bri.value / 255) * 100);
+      bri.title = `${pct}%`;
+      const label = bri.parentElement.querySelector('.light-detail-value');
+      if (label) label.textContent = `${pct}%`;
+    });
+    bri.addEventListener('change', () => {
+      const val = parseInt(bri.value, 10);
+      devicesMap.set(dev.device_id, { ...dev, brightness: val });
+      sendCommand(dev.device_id, { action: 'brightness', value: val });
+    });
+  }
+
+  const ct = card.querySelector('[data-ctrl="color_temp"]');
+  if (ct) {
+    ct.addEventListener('input', () => {
+      const kelvin = Math.round(1_000_000 / ct.value);
+      ct.title = `${kelvin} K`;
+      const label = ct.parentElement.querySelector('.light-detail-value');
+      if (label) label.textContent = `${kelvin} K`;
+    });
+    ct.addEventListener('change', () => {
+      const val = parseInt(ct.value, 10);
+      devicesMap.set(dev.device_id, { ...dev, color_temp: val });
+      sendCommand(dev.device_id, { action: 'color_temp', value: val });
+    });
+  }
+}
+
+async function sendCommand(deviceId, body) {
+  const token = localStorage.getItem('meshToken') ?? '';
+  try {
+    const res = await fetch(
+      `/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(token)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      showToast(`Command failed (${res.status})${text ? ': ' + text : ''}`, true);
+    }
+  } catch (e) {
+    showToast(`Command error: ${e.message}`, true);
+  }
+}
+
+function showToast(msg, isError = false) {
+  let el = document.getElementById('light-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'light-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.className = 'light-toast' + (isError ? ' light-toast-error' : '');
+  el.style.opacity = '1';
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.style.opacity = '0'; }, 4000);
 }
 
 // CIE XY + brightness → approximate sRGB (Philips Hue algorithm)
@@ -103,6 +185,15 @@ function esc(s) {
 // ── Drag-to-reorder (same pattern as models.js / topology.js) ───────────────
 
 function enableDrag(el) {
+  // Disable card drag while the pointer is held on a form control (slider, button).
+  el.addEventListener('pointerdown', e => {
+    if (e.target !== el && e.target.closest('input, button')) {
+      el.setAttribute('draggable', 'false');
+    }
+  });
+  el.addEventListener('pointerup', () => el.setAttribute('draggable', 'true'));
+  el.addEventListener('pointercancel', () => el.setAttribute('draggable', 'true'));
+
   el.addEventListener('dragstart', e => {
     dragSrc = el;
     e.dataTransfer.effectAllowed = 'move';
@@ -122,6 +213,7 @@ function enableDrag(el) {
   el.addEventListener('dragend', () => {
     el.classList.remove('dragging');
     dragSrc = null;
+    el.setAttribute('draggable', 'true');
     saveOrder(el.parentElement);
   });
 }

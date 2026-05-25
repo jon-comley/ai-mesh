@@ -5,7 +5,10 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use shared::{MeshMessage, ModelLoadRequest, ModelUnloadRequest, WIRE_VERSION};
+use shared::{
+    LightAction, LightCommandRequest, LightTarget, MeshMessage, ModelLoadRequest,
+    ModelUnloadRequest, WIRE_VERSION,
+};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -130,6 +133,67 @@ pub async fn unload_model(
         StatusCode::OK.into_response()
     } else {
         StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LightCommandBody {
+    action: String,
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
+    x: Option<f32>,
+    #[serde(default)]
+    y: Option<f32>,
+}
+
+fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
+    match body.action.as_str() {
+        "on" => Some(LightAction::On),
+        "off" => Some(LightAction::Off),
+        "toggle" => Some(LightAction::Toggle),
+        "brightness" => body
+            .value
+            .map(|v| LightAction::Brightness(v.clamp(0.0, 255.0) as u8)),
+        "color_temp" => body
+            .value
+            .map(|v| LightAction::ColorTemp(v.clamp(1.0, 65535.0) as u16)),
+        "color_xy" => match (body.x, body.y) {
+            (Some(x), Some(y)) => Some(LightAction::ColorXY { x, y }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub async fn light_command(
+    Path(device): Path<String>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<LightCommandBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(node_id) = state.get_node_for_device(&device) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(command) = build_light_action(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unknown action or missing required fields",
+        )
+            .into_response();
+    };
+    let cmd = LightCommandRequest {
+        request_id: gen_request_id(),
+        target: LightTarget::Device(device),
+        command,
+    };
+    if state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
     }
 }
 
@@ -442,5 +506,144 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── light_command ─────────────────────────────────────────────────────────
+
+    use shared::messages::LightStateReport;
+
+    fn seed_light(state: &Arc<DashboardState>, device_id: &str, node_id: &str) {
+        state.push_lighting_update(LightStateReport {
+            node_id: node_id.into(),
+            device_id: device_id.into(),
+            on: false,
+            brightness: Some(200),
+            color_xy: None,
+            color_temp: Some(370),
+        });
+    }
+
+    async fn post_light_cmd(
+        state: Arc<DashboardState>,
+        device: &str,
+        token: &str,
+        body: &str,
+    ) -> StatusCode {
+        let router: Router = Router::new()
+            .route("/api/lights/{device}/command", post(light_command))
+            .with_state(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/lights/{device}/command?token={token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let _ = to_bytes(resp.into_body(), usize::MAX).await;
+        status
+    }
+
+    #[tokio::test]
+    async fn light_command_ok_queues_message() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "kitchen_bulb", "pi1");
+
+        let status = post_light_cmd(state, "kitchen_bulb", "", r#"{"action":"toggle"}"#).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        match rx.try_recv().unwrap() {
+            MeshMessage::LightCommand(req) => {
+                assert!(matches!(req.command, LightAction::Toggle));
+                assert!(matches!(req.target, LightTarget::Device(d) if d == "kitchen_bulb"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn light_command_returns_401_for_wrong_token() {
+        let state = make_state(vec!["secret".into()], empty_connections());
+        seed_light(&state, "bulb1", "pi1");
+        let status = post_light_cmd(state, "bulb1", "wrong", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn light_command_returns_404_for_unknown_device() {
+        let state = make_state(vec![], empty_connections());
+        let status = post_light_cmd(state, "ghost_bulb", "", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn light_command_returns_400_for_unknown_action() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+        let status = post_light_cmd(state, "bulb1", "", r#"{"action":"dance"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn light_command_brightness_requires_value() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+        let status = post_light_cmd(state, "bulb1", "", r#"{"action":"brightness"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn light_command_color_xy_requires_both_coords() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+        let status = post_light_cmd(state, "bulb1", "", r#"{"action":"color_xy","x":0.3}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn build_light_action_maps_all_variants() {
+        let mk = |action: &str, value: Option<f64>, x: Option<f32>, y: Option<f32>| {
+            build_light_action(&LightCommandBody {
+                action: action.into(),
+                value,
+                x,
+                y,
+            })
+        };
+        assert!(matches!(mk("on", None, None, None), Some(LightAction::On)));
+        assert!(matches!(
+            mk("off", None, None, None),
+            Some(LightAction::Off)
+        ));
+        assert!(matches!(
+            mk("toggle", None, None, None),
+            Some(LightAction::Toggle)
+        ));
+        assert!(matches!(
+            mk("brightness", Some(128.0), None, None),
+            Some(LightAction::Brightness(128))
+        ));
+        assert!(matches!(
+            mk("color_temp", Some(370.0), None, None),
+            Some(LightAction::ColorTemp(370))
+        ));
+        assert!(matches!(
+            mk("color_xy", None, Some(0.3), Some(0.3)),
+            Some(LightAction::ColorXY { x, y }) if (x - 0.3).abs() < 1e-4 && (y - 0.3).abs() < 1e-4
+        ));
+        assert!(mk("unknown", None, None, None).is_none());
+        assert!(mk("color_xy", None, Some(0.3), None).is_none());
     }
 }

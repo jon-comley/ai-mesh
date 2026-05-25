@@ -124,6 +124,7 @@ pub fn router(dashboard: Arc<DashboardState>) -> Router {
         )
         .route("/api/models/load", post(api::load_model))
         .route("/api/models/unload", post(api::unload_model))
+        .route("/api/lights/{device}/command", post(api::light_command))
         .with_state(dashboard)
 }
 
