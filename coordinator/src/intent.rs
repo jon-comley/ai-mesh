@@ -333,25 +333,11 @@ fn build_light_command(
         None => LightTarget::Group("all".into()),
     };
 
-    let mut cmds = vec![LightCommandRequest {
+    Some(vec![LightCommandRequest {
         request_id: request_id.to_string(),
-        target: target.clone(),
+        target,
         command,
-    }];
-
-    // For color actions, honour an optional brightness field so the LLM can
-    // express light/dark shades in a single tool call.
-    if action_str == "color"
-        && let Some(bri) = args.get("brightness").and_then(|v| v.as_f64())
-    {
-        cmds.push(LightCommandRequest {
-            request_id: format!("{request_id}-bri"),
-            target,
-            command: LightAction::Brightness(bri.clamp(0.0, 254.0) as u8),
-        });
-    }
-
-    Some(cmds)
+    }])
 }
 
 pub fn try_parse_tool_call(output: &str) -> Option<serde_json::Value> {
@@ -387,7 +373,8 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         },
                         "action": {
                             "type": "string",
-                            "enum": ["on", "off", "toggle", "brightness", "color_temp", "color"]
+                            "enum": ["on", "off", "toggle", "brightness", "color_temp", "color"],
+                            "description": "Use 'color' for any named colour (blue, red, green, pink, purple, orange…) — always requires cx+cy. Use 'color_temp' only for white-light warmth (warm, cool, neutral, candlelight, daylight). 'light blue', 'dark red', 'pale green' are colours — use 'color' with brightness."
                         },
                         "value": {
                             "type": "number",
@@ -395,15 +382,11 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         },
                         "cx": {
                             "type": "number",
-                            "description": "CIE 1931 x chromaticity for the color action (0.0–1.0). Examples: red≈0.675, green≈0.409, blue≈0.167, warm-white≈0.450, daylight≈0.313, sky-blue≈0.250, navy≈0.170, pale-pink≈0.400"
+                            "description": "CIE 1931 x chromaticity (0.0–1.0). Saturated: red=0.675, orange=0.600, yellow=0.500, green=0.409, cyan=0.225, blue=0.167, violet=0.200. White point=0.313. Light/pale shades interpolate toward white: light-blue=0.220, sky-blue=0.240, pale-pink=0.430. Dark shades stay at the saturated value."
                         },
                         "cy": {
                             "type": "number",
-                            "description": "CIE 1931 y chromaticity for the color action (0.0–1.0). Examples: red≈0.322, green≈0.518, blue≈0.040, warm-white≈0.408, daylight≈0.329, sky-blue≈0.270, navy≈0.050, pale-pink≈0.330"
-                        },
-                        "brightness": {
-                            "type": "number",
-                            "description": "Optional brightness 0–254 to set alongside the colour. Use for light/dark shades — e.g. 'light blue' → 200, 'dark blue' → 60."
+                            "description": "CIE 1931 y chromaticity (0.0–1.0). Saturated: red=0.322, orange=0.380, yellow=0.470, green=0.518, cyan=0.330, blue=0.040, violet=0.100. White point=0.329. Light/pale shades interpolate toward white: light-blue=0.180, sky-blue=0.240, pale-pink=0.280. Dark shades stay at the saturated value."
                         }
                     },
                     "required": ["target", "action"]
@@ -653,14 +636,12 @@ mod tests {
     }
 
     #[test]
-    fn build_light_command_color_with_brightness_emits_two_commands() {
+    fn build_light_command_color_brightness_field_ignored() {
+        // brightness alongside color is no longer honoured — one command only
         let args = serde_json::json!({"target": "test_bulb", "action": "color", "cx": 0.167, "cy": 0.04, "brightness": 60});
-        let mut cmds = build_light_command("r12", &args).unwrap();
-        assert_eq!(cmds.len(), 2);
-        let bri_cmd = cmds.remove(1);
-        let xy_cmd = cmds.remove(0);
-        assert!(matches!(xy_cmd.command, LightAction::ColorXY { .. }));
-        assert!(matches!(bri_cmd.command, LightAction::Brightness(60)));
+        let cmds = build_light_command("r12", &args).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0].command, LightAction::ColorXY { .. }));
     }
 
     #[test]
@@ -725,5 +706,25 @@ mod tests {
                 "system prompt must embed compact schema JSON"
             );
         }
+    }
+
+    #[test]
+    fn lighting_schema_has_cx_cy_not_color_string() {
+        let schemas = tool_schemas_for_feature("lighting");
+        let light_cmd = schemas
+            .iter()
+            .find(|s| s["name"] == "light_command")
+            .expect("light_command schema missing");
+        let props = &light_cmd["parameters"]["properties"];
+        assert!(props.get("cx").is_some(), "cx field missing from schema");
+        assert!(props.get("cy").is_some(), "cy field missing from schema");
+        assert!(
+            props.get("color").is_none(),
+            "old 'color' string field must not be present"
+        );
+        assert!(
+            props.get("brightness").is_none(),
+            "brightness must not be a color-action field in schema"
+        );
     }
 }
