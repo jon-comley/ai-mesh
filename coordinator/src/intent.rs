@@ -230,14 +230,18 @@ async fn dispatch_tool(
                     );
                 }
             }
-            let cmd = build_light_command(request_id, &args);
-            if lighting_tx
-                .send(MeshMessage::LightCommand(cmd))
-                .await
-                .is_err()
-            {
-                warn!(request_id, "failed to send LightCommand to lighting node");
-                return "failed to send LightCommand to lighting node".into();
+            let Some(cmds) = build_light_command(request_id, &args) else {
+                return "unrecognised colour — no command sent".into();
+            };
+            for cmd in cmds {
+                if lighting_tx
+                    .send(MeshMessage::LightCommand(cmd))
+                    .await
+                    .is_err()
+                {
+                    warn!(request_id, "failed to send LightCommand to lighting node");
+                    return "failed to send LightCommand to lighting node".into();
+                }
             }
             "ok".into()
         }
@@ -286,77 +290,10 @@ async fn dispatch_tool(
     }
 }
 
-fn rgb_to_xy(r: f32, g: f32, b: f32) -> (f32, f32) {
-    let linearize = |c: f32| {
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    let r = linearize(r);
-    let g = linearize(g);
-    let b = linearize(b);
-    // Wide-gamut D65 matrix
-    let cx = r * 0.664511 + g * 0.154324 + b * 0.162028;
-    let cy = r * 0.283881 + g * 0.668433 + b * 0.047685;
-    let cz = r * 0.000088 + g * 0.072310 + b * 0.986039;
-    let sum = cx + cy + cz;
-    if sum < 1e-6 {
-        (0.0, 0.0)
-    } else {
-        (cx / sum, cy / sum)
-    }
-}
-
-fn css_color_to_xy(s: &str) -> Option<(f32, f32)> {
-    let lower = s.trim().to_lowercase();
-    let hex: &str = match lower.as_str() {
-        "red" => "ff0000",
-        "green" => "00ff00",
-        "blue" => "0000ff",
-        "white" => "ffffff",
-        "yellow" => "ffff00",
-        "orange" => "ff8000",
-        "purple" => "8000ff",
-        "pink" => "ff69b4",
-        "cyan" => "00ffff",
-        "magenta" => "ff00ff",
-        "teal" => "008080",
-        "coral" => "ff6347",
-        "gold" => "ffd700",
-        "indigo" => "4b0082",
-        "violet" => "ee82ee",
-        "turquoise" => "40e0d0",
-        "salmon" => "fa8072",
-        "lime" => "bfff00",
-        other => other.trim_start_matches('#'),
-    };
-    let h = hex.trim();
-    if h.len() == 6 {
-        let r = u8::from_str_radix(&h[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&h[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-        Some(rgb_to_xy(
-            r as f32 / 255.0,
-            g as f32 / 255.0,
-            b as f32 / 255.0,
-        ))
-    } else if h.len() == 3 {
-        let r = u8::from_str_radix(&h[0..1].repeat(2), 16).ok()?;
-        let g = u8::from_str_radix(&h[1..2].repeat(2), 16).ok()?;
-        let b = u8::from_str_radix(&h[2..3].repeat(2), 16).ok()?;
-        Some(rgb_to_xy(
-            r as f32 / 255.0,
-            g as f32 / 255.0,
-            b as f32 / 255.0,
-        ))
-    } else {
-        None
-    }
-}
-
-fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightCommandRequest {
+fn build_light_command(
+    request_id: &str,
+    args: &serde_json::Value,
+) -> Option<Vec<LightCommandRequest>> {
     let action_str = args.get("action").and_then(|v| v.as_str()).unwrap_or("on");
     let value = args.get("value").and_then(|v| v.as_f64());
 
@@ -371,13 +308,17 @@ fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightComma
             LightAction::ColorTemp(mireds)
         }
         "color" => {
-            let color_str = args
-                .get("color")
-                .and_then(|v| v.as_str())
-                .unwrap_or("white");
-            match css_color_to_xy(color_str) {
-                Some((x, y)) => LightAction::ColorXY { x, y },
-                None => LightAction::On,
+            let x = args.get("cx").and_then(|v| v.as_f64());
+            let y = args.get("cy").and_then(|v| v.as_f64());
+            match (x, y) {
+                (Some(x), Some(y)) => LightAction::ColorXY {
+                    x: x.clamp(0.0, 1.0) as f32,
+                    y: y.clamp(0.0, 1.0) as f32,
+                },
+                _ => {
+                    tracing::warn!("color action missing cx/cy — command dropped");
+                    return None;
+                }
             }
         }
         _ => LightAction::On,
@@ -392,11 +333,25 @@ fn build_light_command(request_id: &str, args: &serde_json::Value) -> LightComma
         None => LightTarget::Group("all".into()),
     };
 
-    LightCommandRequest {
+    let mut cmds = vec![LightCommandRequest {
         request_id: request_id.to_string(),
-        target,
+        target: target.clone(),
         command,
+    }];
+
+    // For color actions, honour an optional brightness field so the LLM can
+    // express light/dark shades in a single tool call.
+    if action_str == "color"
+        && let Some(bri) = args.get("brightness").and_then(|v| v.as_f64())
+    {
+        cmds.push(LightCommandRequest {
+            request_id: format!("{request_id}-bri"),
+            target,
+            command: LightAction::Brightness(bri.clamp(0.0, 254.0) as u8),
+        });
     }
+
+    Some(cmds)
 }
 
 pub fn try_parse_tool_call(output: &str) -> Option<serde_json::Value> {
@@ -438,9 +393,17 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                             "type": "number",
                             "description": "Brightness 0–255 or colour temp in Kelvin (for brightness/color_temp actions)"
                         },
-                        "color": {
-                            "type": "string",
-                            "description": "CSS colour for the color action: hex (#FF0000) or named (red, green, blue, yellow, orange, purple, pink, cyan, white…)"
+                        "cx": {
+                            "type": "number",
+                            "description": "CIE 1931 x chromaticity for the color action (0.0–1.0). Examples: red≈0.675, green≈0.409, blue≈0.167, warm-white≈0.450, daylight≈0.313, sky-blue≈0.250, navy≈0.170, pale-pink≈0.400"
+                        },
+                        "cy": {
+                            "type": "number",
+                            "description": "CIE 1931 y chromaticity for the color action (0.0–1.0). Examples: red≈0.322, green≈0.518, blue≈0.040, warm-white≈0.408, daylight≈0.329, sky-blue≈0.270, navy≈0.050, pale-pink≈0.330"
+                        },
+                        "brightness": {
+                            "type": "number",
+                            "description": "Optional brightness 0–254 to set alongside the colour. Use for light/dark shades — e.g. 'light blue' → 200, 'dark blue' → 60."
                         }
                     },
                     "required": ["target", "action"]
@@ -608,7 +571,7 @@ mod tests {
     #[test]
     fn build_light_command_on() {
         let args = serde_json::json!({"target": "kitchen", "action": "on"});
-        let cmd = build_light_command("r1", &args);
+        let cmd = build_light_command("r1", &args).unwrap().remove(0);
         assert!(matches!(cmd.command, LightAction::On));
         assert_eq!(cmd.request_id, "r1");
         assert!(matches!(cmd.target, LightTarget::Device(ref n) if n == "kitchen"));
@@ -617,28 +580,28 @@ mod tests {
     #[test]
     fn build_light_command_no_target_falls_back_to_group() {
         let args = serde_json::json!({"action": "on"});
-        let cmd = build_light_command("r0", &args);
+        let cmd = build_light_command("r0", &args).unwrap().remove(0);
         assert!(matches!(cmd.target, LightTarget::Group(ref g) if g == "all"));
     }
 
     #[test]
     fn build_light_command_off() {
         let args = serde_json::json!({"target": "bedroom", "action": "off"});
-        let cmd = build_light_command("r2", &args);
+        let cmd = build_light_command("r2", &args).unwrap().remove(0);
         assert!(matches!(cmd.command, LightAction::Off));
     }
 
     #[test]
     fn build_light_command_brightness() {
         let args = serde_json::json!({"target": "lounge", "action": "brightness", "value": 200});
-        let cmd = build_light_command("r3", &args);
+        let cmd = build_light_command("r3", &args).unwrap().remove(0);
         assert!(matches!(cmd.command, LightAction::Brightness(200)));
     }
 
     #[test]
     fn build_light_command_brightness_clamped_to_254() {
         let args = serde_json::json!({"target": "lounge", "action": "brightness", "value": 255});
-        let cmd = build_light_command("r3b", &args);
+        let cmd = build_light_command("r3b", &args).unwrap().remove(0);
         assert!(matches!(cmd.command, LightAction::Brightness(254)));
     }
 
@@ -646,99 +609,70 @@ mod tests {
     fn build_light_command_color_temp_kelvin_to_mireds() {
         // 4000K → 250 mireds
         let args = serde_json::json!({"target": "office", "action": "color_temp", "value": 4000});
-        let cmd = build_light_command("r4", &args);
+        let cmd = build_light_command("r4", &args).unwrap().remove(0);
         assert!(matches!(cmd.command, LightAction::ColorTemp(250)));
     }
 
     #[test]
     fn build_light_command_unknown_action_defaults_to_on() {
         let args = serde_json::json!({"target": "hall", "action": "sparkle"});
-        let cmd = build_light_command("r5", &args);
+        let cmd = build_light_command("r5", &args).unwrap().remove(0);
         assert!(matches!(cmd.command, LightAction::On));
     }
 
     #[test]
     fn build_light_command_toggle() {
         let args = serde_json::json!({"target": "lounge", "action": "toggle"});
-        let cmd = build_light_command("r6", &args);
+        let cmd = build_light_command("r6", &args).unwrap().remove(0);
         assert!(matches!(cmd.command, LightAction::Toggle));
     }
 
     #[test]
     fn build_light_command_empty_target_falls_back_to_group() {
         let args = serde_json::json!({"target": "", "action": "on"});
-        let cmd = build_light_command("r7", &args);
+        let cmd = build_light_command("r7", &args).unwrap().remove(0);
         assert!(matches!(cmd.target, LightTarget::Group(ref g) if g == "all"));
     }
 
     #[test]
-    fn build_light_command_color_named_green() {
-        let args = serde_json::json!({"target": "test_bulb", "action": "color", "color": "green"});
-        let cmd = build_light_command("r8", &args);
-        assert!(matches!(cmd.command, LightAction::ColorXY { .. }));
-    }
-
-    #[test]
-    fn build_light_command_color_hex() {
+    fn build_light_command_color_with_xy() {
         let args =
-            serde_json::json!({"target": "test_bulb", "action": "color", "color": "#FF0000"});
-        let cmd = build_light_command("r9", &args);
-        assert!(matches!(cmd.command, LightAction::ColorXY { .. }));
+            serde_json::json!({"target": "test_bulb", "action": "color", "cx": 0.675, "cy": 0.322});
+        let cmd = build_light_command("r8", &args).unwrap().remove(0);
+        assert!(
+            matches!(cmd.command, LightAction::ColorXY { x, y } if (x - 0.675).abs() < 1e-4 && (y - 0.322).abs() < 1e-4)
+        );
     }
 
     #[test]
-    fn build_light_command_color_invalid_falls_back_to_on() {
+    fn build_light_command_color_clamps_out_of_range_xy() {
         let args =
-            serde_json::json!({"target": "test_bulb", "action": "color", "color": "not-a-color"});
-        let cmd = build_light_command("r10", &args);
-        assert!(matches!(cmd.command, LightAction::On));
+            serde_json::json!({"target": "test_bulb", "action": "color", "cx": 1.5, "cy": -0.1});
+        let cmd = build_light_command("r9", &args).unwrap().remove(0);
+        assert!(matches!(cmd.command, LightAction::ColorXY { x, y } if x == 1.0 && y == 0.0));
     }
 
     #[test]
-    fn css_color_to_xy_named_red_has_high_x() {
-        let (x, _y) = css_color_to_xy("red").unwrap();
-        assert!(x > 0.5, "red x should be > 0.5, got {x}");
+    fn build_light_command_color_with_brightness_emits_two_commands() {
+        let args = serde_json::json!({"target": "test_bulb", "action": "color", "cx": 0.167, "cy": 0.04, "brightness": 60});
+        let mut cmds = build_light_command("r12", &args).unwrap();
+        assert_eq!(cmds.len(), 2);
+        let bri_cmd = cmds.remove(1);
+        let xy_cmd = cmds.remove(0);
+        assert!(matches!(xy_cmd.command, LightAction::ColorXY { .. }));
+        assert!(matches!(bri_cmd.command, LightAction::Brightness(60)));
     }
 
     #[test]
-    fn css_color_to_xy_named_blue_has_low_y() {
-        let (_x, y) = css_color_to_xy("blue").unwrap();
-        assert!(y < 0.1, "blue y should be < 0.1, got {y}");
+    fn build_light_command_color_missing_xy_returns_none() {
+        let args = serde_json::json!({"target": "test_bulb", "action": "color"});
+        assert!(build_light_command("r10", &args).is_none());
     }
 
     #[test]
-    fn css_color_to_xy_hex_without_hash() {
-        assert!(css_color_to_xy("00ff00").is_some());
-    }
-
-    #[test]
-    fn css_color_to_xy_hex_with_hash() {
-        assert!(css_color_to_xy("#00ff00").is_some());
-    }
-
-    #[test]
-    fn css_color_to_xy_short_hex() {
-        assert!(css_color_to_xy("#f00").is_some());
-    }
-
-    #[test]
-    fn css_color_to_xy_invalid_returns_none() {
-        assert!(css_color_to_xy("not-a-color").is_none());
-    }
-
-    #[test]
-    fn rgb_to_xy_pure_red_produces_correct_xy() {
-        let (x, y) = rgb_to_xy(1.0, 0.0, 0.0);
-        // Wide-gamut D65: pure red → x≈0.7, y≈0.3
-        assert!((x - 0.700).abs() < 0.01, "red x got {x}");
-        assert!((y - 0.300).abs() < 0.01, "red y got {y}");
-    }
-
-    #[test]
-    fn rgb_to_xy_black_returns_zero() {
-        let (x, y) = rgb_to_xy(0.0, 0.0, 0.0);
-        assert_eq!(x, 0.0);
-        assert_eq!(y, 0.0);
+    fn build_light_command_color_missing_cy_returns_none() {
+        let args = serde_json::json!({"target": "test_bulb", "action": "color", "cx": 0.5});
+        assert!(build_light_command("r11", &args).is_none());
     }
 
     #[test]
