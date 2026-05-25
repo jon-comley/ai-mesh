@@ -49,6 +49,20 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Push current model snapshot so the Models panel populates immediately on connect.
+    let model_nodes = state.get_model_snapshot();
+    if !model_nodes.is_empty() {
+        let evt = DashboardEvent::ModelUpdate { nodes: model_nodes };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot ModelUpdate: {e}"),
+        }
+    }
+
     loop {
         tokio::select! {
             event = rx.recv() => match event {

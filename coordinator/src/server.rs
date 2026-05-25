@@ -1,9 +1,11 @@
-use crate::http::state::DashboardState;
+use crate::http::state::{DashboardState, ModelEntry, NodeModelInfo};
 use crate::intent::PendingIntents;
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
 use shared::frame::{FrameVerifyError, SignedFrame, derive_hmac_key};
-use shared::{AdminMessage, HeartbeatPayload, MeshMessage, NodeRecordFull, NodeRole};
+use shared::{
+    AdminMessage, HeartbeatPayload, MeshMessage, ModelLifecycleState, NodeRecordFull, NodeRole,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -270,6 +272,48 @@ where
     Ok(())
 }
 
+fn lifecycle_to_str(state: &ModelLifecycleState) -> (&'static str, Option<String>) {
+    match state {
+        ModelLifecycleState::Loading => ("Loading", None),
+        ModelLifecycleState::Ready => ("Ready", None),
+        ModelLifecycleState::Failed { reason } => ("Failed", Some(reason.clone())),
+        ModelLifecycleState::Unloaded => ("Unloaded", None),
+    }
+}
+
+fn build_model_snapshot(registry: &Registry) -> Vec<NodeModelInfo> {
+    registry
+        .list_nodes()
+        .into_iter()
+        .filter(|n| matches!(n.role, NodeRole::Compute))
+        .filter_map(|lite| registry.get_node_full(&lite.id))
+        .map(|full| {
+            let ram_gb = full.hardware.as_ref().map(|h| h.ram_gb).unwrap_or(0.0);
+            let models = full
+                .models
+                .into_iter()
+                .filter(|m| !matches!(m.state, ModelLifecycleState::Unloaded))
+                .map(|m| {
+                    let (state, reason) = lifecycle_to_str(&m.state);
+                    ModelEntry {
+                        name: m.model_name,
+                        size_mb: m.size_mb,
+                        state: state.into(),
+                        reason,
+                    }
+                })
+                .collect();
+            NodeModelInfo {
+                node_id: full.id,
+                hostname: full.hostname,
+                role: "Compute".into(),
+                ram_gb,
+                models,
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_message(
     msg: MeshMessage,
@@ -323,7 +367,11 @@ async fn process_message(
         }
         MeshMessage::HardwareReport(hw) => {
             if let Some(id) = node_id.as_deref() {
-                registry.lock().unwrap().update_hardware(id, hw);
+                let mut reg = registry.lock().unwrap();
+                reg.update_hardware(id, hw);
+                if let Some(dash) = dashboard {
+                    dash.push_model_update(build_model_snapshot(&reg));
+                }
             }
             MeshMessage::Acknowledge
         }
@@ -559,12 +607,19 @@ async fn process_message(
                 state      = ?report.state,
                 "model status update received"
             );
-            registry.lock().unwrap().update_model_status(
-                &report.node_id,
-                &report.model_name,
-                report.size_mb,
-                report.state,
-            );
+            let snapshot = {
+                let mut reg = registry.lock().unwrap();
+                reg.update_model_status(
+                    &report.node_id,
+                    &report.model_name,
+                    report.size_mb,
+                    report.state,
+                );
+                dashboard.map(|_| build_model_snapshot(&reg))
+            };
+            if let (Some(dash), Some(snap)) = (dashboard, snapshot) {
+                dash.push_model_update(snap);
+            }
             MeshMessage::Acknowledge
         }
         MeshMessage::IntentRequest(req) => {
