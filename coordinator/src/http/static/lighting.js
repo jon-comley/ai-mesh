@@ -5,6 +5,9 @@ const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
 let groupsSet = new Set();
 let dragSrc = null;
+let roomsActive = false;
+
+export function setRoomsActive() { roomsActive = true; }
 
 export function handleLightingUpdate(evt) {
   devicesMap.clear();
@@ -17,7 +20,7 @@ export function handleLightingUpdate(evt) {
 
 function render() {
   const container = document.getElementById('lighting-list');
-  if (!container || dragSrc) return;
+  if (!container || dragSrc || roomsActive) return;
 
   if (devicesMap.size === 0 && groupsSet.size === 0) {
     container.innerHTML = '<p class="placeholder">No lighting devices.</p>';

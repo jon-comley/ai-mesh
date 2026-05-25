@@ -2,6 +2,7 @@ import * as topology from '/static/topology.js';
 import * as health from '/static/health.js';
 import * as models from '/static/models.js';
 import * as lighting from '/static/lighting.js';
+import * as rooms from '/static/rooms.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -59,7 +60,11 @@ const handlers = {
     models.repaintModels();
   },
   ModelUpdate: evt => models.handleModelUpdate(evt),
-  LightingUpdate: evt => lighting.handleLightingUpdate(evt),
+  LightingUpdate: evt => {
+    lighting.handleLightingUpdate(evt);
+    rooms.notifyDevices(evt.devices);
+  },
+  RoomsUpdate: evt => rooms.handleRoomsUpdate(evt),
 };
 
 function dispatch(evt) {
@@ -106,6 +111,7 @@ function connect() {
 
 // ── Init ────────────────────────────────────────────────────────────────────
 topology.init(document.getElementById('node-list'));
+lighting.setRoomsActive();
 
 // Ask for token on very first visit when auth is likely needed.
 if (!localStorage.getItem('meshToken')) {

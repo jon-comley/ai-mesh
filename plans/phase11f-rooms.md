@@ -293,18 +293,20 @@ When the intent handler routes `Group("all")`, it uses the existing Z2M group me
 - Each mutating endpoint calls `push_rooms_update` after the DB write
 - 20 new tests covering all endpoints, status codes, and fan-out behaviour. 398 tests total.
 
-### F-Rooms-3 — Dashboard UI
-- New `rooms.js` ES module
-- `RoomsUpdate` handler, `render()` function
-- Unassigned strip + room cards with drag-drop
-- Inline rename
-- On/off + brightness + CT sliders per room
-- `✕` remove button on device chips
-- `+ New Room` button + inline name input
-- Update `dashboard.js` to import `rooms.js` and route `RoomsUpdate`
-- Update `lighting.js` to suppress flat device list when rooms module is active
-- Update `mod.rs` to serve `rooms.js`
-- CSS: room card, device chip, Unassigned strip, drop-target highlight, drag-over state
+### F-Rooms-3 ✓ — Dashboard UI
+- `coordinator/src/http/static/rooms.js` — new ES module (252 lines)
+  - `handleRoomsUpdate(evt)` + `notifyDevices(devices)` exports; `render()` re-runs on every event
+  - **Unassigned strip**: draggable chips for all devices not in a room; "All devices assigned" / "No lighting devices" placeholders
+  - **Room cards**: name (click-to-rename), rename + delete action buttons, on/off buttons, brightness + CT sliders (shown only when room has devices with those capabilities), member chips with `✕` remove button, drop-zone highlight
+  - **Drag-and-drop**: `dragstart` on chip records `{ deviceId, fromRoomId }`; drop on room card calls `addDeviceToRoom` (server evicts from old room atomically); drop on Unassigned calls `removeDeviceFromRoom`; `dragSrc` guard prevents render during drag
+  - **Inline rename**: click name or rename button → `<input>` replaces span in place; Enter/blur confirms; Escape cancels; confirmed-flag prevents double-fire
+  - **`+ New Room`**: button replaced by inline input on click; Enter/blur confirms; Escape cancels
+  - All API calls (`createRoom`, `deleteRoom`, `renameRoom`, `addDeviceToRoom`, `removeDeviceFromRoom`, `sendRoomCommand`) with toast error display
+- `dashboard.js` — imports `rooms.js`; routes `RoomsUpdate` → `rooms.handleRoomsUpdate`; `LightingUpdate` also calls `rooms.notifyDevices`; calls `lighting.setRoomsActive()` at init
+- `lighting.js` — `setRoomsActive()` export; `render()` returns early when `roomsActive` is true
+- `mod.rs` — `ROOMS_JS` constant + `/static/rooms.js` route + `rooms_js_returns_correct_content_type` test
+- `style.css` — ~130 lines: `.room-card`, `.room-unassigned`, `.room-chip` (+ `.room-chip-on`), `.room-chip-remove`, `.room-drop-active`, `.room-name`, `.room-controls`, `.room-actions`, `.room-new-btn`, `.room-name-input`, `.room-drop-hint`, `.room-empty-hint`
+- 1 new test (content-type); 399 tests total.
 
 ---
 
