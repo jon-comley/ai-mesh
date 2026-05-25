@@ -134,6 +134,15 @@ impl SpatialEngine {
             if let Some(node_id) = self.dashboard.get_node_for_device(&device_id) {
                 let request_id = format!("solar-{}", Utc::now().timestamp());
 
+                info!(
+                    device = %device_id,
+                    bri = final_bri,
+                    ct = base_ct,
+                    scale = format!("{:.2}", intensity_scale),
+                    "Solar sweep → sending bri={} ct={} mireds",
+                    final_bri, base_ct
+                );
+
                 // Send Brightness
                 self.dashboard.send_to_node(
                     &node_id,
@@ -153,6 +162,8 @@ impl SpatialEngine {
                         command: LightAction::ColorTemp(base_ct),
                     }),
                 );
+            } else {
+                warn!(device = %device_id, "Solar: no connected node found for device — skipping");
             }
         }
     }

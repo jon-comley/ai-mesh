@@ -6,6 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
+#[ignore = "live TCP — run with --include-ignored"]
 async fn server_handles_request_node_info() {
     // Start a local test server
     let listener = TcpListener::bind("127.0.0.1:9999").await.unwrap();

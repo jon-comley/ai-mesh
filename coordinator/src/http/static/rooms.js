@@ -5,8 +5,9 @@
 let roomsData = [];
 let devicesMap = new Map();
 let scenesData = [];
-let dragSrc = null;     // chip drag: { deviceId, fromRoomId }
-let roomDragId = null;  // room reorder drag: room id being dragged
+let dragSrc = null;       // chip drag: { deviceId, fromRoomId }
+let roomDragId = null;    // room reorder drag: room id being dragged
+let effectDragSrc = null; // effect palette drag: effect name e.g. 'solar'
 
 // ── Bulb-identify pulse (triggered on drag-grab) ─────────────────────────────
 // Pulses the grabbed bulb full→dim so you know which physical unit you're holding.
@@ -87,6 +88,7 @@ function render() {
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
 
   container.innerHTML = '';
+  container.appendChild(renderEffectsPalette());
   container.appendChild(renderNewRoomBtn());
   container.appendChild(renderUnassigned(unassigned));
 
@@ -100,6 +102,39 @@ function render() {
 
   container.appendChild(roomList);
   wireRoomListDrag(roomList);
+}
+
+// ── Effects palette ──────────────────────────────────────────────────────────
+
+function renderEffectsPalette() {
+  const palette = document.createElement('div');
+  palette.className = 'effects-palette';
+
+  const label = document.createElement('span');
+  label.className = 'effects-palette-label';
+  label.textContent = 'Effects — drag onto a room:';
+  palette.appendChild(label);
+
+  const chip = document.createElement('div');
+  chip.className = 'effect-chip';
+  chip.setAttribute('draggable', 'true');
+  chip.dataset.effect = 'solar';
+  chip.innerHTML = '&#9728; Solar';
+  chip.title = 'Drag onto a room to enable solar lighting mode for all its devices';
+
+  chip.addEventListener('dragstart', e => {
+    effectDragSrc = 'solar';
+    e.dataTransfer.effectAllowed = 'copy';
+    e.dataTransfer.setData('text/plain', 'effect:solar');
+    requestAnimationFrame(() => chip.classList.add('dragging'));
+  });
+  chip.addEventListener('dragend', () => {
+    effectDragSrc = null;
+    chip.classList.remove('dragging');
+  });
+
+  palette.appendChild(chip);
+  return palette;
 }
 
 // ── New Room button ──────────────────────────────────────────────────────────
@@ -179,6 +214,7 @@ function renderRoomCard(room) {
   card.addEventListener('pointerup', () => card.setAttribute('draggable', 'true'));
   card.addEventListener('pointercancel', () => card.setAttribute('draggable', 'true'));
   card.addEventListener('dragstart', e => {
+    if (effectDragSrc) { e.preventDefault(); return; } // let effect drag pass through
     if (card.getAttribute('draggable') !== 'true') { e.preventDefault(); return; }
     roomDragId = room.id;
     e.dataTransfer.effectAllowed = 'move';
@@ -217,6 +253,19 @@ function renderRoomCard(room) {
   deleteBtn.textContent = 'delete';
   deleteBtn.addEventListener('click', () => deleteRoom(room.id));
   actions.appendChild(deleteBtn);
+
+  // Solar active badge — shown when any device in room has solar_enabled
+  const roomDevicesAll = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
+  const solarActive = roomDevicesAll.some(d => d.solar_enabled);
+  if (solarActive) {
+    const solarBadge = document.createElement('span');
+    solarBadge.className = 'badge badge-solar';
+    solarBadge.title = 'Solar mode active — click to disable';
+    solarBadge.innerHTML = '&#9728; Solar';
+    solarBadge.style.cursor = 'pointer';
+    solarBadge.addEventListener('click', () => setSolarMode(room.id, false));
+    actions.insertBefore(solarBadge, renameBtn);
+  }
 
   header.appendChild(actions);
   card.appendChild(header);
@@ -712,9 +761,9 @@ function renderChip(deviceId, fromRoomId, showRemove) {
 
 function wireDropZone(el, roomId) {
   el.addEventListener('dragover', e => {
-    if (!dragSrc) return; // ignore room-reorder drags
+    if (!dragSrc && !effectDragSrc) return; // ignore room-reorder drags
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
+    e.dataTransfer.dropEffect = effectDragSrc ? 'copy' : 'move';
     el.classList.add('room-drop-active');
   });
   el.addEventListener('dragleave', e => {
@@ -723,6 +772,15 @@ function wireDropZone(el, roomId) {
   el.addEventListener('drop', e => {
     e.preventDefault();
     el.classList.remove('room-drop-active');
+
+    // Effect palette drop (only valid on real rooms, not unassigned)
+    if (effectDragSrc && roomId !== 'unassigned') {
+      const effect = effectDragSrc;
+      effectDragSrc = null;
+      if (effect === 'solar') setSolarMode(roomId, true);
+      return;
+    }
+
     if (!dragSrc) return;
     const { deviceId, fromRoomId } = dragSrc;
     dragSrc = null;
@@ -846,6 +904,24 @@ async function reorderRooms(ids) {
     });
     if (!res.ok) showToast(`Reorder failed (${res.status})`, true);
   } catch (e) { showToast(`Reorder error: ${e.message}`, true); }
+}
+
+async function setSolarMode(roomId, enable) {
+  const room = roomsData.find(r => r.id === roomId);
+  if (!room) return;
+  // Optimistic update of solar_enabled on each device
+  for (const deviceId of room.device_ids) {
+    const dev = devicesMap.get(deviceId);
+    if (dev) devicesMap.set(deviceId, { ...dev, solar_enabled: enable });
+  }
+  render();
+  try {
+    const res = await fetch(`/api/rooms/${roomId}/command?token=${encodeURIComponent(tok())}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'solar_mode', value: enable ? 1 : 0 }),
+    });
+    if (!res.ok) showToast(`Solar mode failed (${res.status})`, true);
+  } catch (e) { showToast(`Solar mode error: ${e.message}`, true); }
 }
 
 async function sendRoomCommand(roomId, body, room) {

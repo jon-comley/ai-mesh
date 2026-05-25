@@ -700,6 +700,47 @@ body {
   margin-bottom: 8px;
 }
 
+.effects-palette {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.effects-palette-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.effect-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--amber) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: grab;
+  user-select: none;
+  transition: opacity 0.15s;
+}
+.effect-chip:active, .effect-chip.dragging { opacity: 0.5; cursor: grabbing; }
+.badge-solar {
+  background: color-mix(in srgb, var(--amber) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
+  color: var(--amber);
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  margin-right: 6px;
+}
+
 .room-card {
   background: var(--surface);
   border: 1px solid var(--border);

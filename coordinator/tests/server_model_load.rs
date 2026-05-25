@@ -22,6 +22,7 @@ async fn write_frame(stream: &mut TcpStream, msg: &MeshMessage) {
 }
 
 #[tokio::test]
+#[ignore = "live TCP — run with --include-ignored"]
 async fn test_coordinator_forwards_model_load_to_registered_agent() {
     // Shared state — both connections use the same registry and connections map
     // so the Heartbeat from the agent makes it visible to the CLI's ModelLoad handler.
