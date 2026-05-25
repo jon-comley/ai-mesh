@@ -446,6 +446,21 @@ body {
   flex-shrink: 0;
 }
 
+.color-swatch-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: border-color 0.15s;
+}
+
+.color-swatch-btn:hover {
+  border-color: var(--accent);
+}
+
 .light-card-details {
   margin-top: 10px;
   display: flex;
@@ -554,6 +569,70 @@ body {
 .light-toast-error {
   border-color: var(--red);
   color: var(--red);
+}
+
+/* ── Colour picker ─────────────────────────────────────────────────────────── */
+.light-colour-picker {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  border-top: 1px solid transparent;
+  transition: max-height 0.2s ease, opacity 0.2s ease, padding-top 0.2s ease, border-color 0.2s ease;
+  padding-top: 0;
+}
+
+.light-colour-picker.open {
+  max-height: 200px;
+  opacity: 1;
+  padding-top: 6px;
+  border-top-color: var(--border);
+}
+
+.colour-swatch-preview {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.hue-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 12px;
+  border-radius: 6px;
+  outline: none;
+  cursor: pointer;
+  background: linear-gradient(to right,
+    hsl(0,100%,50%), hsl(30,100%,50%), hsl(60,100%,50%), hsl(90,100%,50%),
+    hsl(120,100%,50%), hsl(150,100%,50%), hsl(180,100%,50%), hsl(210,100%,50%),
+    hsl(240,100%,50%), hsl(270,100%,50%), hsl(300,100%,50%), hsl(330,100%,50%),
+    hsl(0,100%,50%)
+  );
+}
+
+.hue-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: white;
+  border: 2px solid rgba(0,0,0,0.3);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+}
+
+.hue-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: white;
+  border: 2px solid rgba(0,0,0,0.3);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
 }
 
 /* ── Desktop layout (≥ 900px) ──────────────────────────────────────────────── */

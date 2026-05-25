@@ -66,6 +66,21 @@ impl ZigbeeClient {
                                 warn!("zigbee: re-subscribe failed for {topic}: {e}");
                             }
                         }
+                        // Request the device list from Z2M. Z2M normally publishes
+                        // bridge/devices with retain=true, but explicitly requesting it
+                        // ensures we get a fresh copy even if the broker has no retained
+                        // message (e.g. after a Mosquitto wipe or first boot).
+                        if let Err(e) = subscribe_client
+                            .publish(
+                                "zigbee2mqtt/bridge/request/devices",
+                                QoS::AtMostOnce,
+                                false,
+                                "",
+                            )
+                            .await
+                        {
+                            warn!("zigbee: failed to request device list: {e}");
+                        }
                         let _ = tx_loop.send(ZigbeeEvent::ConnectionRestored);
                     }
                     Ok(Event::Incoming(Packet::Publish(p))) => {
@@ -81,6 +96,23 @@ impl ZigbeeClient {
                                     "zigbee: device discovered"
                                 );
                             }
+                            // Poll current state for every device. Without this, the dashboard
+                            // only shows state after the first device-triggered Z2M publish,
+                            // which may never come if nothing changes.
+                            let poll_client = subscribe_client.clone();
+                            let poll_names = names.clone();
+                            tokio::spawn(async move {
+                                for name in &poll_names {
+                                    let topic = format!("zigbee2mqtt/{name}/get");
+                                    let payload = r#"{"state":"","brightness":"","color_temp":"","color":{"x":"","y":""}}"#;
+                                    if let Err(e) = poll_client
+                                        .publish(&topic, QoS::AtMostOnce, false, payload)
+                                        .await
+                                    {
+                                        warn!("zigbee: state poll failed for {name}: {e}");
+                                    }
+                                }
+                            });
                             let _ = tx_loop.send(ZigbeeEvent::DeviceListUpdated(names));
                         } else if topic == "zigbee2mqtt/bridge/groups" {
                             let groups = parse_group_names(p.payload.as_ref());

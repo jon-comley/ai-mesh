@@ -41,12 +41,38 @@ function render() {
 function deviceCard(dev) {
   const badgeClass = dev.on ? 'badge-green' : 'badge-muted';
   const badgeLabel = dev.on ? 'On' : 'Off';
+  const displayName = formatDeviceName(dev.device_id);
 
   let swatch = '';
-  if (dev.color_xy != null) {
-    const [x, y] = dev.color_xy;
-    const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
-    swatch = `<span class="color-swatch" style="background:rgb(${r},${g},${b})" title="XY (${x.toFixed(3)}, ${y.toFixed(3)})"></span>`;
+  let colourPicker = '';
+  if (dev.color_xy != null || dev.color_temp != null) {
+    let h = 30, s = 80;
+    let swatchRgb = `hsl(${h},${s}%,50%)`;
+    if (dev.color_xy != null) {
+      const [x, y] = dev.color_xy;
+      const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
+      ({ h, s } = rgbToHsl(r, g, b));
+      swatchRgb = `rgb(${r},${g},${b})`;
+    }
+    swatch = `<button class="color-swatch-btn" data-ctrl="colour-toggle"
+      style="background:${swatchRgb}"
+      title="Pick colour" aria-label="Pick colour for ${esc(displayName)}"></button>`;
+    colourPicker = `
+      <div class="light-colour-picker" data-ctrl="colour-picker" role="group" aria-label="Colour controls">
+        <div class="light-detail-row">
+          <span class="light-detail-label">Hue</span>
+          <input class="hue-slider" type="range" min="0" max="359" value="${h}"
+                 data-ctrl="hue" aria-label="Hue">
+          <span class="colour-swatch-preview" style="background:hsl(${h},${s}%,50%)"></span>
+        </div>
+        <div class="light-detail-row">
+          <span class="light-detail-label">Saturation</span>
+          <input class="light-slider" type="range" min="0" max="100" value="${s}"
+                 data-ctrl="saturation" aria-label="Saturation"
+                 style="background:linear-gradient(to right,#fff,hsl(${h},100%,50%))">
+          <span class="light-detail-value">${s}%</span>
+        </div>
+      </div>`;
   }
 
   let controls = '';
@@ -70,8 +96,7 @@ function deviceCard(dev) {
         <span class="light-detail-value">${kelvin} K</span>
       </div>`;
   }
-
-  const displayName = formatDeviceName(dev.device_id);
+  controls += colourPicker;
 
   return `
     <div class="light-card-header">
@@ -130,6 +155,41 @@ function wireControls(card, dev) {
       sendCommand(dev.device_id, { action: 'color_temp', value: val });
     });
   }
+
+  // Colour picker
+  const colourToggle = card.querySelector('[data-ctrl="colour-toggle"]');
+  const colourPicker = card.querySelector('[data-ctrl="colour-picker"]');
+  const hue = card.querySelector('[data-ctrl="hue"]');
+  const sat = card.querySelector('[data-ctrl="saturation"]');
+  const preview = colourPicker?.querySelector('.colour-swatch-preview');
+
+  if (colourToggle && colourPicker) {
+    colourToggle.addEventListener('click', e => {
+      e.stopPropagation();
+      colourPicker.classList.toggle('open');
+    });
+  }
+
+  function syncColourUI() {
+    if (!hue || !sat) return;
+    const h = hue.value, s = sat.value;
+    if (preview) preview.style.background = `hsl(${h},${s}%,50%)`;
+    sat.style.background = `linear-gradient(to right,#fff,hsl(${h},100%,50%))`;
+    const satLabel = sat.parentElement?.querySelector('.light-detail-value');
+    if (satLabel) satLabel.textContent = `${s}%`;
+    if (colourToggle) colourToggle.style.background = `hsl(${h},${s}%,50%)`;
+  }
+
+  function sendColour() {
+    if (!hue || !sat) return;
+    const { x, y } = hslToXy(parseInt(hue.value), parseInt(sat.value));
+    devicesMap.set(dev.device_id, { ...dev, color_xy: [x, y] });
+    sendCommand(dev.device_id, { action: 'color_xy', x, y });
+  }
+
+  if (hue) { hue.addEventListener('input', syncColourUI); hue.addEventListener('change', sendColour); }
+  if (sat) { sat.addEventListener('input', syncColourUI); sat.addEventListener('change', sendColour); }
+  if (hue || sat) syncColourUI();
 }
 
 async function sendCommand(deviceId, body) {
@@ -181,6 +241,37 @@ function xyToRgb(x, y, bri = 254) {
   if (max > 1) { r /= max; g /= max; b /= max; }
   const gc = v => v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
   return { r: Math.round(gc(r) * 255), g: Math.round(gc(g) * 255), b: Math.round(gc(b) * 255) };
+}
+
+// RGB (0-255) → HSL (h: 0-359, s: 0-100, l: 0-100)
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l: Math.round(l * 100) };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return { h: Math.round(h * 360) % 360, s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+// HSL hue (0-359) + saturation (0-100) → CIE XY, L fixed at 50%
+function hslToXy(h, s) {
+  s /= 100;
+  const l = 0.5;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1))); };
+  const gc = v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  const r = gc(f(0)), g = gc(f(8)), b = gc(f(4));
+  const X = r * 0.664511 + g * 0.154324 + b * 0.162028;
+  const Y = r * 0.283881 + g * 0.668433 + b * 0.047685;
+  const Z = r * 0.000088 + g * 0.072310 + b * 0.986039;
+  const sum = X + Y + Z;
+  if (sum === 0) return { x: 0.3227, y: 0.3290 };
+  return { x: parseFloat((X / sum).toFixed(4)), y: parseFloat((Y / sum).toFixed(4)) };
 }
 
 function formatDeviceName(id) {
