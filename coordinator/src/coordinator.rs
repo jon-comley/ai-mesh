@@ -17,6 +17,13 @@ pub struct CoordinatorConfig {
     pub listen_addr: String,
 }
 
+fn warm_start_lighting(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
+    let reports = registry.lock().unwrap().load_light_states();
+    for report in reports {
+        dashboard.push_lighting_update(report);
+    }
+}
+
 fn warm_start_rooms(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
     let rooms = registry.lock().unwrap().list_rooms();
     let room_infos: Vec<RoomInfo> = rooms
@@ -131,6 +138,7 @@ impl Coordinator {
             server.auth_tokens = tokens.clone();
             let dashboard = DashboardState::new(tokens, server.connections.clone());
             server.dashboard = Some(dashboard.clone());
+            warm_start_lighting(&self.registry, &dashboard);
             warm_start_rooms(&self.registry, &dashboard);
             warm_start_scenes(&self.registry, &dashboard);
             let handle = tokio::spawn(async move {
@@ -157,6 +165,7 @@ impl Coordinator {
         server.auth_tokens = tokens.clone();
         let dashboard = DashboardState::new(tokens, server.connections.clone());
         server.dashboard = Some(dashboard.clone());
+        warm_start_lighting(&self.registry, &dashboard);
         warm_start_rooms(&self.registry, &dashboard);
         warm_start_scenes(&self.registry, &dashboard);
 

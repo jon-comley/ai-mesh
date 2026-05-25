@@ -121,7 +121,15 @@ pub enum LightAction {
     Off,
     Toggle,
     Brightness(u8),
-    ColorXY { x: f32, y: f32 },
+    /// Brightness with a hardware transition time (seconds). Bulb interpolates smoothly.
+    BrightnessTransition {
+        value: u8,
+        transition_secs: f32,
+    },
+    ColorXY {
+        x: f32,
+        y: f32,
+    },
     ColorTemp(u16), // mireds
 }
 

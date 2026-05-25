@@ -225,7 +225,10 @@ run-coordinator: update-portproxy
     pkill -f "target/(debug|release)/coordinator" || true
     sleep 0.3
     STATE="$HOME/.config/ai-mesh/coordinator.state"
-    [ -f "$STATE" ] && source "$STATE"
+    if [ -f "$STATE" ]; then
+        source "$STATE"
+        export MESH_AUTH_TOKEN="${MESH_AUTH_TOKEN:-}"
+    fi
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -p coordinator
 
 run-controller:
@@ -1260,6 +1263,14 @@ restart-coordinator: update-portproxy
     pkill -f "target/(debug|release)/agent" || true
     sleep 0.3
 
+    # Source the existing token BEFORE starting the coordinator so it inherits
+    # the same token and doesn't generate a new one on every restart.
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ -f "$STATE" ]; then
+        source "$STATE"
+        export MESH_AUTH_TOKEN="${MESH_AUTH_TOKEN:-}"
+    fi
+
     echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
 
@@ -1276,7 +1287,6 @@ restart-coordinator: update-portproxy
     cargo run -q -p cli -- reset-registry > /dev/null || true
 
     # Read fingerprint (and token if set) from the coordinator state file.
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
     if [ ! -f "$STATE" ]; then
         echo ">>> ERROR: coordinator state file not found at $STATE — coordinator may not have started"
         exit 1

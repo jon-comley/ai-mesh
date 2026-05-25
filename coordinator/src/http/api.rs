@@ -146,6 +146,8 @@ pub struct LightCommandBody {
     x: Option<f32>,
     #[serde(default)]
     y: Option<f32>,
+    #[serde(default)]
+    transition_secs: Option<f32>,
 }
 
 fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
@@ -153,9 +155,16 @@ fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
         "on" => Some(LightAction::On),
         "off" => Some(LightAction::Off),
         "toggle" => Some(LightAction::Toggle),
-        "brightness" => body
-            .value
-            .map(|v| LightAction::Brightness(v.clamp(0.0, 255.0) as u8)),
+        "brightness" => body.value.map(|v| {
+            let value = v.clamp(0.0, 255.0) as u8;
+            match body.transition_secs {
+                Some(t) if t > 0.0 => LightAction::BrightnessTransition {
+                    value,
+                    transition_secs: t,
+                },
+                _ => LightAction::Brightness(value),
+            }
+        }),
         "color_temp" => body
             .value
             .map(|v| LightAction::ColorTemp(v.clamp(1.0, 65535.0) as u16)),
@@ -1849,6 +1858,7 @@ mod tests {
                 value,
                 x,
                 y,
+                transition_secs: None,
             })
         };
         assert!(matches!(mk("on", None, None, None), Some(LightAction::On)));

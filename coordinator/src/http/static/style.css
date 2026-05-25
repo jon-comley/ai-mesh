@@ -798,6 +798,19 @@ body {
   background: color-mix(in srgb, var(--green) 10%, var(--surface-2));
 }
 
+.room-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.room-chip-dot-on {
+  background: var(--green);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--green) 70%, transparent);
+}
+
 .room-chip-label {
   white-space: nowrap;
 }
@@ -1016,6 +1029,7 @@ body {
   padding: 2px 4px;
   border-radius: 4px;
 }
+
 .room-scene-delete-btn:hover {
   color: var(--red);
 }
