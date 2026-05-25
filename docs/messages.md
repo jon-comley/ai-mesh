@@ -247,8 +247,15 @@ Instructs the lighting capability to change the state of a Zigbee device or grou
 
 Fields:
 - `request_id: String`
-- `target: LightTarget` — `Device(name)` or `Group(id)`
-- `command: LightAction` — `On`, `Off`, `SetBrightness(u8)`, `SetColorTemp(u16)`, `SetColorXY(f32,f32)`
+- `target: LightTarget` — `Device(name)` or `Group(name)`
+- `command: LightAction` — one of:
+  - `On` / `Off` / `Toggle`
+  - `Brightness(u8)` — 0–254 (Zigbee spec reserves 255)
+  - `BrightnessTransition { value: u8, transition_secs: f32 }` — brightness with hardware-interpolated fade; emits `{"brightness": v, "transition": t}` to Z2M so the bulb itself interpolates
+  - `ColorTemp(u16)` — mireds (154–500; lower = cooler)
+  - `ColorXY { x: f32, y: f32 }` — CIE 1931 xy chromaticity; wide-gamut D65 colour space
+
+Intent routing converts Kelvin to mireds for `ColorTemp`, and CSS colour names / hex strings to `ColorXY` via `css_color_to_xy` + `rgb_to_xy` (inverse sRGB gamma + wide-gamut D65 matrix).
 
 ### `LightState(LightStateReport)`
 Lighting node → Coordinator  
