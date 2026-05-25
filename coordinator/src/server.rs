@@ -642,13 +642,15 @@ async fn process_message(
             MeshMessage::Acknowledge
         }
         MeshMessage::LightState(report) => {
-            // Unsolicited state report from lighting node — log and acknowledge.
             info!(
                 node_id = %report.node_id,
                 device_id = %report.device_id,
                 on = %report.on,
                 "light state report received"
             );
+            if let Some(dash) = dashboard {
+                dash.push_lighting_update(report.clone());
+            }
             MeshMessage::Acknowledge
         }
         MeshMessage::LightDeviceList(report) => {

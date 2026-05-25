@@ -20,6 +20,7 @@ const DASHBOARD_JS: &str = include_str!("static/dashboard.js");
 const TOPOLOGY_JS: &str = include_str!("static/topology.js");
 const HEALTH_JS: &str = include_str!("static/health.js");
 const MODELS_JS: &str = include_str!("static/models.js");
+const LIGHTING_JS: &str = include_str!("static/lighting.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
@@ -81,6 +82,18 @@ pub fn router(dashboard: Arc<DashboardState>) -> Router {
                         "application/javascript; charset=utf-8",
                     )],
                     MODELS_JS,
+                )
+            }),
+        )
+        .route(
+            "/static/lighting.js",
+            get(|| async {
+                (
+                    [(
+                        header::CONTENT_TYPE,
+                        "application/javascript; charset=utf-8",
+                    )],
+                    LIGHTING_JS,
                 )
             }),
         )
@@ -195,6 +208,16 @@ mod tests {
     #[tokio::test]
     async fn models_js_returns_correct_content_type() {
         let (status, ct) = get("/static/models.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            ct.contains("javascript"),
+            "expected application/javascript, got {ct}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lighting_js_returns_correct_content_type() {
+        let (status, ct) = get("/static/lighting.js").await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             ct.contains("javascript"),

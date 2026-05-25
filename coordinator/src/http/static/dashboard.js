@@ -1,6 +1,7 @@
 import * as topology from '/static/topology.js';
 import * as health from '/static/health.js';
 import * as models from '/static/models.js';
+import * as lighting from '/static/lighting.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -58,6 +59,7 @@ const handlers = {
     models.repaintModels();
   },
   ModelUpdate: evt => models.handleModelUpdate(evt),
+  LightingUpdate: evt => lighting.handleLightingUpdate(evt),
 };
 
 function dispatch(evt) {
