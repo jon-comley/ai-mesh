@@ -1,5 +1,6 @@
 import * as topology from '/static/topology.js';
 import * as health from '/static/health.js';
+import * as models from '/static/models.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -52,7 +53,11 @@ const handlers = {
     topology.handleEvent(evt);
     health.handleTopology(evt.nodes);
   },
-  HealthUpdate: evt => health.handleHealth(evt),
+  HealthUpdate: evt => {
+    health.handleHealth(evt);
+    models.repaintModels();
+  },
+  ModelUpdate: evt => models.handleModelUpdate(evt),
 };
 
 function dispatch(evt) {

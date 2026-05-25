@@ -1,12 +1,21 @@
 /** Health panel: CPU/RAM sparklines + heartbeat interval control. */
 
+const ORDER_KEY = 'meshHealthOrder';
+
 const samplesMap   = new Map(); // nodeId -> HealthSample[]
 const hostnamesMap = new Map(); // nodeId -> hostname
 const intervalsMap = new Map(); // nodeId -> secs (last successfully set)
 
 const healthChartsEl = document.getElementById('health-charts');
+let dragSrc = null;
 
 // ── Public API ────────────────────────────────────────────────────────────────
+
+/** Return the most recent health sample for a node, or null if none. */
+export function getLatestSample(nodeId) {
+  const samp = samplesMap.get(nodeId);
+  return samp ? samp.at(-1) : null;
+}
 
 /** Called on each TopologyUpdate to sync hostname labels then repaint. */
 export function handleTopology(nodes) {
@@ -34,17 +43,17 @@ if (healthChartsEl) {
     const btn = e.target.closest('[data-interval-node]');
     if (btn) promptHeartbeatInterval(btn.dataset.intervalNode);
   });
+  enableDrag(healthChartsEl);
 }
 
 function renderHealthPanel() {
-  if (!healthChartsEl) return;
+  if (!healthChartsEl || dragSrc) return;
   if (samplesMap.size === 0) {
     healthChartsEl.innerHTML = '<p class="placeholder">No health data yet.</p>';
     return;
   }
-  healthChartsEl.innerHTML = [...samplesMap.entries()]
-    .map(([id, samp]) => healthCard(id, samp))
-    .join('');
+  const entries = applyOrder([...samplesMap.entries()], ([id]) => id);
+  healthChartsEl.innerHTML = entries.map(([id, samp]) => healthCard(id, samp)).join('');
 }
 
 function healthCard(nodeId, samp) {
@@ -71,7 +80,7 @@ function healthCard(nodeId, samp) {
     ? `${(lastGpu.gpu_vram_used_gb ?? 0).toFixed(1)} / ${lastGpu.gpu_vram_total_gb.toFixed(1)} GB`
     : '—';
 
-  return `<div class="health-card">
+  return `<div class="health-card" draggable="true" data-drag-id="${esc(nodeId)}">
   <div class="health-card-header">
     <span class="health-node-name">${esc(name)}</span>
     <button class="interval-btn" data-interval-node="${esc(nodeId)}">Set interval · ${intervalsMap.get(nodeId) ?? 30}s</button>
@@ -156,6 +165,46 @@ function promptHeartbeatInterval(nodeId) {
       }
     })
     .catch(e => window.alert(`Error: ${e}`));
+}
+
+// ── Drag-to-reorder ───────────────────────────────────────────────────────────
+
+function enableDrag(el) {
+  el.addEventListener('dragstart', e => {
+    const card = e.target.closest('[data-drag-id]');
+    if (!card) return;
+    dragSrc = card;
+    e.dataTransfer.effectAllowed = 'move';
+    requestAnimationFrame(() => card.classList.add('dragging'));
+  });
+
+  el.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const card = e.target.closest('[data-drag-id]');
+    if (!card || card === dragSrc) return;
+    const after = e.clientY > card.getBoundingClientRect().top + card.offsetHeight / 2;
+    el.insertBefore(dragSrc, after ? card.nextSibling : card);
+  });
+
+  el.addEventListener('dragend', () => {
+    if (dragSrc) dragSrc.classList.remove('dragging');
+    const ids = [...el.querySelectorAll('[data-drag-id]')].map(c => c.dataset.dragId);
+    localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
+    dragSrc = null;
+  });
+}
+
+function applyOrder(items, idFn) {
+  try {
+    const order = JSON.parse(localStorage.getItem(ORDER_KEY) ?? '[]');
+    if (!order.length) return items;
+    return [...items].sort((a, b) => {
+      const ia = order.indexOf(idFn(a));
+      const ib = order.indexOf(idFn(b));
+      return (ia === -1 ? Infinity : ia) - (ib === -1 ? Infinity : ib);
+    });
+  } catch { return items; }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

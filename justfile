@@ -221,6 +221,11 @@ run-agent:
     cargo run -p agent
 
 run-coordinator: update-portproxy
+    #!/usr/bin/env bash
+    pkill -f "target/(debug|release)/coordinator" || true
+    sleep 0.3
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    [ -f "$STATE" ] && source "$STATE"
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -p coordinator
 
 run-controller:
