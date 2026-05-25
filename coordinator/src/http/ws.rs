@@ -63,6 +63,22 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Push current lighting snapshot so the Lighting panel populates immediately on connect.
+    let light_devices = state.get_light_snapshot();
+    if !light_devices.is_empty() {
+        let evt = DashboardEvent::LightingUpdate {
+            devices: light_devices,
+        };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot LightingUpdate: {e}"),
+        }
+    }
+
     loop {
         tokio::select! {
             event = rx.recv() => match event {

@@ -54,6 +54,7 @@ impl ZigbeeClient {
                         // Re-subscribe on every connect (not just the first) so that
                         // subscriptions are restored after a Mosquitto restart or network blip.
                         for topic in &[
+                            "zigbee2mqtt/+",
                             "zigbee2mqtt/+/state",
                             "zigbee2mqtt/+/availability",
                             "zigbee2mqtt/bridge/devices",
@@ -85,7 +86,11 @@ impl ZigbeeClient {
                             let groups = parse_group_names(p.payload.as_ref());
                             info!(count = groups.len(), "zigbee: groups updated");
                             let _ = tx_loop.send(ZigbeeEvent::GroupListUpdated(groups));
-                        } else if topic.ends_with("/state") {
+                        } else if topic.ends_with("/state") || topic.matches('/').count() == 1 {
+                            // Both the legacy "<device>/state" subtopic and the standard Z2M
+                            // base topic "<device>" carry device state. Only warn on failures
+                            // for the explicit /state form; base topics receive many non-state
+                            // event types (actions, linkquality, etc.) so we skip silently.
                             match parse_state_report(topic, p.payload.as_ref(), &node_id) {
                                 Some(report) => {
                                     // Debounce: Z2M fires multiple partial updates per action.
@@ -102,7 +107,11 @@ impl ZigbeeClient {
                                     .abort_handle();
                                     debounce.insert(device_id, abort_handle);
                                 }
-                                None => warn!("zigbee: unparseable state on topic '{topic}'"),
+                                None => {
+                                    if topic.ends_with("/state") {
+                                        warn!("zigbee: unparseable state on topic '{topic}'");
+                                    }
+                                }
                             }
                         }
                         // availability messages are received but not yet forwarded
@@ -161,10 +170,23 @@ fn parse_state_report(topic: &str, payload: &[u8], node_id: &str) -> Option<Ligh
     let mut parts = topic.splitn(3, '/');
     let _ = parts.next(); // "zigbee2mqtt"
     let device_name = parts.next()?.to_owned();
+    // "bridge" is the Z2M coordinator itself, not a light device.
+    if device_name == "bridge" {
+        return None;
+    }
 
     let json: serde_json::Value = serde_json::from_slice(payload)
         .map_err(|e| warn!("zigbee: JSON parse error for '{device_name}': {e}"))
         .ok()?;
+
+    // Require at least one light field — filters out button action events like {"action":"toggle"}.
+    let has_light_fields = json.get("state").is_some()
+        || json.get("brightness").is_some()
+        || json.get("color_temp").is_some()
+        || json.get("color").is_some();
+    if !has_light_fields {
+        return None;
+    }
 
     let on = json
         .get("state")
@@ -280,6 +302,42 @@ mod tests {
     #[test]
     fn parse_group_names_malformed_returns_empty() {
         assert!(parse_group_names(b"not json").is_empty());
+    }
+
+    #[test]
+    fn parse_base_topic_on_with_brightness() {
+        // Z2M standard format: zigbee2mqtt/<device> (no /state suffix)
+        let r = parse_state_report(
+            "zigbee2mqtt/kitchen_bulb",
+            br#"{"state":"ON","brightness":200}"#,
+            "pi1",
+        )
+        .unwrap();
+        assert_eq!(r.device_id, "kitchen_bulb");
+        assert!(r.on);
+        assert_eq!(r.brightness, Some(200));
+    }
+
+    #[test]
+    fn parse_base_topic_action_event_returns_none() {
+        // Button/remote action events must not create false device entries.
+        assert!(
+            parse_state_report(
+                "zigbee2mqtt/remote_switch",
+                br#"{"action":"toggle","linkquality":95}"#,
+                "pi1"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_bridge_state_returns_none() {
+        // zigbee2mqtt/bridge/state publishes {"state":"online"} — not a light device.
+        assert!(
+            parse_state_report("zigbee2mqtt/bridge/state", br#"{"state":"online"}"#, "pi1")
+                .is_none()
+        );
     }
 
     #[test]

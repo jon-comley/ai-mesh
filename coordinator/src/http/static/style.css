@@ -392,6 +392,88 @@ body {
   border-color: var(--accent);
 }
 
+/* ── Lighting cards ────────────────────────────────────────────────────────── */
+.light-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 10px;
+  padding: 12px 14px;
+}
+
+.light-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.light-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.light-card-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.color-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.light-card-details {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.light-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.light-detail-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 74px;
+}
+
+.light-detail-value {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 50px;
+  text-align: right;
+}
+
+.light-bar-track {
+  flex: 1;
+  height: 4px;
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.light-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
 /* ── Desktop layout (≥ 900px) ──────────────────────────────────────────────── */
 @media (min-width: 900px) {
   body { overflow: auto; }

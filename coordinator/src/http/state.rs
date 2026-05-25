@@ -1,7 +1,7 @@
 use serde::Serialize;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
-use shared::messages::NodeRecordLite;
+use shared::messages::{LightStateReport, NodeRecordLite};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +26,9 @@ pub enum DashboardEvent {
     },
     ModelUpdate {
         nodes: Vec<NodeModelInfo>,
+    },
+    LightingUpdate {
+        devices: Vec<LightStateReport>,
     },
 }
 
@@ -87,6 +90,7 @@ pub struct DashboardState {
     pub auth_tokens: Arc<Vec<String>>,
     health_store: Mutex<HashMap<String, VecDeque<HealthSample>>>,
     model_snapshot: Mutex<Vec<NodeModelInfo>>,
+    light_snapshot: Mutex<HashMap<String, LightStateReport>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
 }
@@ -99,6 +103,7 @@ impl DashboardState {
             auth_tokens,
             health_store: Mutex::new(HashMap::new()),
             model_snapshot: Mutex::new(Vec::new()),
+            light_snapshot: Mutex::new(HashMap::new()),
             connections,
         })
     }
@@ -146,6 +151,28 @@ impl DashboardState {
     /// Return a point-in-time copy of the model snapshot for warm-starting new WS clients.
     pub fn get_model_snapshot(&self) -> Vec<NodeModelInfo> {
         self.model_snapshot.lock().unwrap().clone()
+    }
+
+    /// Store the latest state for one device and broadcast a LightingUpdate with all devices.
+    pub fn push_lighting_update(&self, report: LightStateReport) {
+        let devices = {
+            let mut snap = self.light_snapshot.lock().unwrap();
+            snap.insert(report.device_id.clone(), report);
+            snap.values().cloned().collect::<Vec<_>>()
+        };
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::LightingUpdate { devices });
+        }
+    }
+
+    /// Return all known light device states — used to warm-start new WS clients.
+    pub fn get_light_snapshot(&self) -> Vec<LightStateReport> {
+        self.light_snapshot
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Build and broadcast a TopologyUpdate from a fresh node list.
@@ -745,6 +772,121 @@ mod tests {
         assert!(
             !json.contains("\"reason\""),
             "reason should be absent when None: {json}"
+        );
+    }
+
+    // ── push_lighting_update / get_light_snapshot ────────────────────────────
+
+    fn make_light_report(device_id: &str, on: bool) -> LightStateReport {
+        LightStateReport {
+            node_id: "lighting-node".into(),
+            device_id: device_id.into(),
+            on,
+            brightness: Some(200),
+            color_xy: None,
+            color_temp: Some(370),
+        }
+    }
+
+    #[test]
+    fn push_lighting_update_stores_snapshot() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_lighting_update(make_light_report("bulb1", true));
+        let snap = state.get_light_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].device_id, "bulb1");
+        assert!(snap[0].on);
+    }
+
+    #[test]
+    fn push_lighting_update_broadcasts_event() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut rx = state.tx.subscribe();
+        state.push_lighting_update(make_light_report("bulb1", true));
+        match rx.try_recv().unwrap() {
+            DashboardEvent::LightingUpdate { devices } => {
+                assert_eq!(devices.len(), 1);
+                assert_eq!(devices[0].device_id, "bulb1");
+                assert!(devices[0].on);
+            }
+            _ => panic!("expected LightingUpdate"),
+        }
+    }
+
+    #[test]
+    fn push_lighting_update_with_no_receivers_stores_snapshot_anyway() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_lighting_update(make_light_report("bulb1", false));
+        assert_eq!(state.get_light_snapshot().len(), 1);
+    }
+
+    #[test]
+    fn push_lighting_update_overwrites_same_device() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_lighting_update(make_light_report("bulb1", true));
+        state.push_lighting_update(make_light_report("bulb1", false));
+        let snap = state.get_light_snapshot();
+        assert_eq!(
+            snap.len(),
+            1,
+            "same device should overwrite, not accumulate"
+        );
+        assert!(!snap[0].on, "latest state should win");
+    }
+
+    #[test]
+    fn get_light_snapshot_returns_all_devices() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_lighting_update(make_light_report("bulb1", true));
+        state.push_lighting_update(make_light_report("bulb2", false));
+        let snap = state.get_light_snapshot();
+        assert_eq!(snap.len(), 2);
+    }
+
+    #[test]
+    fn lighting_update_event_wire_format() {
+        let evt = DashboardEvent::LightingUpdate {
+            devices: vec![LightStateReport {
+                node_id: "n1".into(),
+                device_id: "test_bulb".into(),
+                on: true,
+                brightness: Some(200),
+                color_xy: Some((0.3, 0.3)),
+                color_temp: Some(370),
+            }],
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(
+            json.contains("\"type\":\"LightingUpdate\""),
+            "missing type tag: {json}"
+        );
+        assert!(
+            json.contains("\"device_id\":\"test_bulb\""),
+            "missing device_id: {json}"
+        );
+        assert!(json.contains("\"on\":true"), "missing on field: {json}");
+        assert!(
+            json.contains("\"brightness\":200"),
+            "missing brightness: {json}"
+        );
+        assert!(
+            json.contains("\"color_temp\":370"),
+            "missing color_temp: {json}"
         );
     }
 
