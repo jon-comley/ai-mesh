@@ -247,6 +247,29 @@ fn rooms_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<RoomInfo> {
 }
 
 #[derive(Deserialize)]
+pub struct ReorderRoomsBody {
+    ids: Vec<String>,
+}
+
+pub async fn reorder_rooms(
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<ReorderRoomsBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        let refs: Vec<&str> = body.ids.iter().map(|s| s.as_str()).collect();
+        reg.set_room_positions(&refs);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
 pub struct CreateRoomBody {
     name: String,
 }
@@ -913,6 +936,7 @@ mod tests {
     fn rooms_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
         Router::new()
             .route("/api/rooms", post(create_room))
+            .route("/api/rooms/reorder", post(reorder_rooms))
             .route("/api/rooms/{id}", axum::routing::delete(delete_room))
             .route("/api/rooms/{id}/name", axum::routing::patch(rename_room))
             .route(
@@ -1310,6 +1334,63 @@ mod tests {
             "POST",
             &format!("/api/rooms/{room_id}/command?token=wrong"),
             r#"{"action":"on"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── reorder_rooms ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reorder_rooms_returns_204() {
+        let registry = make_registry();
+        let a = make_room(&registry, "A");
+        let b = make_room(&registry, "B");
+        let status = send(
+            rooms_router(make_state(vec![], empty_connections()), registry),
+            "POST",
+            "/api/rooms/reorder?token=",
+            &format!(r#"{{"ids":["{b}","{a}"]}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn reorder_rooms_persists_order() {
+        let registry = make_registry();
+        let a = make_room(&registry, "A");
+        let b = make_room(&registry, "B");
+        let c = make_room(&registry, "C");
+        send(
+            rooms_router(
+                make_state(vec![], empty_connections()),
+                Arc::clone(&registry),
+            ),
+            "POST",
+            "/api/rooms/reorder?token=",
+            &format!(r#"{{"ids":["{c}","{a}","{b}"]}}"#),
+        )
+        .await;
+        let rooms = registry.lock().unwrap().list_rooms();
+        let pos = |id: &str| rooms.iter().find(|r| r.id == id).unwrap().position;
+        assert_eq!(pos(&c), 0);
+        assert_eq!(pos(&a), 1);
+        assert_eq!(pos(&b), 2);
+    }
+
+    #[tokio::test]
+    async fn reorder_rooms_returns_401_for_wrong_token() {
+        let registry = make_registry();
+        let a = make_room(&registry, "A");
+        let status = send(
+            rooms_router(
+                make_state(vec!["secret".into()], empty_connections()),
+                registry,
+            ),
+            "POST",
+            "/api/rooms/reorder?token=wrong",
+            &format!(r#"{{"ids":["{a}"]}}"#),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
