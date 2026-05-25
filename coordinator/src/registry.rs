@@ -41,6 +41,25 @@ pub struct RoomRecord {
     pub device_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeviceSnapshot {
+    pub device_id: String,
+    pub node_id: String,
+    pub on: bool,
+    pub brightness: Option<u8>,
+    pub color_xy: Option<(f32, f32)>,
+    pub color_temp: Option<u16>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneRecord {
+    pub id: String,
+    pub name: String,
+    pub room_id: Option<String>,
+    pub created_at: i64,
+    pub states: Vec<DeviceSnapshot>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelAllocation {
     pub model_name: String,
@@ -100,6 +119,13 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             room_id   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             device_id TEXT NOT NULL,
             PRIMARY KEY (room_id, device_id)
+        );
+        CREATE TABLE IF NOT EXISTS scenes (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            room_id     TEXT REFERENCES rooms(id) ON DELETE CASCADE,
+            created_at  INTEGER NOT NULL,
+            states_json TEXT NOT NULL
         );",
     )
 }
@@ -108,6 +134,13 @@ fn now_unix_secs() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn now_unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 
@@ -639,6 +672,118 @@ impl Registry {
                 |row| row.get(0),
             )
             .ok()
+    }
+
+    // ── Scenes ────────────────────────────────────────────────────────────────
+
+    pub fn save_scene(
+        &mut self,
+        name: &str,
+        room_id: Option<&str>,
+        states: Vec<DeviceSnapshot>,
+    ) -> SceneRecord {
+        let id = gen_uuid();
+        let created_at = now_unix_millis();
+        let states_json = serde_json::to_string(&states).unwrap_or_else(|_| "[]".into());
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO scenes (id, name, room_id, created_at, states_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, name, room_id, created_at, states_json],
+        ) {
+            warn!(error = %e, "save_scene failed");
+        }
+        SceneRecord {
+            id,
+            name: name.to_owned(),
+            room_id: room_id.map(|s| s.to_owned()),
+            created_at,
+            states,
+        }
+    }
+
+    pub fn list_scenes(&self) -> Vec<SceneRecord> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, name, room_id, created_at, states_json FROM scenes ORDER BY created_at DESC",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "list_scenes prepare failed");
+                return vec![];
+            }
+        };
+        type SceneRow = (String, String, Option<String>, i64, String);
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map(|rows| {
+            rows.filter_map(|r| r.ok())
+                .map(|(id, name, room_id, created_at, states_json): SceneRow| {
+                    let states: Vec<DeviceSnapshot> =
+                        serde_json::from_str(&states_json).unwrap_or_default();
+                    SceneRecord {
+                        id,
+                        name,
+                        room_id,
+                        created_at,
+                        states,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    pub fn get_scene(&self, id: &str) -> Option<SceneRecord> {
+        self.conn
+            .query_row(
+                "SELECT id, name, room_id, created_at, states_json FROM scenes WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .ok()
+            .map(|(id, name, room_id, created_at, states_json)| {
+                let states: Vec<DeviceSnapshot> =
+                    serde_json::from_str(&states_json).unwrap_or_default();
+                SceneRecord {
+                    id,
+                    name,
+                    room_id,
+                    created_at,
+                    states,
+                }
+            })
+    }
+
+    pub fn delete_scene(&mut self, id: &str) {
+        if let Err(e) = self
+            .conn
+            .execute("DELETE FROM scenes WHERE id = ?1", params![id])
+        {
+            warn!(error = %e, "delete_scene failed");
+        }
+    }
+
+    pub fn scene_exists(&self, id: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM scenes WHERE id = ?1",
+                params![id],
+                |_| Ok(()),
+            )
+            .is_ok()
     }
 }
 
@@ -1203,5 +1348,150 @@ mod tests {
         // No panic; known room gets position 0
         let rooms = reg.list_rooms();
         assert_eq!(rooms[0].position, 0);
+    }
+
+    // ── Scenes ────────────────────────────────────────────────────────────────
+
+    fn make_snapshot(device_id: &str, on: bool) -> DeviceSnapshot {
+        DeviceSnapshot {
+            device_id: device_id.into(),
+            node_id: "pi1".into(),
+            on,
+            brightness: Some(200),
+            color_xy: None,
+            color_temp: Some(370),
+        }
+    }
+
+    #[test]
+    fn save_scene_appears_in_list() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Living Room");
+        let scene = reg.save_scene("Evening", Some(&r.id), vec![make_snapshot("bulb1", true)]);
+        assert!(!scene.id.is_empty());
+        assert_eq!(scene.name, "Evening");
+        assert_eq!(scene.room_id, Some(r.id.clone()));
+        assert_eq!(scene.states.len(), 1);
+        let scenes = reg.list_scenes();
+        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes[0].name, "Evening");
+    }
+
+    #[test]
+    fn save_scene_global_has_no_room_id() {
+        let mut reg = Registry::new();
+        let scene = reg.save_scene("All Off", None, vec![make_snapshot("bulb1", false)]);
+        assert!(scene.room_id.is_none());
+        let scenes = reg.list_scenes();
+        assert_eq!(scenes.len(), 1);
+        assert!(scenes[0].room_id.is_none());
+    }
+
+    #[test]
+    fn get_scene_returns_correct_record() {
+        let mut reg = Registry::new();
+        let saved = reg.save_scene("Morning", None, vec![make_snapshot("bulb2", true)]);
+        let fetched = reg.get_scene(&saved.id).expect("scene should exist");
+        assert_eq!(fetched.id, saved.id);
+        assert_eq!(fetched.name, "Morning");
+        assert_eq!(fetched.states.len(), 1);
+        assert_eq!(fetched.states[0].device_id, "bulb2");
+        assert!(fetched.states[0].on);
+    }
+
+    #[test]
+    fn get_scene_returns_none_for_unknown_id() {
+        let reg = Registry::new();
+        assert!(reg.get_scene("no-such-id").is_none());
+    }
+
+    #[test]
+    fn scene_exists_returns_correct_values() {
+        let mut reg = Registry::new();
+        let s = reg.save_scene("Test", None, vec![]);
+        assert!(reg.scene_exists(&s.id));
+        assert!(!reg.scene_exists("nonexistent-id"));
+    }
+
+    #[test]
+    fn delete_scene_removes_from_list() {
+        let mut reg = Registry::new();
+        let s = reg.save_scene("Temp", None, vec![]);
+        reg.delete_scene(&s.id);
+        assert!(reg.list_scenes().is_empty());
+        assert!(!reg.scene_exists(&s.id));
+    }
+
+    #[test]
+    fn delete_room_cascades_to_scenes() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Study");
+        reg.save_scene(
+            "Night",
+            Some(&r.id),
+            vec![make_snapshot("desk_lamp", false)],
+        );
+        assert_eq!(reg.list_scenes().len(), 1);
+        reg.delete_room(&r.id);
+        assert!(
+            reg.list_scenes().is_empty(),
+            "scene should be deleted with the room"
+        );
+    }
+
+    #[test]
+    fn list_scenes_ordered_by_created_at_desc() {
+        let mut reg = Registry::new();
+        let a = reg.save_scene("First", None, vec![]);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = reg.save_scene("Second", None, vec![]);
+        let scenes = reg.list_scenes();
+        assert_eq!(scenes.len(), 2);
+        // Most recent first — b was saved later so must come first
+        assert_eq!(scenes[0].id, b.id);
+        assert_eq!(scenes[1].id, a.id);
+    }
+
+    #[test]
+    fn device_snapshot_serializes_round_trips() {
+        let snap = DeviceSnapshot {
+            device_id: "bulb1".into(),
+            node_id: "pi1".into(),
+            on: true,
+            brightness: Some(200),
+            color_xy: Some((0.3, 0.4)),
+            color_temp: None,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: DeviceSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.device_id, "bulb1");
+        assert_eq!(back.brightness, Some(200));
+        assert_eq!(back.color_xy, Some((0.3, 0.4)));
+        assert!(back.color_temp.is_none());
+    }
+
+    #[test]
+    fn scenes_persist_across_open() {
+        let path = "/tmp/test-scenes-registry.db";
+        let _ = std::fs::remove_file(path);
+        let scene_id;
+        {
+            let mut reg = Registry::open(path).unwrap();
+            let r = reg.create_room("Hall");
+            let s = reg.save_scene(
+                "Bright",
+                Some(&r.id),
+                vec![make_snapshot("hall_bulb", true)],
+            );
+            scene_id = s.id.clone();
+        }
+        let reg = Registry::open(path).unwrap();
+        let scene = reg
+            .get_scene(&scene_id)
+            .expect("scene should survive restart");
+        assert_eq!(scene.name, "Bright");
+        assert_eq!(scene.states.len(), 1);
+        assert_eq!(scene.states[0].device_id, "hall_bulb");
+        let _ = std::fs::remove_file(path);
     }
 }

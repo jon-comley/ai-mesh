@@ -1,4 +1,4 @@
-use crate::http::state::{DashboardState, RoomInfo};
+use crate::http::state::{DashboardState, RoomInfo, SceneInfo};
 use crate::registry::Registry;
 use crate::server::Server;
 use crate::tls as coord_tls;
@@ -29,6 +29,20 @@ fn warm_start_rooms(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardSt
         })
         .collect();
     dashboard.push_rooms_update(room_infos);
+}
+
+fn warm_start_scenes(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
+    let scenes = registry.lock().unwrap().list_scenes();
+    let scene_infos: Vec<SceneInfo> = scenes
+        .into_iter()
+        .map(|s| SceneInfo {
+            id: s.id,
+            name: s.name,
+            room_id: s.room_id,
+            created_at: s.created_at,
+        })
+        .collect();
+    dashboard.push_scenes_update(scene_infos);
 }
 
 pub struct Coordinator {
@@ -118,6 +132,7 @@ impl Coordinator {
             let dashboard = DashboardState::new(tokens, server.connections.clone());
             server.dashboard = Some(dashboard.clone());
             warm_start_rooms(&self.registry, &dashboard);
+            warm_start_scenes(&self.registry, &dashboard);
             let handle = tokio::spawn(async move {
                 let _ = server.run().await;
             });
@@ -143,6 +158,7 @@ impl Coordinator {
         let dashboard = DashboardState::new(tokens, server.connections.clone());
         server.dashboard = Some(dashboard.clone());
         warm_start_rooms(&self.registry, &dashboard);
+        warm_start_scenes(&self.registry, &dashboard);
 
         let handle = tokio::spawn(async move {
             let _ = server.run().await;

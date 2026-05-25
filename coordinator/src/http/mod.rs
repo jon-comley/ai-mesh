@@ -149,6 +149,9 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
         .route("/api/rooms/{id}/name", patch(api::rename_room))
         .route("/api/rooms/{id}/devices", patch(api::modify_room_devices))
         .route("/api/rooms/{id}/command", post(api::room_command))
+        .route("/api/scenes", post(api::save_scene))
+        .route("/api/scenes/{id}/recall", post(api::recall_scene))
+        .route("/api/scenes/{id}", delete(api::delete_scene))
         .layer(axum::Extension(registry))
         .with_state(dashboard)
 }

@@ -95,6 +95,20 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Push current scenes snapshot so the Scenes sections populate immediately on connect.
+    let scenes = state.get_scene_snapshot();
+    if !scenes.is_empty() {
+        let evt = DashboardEvent::ScenesUpdate { scenes };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot ScenesUpdate: {e}"),
+        }
+    }
+
     loop {
         tokio::select! {
             event = rx.recv() => match event {

@@ -65,6 +65,7 @@ const handlers = {
     rooms.notifyDevices(evt.devices);
   },
   RoomsUpdate: evt => rooms.handleRoomsUpdate(evt),
+  ScenesUpdate: evt => rooms.handleScenesUpdate(evt),
 };
 
 function dispatch(evt) {
