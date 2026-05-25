@@ -522,6 +522,7 @@ body {
 }
 
 .light-toggle-btn:hover .badge { opacity: 0.75; }
+.light-toggle-btn:disabled { cursor: not-allowed; opacity: 0.35; }
 
 .light-slider {
   flex: 1;
@@ -827,6 +828,34 @@ body {
 .room-drop-active {
   border-color: var(--accent) !important;
   background: color-mix(in srgb, var(--accent) 8%, var(--surface)) !important;
+}
+
+.room-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.room-device-card {
+  border-radius: 8px;
+  background: var(--surface-2);
+  margin-bottom: 0;
+}
+
+.room-remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.room-remove-btn:hover {
+  color: var(--red);
 }
 
 /* ── Desktop layout (≥ 900px) ──────────────────────────────────────────────── */
