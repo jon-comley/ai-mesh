@@ -226,17 +226,32 @@ function renderRoomCard(room) {
   const controls = document.createElement('div');
   controls.className = 'room-controls';
 
-  const onBtn = document.createElement('button');
-  onBtn.className = 'light-toggle-btn';
-  onBtn.innerHTML = '<span class="badge badge-green">On</span>';
-  onBtn.disabled = empty;
-  if (!empty) onBtn.addEventListener('click', () => sendRoomCommand(room.id, { action: 'on' }, room));
+  const roomDevicesForState = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
+  const anyOn = roomDevicesForState.some(d => d.on);
 
+  const onBtn  = document.createElement('button');
   const offBtn = document.createElement('button');
+
+  const setRoomOnOff = (isOn) => {
+    onBtn.innerHTML  = `<span class="badge ${isOn  ? 'badge-green' : 'badge-muted'}">On</span>`;
+    offBtn.innerHTML = `<span class="badge ${!isOn ? 'badge-red'   : 'badge-muted'}">Off</span>`;
+  };
+
+  onBtn.className = 'light-toggle-btn';
+  onBtn.disabled = empty;
+  if (!empty) onBtn.addEventListener('click', () => {
+    setRoomOnOff(true);
+    sendRoomCommand(room.id, { action: 'on' }, room);
+  });
+
   offBtn.className = 'light-toggle-btn';
-  offBtn.innerHTML = '<span class="badge badge-muted">Off</span>';
   offBtn.disabled = empty;
-  if (!empty) offBtn.addEventListener('click', () => sendRoomCommand(room.id, { action: 'off' }, room));
+  if (!empty) offBtn.addEventListener('click', () => {
+    setRoomOnOff(false);
+    sendRoomCommand(room.id, { action: 'off' }, room);
+  });
+
+  setRoomOnOff(anyOn);
 
   controls.appendChild(onBtn);
   controls.appendChild(offBtn);
