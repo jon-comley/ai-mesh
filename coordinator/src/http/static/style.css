@@ -668,12 +668,24 @@ body {
     min-height: calc(100vh - var(--header-h));
   }
 
-  .panel {
-    display: block;
+  /* Tabs still switch panels on desktop; only tweak sizing */
+  .panel.active {
     height: auto;
     overflow-y: visible;
+    padding: 24px;
+    max-width: 1100px;
   }
 
-  /* On desktop all panels scroll together — tab bar highlights current view */
-  .panel { padding: 24px; }
+  /* Two-column card grid so cards don't stretch across the full viewport */
+  #nodes-list,
+  #health-list,
+  #models-list,
+  #lighting-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 10px;
+    align-items: start;
+  }
+
+  .node-card, .health-card, .model-card, .light-card { margin-bottom: 0; }
 }

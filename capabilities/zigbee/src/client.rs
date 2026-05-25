@@ -47,10 +47,13 @@ impl ZigbeeClient {
         tokio::spawn(async move {
             let mut debounce: std::collections::HashMap<String, tokio::task::AbortHandle> =
                 std::collections::HashMap::new();
+            let mut known_groups: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
                         info!("zigbee: MQTT connected to broker");
+                        known_groups.clear();
                         // Re-subscribe on every connect (not just the first) so that
                         // subscriptions are restored after a Mosquitto restart or network blip.
                         for topic in &[
@@ -116,6 +119,7 @@ impl ZigbeeClient {
                             let _ = tx_loop.send(ZigbeeEvent::DeviceListUpdated(names));
                         } else if topic == "zigbee2mqtt/bridge/groups" {
                             let groups = parse_group_names(p.payload.as_ref());
+                            known_groups = groups.iter().cloned().collect();
                             info!(count = groups.len(), "zigbee: groups updated");
                             let _ = tx_loop.send(ZigbeeEvent::GroupListUpdated(groups));
                         } else if topic.ends_with("/state") || topic.matches('/').count() == 1 {
@@ -124,7 +128,7 @@ impl ZigbeeClient {
                             // for the explicit /state form; base topics receive many non-state
                             // event types (actions, linkquality, etc.) so we skip silently.
                             match parse_state_report(topic, p.payload.as_ref(), &node_id) {
-                                Some(report) => {
+                                Some(report) if !known_groups.contains(&report.device_id) => {
                                     // Debounce: Z2M fires multiple partial updates per action.
                                     // Cancel any pending emit for this device and restart the timer.
                                     let device_id = report.device_id.clone();
@@ -139,6 +143,7 @@ impl ZigbeeClient {
                                     .abort_handle();
                                     debounce.insert(device_id, abort_handle);
                                 }
+                                Some(_) => {} // group name — silently skip
                                 None => {
                                     if topic.ends_with("/state") {
                                         warn!("zigbee: unparseable state on topic '{topic}'");
@@ -385,5 +390,21 @@ mod tests {
         let payload = br#"[{"id":1},{"id":2,"friendly_name":"all"}]"#;
         let names = parse_group_names(payload);
         assert_eq!(names, vec!["all"]);
+    }
+
+    #[test]
+    fn group_name_state_would_be_parsed_but_filtered() {
+        // Z2M publishes group state to zigbee2mqtt/<group_name> — same pattern as devices.
+        // parse_state_report would accept it; the event loop filters it via known_groups.
+        let r = parse_state_report(
+            "zigbee2mqtt/all",
+            br#"{"state":"ON","brightness":200}"#,
+            "pi1",
+        );
+        assert!(
+            r.is_some(),
+            "parser accepts group topics — caller must filter"
+        );
+        assert_eq!(r.unwrap().device_id, "all");
     }
 }
