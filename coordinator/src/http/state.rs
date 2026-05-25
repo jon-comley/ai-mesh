@@ -35,6 +35,9 @@ pub enum DashboardEvent {
     RoomsUpdate {
         rooms: Vec<RoomInfo>,
     },
+    ScenesUpdate {
+        scenes: Vec<SceneInfo>,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -43,6 +46,15 @@ pub struct RoomInfo {
     pub name: String,
     pub position: i64,
     pub device_ids: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SceneInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<String>,
+    pub created_at: i64,
 }
 
 /// Per-model entry in a `ModelUpdate` event — one per non-Unloaded allocation.
@@ -107,6 +119,7 @@ pub struct DashboardState {
     /// Group friendly name → node_id that owns it.
     group_snapshot: Mutex<HashMap<String, String>>,
     room_snapshot: Mutex<Vec<RoomInfo>>,
+    scene_snapshot: Mutex<Vec<SceneInfo>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
 }
@@ -122,6 +135,7 @@ impl DashboardState {
             light_snapshot: Mutex::new(HashMap::new()),
             group_snapshot: Mutex::new(HashMap::new()),
             room_snapshot: Mutex::new(Vec::new()),
+            scene_snapshot: Mutex::new(Vec::new()),
             connections,
         })
     }
@@ -249,6 +263,19 @@ impl DashboardState {
     /// Return a point-in-time copy of the rooms snapshot for warm-starting new WS clients.
     pub fn get_room_snapshot(&self) -> Vec<RoomInfo> {
         self.room_snapshot.lock().unwrap().clone()
+    }
+
+    /// Store and broadcast the current scenes state.
+    pub fn push_scenes_update(&self, scenes: Vec<SceneInfo>) {
+        *self.scene_snapshot.lock().unwrap() = scenes.clone();
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::ScenesUpdate { scenes });
+        }
+    }
+
+    /// Return a point-in-time copy of the scenes snapshot for warm-starting new WS clients.
+    pub fn get_scene_snapshot(&self) -> Vec<SceneInfo> {
+        self.scene_snapshot.lock().unwrap().clone()
     }
 
     /// Build and broadcast a TopologyUpdate from a fresh node list.
@@ -1129,6 +1156,114 @@ mod tests {
         assert!(
             json.contains("\"device_ids\""),
             "missing device_ids: {json}"
+        );
+    }
+
+    // ── push_scenes_update / get_scene_snapshot ──────────────────────────────
+
+    fn make_scene_info(id: &str, name: &str, room_id: Option<&str>) -> SceneInfo {
+        SceneInfo {
+            id: id.into(),
+            name: name.into(),
+            room_id: room_id.map(|s| s.into()),
+            created_at: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn push_scenes_update_stores_snapshot() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_scenes_update(vec![make_scene_info("s1", "Evening", Some("r1"))]);
+        let snap = state.get_scene_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].id, "s1");
+        assert_eq!(snap[0].name, "Evening");
+        assert_eq!(snap[0].room_id, Some("r1".into()));
+    }
+
+    #[test]
+    fn push_scenes_update_replaces_snapshot() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_scenes_update(vec![make_scene_info("s1", "Old", None)]);
+        state.push_scenes_update(vec![make_scene_info("s2", "New", None)]);
+        let snap = state.get_scene_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].id, "s2");
+    }
+
+    #[test]
+    fn push_scenes_update_broadcasts_event() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut rx = state.tx.subscribe();
+        state.push_scenes_update(vec![make_scene_info("s1", "Night", Some("r1"))]);
+        match rx.try_recv().unwrap() {
+            DashboardEvent::ScenesUpdate { scenes } => {
+                assert_eq!(scenes.len(), 1);
+                assert_eq!(scenes[0].name, "Night");
+            }
+            _ => panic!("expected ScenesUpdate"),
+        }
+    }
+
+    #[test]
+    fn push_scenes_update_with_no_receivers_stores_snapshot_anyway() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_scenes_update(vec![make_scene_info("s1", "Morning", None)]);
+        assert_eq!(state.get_scene_snapshot().len(), 1);
+    }
+
+    #[test]
+    fn scenes_update_event_wire_format() {
+        let evt = DashboardEvent::ScenesUpdate {
+            scenes: vec![SceneInfo {
+                id: "abc-123".into(),
+                name: "Evening".into(),
+                room_id: Some("room-456".into()),
+                created_at: 1_700_000_000,
+            }],
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(
+            json.contains("\"type\":\"ScenesUpdate\""),
+            "missing type tag: {json}"
+        );
+        assert!(json.contains("\"id\":\"abc-123\""), "missing id: {json}");
+        assert!(
+            json.contains("\"name\":\"Evening\""),
+            "missing name: {json}"
+        );
+        assert!(
+            json.contains("\"room_id\":\"room-456\""),
+            "missing room_id: {json}"
+        );
+    }
+
+    #[test]
+    fn scene_info_room_id_omitted_when_none() {
+        let evt = DashboardEvent::ScenesUpdate {
+            scenes: vec![SceneInfo {
+                id: "s1".into(),
+                name: "Global".into(),
+                room_id: None,
+                created_at: 0,
+            }],
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(
+            !json.contains("\"room_id\""),
+            "None room_id should be absent: {json}"
         );
     }
 

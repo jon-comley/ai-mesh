@@ -4,11 +4,17 @@
 
 let roomsData = [];
 let devicesMap = new Map();
+let scenesData = [];
 let dragSrc = null;     // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;  // room reorder drag: room id being dragged
 
 export function handleRoomsUpdate(evt) {
   roomsData = evt.rooms ?? [];
+  render();
+}
+
+export function handleScenesUpdate(evt) {
+  scenesData = evt.scenes ?? [];
   render();
 }
 
@@ -233,7 +239,99 @@ function renderRoomCard(room) {
 
   card.appendChild(devicesEl);
   wireDropZone(card, room.id);
+
+  // Scenes section
+  card.appendChild(buildScenesSection(room.id));
+
   return card;
+}
+
+// ── Scenes section ──────────────────────────────────────────────────────────
+
+function buildScenesSection(roomId) {
+  const section = document.createElement('div');
+  section.className = 'room-scenes';
+  section.dataset.roomId = roomId;
+
+  // Save scene row
+  const saveRow = document.createElement('div');
+  saveRow.className = 'room-scene-save-row';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'room-scene-save-btn';
+  saveBtn.textContent = '+ Save scene';
+  saveRow.appendChild(saveBtn);
+
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.className = 'room-scene-name-input';
+  nameInput.placeholder = 'Scene name…';
+  nameInput.style.display = 'none';
+  saveRow.appendChild(nameInput);
+
+  section.appendChild(saveRow);
+
+  saveBtn.addEventListener('click', () => {
+    saveBtn.style.display = 'none';
+    nameInput.style.display = '';
+    nameInput.value = '';
+    nameInput.focus();
+  });
+
+  let savingScene = false;
+  const doSave = () => {
+    if (savingScene) return;
+    const name = nameInput.value.trim();
+    nameInput.style.display = 'none';
+    saveBtn.style.display = '';
+    if (!name) return;
+    savingScene = true;
+    saveScene(name, roomId).finally(() => { savingScene = false; });
+  };
+  nameInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') doSave();
+    if (e.key === 'Escape') { nameInput.style.display = 'none'; saveBtn.style.display = ''; }
+  });
+  nameInput.addEventListener('blur', doSave);
+
+  // Scene list
+  const roomScenes = scenesData
+    .filter(s => s.room_id === roomId)
+    .sort((a, b) => b.created_at - a.created_at);
+
+  if (roomScenes.length > 0) {
+    const list = document.createElement('ul');
+    list.className = 'room-scene-list';
+
+    for (const scene of roomScenes) {
+      const li = document.createElement('li');
+      li.className = 'room-scene-item';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'room-scene-name';
+      nameSpan.textContent = scene.name;
+      li.appendChild(nameSpan);
+
+      const recallBtn = document.createElement('button');
+      recallBtn.className = 'room-scene-recall-btn';
+      recallBtn.textContent = 'Recall';
+      recallBtn.addEventListener('click', () => recallScene(scene.id));
+      li.appendChild(recallBtn);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'room-scene-delete-btn';
+      delBtn.textContent = '✕';
+      delBtn.title = `Delete scene "${scene.name}"`;
+      delBtn.addEventListener('click', () => deleteSceneApi(scene.id));
+      li.appendChild(delBtn);
+
+      list.appendChild(li);
+    }
+
+    section.appendChild(list);
+  }
+
+  return section;
 }
 
 // ── Room colour picker ───────────────────────────────────────────────────────
@@ -709,6 +807,38 @@ async function sendDeviceCommand(deviceId, body) {
       showToast(`Command failed (${res.status})${text ? ': ' + text : ''}`, true);
     }
   } catch (e) { showToast(`Command error: ${e.message}`, true); }
+}
+
+async function saveScene(name, roomId) {
+  try {
+    const body = roomId ? { name, room_id: roomId } : { name };
+    const res = await fetch(`/api/scenes?token=${encodeURIComponent(tok())}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) showToast(`Save scene failed (${res.status})`, true);
+  } catch (e) { showToast(`Save scene error: ${e.message}`, true); }
+}
+
+async function recallScene(id) {
+  try {
+    const res = await fetch(`/api/scenes/${id}/recall?token=${encodeURIComponent(tok())}`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      if (res.status === 503) showToast('Some devices offline — others recalled', false);
+      else showToast(`Recall failed (${res.status})`, true);
+    }
+  } catch (e) { showToast(`Recall error: ${e.message}`, true); }
+}
+
+async function deleteSceneApi(id) {
+  try {
+    const res = await fetch(`/api/scenes/${id}?token=${encodeURIComponent(tok())}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok && res.status !== 404) showToast(`Delete scene failed (${res.status})`, true);
+  } catch (e) { showToast(`Delete scene error: ${e.message}`, true); }
 }
 
 // ── Colour math ──────────────────────────────────────────────────────────────

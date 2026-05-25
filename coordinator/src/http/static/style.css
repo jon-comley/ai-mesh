@@ -921,3 +921,101 @@ body {
 
   .node-card, .health-card, .model-card, .light-card { margin-bottom: 0; }
 }
+
+/* ── Scenes ─────────────────────────────────────────────────────────────────── */
+
+.room-scenes {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 6px;
+}
+
+.room-scene-save-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.room-scene-save-btn {
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 8px;
+  transition: border-color 0.15s, color 0.15s;
+}
+.room-scene-save-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.room-scene-name-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 8px;
+  flex: 1;
+}
+.room-scene-name-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.room-scene-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.room-scene-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  background: var(--surface-2);
+  border-radius: 6px;
+}
+
+.room-scene-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-scene-recall-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+.room-scene-recall-btn:hover {
+  background: var(--accent);
+  color: #000;
+}
+
+.room-scene-delete-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.room-scene-delete-btn:hover {
+  color: var(--red);
+}
