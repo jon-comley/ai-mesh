@@ -40,6 +40,9 @@ pub struct RoomRecord {
     pub name: String,
     pub position: i64,
     pub device_ids: Vec<String>,
+    pub orientation_degrees: f32,
+    pub has_window: bool,
+    pub window_facing: Option<f32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -50,6 +53,8 @@ pub struct DeviceSnapshot {
     pub brightness: Option<u8>,
     pub color_xy: Option<(f32, f32)>,
     pub color_temp: Option<u16>,
+    #[serde(default)]
+    pub solar_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +89,8 @@ pub struct Registry {
     conn: Connection,
     /// Known Zigbee devices and groups per lighting node, keyed by node_id.
     light_devices: HashMap<String, (Vec<String>, Vec<String>)>,
+    /// Physical coordinates (x, y, z) and optional room association for lighting devices.
+    light_positions: HashMap<String, (f32, f32, f32, Option<String>)>,
 }
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -114,7 +121,10 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS rooms (
             id       TEXT PRIMARY KEY,
             name     TEXT NOT NULL,
-            position INTEGER NOT NULL DEFAULT 0
+            position INTEGER NOT NULL DEFAULT 0,
+            orientation_degrees REAL NOT NULL DEFAULT 0.0,
+            has_window          INTEGER NOT NULL DEFAULT 0,
+            window_facing       REAL
         );
         CREATE TABLE IF NOT EXISTS room_devices (
             room_id   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
@@ -131,9 +141,67 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS light_states (
             device_id  TEXT PRIMARY KEY,
             node_id    TEXT NOT NULL,
-            state_json TEXT NOT NULL
+            state_json TEXT NOT NULL,
+            solar_enabled INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS light_positions (
+            device_id TEXT PRIMARY KEY,
+            x         REAL NOT NULL DEFAULT 0.0,
+            y         REAL NOT NULL DEFAULT 0.0,
+            z         REAL NOT NULL DEFAULT 0.0,
+            room_id   TEXT REFERENCES rooms(id)
         );",
-    )
+    )?;
+
+    // Migration: Add new columns to rooms if they don't exist
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(rooms)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    if !columns.contains(&"orientation_degrees".to_string()) {
+        conn.execute(
+            "ALTER TABLE rooms ADD COLUMN orientation_degrees REAL NOT NULL DEFAULT 0.0",
+            [],
+        )?;
+    }
+    if !columns.contains(&"has_window".to_string()) {
+        conn.execute(
+            "ALTER TABLE rooms ADD COLUMN has_window INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains(&"window_facing".to_string()) {
+        conn.execute("ALTER TABLE rooms ADD COLUMN window_facing REAL", [])?;
+    }
+
+    // Migration: Add new columns to light_states if they don't exist
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(light_states)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    if !columns.contains(&"solar_enabled".to_string()) {
+        conn.execute(
+            "ALTER TABLE light_states ADD COLUMN solar_enabled INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+
+    // Migration: Add new columns to light_positions if they don't exist
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(light_positions)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    if !columns.contains(&"room_id".to_string()) {
+        conn.execute(
+            "ALTER TABLE light_positions ADD COLUMN room_id TEXT REFERENCES rooms(id)",
+            [],
+        )?;
+    }
+
+    Ok(())
 }
 
 fn now_unix_secs() -> i64 {
@@ -165,6 +233,7 @@ impl Registry {
             nodes: HashMap::new(),
             conn,
             light_devices: HashMap::new(),
+            light_positions: HashMap::new(),
         }
     }
 
@@ -177,6 +246,7 @@ impl Registry {
             nodes: HashMap::new(),
             conn,
             light_devices: HashMap::new(),
+            light_positions: HashMap::new(),
         };
         reg.load_from_db()?;
         Ok(reg)
@@ -285,6 +355,27 @@ impl Registry {
             let devices: Vec<String> = serde_json::from_str(&devices_json).unwrap_or_default();
             let groups: Vec<String> = serde_json::from_str(&groups_json).unwrap_or_default();
             self.light_devices.insert(node_id, (devices, groups));
+        }
+
+        // ── light_positions ────────────────────────────────────────────────
+        let pos_rows: Vec<(String, f32, f32, f32, Option<String>)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT device_id, x, y, z, room_id FROM light_positions")?;
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+
+        for (device_id, x, y, z, room_id) in pos_rows {
+            self.light_positions.insert(device_id, (x, y, z, room_id));
         }
 
         Ok(())
@@ -565,30 +656,43 @@ impl Registry {
     }
 
     pub fn list_rooms(&self) -> Vec<RoomRecord> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT id, name, position FROM rooms ORDER BY position, name")
-        {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, name, position, orientation_degrees, has_window, window_facing FROM rooms ORDER BY position, name",
+        ) {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "list_rooms prepare failed");
                 return vec![];
             }
         };
-        let rows: Vec<(String, String, i64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        let rows: Vec<(String, String, i64, f32, bool, Option<f32>)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get::<_, i32>(4)? != 0,
+                    row.get(5)?,
+                ))
+            })
             .map(|r| r.collect::<rusqlite::Result<_>>().unwrap_or_default())
             .unwrap_or_default();
         rows.into_iter()
-            .map(|(id, name, position)| {
-                let device_ids = self.room_device_ids(&id);
-                RoomRecord {
-                    id,
-                    name,
-                    position,
-                    device_ids,
-                }
-            })
+            .map(
+                |(id, name, position, orientation_degrees, has_window, window_facing)| {
+                    let device_ids = self.room_device_ids(&id);
+                    RoomRecord {
+                        id,
+                        name,
+                        position,
+                        device_ids,
+                        orientation_degrees,
+                        has_window,
+                        window_facing,
+                    }
+                },
+            )
             .collect()
     }
 
@@ -605,6 +709,9 @@ impl Registry {
             name: name.to_owned(),
             position: 0,
             device_ids: vec![],
+            orientation_degrees: 0.0,
+            has_window: false,
+            window_facing: None,
         }
     }
 
@@ -804,8 +911,8 @@ impl Registry {
             }
         };
         if let Err(e) = self.conn.execute(
-            "INSERT OR REPLACE INTO light_states (device_id, node_id, state_json) VALUES (?1, ?2, ?3)",
-            params![report.device_id, report.node_id, state_json],
+            "INSERT OR REPLACE INTO light_states (device_id, node_id, state_json, solar_enabled) VALUES (?1, ?2, ?3, ?4)",
+            params![report.device_id, report.node_id, state_json, if report.solar_enabled { 1 } else { 0 }],
         ) {
             warn!(error = %e, "save_light_state: db write failed");
         }
@@ -813,20 +920,66 @@ impl Registry {
 
     /// Return all persisted device light states — used to warm-start the dashboard on boot.
     pub fn load_light_states(&self) -> Vec<LightStateReport> {
-        let mut stmt = match self.conn.prepare("SELECT state_json FROM light_states") {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT state_json, solar_enabled FROM light_states")
+        {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "load_light_states: prepare failed");
                 return vec![];
             }
         };
-        stmt.query_map([], |row| row.get::<_, String>(0))
-            .map(|rows| {
-                rows.filter_map(|r| r.ok())
-                    .filter_map(|json| serde_json::from_str::<LightStateReport>(&json).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i32>(1).unwrap_or(0) != 0,
+            ))
+        })
+        .map(|rows| {
+            rows.filter_map(|r| r.ok())
+                .filter_map(|(json, solar_enabled)| {
+                    let mut report = serde_json::from_str::<LightStateReport>(&json).ok()?;
+                    report.solar_enabled = solar_enabled;
+                    Some(report)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    // ── Light positions ──────────────────────────────────────────────────────
+
+    pub fn get_all_light_positions(&self) -> HashMap<String, (f32, f32, f32, Option<String>)> {
+        self.light_positions.clone()
+    }
+
+    pub fn get_light_position(&self, device_id: &str) -> Option<(f32, f32, f32, Option<String>)> {
+        self.light_positions.get(device_id).cloned()
+    }
+
+    pub fn update_light_position(
+        &mut self,
+        device_id: &str,
+        x: f32,
+        y: f32,
+        z: f32,
+        mut room_id: Option<String>,
+    ) {
+        // If room_id not provided, try to infer it from existing room membership.
+        if room_id.is_none() {
+            room_id = self.get_room_for_device(device_id);
+        }
+
+        if let Err(e) = self.conn.execute(
+            "INSERT OR REPLACE INTO light_positions (device_id, x, y, z, room_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![device_id, x, y, z, room_id],
+        ) {
+            warn!(error = %e, "update_light_position failed");
+            return;
+        }
+        self.light_positions
+            .insert(device_id.to_owned(), (x, y, z, room_id));
     }
 }
 
@@ -1403,6 +1556,7 @@ mod tests {
             brightness: Some(200),
             color_xy: None,
             color_temp: Some(370),
+            solar_enabled: false,
         }
     }
 
@@ -1504,6 +1658,7 @@ mod tests {
             brightness: Some(200),
             color_xy: Some((0.3, 0.4)),
             color_temp: None,
+            solar_enabled: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: DeviceSnapshot = serde_json::from_str(&json).unwrap();
@@ -1548,6 +1703,7 @@ mod tests {
             brightness: Some(200),
             color_xy: Some((0.3, 0.4)),
             color_temp: None,
+            solar_enabled: false,
         }
     }
 
@@ -1604,5 +1760,88 @@ mod tests {
         assert_eq!(states[0].device_id, "living_room_bulb");
         assert!(states[0].on);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_light_state_persists_solar_enabled_flag() {
+        let mut reg = Registry::new();
+        let mut report = make_light_state("bulb1", "pi1", true);
+        report.solar_enabled = true;
+        reg.save_light_state(&report);
+        let loaded = reg.load_light_states();
+        assert!(loaded[0].solar_enabled);
+    }
+
+    // ── Light positions ───────────────────────────────────────────────────────
+
+    #[test]
+    fn update_and_get_light_position_round_trips() {
+        let mut reg = Registry::new();
+        reg.update_light_position("bulb1", 1.0, 2.0, 0.5, None);
+        let pos = reg.get_light_position("bulb1").unwrap();
+        assert!((pos.0 - 1.0).abs() < 1e-4);
+        assert!((pos.1 - 2.0).abs() < 1e-4);
+        assert!((pos.2 - 0.5).abs() < 1e-4);
+        assert!(pos.3.is_none());
+    }
+
+    #[test]
+    fn get_light_position_returns_none_for_unknown_device() {
+        let reg = Registry::new();
+        assert!(reg.get_light_position("ghost").is_none());
+    }
+
+    #[test]
+    fn get_all_light_positions_returns_all_entries() {
+        let mut reg = Registry::new();
+        reg.update_light_position("bulb1", 0.0, 0.0, 0.0, None);
+        reg.update_light_position("bulb2", 1.0, 1.0, 0.0, None);
+        let all = reg.get_all_light_positions();
+        assert_eq!(all.len(), 2);
+        assert!(all.contains_key("bulb1"));
+        assert!(all.contains_key("bulb2"));
+    }
+
+    #[test]
+    fn update_light_position_upserts() {
+        let mut reg = Registry::new();
+        reg.update_light_position("bulb1", 1.0, 2.0, 0.0, None);
+        reg.update_light_position("bulb1", 3.0, 4.0, 0.0, None);
+        let pos = reg.get_light_position("bulb1").unwrap();
+        assert!((pos.0 - 3.0).abs() < 1e-4);
+        assert!((pos.1 - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn light_position_infers_room_from_existing_membership() {
+        let mut reg = Registry::new();
+        let room_id = reg.create_room("Study").id;
+        reg.add_device_to_room(&room_id, "bulb1");
+        // No room_id passed — should be inferred from membership
+        reg.update_light_position("bulb1", 1.0, 1.0, 0.0, None);
+        let pos = reg.get_light_position("bulb1").unwrap();
+        assert_eq!(pos.3.as_deref(), Some(room_id.as_str()));
+    }
+
+    // ── Room spatial fields ───────────────────────────────────────────────────
+
+    #[test]
+    fn create_room_has_default_spatial_fields() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Living Room");
+        assert_eq!(room.orientation_degrees, 0.0);
+        assert!(!room.has_window);
+        assert!(room.window_facing.is_none());
+    }
+
+    #[test]
+    fn list_rooms_returns_spatial_fields() {
+        let mut reg = Registry::new();
+        reg.create_room("Kitchen");
+        let rooms = reg.list_rooms();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].orientation_degrees, 0.0);
+        assert!(!rooms[0].has_window);
+        assert!(rooms[0].window_facing.is_none());
     }
 }

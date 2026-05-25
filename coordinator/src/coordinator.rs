@@ -26,15 +26,7 @@ fn warm_start_lighting(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<Dashboar
 
 fn warm_start_rooms(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
     let rooms = registry.lock().unwrap().list_rooms();
-    let room_infos: Vec<RoomInfo> = rooms
-        .into_iter()
-        .map(|r| RoomInfo {
-            id: r.id,
-            name: r.name,
-            position: r.position,
-            device_ids: r.device_ids,
-        })
-        .collect();
+    let room_infos: Vec<RoomInfo> = rooms.into_iter().map(RoomInfo::from).collect();
     dashboard.push_rooms_update(room_infos);
 }
 

@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use shared::{
-    LightAction, LightCommandRequest, LightTarget, MeshMessage, ModelLoadRequest,
+    LightAction, LightCommandRequest, LightStateReport, LightTarget, MeshMessage, ModelLoadRequest,
     ModelUnloadRequest, WIRE_VERSION,
 };
 use std::sync::{Arc, Mutex};
@@ -172,6 +172,7 @@ fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
             (Some(x), Some(y)) => Some(LightAction::ColorXY { x, y }),
             _ => None,
         },
+        "solar_mode" => body.value.map(|v| LightAction::SolarMode(v > 0.0)),
         _ => None,
     }
 }
@@ -195,6 +196,63 @@ pub async fn light_command(
         )
             .into_response();
     };
+
+    // SolarMode is coordinator-only — update dashboard state and optionally restore
+    // the pre-solar light state, but never forward the command to the node.
+    if let LightAction::SolarMode(enabled) = command {
+        if enabled {
+            state.save_manual_state(&device);
+        } else if let Some(manual) = state.get_manual_state(&device) {
+            let rid = gen_request_id();
+            let target = LightTarget::Device(device.clone());
+            let on_cmd = if manual.on {
+                LightAction::On
+            } else {
+                LightAction::Off
+            };
+            state.send_to_node(
+                &node_id,
+                MeshMessage::LightCommand(LightCommandRequest {
+                    request_id: rid.clone(),
+                    target: target.clone(),
+                    command: on_cmd,
+                }),
+            );
+            if let Some(b) = manual.brightness {
+                state.send_to_node(
+                    &node_id,
+                    MeshMessage::LightCommand(LightCommandRequest {
+                        request_id: rid.clone(),
+                        target: target.clone(),
+                        command: LightAction::Brightness(b),
+                    }),
+                );
+            }
+            if let Some(ct) = manual.color_temp {
+                state.send_to_node(
+                    &node_id,
+                    MeshMessage::LightCommand(LightCommandRequest {
+                        request_id: rid.clone(),
+                        target: target.clone(),
+                        command: LightAction::ColorTemp(ct),
+                    }),
+                );
+            }
+            if let Some((x, y)) = manual.color_xy {
+                state.send_to_node(
+                    &node_id,
+                    MeshMessage::LightCommand(LightCommandRequest {
+                        request_id: rid,
+                        target: target.clone(),
+                        command: LightAction::ColorXY { x, y },
+                    }),
+                );
+            }
+        }
+        state.set_solar_enabled(&device, enabled);
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     let cmd = LightCommandRequest {
         request_id: gen_request_id(),
         target: LightTarget::Device(device),
@@ -246,12 +304,7 @@ fn rooms_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<RoomInfo> {
         .unwrap()
         .list_rooms()
         .into_iter()
-        .map(|r| RoomInfo {
-            id: r.id,
-            name: r.name,
-            position: r.position,
-            device_ids: r.device_ids,
-        })
+        .map(RoomInfo::from)
         .collect()
 }
 
@@ -490,24 +543,26 @@ pub async fn save_scene(
             .into_iter()
             .filter(|s| room_device_ids.contains(&s.device_id))
             .map(|s| DeviceSnapshot {
-                device_id: s.device_id,
-                node_id: s.node_id,
+                device_id: s.device_id.clone(),
+                node_id: s.node_id.clone(),
                 on: s.on,
                 brightness: s.brightness,
                 color_xy: s.color_xy,
                 color_temp: s.color_temp,
+                solar_enabled: s.solar_enabled,
             })
             .collect()
     } else {
         all_states
             .into_iter()
             .map(|s| DeviceSnapshot {
-                device_id: s.device_id,
-                node_id: s.node_id,
+                device_id: s.device_id.clone(),
+                node_id: s.node_id.clone(),
                 on: s.on,
                 brightness: s.brightness,
                 color_xy: s.color_xy,
                 color_temp: s.color_temp,
+                solar_enabled: s.solar_enabled,
             })
             .collect()
     };
@@ -582,6 +637,17 @@ pub async fn recall_scene(
         if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
             any_unavailable = true;
         }
+
+        // Update the dashboard snapshot so the SpatialEngine (and UI) sees the mode from the scene.
+        state.push_lighting_update(LightStateReport {
+            node_id: node_id.clone(),
+            device_id: snap.device_id.clone(),
+            on: snap.on,
+            brightness: snap.brightness,
+            color_xy: snap.color_xy,
+            color_temp: snap.color_temp,
+            solar_enabled: snap.solar_enabled,
+        });
     }
     if any_unavailable {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
@@ -610,6 +676,58 @@ pub async fn delete_scene(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ── Spatial ──────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SetPositionBody {
+    x: f32,
+    y: f32,
+    z: f32,
+    room_id: Option<String>,
+}
+
+pub async fn get_light_position(
+    Path(device_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let pos = registry.lock().unwrap().get_light_position(&device_id);
+    match pos {
+        Some((x, y, z, room_id)) => Json(serde_json::json!({
+            "x": x,
+            "y": y,
+            "z": z,
+            "room_id": room_id,
+        }))
+        .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+pub async fn update_light_position(
+    Path(device_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<SetPositionBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    registry.lock().unwrap().update_light_position(
+        &device_id,
+        body.x,
+        body.y,
+        body.z,
+        body.room_id,
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,7 +735,7 @@ mod tests {
     use axum::Router;
     use axum::body::to_bytes;
     use axum::http::Request;
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use tokio::sync::mpsc;
@@ -933,6 +1051,7 @@ mod tests {
             brightness: Some(200),
             color_xy: None,
             color_temp: Some(370),
+            solar_enabled: false,
         });
     }
 
@@ -1729,11 +1848,12 @@ mod tests {
                 None,
                 vec![crate::registry::DeviceSnapshot {
                     device_id: "bulb1".into(),
-                    node_id: "pi1".into(),
+                    node_id: "node1".into(),
                     on: true,
-                    brightness: Some(200),
+                    brightness: Some(255),
                     color_xy: None,
                     color_temp: Some(370),
+                    solar_enabled: false,
                 }],
             )
             .id
@@ -1763,12 +1883,13 @@ mod tests {
                 "Night",
                 None,
                 vec![crate::registry::DeviceSnapshot {
-                    device_id: "offline_bulb".into(),
-                    node_id: "pi1".into(),
-                    on: false,
-                    brightness: None,
+                    device_id: "bulb1".into(),
+                    node_id: "node1".into(),
+                    on: true,
+                    brightness: Some(255),
                     color_xy: None,
-                    color_temp: None,
+                    color_temp: Some(370),
+                    solar_enabled: false,
                 }],
             )
             .id;
@@ -1884,5 +2005,161 @@ mod tests {
         ));
         assert!(mk("unknown", None, None, None).is_none());
         assert!(mk("color_xy", None, Some(0.3), None).is_none());
+        assert!(matches!(
+            mk("solar_mode", Some(1.0), None, None),
+            Some(LightAction::SolarMode(true))
+        ));
+        assert!(matches!(
+            mk("solar_mode", Some(0.0), None, None),
+            Some(LightAction::SolarMode(false))
+        ));
+    }
+
+    // ── solar_mode command ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn solar_mode_enable_saves_state_and_does_not_forward_to_node() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(8);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+
+        let status = post_light_cmd(
+            state.clone(),
+            "bulb1",
+            "",
+            r#"{"action":"solar_mode","value":1}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // No message forwarded to the node
+        assert!(
+            rx.try_recv().is_err(),
+            "SolarMode must not be forwarded to node"
+        );
+
+        // solar_enabled flag set in snapshot
+        let snap = state.get_solar_enabled_devices();
+        assert!(snap.contains(&"bulb1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn solar_mode_disable_restores_state_and_clears_flag() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(8);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+
+        // Seed with known brightness + CT state
+        state.push_lighting_update(shared::LightStateReport {
+            node_id: "pi1".into(),
+            device_id: "bulb1".into(),
+            on: true,
+            brightness: Some(150),
+            color_xy: None,
+            color_temp: Some(350),
+            solar_enabled: false,
+        });
+
+        // Enable solar (saves manual state)
+        post_light_cmd(
+            state.clone(),
+            "bulb1",
+            "",
+            r#"{"action":"solar_mode","value":1}"#,
+        )
+        .await;
+
+        // Drain any messages (none expected from enable)
+        while rx.try_recv().is_ok() {}
+
+        // Disable solar — should restore brightness + CT
+        let status = post_light_cmd(
+            state.clone(),
+            "bulb1",
+            "",
+            r#"{"action":"solar_mode","value":0}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let msgs: Vec<MeshMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let actions: Vec<_> = msgs
+            .iter()
+            .filter_map(|m| {
+                if let MeshMessage::LightCommand(r) = m {
+                    Some(&r.command)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(actions.iter().any(|a| matches!(a, LightAction::On)));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, LightAction::Brightness(150)))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, LightAction::ColorTemp(350)))
+        );
+
+        // Flag cleared
+        assert!(state.get_solar_enabled_devices().is_empty());
+    }
+
+    // ── light position endpoints ──────────────────────────────────────────────
+
+    fn position_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
+        Router::new()
+            .route(
+                "/api/lights/{device}/position",
+                get(get_light_position).post(update_light_position),
+            )
+            .layer(axum::Extension(registry))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn get_light_position_returns_404_when_unset() {
+        let router = position_router(make_state(vec![], empty_connections()), make_registry());
+        let status = send(router, "GET", "/api/lights/bulb1/position?token=", "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_then_get_light_position_round_trips() {
+        let registry = make_registry();
+        let router = position_router(make_state(vec![], empty_connections()), registry.clone());
+
+        let set_status = send(
+            router,
+            "POST",
+            "/api/lights/bulb1/position?token=",
+            r#"{"x":1.5,"y":2.5,"z":0.0}"#,
+        )
+        .await;
+        assert_eq!(set_status, StatusCode::NO_CONTENT);
+
+        let pos = registry.lock().unwrap().get_light_position("bulb1");
+        assert!(pos.is_some());
+        let (x, y, z, _) = pos.unwrap();
+        assert!((x - 1.5).abs() < 1e-4);
+        assert!((y - 2.5).abs() < 1e-4);
+        assert!((z - 0.0).abs() < 1e-4);
+    }
+
+    #[tokio::test]
+    async fn get_light_position_returns_401_for_wrong_token() {
+        let router = position_router(
+            make_state(vec!["secret".into()], empty_connections()),
+            make_registry(),
+        );
+        let status = send(router, "GET", "/api/lights/bulb1/position?token=wrong", "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 }

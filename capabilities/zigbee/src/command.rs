@@ -19,6 +19,7 @@ pub fn action_payload(action: &LightAction) -> serde_json::Value {
         } => serde_json::json!({"brightness": value, "transition": transition_secs}),
         LightAction::ColorTemp(mireds) => serde_json::json!({"color_temp": mireds}),
         LightAction::ColorXY { x, y } => serde_json::json!({"color": {"x": x, "y": y}}),
+        LightAction::SolarMode(_) => serde_json::json!({}),
     }
 }
 
