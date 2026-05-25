@@ -144,6 +144,7 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
             post(api::group_light_command),
         )
         .route("/api/rooms", post(api::create_room))
+        .route("/api/rooms/reorder", post(api::reorder_rooms))
         .route("/api/rooms/{id}", delete(api::delete_room))
         .route("/api/rooms/{id}/name", patch(api::rename_room))
         .route("/api/rooms/{id}/devices", patch(api::modify_room_devices))

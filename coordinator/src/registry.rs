@@ -620,6 +620,16 @@ impl Registry {
         }
     }
 
+    /// Sets `position` for each room id in order (position = index in slice).
+    pub fn set_room_positions(&mut self, ordered_ids: &[&str]) {
+        for (i, id) in ordered_ids.iter().enumerate() {
+            let _ = self.conn.execute(
+                "UPDATE rooms SET position = ?1 WHERE id = ?2",
+                params![i as i64, id],
+            );
+        }
+    }
+
     /// Returns the room_id the device is currently assigned to, if any.
     pub fn get_room_for_device(&self, device_id: &str) -> Option<String> {
         self.conn
@@ -1169,5 +1179,29 @@ mod tests {
         assert!(rooms[0].device_ids.contains(&"hall_bulb".to_string()));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn set_room_positions_updates_order() {
+        let mut reg = Registry::new();
+        let a = reg.create_room("A");
+        let b = reg.create_room("B");
+        let c = reg.create_room("C");
+        reg.set_room_positions(&[&c.id, &a.id, &b.id]);
+        let rooms = reg.list_rooms();
+        let pos = |id: &str| rooms.iter().find(|r| r.id == id).unwrap().position;
+        assert_eq!(pos(&c.id), 0);
+        assert_eq!(pos(&a.id), 1);
+        assert_eq!(pos(&b.id), 2);
+    }
+
+    #[test]
+    fn set_room_positions_ignores_unknown_ids() {
+        let mut reg = Registry::new();
+        let a = reg.create_room("A");
+        reg.set_room_positions(&[&a.id, "no-such-id"]);
+        // No panic; known room gets position 0
+        let rooms = reg.list_rooms();
+        assert_eq!(rooms[0].position, 0);
     }
 }

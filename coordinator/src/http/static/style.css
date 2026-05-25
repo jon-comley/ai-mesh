@@ -830,6 +830,15 @@ body {
   background: color-mix(in srgb, var(--accent) 8%, var(--surface)) !important;
 }
 
+.room-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.room-colour-picker {
+  margin: 0 0 8px;
+}
+
 .room-devices {
   display: flex;
   flex-direction: column;
