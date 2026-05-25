@@ -2,6 +2,8 @@
 // First-class spatial room objects with drag-and-drop device assignment
 // and drag-to-reorder room cards.
 
+import * as layout from '/static/layout.js';
+
 let roomsData = [];
 let devicesMap = new Map();
 let scenesData = [];
@@ -62,6 +64,12 @@ function stopPulse(restore = true) {
   }
 }
 
+// Expose pulse helpers for layout.js (cross-module, avoids circular import)
+window.__roomsStartPulse = startPulse;
+window.__roomsStopPulse = stopPulse;
+
+layout.init(devicesMap);
+
 export function handleRoomsUpdate(evt) {
   roomsData = evt.rooms ?? [];
   render();
@@ -75,6 +83,8 @@ export function handleScenesUpdate(evt) {
 export function notifyDevices(devices) {
   devicesMap.clear();
   for (const dev of devices) devicesMap.set(dev.device_id, dev);
+  // Forward live state to canvas if layout is open
+  for (const dev of devices) layout.notifyDeviceUpdate(dev.device_id, dev);
   render();
 }
 
@@ -83,6 +93,7 @@ export function notifyDevices(devices) {
 function render() {
   const container = document.getElementById('lighting-list');
   if (!container || dragSrc || roomDragId) return;
+  if (container.querySelector('.layout-view')) return; // layout open — don't wipe
 
   const assigned = new Set(roomsData.flatMap(r => r.device_ids));
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
@@ -93,7 +104,7 @@ function render() {
   container.appendChild(renderUnassigned(unassigned));
 
   const roomList = document.createElement('div');
-  roomList.className = 'room-list';
+  roomList.className = 'room-list rooms-layout-root';
 
   const sorted = [...roomsData].sort((a, b) => a.position - b.position);
   for (const room of sorted) {
@@ -238,6 +249,13 @@ function renderRoomCard(room) {
   nameEl.textContent = room.name;
   nameEl.addEventListener('click', () => startRename(nameEl, room));
   header.appendChild(nameEl);
+
+  const layoutBtn = document.createElement('button');
+  layoutBtn.className = 'room-action-btn room-layout-btn';
+  layoutBtn.title = 'Open floor plan';
+  layoutBtn.textContent = '⊞';
+  layoutBtn.addEventListener('click', e => { e.stopPropagation(); layout.openLayout(room); });
+  header.appendChild(layoutBtn);
 
   const actions = document.createElement('div');
   actions.className = 'room-actions';

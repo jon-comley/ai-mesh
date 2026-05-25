@@ -82,8 +82,10 @@ impl SpatialEngine {
         };
 
         for device_id in enabled_devices {
-            let pos_info = positions.get(&device_id);
-            let (x, y, _z, room_id) = pos_info.cloned().unwrap_or((0.0, 0.0, 0.0, None));
+            let pos_info = positions.get(&device_id).cloned();
+            let (x, y, z, room_id, fixture_type) = pos_info
+                .map(|p| (p.x, p.y, p.z, p.room_id, p.fixture_type))
+                .unwrap_or((0.0, 0.0, 0.0, None, None));
 
             // Find room metadata
             let room = room_id.and_then(|rid| rooms.iter().find(|r| r.id == rid));
@@ -96,10 +98,8 @@ impl SpatialEngine {
             let mut intensity_scale = 1.0;
 
             if let Some(r) = room {
-                // Apply room orientation rotation
                 effective_azimuth = (azimuth - r.orientation_degrees as f64 + 360.0) % 360.0;
 
-                // Window awareness
                 if r.has_window
                     && let Some(facing) = r.window_facing
                 {
@@ -111,24 +111,44 @@ impl SpatialEngine {
                         intensity_scale *= 1.0 + (1.0 - (normalized_diff / 90.0)) * 0.5;
                     }
                 } else if !r.has_window {
-                    // No windows? Maybe solar mode should be more subtle or disabled.
                     intensity_scale *= 0.5;
                 }
             }
 
-            // 3. Apply spatial weighting (The Sweep)
-            // East (90°) -> West (270°) sweep.
-            // sun_loc represents the direction the sun is AT.
-            let sun_rad = (effective_azimuth).to_radians();
-            let sun_loc_x = sun_rad.sin() as f32;
-            let sun_loc_y = sun_rad.cos() as f32;
+            // 3. Fixture type sensitivity multiplier
+            let fixture_sensitivity = match fixture_type.as_deref().unwrap_or("ceiling_spot") {
+                "table_lamp" => 1.0_f32,
+                "floor_lamp" => 0.8,
+                "led_strip" => 0.9,
+                "pendant" => 0.7,
+                _ => 0.4, // ceiling_spot and unknown
+            };
 
-            // Dot product of bulb position and sun location gives the "exposure"
-            // We clamp it to [-1, 1] to avoid exaggerated weights for far-flung bulbs.
-            let exposure = (x * sun_loc_x + y * sun_loc_y) * 0.1;
-            let exposure = exposure.clamp(-1.0, 1.0);
+            // 4. Spatial weighting — 3D when Z is set, 2D fallback for legacy
+            let exposure = if z > 0.0 {
+                // Full 3D: sun direction vector × normalised bulb position vector
+                let az_rad = effective_azimuth.to_radians();
+                let el_rad = elevation.to_radians();
+                let sun = (
+                    (az_rad.sin() * el_rad.cos()) as f32,
+                    (az_rad.cos() * el_rad.cos()) as f32,
+                    el_rad.sin() as f32,
+                );
+                let bx = x - 0.5;
+                let by = y - 0.5;
+                let bz = z - 0.5;
+                let len = (bx * bx + by * by + bz * bz).sqrt().max(1e-6);
+                let dot = (bx / len) * sun.0 + (by / len) * sun.1 + (bz / len) * sun.2;
+                dot.max(0.0)
+            } else {
+                // Legacy 2D path — preserves old behaviour until user sets up canvas
+                let sun_rad = effective_azimuth.to_radians();
+                let raw = (x * sun_rad.sin() as f32 + y * sun_rad.cos() as f32) * 0.1;
+                raw.clamp(-1.0, 1.0)
+            };
 
-            let final_bri = ((base_bri as f32 + (exposure * 20.0)) * intensity_scale as f32)
+            let final_bri = ((base_bri as f32 + (exposure * fixture_sensitivity * 20.0))
+                * intensity_scale as f32)
                 .clamp(1.0, 255.0) as u8;
 
             if let Some(node_id) = self.dashboard.get_node_for_device(&device_id) {

@@ -684,6 +684,7 @@ pub struct SetPositionBody {
     y: f32,
     z: f32,
     room_id: Option<String>,
+    fixture_type: Option<String>,
 }
 
 pub async fn get_light_position(
@@ -697,11 +698,12 @@ pub async fn get_light_position(
     }
     let pos = registry.lock().unwrap().get_light_position(&device_id);
     match pos {
-        Some((x, y, z, room_id)) => Json(serde_json::json!({
-            "x": x,
-            "y": y,
-            "z": z,
-            "room_id": room_id,
+        Some(p) => Json(serde_json::json!({
+            "x": p.x,
+            "y": p.y,
+            "z": p.z,
+            "room_id": p.room_id,
+            "fixture_type": p.fixture_type,
         }))
         .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -724,8 +726,34 @@ pub async fn update_light_position(
         body.y,
         body.z,
         body.room_id,
+        body.fixture_type,
     );
     StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn get_room_positions(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let positions = registry.lock().unwrap().get_positions_for_room(&room_id);
+    let body: Vec<_> = positions
+        .into_iter()
+        .map(|(device_id, p)| {
+            serde_json::json!({
+                "device_id": device_id,
+                "x": p.x,
+                "y": p.y,
+                "z": p.z,
+                "fixture_type": p.fixture_type,
+            })
+        })
+        .collect();
+    Json(body).into_response()
 }
 
 #[cfg(test)]
@@ -2147,10 +2175,10 @@ mod tests {
 
         let pos = registry.lock().unwrap().get_light_position("bulb1");
         assert!(pos.is_some());
-        let (x, y, z, _) = pos.unwrap();
-        assert!((x - 1.5).abs() < 1e-4);
-        assert!((y - 2.5).abs() < 1e-4);
-        assert!((z - 0.0).abs() < 1e-4);
+        let p = pos.unwrap();
+        assert!((p.x - 1.5).abs() < 1e-4);
+        assert!((p.y - 2.5).abs() < 1e-4);
+        assert!((p.z - 0.0).abs() < 1e-4);
     }
 
     #[tokio::test]
