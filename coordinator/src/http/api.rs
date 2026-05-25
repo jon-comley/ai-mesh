@@ -1,5 +1,5 @@
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
@@ -9,10 +9,11 @@ use shared::{
     LightAction, LightCommandRequest, LightTarget, MeshMessage, ModelLoadRequest,
     ModelUnloadRequest, WIRE_VERSION,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::state::DashboardState;
+use super::state::{DashboardState, RoomInfo};
+use crate::registry::Registry;
 
 fn gen_request_id() -> String {
     let ms = SystemTime::now()
@@ -225,6 +226,184 @@ pub async fn group_light_command(
         StatusCode::NO_CONTENT.into_response()
     } else {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
+// ── Rooms ─────────────────────────────────────────────────────────────────────
+
+fn rooms_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<RoomInfo> {
+    registry
+        .lock()
+        .unwrap()
+        .list_rooms()
+        .into_iter()
+        .map(|r| RoomInfo {
+            id: r.id,
+            name: r.name,
+            position: r.position,
+            device_ids: r.device_ids,
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+pub struct CreateRoomBody {
+    name: String,
+}
+
+pub async fn create_room(
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<CreateRoomBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let name = body.name.trim().to_owned();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
+    }
+    let room_id = registry.lock().unwrap().create_room(&name).id;
+    state.push_rooms_update(rooms_from_registry(&registry));
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": room_id })),
+    )
+        .into_response()
+}
+
+pub async fn delete_room(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        reg.delete_room(&room_id);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RenameRoomBody {
+    name: String,
+}
+
+pub async fn rename_room(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<RenameRoomBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let name = body.name.trim().to_owned();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        reg.rename_room(&room_id, &name);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+pub struct ModifyRoomDevicesBody {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
+}
+
+pub async fn modify_room_devices(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<ModifyRoomDevicesBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        for device_id in &body.remove {
+            reg.remove_device_from_room(&room_id, device_id);
+        }
+        for device_id in &body.add {
+            reg.add_device_to_room(&room_id, device_id);
+        }
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn room_command(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<LightCommandBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let device_ids = {
+        let reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        reg.list_rooms()
+            .into_iter()
+            .find(|r| r.id == room_id)
+            .map(|r| r.device_ids)
+            .unwrap_or_default()
+    };
+    let Some(command) = build_light_action(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unknown action or missing required fields",
+        )
+            .into_response();
+    };
+    let mut any_unavailable = false;
+    for device_id in &device_ids {
+        let Some(node_id) = state.get_node_for_device(device_id) else {
+            any_unavailable = true;
+            continue;
+        };
+        let cmd = LightCommandRequest {
+            request_id: gen_request_id(),
+            target: LightTarget::Device(device_id.clone()),
+            command: command.clone(),
+        };
+        if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+            any_unavailable = true;
+        }
+    }
+    if any_unavailable {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    } else {
+        StatusCode::NO_CONTENT.into_response()
     }
 }
 
@@ -717,6 +896,423 @@ mod tests {
         seed_group(&state, "all", "pi1");
         let status = post_group_cmd(state, "all", "", r#"{"action":"dance"}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ── rooms ─────────────────────────────────────────────────────────────────
+
+    use crate::registry::Registry;
+
+    fn make_registry() -> Arc<Mutex<Registry>> {
+        Arc::new(Mutex::new(Registry::new()))
+    }
+
+    fn make_room(registry: &Arc<Mutex<Registry>>, name: &str) -> String {
+        registry.lock().unwrap().create_room(name).id
+    }
+
+    fn rooms_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
+        Router::new()
+            .route("/api/rooms", post(create_room))
+            .route("/api/rooms/{id}", axum::routing::delete(delete_room))
+            .route("/api/rooms/{id}/name", axum::routing::patch(rename_room))
+            .route(
+                "/api/rooms/{id}/devices",
+                axum::routing::patch(modify_room_devices),
+            )
+            .route("/api/rooms/{id}/command", post(room_command))
+            .layer(axum::Extension(registry))
+            .with_state(state)
+    }
+
+    async fn send(router: Router, method: &str, uri: &str, body: &str) -> StatusCode {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let _ = to_bytes(resp.into_body(), usize::MAX).await;
+        status
+    }
+
+    async fn send_with_body(
+        router: Router,
+        method: &str,
+        uri: &str,
+        body: &str,
+    ) -> (StatusCode, String) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    // ── create_room ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_room_returns_201_with_id() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let (status, body) = send_with_body(
+            rooms_router(state, registry),
+            "POST",
+            "/api/rooms?token=",
+            r#"{"name":"Living Room"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(
+            body.contains("\"id\""),
+            "response should contain id: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_room_returns_400_for_empty_name() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            "/api/rooms?token=",
+            r#"{"name":"  "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_room_returns_401_for_wrong_token() {
+        let registry = make_registry();
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            "/api/rooms?token=wrong",
+            r#"{"name":"Hall"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn create_room_broadcasts_rooms_update() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let mut rx = state.tx.subscribe();
+        send(
+            rooms_router(state, registry),
+            "POST",
+            "/api/rooms?token=",
+            r#"{"name":"Bedroom"}"#,
+        )
+        .await;
+        use super::super::state::DashboardEvent;
+        match rx.try_recv().unwrap() {
+            DashboardEvent::RoomsUpdate { rooms } => {
+                assert_eq!(rooms.len(), 1);
+                assert_eq!(rooms[0].name, "Bedroom");
+            }
+            _ => panic!("expected RoomsUpdate"),
+        }
+    }
+
+    // ── delete_room ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn delete_room_returns_204() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "DELETE",
+            &format!("/api/rooms/{room_id}?token="),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn delete_room_returns_404_for_unknown_id() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "DELETE",
+            "/api/rooms/nonexistent-id?token=",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_room_returns_401_for_wrong_token() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Test");
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "DELETE",
+            &format!("/api/rooms/{room_id}?token=wrong"),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── rename_room ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn rename_room_returns_204() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Old Name");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry.clone()),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/name?token="),
+            r#"{"name":"New Name"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let rooms = registry.lock().unwrap().list_rooms();
+        assert_eq!(rooms[0].name, "New Name");
+    }
+
+    #[tokio::test]
+    async fn rename_room_returns_404_for_unknown_id() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "PATCH",
+            "/api/rooms/ghost-id/name?token=",
+            r#"{"name":"Whatever"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn rename_room_returns_400_for_empty_name() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Room");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/name?token="),
+            r#"{"name":""}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ── modify_room_devices ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn modify_devices_add_returns_204() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry.clone()),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/devices?token="),
+            r#"{"add":["bulb1","bulb2"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let rooms = registry.lock().unwrap().list_rooms();
+        assert!(rooms[0].device_ids.contains(&"bulb1".to_string()));
+        assert!(rooms[0].device_ids.contains(&"bulb2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn modify_devices_remove_returns_204() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Office");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "desk_lamp");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry.clone()),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/devices?token="),
+            r#"{"remove":["desk_lamp"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let rooms = registry.lock().unwrap().list_rooms();
+        assert!(rooms[0].device_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn modify_devices_returns_404_for_unknown_room() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "PATCH",
+            "/api/rooms/ghost/devices?token=",
+            r#"{"add":["bulb1"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn modify_devices_returns_401_for_wrong_token() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Room");
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/devices?token=wrong"),
+            r#"{"add":["b1"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── room_command ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn room_command_fans_out_to_devices() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(8);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+
+        // Seed two devices on pi1
+        seed_light(&state, "bulb1", "pi1");
+        seed_light(&state, "bulb2", "pi1");
+
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Study");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb2");
+
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/command?token="),
+            r#"{"action":"on"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Both devices should have received a LightCommand
+        let msg1 = rx.try_recv().unwrap();
+        let msg2 = rx.try_recv().unwrap();
+        for msg in [msg1, msg2] {
+            match msg {
+                MeshMessage::LightCommand(req) => {
+                    assert!(matches!(req.command, LightAction::On));
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn room_command_returns_404_for_unknown_room() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            "/api/rooms/ghost/command?token=",
+            r#"{"action":"on"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn room_command_returns_400_for_unknown_action() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Hall");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/command?token="),
+            r#"{"action":"dance"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn room_command_returns_503_when_device_node_not_connected() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        // Add a device to the room but don't register it in DashboardState
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "ghost_bulb");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/command?token="),
+            r#"{"action":"off"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn room_command_returns_204_for_empty_room() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Empty Room");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/command?token="),
+            r#"{"action":"on"}"#,
+        )
+        .await;
+        // No devices → nothing to fan out to → 204 (nothing failed)
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn room_command_returns_401_for_wrong_token() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Hall");
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/command?token=wrong"),
+            r#"{"action":"on"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[test]

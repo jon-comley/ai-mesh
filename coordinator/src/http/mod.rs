@@ -6,12 +6,13 @@ use axum::{
     Router,
     http::header,
     response::Html,
-    routing::{get, post},
+    routing::{delete, get, patch, post},
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+use crate::registry::Registry;
 use state::DashboardState;
 
 const INDEX_HTML: &str = include_str!("static/index.html");
@@ -24,7 +25,7 @@ const LIGHTING_JS: &str = include_str!("static/lighting.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
-pub fn router(dashboard: Arc<DashboardState>) -> Router {
+pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/", get(|| async { Html(INDEX_HTML) }))
@@ -129,16 +130,22 @@ pub fn router(dashboard: Arc<DashboardState>) -> Router {
             "/api/lights/group/{group}/command",
             post(api::group_light_command),
         )
+        .route("/api/rooms", post(api::create_room))
+        .route("/api/rooms/{id}", delete(api::delete_room))
+        .route("/api/rooms/{id}/name", patch(api::rename_room))
+        .route("/api/rooms/{id}/devices", patch(api::modify_room_devices))
+        .route("/api/rooms/{id}/command", post(api::room_command))
+        .layer(axum::Extension(registry))
         .with_state(dashboard)
 }
 
-pub async fn start(port: u16, dashboard: Arc<DashboardState>) {
+pub async fn start(port: u16, dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) {
     let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("failed to bind dashboard HTTP server to {addr}: {e}"));
     info!("Dashboard available at http://localhost:{port}");
-    if let Err(e) = axum::serve(listener, router(dashboard)).await {
+    if let Err(e) = axum::serve(listener, router(dashboard, registry)).await {
         error!("Dashboard HTTP server error: {e}");
     }
 }
@@ -155,7 +162,8 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        let resp = router(dashboard)
+        let registry = Arc::new(std::sync::Mutex::new(crate::registry::Registry::new()));
+        let resp = router(dashboard, registry)
             .oneshot(
                 Request::builder()
                     .uri(uri)

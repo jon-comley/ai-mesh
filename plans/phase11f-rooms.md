@@ -283,11 +283,15 @@ When the intent handler routes `Group("all")`, it uses the existing Z2M group me
 - `warm_start_rooms()` in `coordinator.rs` — populates room snapshot from SQLite on startup (both TLS and insecure paths)
 - 15 new tests: 10 registry (CRUD, cascade, cross-room move, persistence) + 5 state (broadcast, snapshot, wire format). 378 tests total.
 
-### F-Rooms-2 — HTTP API
-- Implement all five endpoints in `api.rs`
+### F-Rooms-2 ✓ — HTTP API
+- `Registry` passed to `router()` and `start()` via Axum `Extension` — zero changes to `DashboardState` or its tests
+- `POST /api/rooms` — 201 + `{ "id": "uuid" }`, 400 on blank name, 401
+- `DELETE /api/rooms/{id}` — 204, 404, 401
+- `PATCH /api/rooms/{id}/name` — 204, 400 on blank name, 404, 401
+- `PATCH /api/rooms/{id}/devices { add: [...], remove: [...] }` — 204, 404, 401; add calls `add_device_to_room` (evicts from old room); both lists default to `[]`
+- `POST /api/rooms/{id}/command` — fans out `LightCommand` to each device in room; 204, 400, 404, 503 if any device node unreachable (best-effort — still sends to reachable nodes); empty room → 204
 - Each mutating endpoint calls `push_rooms_update` after the DB write
-- `POST /api/rooms/{id}/command` fans out to each device using `get_node_for_device`
-- Tests: create/delete/rename, membership add/remove, command fan-out, 404s, 401s
+- 20 new tests covering all endpoints, status codes, and fan-out behaviour. 398 tests total.
 
 ### F-Rooms-3 — Dashboard UI
 - New `rooms.js` ES module
