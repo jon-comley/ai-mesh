@@ -810,7 +810,19 @@ impl Registry {
     }
 
     pub fn delete_room(&mut self, id: &str) {
-        // CASCADE in room_devices handles membership cleanup.
+        // light_positions.room_id has no ON DELETE action, so clear it first
+        // to avoid a FK violation blocking the room deletion.
+        // The bulb keeps its coordinates and remains as an unassigned device.
+        let _ = self.conn.execute(
+            "UPDATE light_positions SET room_id = NULL WHERE room_id = ?1",
+            params![id],
+        );
+        for pos in self.light_positions.values_mut() {
+            if pos.room_id.as_deref() == Some(id) {
+                pos.room_id = None;
+            }
+        }
+        // CASCADE in room_devices and openings handles the rest.
         if let Err(e) = self
             .conn
             .execute("DELETE FROM rooms WHERE id = ?1", params![id])
@@ -2172,6 +2184,39 @@ mod tests {
         reg.create_opening(&room.id, "window", "S", 0.5, 0.3, 1.0);
         reg.delete_room(&room.id);
         assert!(reg.get_openings_for_room(&room.id).is_empty());
+    }
+
+    #[test]
+    fn delete_room_nulls_light_position_room_id() {
+        // Deleting a room must not silently fail due to FK violation in light_positions.
+        // The bulb should survive with room_id = None (unassigned).
+        let mut reg = Registry::new();
+        let room = reg.create_room("Studio");
+        reg.update_light_position("bulb1", 0.5, 0.5, 1.0, Some(room.id.clone()), None);
+        assert_eq!(
+            reg.get_light_position("bulb1").unwrap().room_id,
+            Some(room.id.clone())
+        );
+
+        reg.delete_room(&room.id);
+
+        // Room is gone
+        assert!(reg.list_rooms().is_empty());
+        // Bulb still exists with coordinates intact, room_id cleared
+        let pos = reg.get_light_position("bulb1").unwrap();
+        assert!(pos.room_id.is_none());
+        assert!((pos.x - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn update_opening_can_change_wall_edge() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Kitchen");
+        let o = reg.create_opening(&room.id, "window", "N", 0.5, 0.3, 1.0);
+        reg.update_opening(&o.id, None, None, None, Some("E"));
+        let openings = reg.get_openings_for_room(&room.id);
+        assert_eq!(openings[0].wall_edge, "E");
+        assert_eq!(openings[0].opening_type, "window"); // type unchanged
     }
 
     #[test]

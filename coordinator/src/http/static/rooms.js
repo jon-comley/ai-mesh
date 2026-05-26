@@ -244,15 +244,34 @@ function renderRoomCard(room) {
     if (wasReordering) saveRoomOrder();
   });
 
-  // Header: name + rename + delete
+  // Header: collapse chevron + name + layout button + actions
   const header = document.createElement('div');
   header.className = 'room-card-header';
+
+  const collapseBtn = document.createElement('button');
+  collapseBtn.className = 'room-collapse-btn';
+  collapseBtn.title = 'Collapse / expand';
+  const isCollapsed = localStorage.getItem(`mesh-room-collapsed-${room.id}`) === '1';
+  collapseBtn.textContent = isCollapsed ? '▸' : '▾';
+  header.appendChild(collapseBtn);
+
+  const nameWrap = document.createElement('span');
+  nameWrap.className = 'room-name-wrap';
 
   const nameEl = document.createElement('span');
   nameEl.className = 'room-name';
   nameEl.textContent = room.name;
-  nameEl.addEventListener('click', () => startRename(nameEl, room));
-  header.appendChild(nameEl);
+  nameWrap.appendChild(nameEl);
+
+  const pencilBtn = document.createElement('button');
+  pencilBtn.className = 'room-rename-pencil';
+  pencilBtn.title = 'Rename room';
+  pencilBtn.textContent = '✎';
+  pencilBtn.addEventListener('click', e => { e.stopPropagation(); startRename(nameEl, room); });
+  nameWrap.appendChild(pencilBtn);
+
+  nameWrap.addEventListener('click', () => startRename(nameEl, room));
+  header.appendChild(nameWrap);
 
   const layoutBtn = document.createElement('button');
   layoutBtn.className = 'room-action-btn room-layout-btn';
@@ -264,18 +283,6 @@ function renderRoomCard(room) {
   const actions = document.createElement('div');
   actions.className = 'room-actions';
 
-  const renameBtn = document.createElement('button');
-  renameBtn.className = 'room-action-btn';
-  renameBtn.textContent = 'rename';
-  renameBtn.addEventListener('click', () => startRename(nameEl, room));
-  actions.appendChild(renameBtn);
-
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'room-action-btn room-action-delete';
-  deleteBtn.textContent = 'delete';
-  deleteBtn.addEventListener('click', () => deleteRoom(room.id));
-  actions.appendChild(deleteBtn);
-
   // Solar active badge — shown when any device in room has solar_enabled
   const roomDevicesAll = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
   const solarActive = roomDevicesAll.some(d => d.solar_enabled);
@@ -286,11 +293,28 @@ function renderRoomCard(room) {
     solarBadge.innerHTML = '&#9728; Solar';
     solarBadge.style.cursor = 'pointer';
     solarBadge.addEventListener('click', () => setSolarMode(room.id, false));
-    actions.insertBefore(solarBadge, renameBtn);
+    actions.appendChild(solarBadge);
   }
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'room-action-btn room-action-delete';
+  deleteBtn.textContent = 'delete';
+  deleteBtn.addEventListener('click', () => deleteRoom(room.id));
+  actions.appendChild(deleteBtn);
 
   header.appendChild(actions);
   card.appendChild(header);
+
+  // Collapsible body
+  const body = document.createElement('div');
+  body.className = 'room-body' + (isCollapsed ? ' collapsed' : '');
+  collapseBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    const nowCollapsed = !body.classList.contains('collapsed');
+    body.classList.toggle('collapsed', nowCollapsed);
+    collapseBtn.textContent = nowCollapsed ? '▸' : '▾';
+    localStorage.setItem(`mesh-room-collapsed-${room.id}`, nowCollapsed ? '1' : '0');
+  });
 
   // Room-level controls: on/off + optional colour swatch
   const empty = room.device_ids.length === 0;
@@ -340,13 +364,13 @@ function renderRoomCard(room) {
     controls.appendChild(swatchBtn);
   }
 
-  card.appendChild(controls);
+  body.appendChild(controls);
 
   // Room colour picker (hidden until swatch clicked)
   if (hasColour) {
     const { h, s } = getRoomColourHsl(roomDevices);
     const pickerEl = buildRoomColourPicker(h, s);
-    card.appendChild(pickerEl);
+    body.appendChild(pickerEl);
 
     const swatchBtn = controls.querySelector('[data-ctrl="room-colour-toggle"]');
     swatchBtn.addEventListener('click', () => pickerEl.classList.toggle('open'));
@@ -376,12 +400,13 @@ function renderRoomCard(room) {
     }
   }
 
-  card.appendChild(devicesEl);
-  wireDropZone(card, room.id);
+  body.appendChild(devicesEl);
+  wireDropZone(body, room.id);
 
   // Scenes section
-  card.appendChild(buildScenesSection(room.id));
+  body.appendChild(buildScenesSection(room.id));
 
+  card.appendChild(body);
   return card;
 }
 
