@@ -135,7 +135,7 @@ export function closeLayout() {
 // Called by rooms.js when a LightingUpdate WS event arrives so canvas icons stay live.
 export function notifyDeviceUpdate(deviceId, state) {
   const entry = placedBulbs[deviceId];
-  if (!entry) return;
+  if (!entry || !scrubberLive) return;
   updateBulbIcon(entry, state);
 }
 
@@ -600,7 +600,11 @@ async function sendSimSolarCommands(elevation) {
   const t = tok();
   for (const deviceId of room.device_ids) {
     const dev = devicesRef.get(deviceId);
-    if (!dev?.solar_enabled) continue;
+    if (!dev) continue;
+    // If room is in solar mode, respect per-device solar_enabled flag (manual override).
+    // If room is NOT in solar mode, allow simulation to affect all bulbs for preview.
+    if (room.solar_enabled && !dev.solar_enabled) continue;
+
     // brightness command also implicitly turns the device on
     fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1111,8 +1115,11 @@ function drawFixtureIcon(g, cx, cy, z, fixtureType, dev) {
 
   if (fixtureType === 'led_strip') {
     // Wide pill — represents a strip mounted on a wall or ceiling
-    els.push(svgEl('rect', { x: cx - 44, y: cy - 8, width: 88, height: 16, rx: 8,
-      fill: color, opacity: on ? 0.2 : 0.1 }));
+    const halo = svgEl('rect', { x: cx - 44, y: cy - 8, width: 88, height: 16, rx: 8,
+      fill: color, opacity: on ? 0.2 : 0.1 });
+    halo.classList.add('lc-bulb-halo');
+    halo.dataset.baseOpacity = '0.2';
+    els.push(halo);
     const strip = svgEl('rect', { x: cx - 40, y: cy - 5, width: 80, height: 10, rx: 5,
       fill: color, opacity: alpha });
     strip.classList.add('lc-bulb-shape');
@@ -1124,13 +1131,18 @@ function drawFixtureIcon(g, cx, cy, z, fixtureType, dev) {
     els.push(svgEl('line', { x1: cx, y1: cy - 16, x2: cx, y2: cy - 16 - cordLen,
       stroke: 'rgba(255,255,255,0.35)', 'stroke-width': 2 }));
     // Glow halo
-    els.push(svgEl('circle', { cx, cy, r: 22, fill: color, opacity: on ? 0.15 : 0.05 }));
+    const halo = svgEl('circle', { cx, cy, r: 22, fill: color, opacity: on ? 0.15 : 0.05 });
+    halo.classList.add('lc-bulb-halo');
+    halo.dataset.baseOpacity = '0.15';
+    els.push(halo);
     const bulb = svgEl('circle', { cx, cy, r: 14, fill: color, opacity: alpha });
     bulb.classList.add('lc-bulb-shape');
     els.push(bulb);
     // Ring outline
-    els.push(svgEl('circle', { cx, cy, r: 14, fill: 'none',
-      stroke: color, 'stroke-width': 2, opacity: Math.min(alpha + 0.3, 1) }));
+    const ring = svgEl('circle', { cx, cy, r: 14, fill: 'none',
+      stroke: color, 'stroke-width': 2, opacity: Math.min(alpha + 0.3, 1) });
+    ring.classList.add('lc-bulb-ring');
+    els.push(ring);
 
   } else if (fixtureType === 'table_lamp') {
     // Shade (downward triangle) + short stem + base
@@ -1149,9 +1161,11 @@ function drawFixtureIcon(g, cx, cy, z, fixtureType, dev) {
     els.push(svgEl('line', { x1: cx, y1: cy + 28, x2: cx, y2: cy - 4,
       stroke: 'rgba(255,255,255,0.4)', 'stroke-width': 3 }));
     // Shade arc (semi-circle open downwards)
-    els.push(svgEl('path', {
+    const halo = svgEl('path', {
       d: `M ${cx - 16} ${cy - 4} A 16 16 0 0 1 ${cx + 16} ${cy - 4}`,
-      fill: color, opacity: alpha }));
+      fill: color, opacity: alpha });
+    halo.classList.add('lc-bulb-halo');
+    els.push(halo);
     const head = svgEl('circle', { cx, cy: cy - 4, r: 7, fill: color, opacity: alpha });
     head.classList.add('lc-bulb-shape');
     els.push(head);
@@ -1160,21 +1174,34 @@ function drawFixtureIcon(g, cx, cy, z, fixtureType, dev) {
 
   } else {
     // ceiling_spot (default) — downlight: halo ring + filled dot
-    els.push(svgEl('circle', { cx, cy, r: 26, fill: color, opacity: on ? 0.12 : 0.04 }));
-    els.push(svgEl('circle', { cx, cy, r: 18, fill: 'none',
-      stroke: color, 'stroke-width': 2, opacity: on ? 0.5 : 0.2 }));
+    const halo = svgEl('circle', { cx, cy, r: 26, fill: color, opacity: on ? 0.12 : 0.04 });
+    halo.classList.add('lc-bulb-halo');
+    halo.dataset.baseOpacity = '0.12';
+    els.push(halo);
+    const ring = svgEl('circle', { cx, cy, r: 18, fill: 'none',
+      stroke: color, 'stroke-width': 2, opacity: on ? 0.5 : 0.2 });
+    ring.classList.add('lc-bulb-ring');
+    els.push(ring);
     const dot = svgEl('circle', { cx, cy, r: 10, fill: color, opacity: alpha });
     dot.classList.add('lc-bulb-shape');
     els.push(dot);
     // Cross-hatch tick marks like a recessed light symbol
-    els.push(svgEl('line', { x1: cx - 18, y1: cy, x2: cx - 10, y2: cy,
-      stroke: color, 'stroke-width': 1.5, opacity: on ? 0.5 : 0.2 }));
-    els.push(svgEl('line', { x1: cx + 10, y1: cy, x2: cx + 18, y2: cy,
-      stroke: color, 'stroke-width': 1.5, opacity: on ? 0.5 : 0.2 }));
-    els.push(svgEl('line', { x1: cx, y1: cy - 18, x2: cx, y2: cy - 10,
-      stroke: color, 'stroke-width': 1.5, opacity: on ? 0.5 : 0.2 }));
-    els.push(svgEl('line', { x1: cx, y1: cy + 10, x2: cx, y2: cy + 18,
-      stroke: color, 'stroke-width': 1.5, opacity: on ? 0.5 : 0.2 }));
+    const t1 = svgEl('line', { x1: cx - 18, y1: cy, x2: cx - 10, y2: cy,
+      stroke: color, 'stroke-width': 1.5, opacity: on ? 0.5 : 0.2 });
+    t1.classList.add('lc-bulb-ring');
+    els.push(t1);
+    const t2 = svgEl('line', { x1: cx + 10, y1: cy, x2: cx + 18, y2: cy,
+      stroke: color, 'stroke-width': 1.5, opacity: on ? 0.5 : 0.2 });
+    t2.classList.add('lc-bulb-ring');
+    els.push(t2);
+    const t3 = svgEl('line', { x1: cx, y1: cy - 18, x2: cx, y2: cy - 10,
+      stroke: color, 'stroke-width': 1.5, opacity: on ? 0.5 : 0.2 });
+    t3.classList.add('lc-bulb-ring');
+    els.push(t3);
+    const t4 = svgEl('line', { x1: cx, y1: cy + 10, x2: cx, y2: cy + 18,
+      stroke: color, 'stroke-width': 1.5, opacity: on ? 0.5 : 0.2 });
+    t4.classList.add('lc-bulb-ring');
+    els.push(t4);
   }
 
   // Insert before any text/label children
@@ -1275,11 +1302,26 @@ function updateBulbIcon(entry, state) {
     Object.entries(placedBulbs).find(([, v]) => v === entry)?.[0] ?? ''
   );
   if (!entry.el) return;
-  const shape = entry.el.querySelector('.lc-bulb-shape');
-  if (!shape) return;
+
   const color = devStateColor(state ?? dev);
-  shape.setAttribute('fill', color);
-  shape.setAttribute('opacity', (state ?? dev)?.on ? 1 : 0.45);
+  const on = (state ?? dev)?.on ?? false;
+  const alpha = on ? 1 : 0.35;
+
+  entry.el.querySelectorAll('.lc-bulb-shape').forEach(el => {
+    el.setAttribute('fill', color);
+    el.setAttribute('opacity', alpha);
+  });
+
+  entry.el.querySelectorAll('.lc-bulb-halo').forEach(el => {
+    el.setAttribute('fill', color);
+    const base = parseFloat(el.dataset.baseOpacity || '0.15');
+    el.setAttribute('opacity', on ? base : base / 3);
+  });
+
+  entry.el.querySelectorAll('.lc-bulb-ring').forEach(el => {
+    el.setAttribute('stroke', color);
+    el.setAttribute('opacity', on ? 0.5 : 0.2);
+  });
 }
 
 // ── Popover ───────────────────────────────────────────────────────────────────
