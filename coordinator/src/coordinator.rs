@@ -25,9 +25,11 @@ fn warm_start_lighting(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<Dashboar
 }
 
 fn warm_start_rooms(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
-    let rooms = registry.lock().unwrap().list_rooms();
-    let room_infos: Vec<RoomInfo> = rooms.into_iter().map(RoomInfo::from).collect();
-    dashboard.push_rooms_update(room_infos);
+    let reg = registry.lock().unwrap();
+    let room_infos: Vec<RoomInfo> = reg.list_rooms().into_iter().map(RoomInfo::from).collect();
+    let names = reg.get_all_device_names();
+    drop(reg);
+    dashboard.push_rooms_update_with_names(room_infos, names);
 }
 
 fn warm_start_scenes(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
@@ -41,6 +43,7 @@ fn warm_start_scenes(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardS
                 name: s.name,
                 room_id: s.room_id,
                 created_at: s.created_at,
+                position: s.position,
                 preview_color,
             }
         })

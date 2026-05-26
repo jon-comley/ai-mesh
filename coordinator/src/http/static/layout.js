@@ -15,6 +15,9 @@ let snapDivisions = 20;         // invisible grid: 1/N of canvas width
 let showLabels = true;
 let activePopover = null;       // currently open popover element
 let dragType = null;            // 'bulb' | 'opening' — set on dragstart since getData is unavailable in dragover
+// Global safety net: clear dragType if a drag is cancelled or ends outside the canvas
+window.addEventListener('dragend', () => { dragType = null; });
+window.addEventListener('drop', () => { dragType = null; });
 
 const FIXTURE_TYPES = [
   { id: 'ceiling_spot', label: 'Ceiling spot', defaultZ: 1.0 },
@@ -33,6 +36,7 @@ export function init(devicesMap) {
 export function openLayout(room) {
   layoutRoom = room;
   placedBulbs = {};
+  placedOpenings = {};
   undoStack = [];
   redoStack = [];
 
@@ -614,13 +618,13 @@ function makeBulbDraggable(g, deviceId) {
     g.style.cursor = 'grab';
     g.releasePointerCapture(e.pointerId);
 
-    if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(true);
-
     if (!moved) {
-      // Tap — open popover
+      // Tap — open popover; keep pulse running until popover is dismissed
       openPopover(deviceId, g);
       return;
     }
+
+    if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(true);
 
     g.removeAttribute('transform');
 
@@ -743,6 +747,7 @@ function openPopover(deviceId, anchorEl) {
 
 function dismissPopover() {
   if (activePopover) { activePopover.remove(); activePopover = null; }
+  if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(true);
 }
 
 // ── Remove bulb ───────────────────────────────────────────────────────────────
@@ -991,6 +996,7 @@ function renderOpening(o) {
     cursor: 'grab',
   });
   makeMoveDraggable(body, o.id);
+  g.addEventListener('click', e => e.stopPropagation());
   g.appendChild(body);
 
   // Resize handles at each end
@@ -1269,8 +1275,8 @@ function openOpeningPopover(openingId, anchorEl) {
   pt.x = r.x + r.w / 2;
   pt.y = r.y + r.h / 2;
   const sp = pt.matrixTransform(svg.getScreenCTM());
-  pop.style.left = `${Math.min(sp.x + 12, window.innerWidth - 220)}px`;
-  pop.style.top  = `${Math.min(sp.y + 12, window.innerHeight - 300)}px`;
+  pop.style.left = `${Math.min(sp.x + window.scrollX + 12, window.innerWidth - 220)}px`;
+  pop.style.top  = `${Math.min(sp.y + window.scrollY + 12, window.innerHeight - 300)}px`;
   document.body.appendChild(pop);
 }
 

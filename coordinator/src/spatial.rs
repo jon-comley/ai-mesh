@@ -40,6 +40,7 @@ impl SpatialEngine {
             "Spatial Engine started (Lat: {}, Long: {})",
             self.latitude, self.longitude
         );
+        let notify = self.dashboard.solar_sweep_notify.clone();
 
         loop {
             let now = Utc::now();
@@ -57,16 +58,20 @@ impl SpatialEngine {
 
                     self.dashboard.push_solar_update(azimuth, elevation);
 
-                    // Perform the spatial sweep if we have elevation
                     if elevation > -18.0 {
-                        // Twilight or Day
                         self.perform_solar_sweep(azimuth, elevation).await;
                     }
                 }
                 Err(e) => warn!("Solar calculation failed: {:?}", e),
             }
 
-            sleep(Duration::from_secs(60)).await;
+            // Wait for the scheduled 60 s tick or an immediate-sweep request.
+            tokio::select! {
+                _ = sleep(Duration::from_secs(60)) => {}
+                _ = notify.notified() => {
+                    info!("Solar sweep triggered immediately (solar enabled on room)");
+                }
+            }
         }
     }
 

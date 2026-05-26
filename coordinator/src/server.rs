@@ -366,7 +366,7 @@ async fn process_message(
                     gpu_vram_total_gb,
                 );
             }
-            None
+            Some(MeshMessage::Acknowledge)
         }
         MeshMessage::HardwareReport(hw) => {
             if let Some(id) = node_id.as_deref() {

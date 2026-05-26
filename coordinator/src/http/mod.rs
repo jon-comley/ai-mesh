@@ -153,6 +153,10 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
         .route("/api/models/unload", post(api::unload_model))
         .route("/api/lights/names", get(api::get_device_names))
         .route("/api/lights/{device}/command", post(api::light_command))
+        .route(
+            "/api/lights/{device}/restore-solar",
+            post(api::restore_device_solar),
+        )
         .route("/api/lights/{device}/name", patch(api::rename_device))
         .route(
             "/api/lights/{device}/position",
@@ -176,8 +180,10 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
             "/api/rooms/{id}/openings/{oid}",
             patch(api::update_opening).delete(api::delete_opening),
         )
+        .route("/api/rooms/{id}/solar", post(api::set_room_solar))
         .route("/api/rooms/{id}/command", post(api::room_command))
         .route("/api/scenes", post(api::save_scene))
+        .route("/api/scenes/reorder", post(api::reorder_scenes))
         .route("/api/scenes/{id}/recall", post(api::recall_scene))
         .route("/api/scenes/{id}", delete(api::delete_scene))
         .layer(axum::Extension(registry))

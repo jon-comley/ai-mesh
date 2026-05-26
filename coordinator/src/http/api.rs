@@ -193,6 +193,7 @@ fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
 
 pub async fn light_command(
     Path(device): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
     Query(q): Query<TokenQuery>,
     State(state): State<Arc<DashboardState>>,
     Json(body): Json<LightCommandBody>,
@@ -269,10 +270,15 @@ pub async fn light_command(
 
     let cmd = LightCommandRequest {
         request_id: gen_request_id(),
-        target: LightTarget::Device(device),
+        target: LightTarget::Device(device.clone()),
         command,
     };
-    if state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+    let sent = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
+    // Manual command in a solar-enabled room suspends solar for this device.
+    if let Some(true) = registry.lock().unwrap().get_room_for_device_solar(&device) {
+        state.set_solar_enabled(&device, false);
+    }
+    if sent {
         StatusCode::NO_CONTENT.into_response()
     } else {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
@@ -466,16 +472,18 @@ pub async fn room_command(
     if !state.auth_ok(&q.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let device_ids = {
+    let (device_ids, room_solar) = {
         let reg = registry.lock().unwrap();
         if !reg.room_exists(&room_id) {
             return StatusCode::NOT_FOUND.into_response();
         }
-        reg.list_rooms()
-            .into_iter()
-            .find(|r| r.id == room_id)
-            .map(|r| r.device_ids)
-            .unwrap_or_default()
+        let room = reg.list_rooms().into_iter().find(|r| r.id == room_id);
+        let ids = room
+            .as_ref()
+            .map(|r| r.device_ids.clone())
+            .unwrap_or_default();
+        let solar = room.map(|r| r.solar_enabled).unwrap_or(false);
+        (ids, solar)
     };
     let Some(command) = build_light_action(&body) else {
         return (
@@ -499,11 +507,70 @@ pub async fn room_command(
             any_unavailable = true;
         }
     }
+    // Manual room command in a solar-enabled room suspends solar for all devices.
+    if room_solar {
+        for device_id in &device_ids {
+            state.set_solar_enabled(device_id, false);
+        }
+    }
     if any_unavailable {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
     } else {
         StatusCode::NO_CONTENT.into_response()
     }
+}
+
+// ── Room solar ────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SetRoomSolarBody {
+    enabled: bool,
+}
+
+pub async fn set_room_solar(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<SetRoomSolarBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let device_ids = {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        reg.set_room_solar(&room_id, body.enabled);
+        reg.list_rooms()
+            .into_iter()
+            .find(|r| r.id == room_id)
+            .map(|r| r.device_ids)
+            .unwrap_or_default()
+    };
+    for device_id in &device_ids {
+        state.set_solar_enabled(device_id, body.enabled);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    // Wake the spatial engine for an immediate sweep so bulbs change right away.
+    if body.enabled {
+        state.solar_sweep_notify.notify_one();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn restore_device_solar(
+    Path(device): Path<String>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    state.set_solar_enabled(&device, true);
+    state.solar_sweep_notify.notify_one();
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ── Scenes ────────────────────────────────────────────────────────────────────
@@ -521,10 +588,30 @@ fn scenes_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<SceneInfo> {
                 name: s.name,
                 room_id: s.room_id,
                 created_at: s.created_at,
+                position: s.position,
                 preview_color,
             }
         })
         .collect()
+}
+
+#[derive(Deserialize)]
+pub struct ReorderScenesBody {
+    ids: Vec<String>,
+}
+
+pub async fn reorder_scenes(
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<ReorderScenesBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    registry.lock().unwrap().reorder_scenes(&body.ids);
+    state.push_scenes_update(scenes_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
@@ -1319,8 +1406,10 @@ mod tests {
         token: &str,
         body: &str,
     ) -> StatusCode {
+        let registry = Arc::new(Mutex::new(Registry::new()));
         let router: Router = Router::new()
             .route("/api/lights/{device}/command", post(light_command))
+            .layer(axum::Extension(registry))
             .with_state(state);
         let req = Request::builder()
             .method("POST")
@@ -1501,6 +1590,7 @@ mod tests {
                 axum::routing::patch(modify_room_devices),
             )
             .route("/api/rooms/{id}/command", post(room_command))
+            .route("/api/rooms/{id}/solar", post(set_room_solar))
             .layer(axum::Extension(registry))
             .with_state(state)
     }
@@ -2574,5 +2664,111 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ── set_room_solar ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_room_solar_returns_401_for_wrong_token() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/solar?token=wrong"),
+            r#"{"enabled":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn set_room_solar_returns_404_for_unknown_room() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            "/api/rooms/ghost-room/solar?token=",
+            r#"{"enabled":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn set_room_solar_persists_and_fans_out() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+        let state = make_state(vec![], empty_connections());
+        seed_light(&state, "bulb1", "pi1");
+        let status = send(
+            rooms_router(Arc::clone(&state), Arc::clone(&registry)),
+            "POST",
+            &format!("/api/rooms/{room_id}/solar?token="),
+            r#"{"enabled":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(registry.lock().unwrap().list_rooms()[0].solar_enabled);
+        // fan-out: bulb1 should now be in the solar-enabled set
+        assert!(
+            state
+                .get_solar_enabled_devices()
+                .contains(&"bulb1".to_string())
+        );
+    }
+
+    // ── restore_device_solar ──────────────────────────────────────────────────
+
+    fn restore_solar_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
+        Router::new()
+            .route(
+                "/api/lights/{device}/restore-solar",
+                post(restore_device_solar),
+            )
+            .layer(axum::Extension(registry))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn restore_device_solar_returns_401_for_wrong_token() {
+        let registry = make_registry();
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let status = send(
+            restore_solar_router(state, registry),
+            "POST",
+            "/api/lights/bulb1/restore-solar?token=wrong",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn restore_device_solar_sets_solar_enabled() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        seed_light(&state, "bulb1", "pi1");
+        // simulate manual override: clear solar flag
+        state.set_solar_enabled("bulb1", false);
+        let status = send(
+            restore_solar_router(Arc::clone(&state), registry),
+            "POST",
+            "/api/lights/bulb1/restore-solar?token=",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            state
+                .get_solar_enabled_devices()
+                .contains(&"bulb1".to_string())
+        );
     }
 }
