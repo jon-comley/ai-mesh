@@ -131,6 +131,15 @@ pub enum LightAction {
         y: f32,
     },
     ColorTemp(u16), // mireds
+    ColorTempTransition {
+        value: u16,
+        transition_secs: f32,
+    },
+    ColorXYTransition {
+        x: f32,
+        y: f32,
+        transition_secs: f32,
+    },
     SolarMode(bool),
 }
 

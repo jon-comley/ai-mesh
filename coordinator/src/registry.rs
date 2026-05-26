@@ -102,6 +102,28 @@ pub struct SceneRecord {
     pub states: Vec<DeviceSnapshot>,
 }
 
+impl SceneRecord {
+    /// Average CIE xy across all snapshots that have colour data.
+    /// Prefers explicit xy; falls back to colour-temperature-derived xy.
+    pub fn preview_color(&self) -> Option<[f32; 2]> {
+        let xy_snaps: Vec<(f32, f32)> = self.states.iter().filter_map(|s| s.color_xy).collect();
+        if !xy_snaps.is_empty() {
+            let n = xy_snaps.len() as f32;
+            let x = xy_snaps.iter().map(|(x, _)| x).sum::<f32>() / n;
+            let y = xy_snaps.iter().map(|(_, y)| y).sum::<f32>() / n;
+            return Some([x, y]);
+        }
+        let ct_snaps: Vec<u16> = self.states.iter().filter_map(|s| s.color_temp).collect();
+        if !ct_snaps.is_empty() {
+            let mean_ct = ct_snaps.iter().map(|&c| c as f32).sum::<f32>() / ct_snaps.len() as f32;
+            let k = 1_000_000.0 / mean_ct;
+            let t = ((k - 2700.0) / (6500.0 - 2700.0)).clamp(0.0, 1.0);
+            return Some([0.46 - t * 0.15, 0.41 - t * 0.09]);
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelAllocation {
     pub model_name: String,
@@ -198,6 +220,10 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             opening_scope TEXT NOT NULL DEFAULT 'exterior',
             height_norm   REAL NOT NULL DEFAULT 0.3,
             height_span   REAL NOT NULL DEFAULT 0.5
+        );
+        CREATE TABLE IF NOT EXISTS device_names (
+            device_id   TEXT PRIMARY KEY,
+            custom_name TEXT NOT NULL
         );",
     )?;
 
@@ -1218,6 +1244,39 @@ impl Registry {
             .execute("DELETE FROM openings WHERE id = ?1", params![id])
         {
             warn!(error = %e, "delete_opening failed");
+        }
+    }
+
+    // ── Device custom names ───────────────────────────────────────────────────
+
+    pub fn set_device_name(&mut self, device_id: &str, name: &str) {
+        if let Err(e) = self.conn.execute(
+            "INSERT OR REPLACE INTO device_names (device_id, custom_name) VALUES (?1, ?2)",
+            params![device_id, name],
+        ) {
+            warn!(error = %e, "set_device_name failed");
+        }
+    }
+
+    pub fn get_all_device_names(&self) -> HashMap<String, String> {
+        let mut stmt = match self
+            .conn
+            .prepare("SELECT device_id, custom_name FROM device_names")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "get_all_device_names: prepare failed");
+                return HashMap::new();
+            }
+        };
+        match stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                warn!(error = %e, "get_all_device_names: query failed");
+                HashMap::new()
+            }
         }
     }
 

@@ -151,7 +151,9 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
         )
         .route("/api/models/load", post(api::load_model))
         .route("/api/models/unload", post(api::unload_model))
+        .route("/api/lights/names", get(api::get_device_names))
         .route("/api/lights/{device}/command", post(api::light_command))
+        .route("/api/lights/{device}/name", patch(api::rename_device))
         .route(
             "/api/lights/{device}/position",
             get(api::get_light_position).post(api::update_light_position),

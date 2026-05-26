@@ -7,9 +7,18 @@ import * as layout from '/static/layout.js';
 let roomsData = [];
 let devicesMap = new Map();
 let scenesData = [];
+let deviceNamesMap = new Map();
 let dragSrc = null;       // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;    // room reorder drag: room id being dragged
 let effectDragSrc = null; // effect palette drag: effect name e.g. 'solar'
+const openPickerIds = new Set(); // device IDs whose colour picker is currently open
+
+// Close all colour pickers on Escape
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || openPickerIds.size === 0) return;
+  openPickerIds.clear();
+  document.querySelectorAll('[data-ctrl="colour-picker"].open').forEach(el => el.classList.remove('open'));
+});
 
 // ── Bulb-identify pulse (triggered on drag-grab) ─────────────────────────────
 // Pulses the grabbed bulb full→dim so you know which physical unit you're holding.
@@ -69,10 +78,23 @@ window.__roomsStartPulse = startPulse;
 window.__roomsStopPulse = stopPulse;
 
 layout.init(devicesMap);
+fetchDeviceNames();
 
 export function handleRoomsUpdate(evt) {
   roomsData = evt.rooms ?? [];
+  if (evt.device_names) notifyDeviceNames(evt.device_names);
   render();
+}
+
+export function notifyDeviceNames(names) {
+  deviceNamesMap = new Map(Object.entries(names));
+}
+
+async function fetchDeviceNames() {
+  try {
+    const res = await fetch(`/api/lights/names?token=${encodeURIComponent(tok())}`);
+    if (res.ok) notifyDeviceNames(await res.json());
+  } catch (_) {}
 }
 
 export function handleScenesUpdate(evt) {
@@ -103,6 +125,7 @@ function render() {
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
 
   container.innerHTML = '';
+  if (roomsData.length > 0) container.appendChild(renderGlobalControls());
   container.appendChild(renderEffectsPalette());
   container.appendChild(renderNewRoomBtn());
   container.appendChild(renderUnassigned(unassigned));
@@ -117,6 +140,37 @@ function render() {
 
   container.appendChild(roomList);
   wireRoomListDrag(roomList);
+
+  // Restore open colour pickers after re-render
+  for (const deviceId of openPickerIds) {
+    document.querySelector(`[data-device-id="${CSS.escape(deviceId)}"] [data-ctrl="colour-picker"]`)
+      ?.classList.add('open');
+  }
+}
+
+// ── Global controls ──────────────────────────────────────────────────────────
+
+function renderGlobalControls() {
+  const bar = document.createElement('div');
+  bar.className = 'room-global-controls';
+
+  const allOnBtn = document.createElement('button');
+  allOnBtn.className = 'room-action-btn';
+  allOnBtn.textContent = 'All On';
+  allOnBtn.addEventListener('click', () => {
+    for (const r of roomsData) sendRoomCommand(r.id, { action: 'on' }, r);
+  });
+
+  const allOffBtn = document.createElement('button');
+  allOffBtn.className = 'room-action-btn room-action-delete';
+  allOffBtn.textContent = 'All Off';
+  allOffBtn.addEventListener('click', () => {
+    for (const r of roomsData) sendRoomCommand(r.id, { action: 'off' }, r);
+  });
+
+  bar.appendChild(allOnBtn);
+  bar.appendChild(allOffBtn);
+  return bar;
 }
 
 // ── Effects palette ──────────────────────────────────────────────────────────
@@ -200,9 +254,9 @@ function renderUnassigned(deviceIds) {
   chips.className = 'room-chips';
 
   if (devicesMap.size === 0) {
-    chips.innerHTML = '<span class="room-empty-hint">No lighting devices.</span>';
+    chips.innerHTML = '<span class="room-empty-hint">No lighting devices discovered yet.</span>';
   } else if (deviceIds.length === 0) {
-    chips.innerHTML = '<span class="room-empty-hint">All devices assigned</span>';
+    chips.innerHTML = '<span class="room-unassigned-drop-hint">Drag a device here to remove it from its room.</span>';
   } else {
     for (const id of deviceIds) chips.appendChild(renderChip(id, 'unassigned', false));
   }
@@ -244,7 +298,14 @@ function renderRoomCard(room) {
     if (wasReordering) saveRoomOrder();
   });
 
-  // Header: collapse chevron + name + layout button + actions
+  // Shared state for header
+  const roomDevicesAll = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
+  const anyOn = roomDevicesAll.some(d => d.on);
+  const hasColour = roomDevicesAll.some(d => d.color_xy != null);
+  const solarActive = roomDevicesAll.some(d => d.solar_enabled);
+  const empty = room.device_ids.length === 0;
+
+  // Header: collapse chevron + name + quick controls + layout button + actions
   const header = document.createElement('div');
   header.className = 'room-card-header';
 
@@ -257,21 +318,50 @@ function renderRoomCard(room) {
 
   const nameWrap = document.createElement('span');
   nameWrap.className = 'room-name-wrap';
-
   const nameEl = document.createElement('span');
   nameEl.className = 'room-name';
   nameEl.textContent = room.name;
   nameWrap.appendChild(nameEl);
-
   const pencilBtn = document.createElement('button');
   pencilBtn.className = 'room-rename-pencil';
   pencilBtn.title = 'Rename room';
   pencilBtn.textContent = '✎';
   pencilBtn.addEventListener('click', e => { e.stopPropagation(); startRename(nameEl, room); });
   nameWrap.appendChild(pencilBtn);
-
   nameWrap.addEventListener('click', () => startRename(nameEl, room));
   header.appendChild(nameWrap);
+
+  // Quick on/off + colour swatch in header (always visible when collapsed)
+  const quickCtrl = document.createElement('div');
+  quickCtrl.className = 'room-header-quick';
+
+  const onBtn  = document.createElement('button');
+  const offBtn = document.createElement('button');
+  const setRoomOnOff = (isOn) => {
+    onBtn.innerHTML  = `<span class="badge ${isOn  ? 'badge-green' : 'badge-muted'}">On</span>`;
+    offBtn.innerHTML = `<span class="badge ${!isOn ? 'badge-red'   : 'badge-muted'}">Off</span>`;
+  };
+  onBtn.className = 'light-toggle-btn';
+  onBtn.disabled = empty;
+  if (!empty) onBtn.addEventListener('click', e => { e.stopPropagation(); setRoomOnOff(true);  sendRoomCommand(room.id, { action: 'on' }, room); });
+  offBtn.className = 'light-toggle-btn';
+  offBtn.disabled = empty;
+  if (!empty) offBtn.addEventListener('click', e => { e.stopPropagation(); setRoomOnOff(false); sendRoomCommand(room.id, { action: 'off' }, room); });
+  setRoomOnOff(anyOn);
+  quickCtrl.appendChild(onBtn);
+  quickCtrl.appendChild(offBtn);
+
+  let roomSwatchBtn = null;
+  if (hasColour) {
+    const { h, s } = getRoomColourHsl(roomDevicesAll);
+    roomSwatchBtn = document.createElement('button');
+    roomSwatchBtn.className = 'color-swatch-btn room-colour-swatch';
+    roomSwatchBtn.style.background = `hsl(${h},${s}%,50%)`;
+    roomSwatchBtn.title = 'Set room colour';
+    roomSwatchBtn.setAttribute('data-ctrl', 'room-colour-toggle');
+    quickCtrl.appendChild(roomSwatchBtn);
+  }
+  header.appendChild(quickCtrl);
 
   const layoutBtn = document.createElement('button');
   layoutBtn.className = 'room-action-btn room-layout-btn';
@@ -282,10 +372,6 @@ function renderRoomCard(room) {
 
   const actions = document.createElement('div');
   actions.className = 'room-actions';
-
-  // Solar active badge — shown when any device in room has solar_enabled
-  const roomDevicesAll = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
-  const solarActive = roomDevicesAll.some(d => d.solar_enabled);
   if (solarActive) {
     const solarBadge = document.createElement('span');
     solarBadge.className = 'badge badge-solar';
@@ -295,15 +381,42 @@ function renderRoomCard(room) {
     solarBadge.addEventListener('click', () => setSolarMode(room.id, false));
     actions.appendChild(solarBadge);
   }
-
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'room-action-btn room-action-delete';
   deleteBtn.textContent = 'delete';
   deleteBtn.addEventListener('click', () => deleteRoom(room.id));
   actions.appendChild(deleteBtn);
-
   header.appendChild(actions);
   card.appendChild(header);
+
+  // Room colour picker — outside body so it stays accessible when collapsed
+  if (hasColour && roomSwatchBtn) {
+    const { h, s } = getRoomColourHsl(roomDevicesAll);
+    const pickerEl = buildRoomColourPicker(h, s);
+    card.appendChild(pickerEl);
+    roomSwatchBtn.addEventListener('click', e => { e.stopPropagation(); pickerEl.classList.toggle('open'); });
+    wireRoomColourPicker(pickerEl, room.id, roomSwatchBtn);
+  }
+
+  // Quick scenes bar — always visible, horizontal scroll
+  const roomScenesList = scenesData.filter(s => s.room_id === room.id).sort((a, b) => b.created_at - a.created_at);
+  if (roomScenesList.length > 0) {
+    const sceneBar = document.createElement('div');
+    sceneBar.className = 'room-quick-scenes';
+    for (const scene of roomScenesList) {
+      const chip = document.createElement('button');
+      chip.className = 'room-quick-scene-chip';
+      chip.textContent = scene.name;
+      chip.title = `Recall "${scene.name}"`;
+      if (scene.preview_color) {
+        const { r, g, b } = xyToRgb(scene.preview_color[0], scene.preview_color[1], 180);
+        chip.style.setProperty('--scene-chip-color', `rgb(${r},${g},${b})`);
+      }
+      chip.addEventListener('click', e => { e.stopPropagation(); recallScene(scene.id); });
+      sceneBar.appendChild(chip);
+    }
+    card.appendChild(sceneBar);
+  }
 
   // Collapsible body
   const body = document.createElement('div');
@@ -316,71 +429,9 @@ function renderRoomCard(room) {
     localStorage.setItem(`mesh-room-collapsed-${room.id}`, nowCollapsed ? '1' : '0');
   });
 
-  // Room-level controls: on/off + optional colour swatch
-  const empty = room.device_ids.length === 0;
-  const controls = document.createElement('div');
-  controls.className = 'room-controls';
-
-  const roomDevicesForState = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
-  const anyOn = roomDevicesForState.some(d => d.on);
-
-  const onBtn  = document.createElement('button');
-  const offBtn = document.createElement('button');
-
-  const setRoomOnOff = (isOn) => {
-    onBtn.innerHTML  = `<span class="badge ${isOn  ? 'badge-green' : 'badge-muted'}">On</span>`;
-    offBtn.innerHTML = `<span class="badge ${!isOn ? 'badge-red'   : 'badge-muted'}">Off</span>`;
-  };
-
-  onBtn.className = 'light-toggle-btn';
-  onBtn.disabled = empty;
-  if (!empty) onBtn.addEventListener('click', () => {
-    setRoomOnOff(true);
-    sendRoomCommand(room.id, { action: 'on' }, room);
-  });
-
-  offBtn.className = 'light-toggle-btn';
-  offBtn.disabled = empty;
-  if (!empty) offBtn.addEventListener('click', () => {
-    setRoomOnOff(false);
-    sendRoomCommand(room.id, { action: 'off' }, room);
-  });
-
-  setRoomOnOff(anyOn);
-
-  controls.appendChild(onBtn);
-  controls.appendChild(offBtn);
-
-  // Colour swatch — shown when at least one device in the room supports color_xy
-  const roomDevices = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
-  const hasColour = roomDevices.some(d => d.color_xy != null);
-  if (hasColour) {
-    const { h, s } = getRoomColourHsl(roomDevices);
-    const swatchBtn = document.createElement('button');
-    swatchBtn.className = 'color-swatch-btn room-colour-swatch';
-    swatchBtn.style.background = `hsl(${h},${s}%,50%)`;
-    swatchBtn.title = 'Set room colour';
-    swatchBtn.setAttribute('data-ctrl', 'room-colour-toggle');
-    controls.appendChild(swatchBtn);
-  }
-
-  body.appendChild(controls);
-
-  // Room colour picker (hidden until swatch clicked)
-  if (hasColour) {
-    const { h, s } = getRoomColourHsl(roomDevices);
-    const pickerEl = buildRoomColourPicker(h, s);
-    body.appendChild(pickerEl);
-
-    const swatchBtn = controls.querySelector('[data-ctrl="room-colour-toggle"]');
-    swatchBtn.addEventListener('click', () => pickerEl.classList.toggle('open'));
-    wireRoomColourPicker(pickerEl, room.id, swatchBtn);
-  }
-
   // Device cards
   const devicesEl = document.createElement('div');
   devicesEl.className = 'room-devices';
-
   if (room.device_ids.length === 0) {
     const hint = document.createElement('span');
     hint.className = 'room-drop-hint';
@@ -399,11 +450,10 @@ function renderRoomCard(room) {
       }
     }
   }
-
   body.appendChild(devicesEl);
   wireDropZone(body, room.id);
 
-  // Scenes section
+  // Scenes section (full list with save button)
   body.appendChild(buildScenesSection(room.id));
 
   card.appendChild(body);
@@ -562,6 +612,7 @@ function wireRoomColourPicker(pickerEl, roomId, swatchBtn) {
 function buildDeviceCard(dev, roomId) {
   const card = document.createElement('div');
   card.className = 'light-card room-device-card';
+  card.dataset.deviceId = dev.device_id;
   card.innerHTML = deviceCardHtml(dev);
   return card;
 }
@@ -576,7 +627,11 @@ function deviceCardHtml(dev) {
   if (dev.color_xy != null || dev.color_temp != null) {
     let h = 30, s = 80;
     let swatchRgb = `hsl(${h},${s}%,50%)`;
-    if (dev.color_xy != null) {
+    if (dev.solar_enabled) {
+      // Circadian: warm amber ~2700 K
+      swatchRgb = 'rgb(255, 195, 120)';
+      h = 30; s = 100;
+    } else if (dev.color_xy != null) {
       const [x, y] = dev.color_xy;
       const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
       ({ h, s } = rgbToHsl(r, g, b));
@@ -629,7 +684,7 @@ function deviceCardHtml(dev) {
   return `
     <div class="light-card-header">
       <div class="light-name-group">
-        <span class="light-name">${esc(displayName)}</span>
+        <span class="light-name" title="Click to rename" style="cursor:pointer">${esc(displayName)}</span>
         <span class="light-node-badge">${esc(dev.node_id)}</span>
       </div>
       <div class="light-card-header-right">
@@ -702,6 +757,10 @@ function wireDeviceControls(card, dev, roomId) {
     removeDeviceFromRoom(roomId, dev.device_id);
   });
 
+  // Device rename on name click
+  const nameEl = card.querySelector('.light-name');
+  if (nameEl) nameEl.addEventListener('click', e => { e.stopPropagation(); startDeviceRename(nameEl, dev.device_id); });
+
   const bri = card.querySelector('[data-ctrl="brightness"]');
   if (bri) {
     bri.addEventListener('input', () => {
@@ -712,7 +771,7 @@ function wireDeviceControls(card, dev, roomId) {
     bri.addEventListener('change', () => {
       const val = parseInt(bri.value, 10);
       devicesMap.set(dev.device_id, { ...dev, brightness: val });
-      sendDeviceCommand(dev.device_id, { action: 'brightness', value: val });
+      sendDeviceCommand(dev.device_id, { action: 'brightness', value: val, transition_secs: 0.4 });
     });
   }
 
@@ -726,7 +785,7 @@ function wireDeviceControls(card, dev, roomId) {
     ct.addEventListener('change', () => {
       const val = parseInt(ct.value, 10);
       devicesMap.set(dev.device_id, { ...dev, color_temp: val });
-      sendDeviceCommand(dev.device_id, { action: 'color_temp', value: val });
+      sendDeviceCommand(dev.device_id, { action: 'color_temp', value: val, transition_secs: 0.4 });
     });
   }
 
@@ -738,7 +797,9 @@ function wireDeviceControls(card, dev, roomId) {
 
   colourToggle?.addEventListener('click', e => {
     e.stopPropagation();
-    colourPicker.classList.toggle('open');
+    const isOpen = colourPicker.classList.toggle('open');
+    if (isOpen) openPickerIds.add(dev.device_id);
+    else openPickerIds.delete(dev.device_id);
   });
 
   function syncColourUI() {
@@ -1023,6 +1084,8 @@ async function recallScene(id) {
   try {
     const res = await fetch(`/api/scenes/${id}/recall?token=${encodeURIComponent(tok())}`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transition_secs: 1.0 }),
     });
     if (!res.ok) {
       if (res.status === 503) showToast('Some devices offline — others recalled', false);
@@ -1085,7 +1148,46 @@ function hslToXy(h, s) {
 // ── Utilities ────────────────────────────────────────────────────────────────
 
 function formatDeviceName(id) {
-  return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return deviceNamesMap.get(id) ?? id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function startDeviceRename(nameEl, deviceId) {
+  const current = deviceNamesMap.get(deviceId) ?? formatDeviceName(deviceId);
+  const input = document.createElement('input');
+  input.value = current;
+  input.className = 'room-rename-input';
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let saved = false;
+  const save = () => {
+    if (saved) return;
+    saved = true;
+    const name = input.value.trim();
+    input.replaceWith(nameEl);
+    if (name && name !== current) {
+      deviceNamesMap.set(deviceId, name);
+      nameEl.textContent = name;
+      patchDeviceName(deviceId, name);
+    }
+  };
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') { saved = true; input.replaceWith(nameEl); }
+  });
+  input.addEventListener('blur', save);
+}
+
+async function patchDeviceName(deviceId, name) {
+  try {
+    await fetch(`/api/lights/${encodeURIComponent(deviceId)}/name?token=${encodeURIComponent(tok())}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+  } catch (e) { showToast(`Rename error: ${e.message}`, true); }
 }
 
 function esc(s) {

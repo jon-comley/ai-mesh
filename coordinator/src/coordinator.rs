@@ -34,11 +34,15 @@ fn warm_start_scenes(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardS
     let scenes = registry.lock().unwrap().list_scenes();
     let scene_infos: Vec<SceneInfo> = scenes
         .into_iter()
-        .map(|s| SceneInfo {
-            id: s.id,
-            name: s.name,
-            room_id: s.room_id,
-            created_at: s.created_at,
+        .map(|s| {
+            let preview_color = s.preview_color();
+            SceneInfo {
+                id: s.id,
+                name: s.name,
+                room_id: s.room_id,
+                created_at: s.created_at,
+                preview_color,
+            }
         })
         .collect();
     dashboard.push_scenes_update(scene_infos);
