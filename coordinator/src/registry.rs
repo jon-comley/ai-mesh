@@ -79,6 +79,7 @@ pub struct RoomRecord {
     pub orientation_degrees: f32,
     pub has_window: bool,
     pub window_facing: Option<f32>,
+    pub solar_enabled: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -99,6 +100,7 @@ pub struct SceneRecord {
     pub name: String,
     pub room_id: Option<String>,
     pub created_at: i64,
+    pub position: i64,
     pub states: Vec<DeviceSnapshot>,
 }
 
@@ -109,8 +111,8 @@ impl SceneRecord {
         let xy_snaps: Vec<(f32, f32)> = self.states.iter().filter_map(|s| s.color_xy).collect();
         if !xy_snaps.is_empty() {
             let n = xy_snaps.len() as f32;
-            let x = xy_snaps.iter().map(|(x, _)| x).sum::<f32>() / n;
-            let y = xy_snaps.iter().map(|(_, y)| y).sum::<f32>() / n;
+            let x = (xy_snaps.iter().map(|(x, _)| x).sum::<f32>() / n).clamp(0.0, 1.0);
+            let y = (xy_snaps.iter().map(|(_, y)| y).sum::<f32>() / n).clamp(0.0, 1.0);
             return Some([x, y]);
         }
         let ct_snaps: Vec<u16> = self.states.iter().filter_map(|s| s.color_temp).collect();
@@ -248,6 +250,12 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !columns.contains(&"window_facing".to_string()) {
         conn.execute("ALTER TABLE rooms ADD COLUMN window_facing REAL", [])?;
     }
+    if !columns.contains(&"solar_enabled".to_string()) {
+        conn.execute(
+            "ALTER TABLE rooms ADD COLUMN solar_enabled INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
 
     // Migration: Add new columns to light_states if they don't exist
     let columns: Vec<String> = conn
@@ -278,6 +286,26 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute(
             "ALTER TABLE light_positions ADD COLUMN fixture_type TEXT",
             [],
+        )?;
+    }
+
+    // Migration: Add position column to scenes if it doesn't exist
+    let scene_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(scenes)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !scene_cols.contains(&"position".to_string()) {
+        conn.execute(
+            "ALTER TABLE scenes ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        // Set initial positions from created_at order within each room so existing
+        // scenes have a deterministic starting order rather than all being 0.
+        conn.execute_batch(
+            "UPDATE scenes SET position = (
+                SELECT COUNT(*) FROM scenes s2
+                WHERE s2.room_id IS scenes.room_id AND s2.created_at < scenes.created_at
+            )",
         )?;
     }
 
@@ -770,7 +798,7 @@ impl Registry {
 
     pub fn list_rooms(&self) -> Vec<RoomRecord> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, name, position, orientation_degrees, has_window, window_facing FROM rooms ORDER BY position, name",
+            "SELECT id, name, position, orientation_degrees, has_window, window_facing, solar_enabled FROM rooms ORDER BY position, name",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -778,7 +806,8 @@ impl Registry {
                 return vec![];
             }
         };
-        let rows: Vec<(String, String, i64, f32, bool, Option<f32>)> = stmt
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(String, String, i64, f32, bool, Option<f32>, bool)> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get(0)?,
@@ -787,13 +816,22 @@ impl Registry {
                     row.get(3)?,
                     row.get::<_, i32>(4)? != 0,
                     row.get(5)?,
+                    row.get::<_, i32>(6)? != 0,
                 ))
             })
             .map(|r| r.collect::<rusqlite::Result<_>>().unwrap_or_default())
             .unwrap_or_default();
         rows.into_iter()
             .map(
-                |(id, name, position, orientation_degrees, has_window, window_facing)| {
+                |(
+                    id,
+                    name,
+                    position,
+                    orientation_degrees,
+                    has_window,
+                    window_facing,
+                    solar_enabled,
+                )| {
                     let device_ids = self.room_device_ids(&id);
                     RoomRecord {
                         id,
@@ -803,6 +841,7 @@ impl Registry {
                         orientation_degrees,
                         has_window,
                         window_facing,
+                        solar_enabled,
                     }
                 },
             )
@@ -825,7 +864,31 @@ impl Registry {
             orientation_degrees: 0.0,
             has_window: false,
             window_facing: None,
+            solar_enabled: false,
         }
+    }
+
+    /// Set the room-level solar effect flag and persist to SQLite.
+    pub fn set_room_solar(&mut self, room_id: &str, enabled: bool) {
+        if let Err(e) = self.conn.execute(
+            "UPDATE rooms SET solar_enabled = ?1 WHERE id = ?2",
+            params![enabled as i64, room_id],
+        ) {
+            warn!(error = %e, "set_room_solar failed");
+        }
+    }
+
+    /// Returns the solar_enabled flag of the room that owns this device, or None if unassigned.
+    pub fn get_room_for_device_solar(&self, device_id: &str) -> Option<bool> {
+        self.conn
+            .query_row(
+                "SELECT r.solar_enabled FROM rooms r \
+                 JOIN room_devices rd ON r.id = rd.room_id \
+                 WHERE rd.device_id = ?1",
+                params![device_id],
+                |row| Ok(row.get::<_, i32>(0)? != 0),
+            )
+            .ok()
     }
 
     /// Returns true if a room with this id exists.
@@ -923,9 +986,18 @@ impl Registry {
         let id = gen_uuid();
         let created_at = now_unix_millis();
         let states_json = serde_json::to_string(&states).unwrap_or_else(|_| "[]".into());
+        // New scenes go to the end of the list for their room
+        let position: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(position) + 1, 0) FROM scenes WHERE room_id IS ?1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         if let Err(e) = self.conn.execute(
-            "INSERT INTO scenes (id, name, room_id, created_at, states_json) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, name, room_id, created_at, states_json],
+            "INSERT INTO scenes (id, name, room_id, created_at, states_json, position) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, name, room_id, created_at, states_json, position],
         ) {
             warn!(error = %e, "save_scene failed");
         }
@@ -934,13 +1006,14 @@ impl Registry {
             name: name.to_owned(),
             room_id: room_id.map(|s| s.to_owned()),
             created_at,
+            position,
             states,
         }
     }
 
     pub fn list_scenes(&self) -> Vec<SceneRecord> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, name, room_id, created_at, states_json FROM scenes ORDER BY created_at DESC",
+            "SELECT id, name, room_id, created_at, states_json, position FROM scenes ORDER BY position ASC, created_at ASC",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -948,7 +1021,7 @@ impl Registry {
                 return vec![];
             }
         };
-        type SceneRow = (String, String, Option<String>, i64, String);
+        type SceneRow = (String, String, Option<String>, i64, String, i64);
         stmt.query_map([], |row| {
             Ok((
                 row.get(0)?,
@@ -956,30 +1029,43 @@ impl Registry {
                 row.get(2)?,
                 row.get(3)?,
                 row.get(4)?,
+                row.get(5)?,
             ))
         })
         .map(|rows| {
             rows.filter_map(|r| r.ok())
-                .map(|(id, name, room_id, created_at, states_json): SceneRow| {
-                    let states: Vec<DeviceSnapshot> =
-                        serde_json::from_str(&states_json).unwrap_or_default();
-                    SceneRecord {
-                        id,
-                        name,
-                        room_id,
-                        created_at,
-                        states,
-                    }
-                })
+                .map(
+                    |(id, name, room_id, created_at, states_json, position): SceneRow| {
+                        let states: Vec<DeviceSnapshot> =
+                            serde_json::from_str(&states_json).unwrap_or_default();
+                        SceneRecord {
+                            id,
+                            name,
+                            room_id,
+                            created_at,
+                            position,
+                            states,
+                        }
+                    },
+                )
                 .collect()
         })
         .unwrap_or_default()
     }
 
+    pub fn reorder_scenes(&mut self, ids: &[String]) {
+        for (i, id) in ids.iter().enumerate() {
+            let _ = self.conn.execute(
+                "UPDATE scenes SET position = ?1 WHERE id = ?2",
+                params![i as i64, id],
+            );
+        }
+    }
+
     pub fn get_scene(&self, id: &str) -> Option<SceneRecord> {
         self.conn
             .query_row(
-                "SELECT id, name, room_id, created_at, states_json FROM scenes WHERE id = ?1",
+                "SELECT id, name, room_id, created_at, states_json, position FROM scenes WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok((
@@ -988,11 +1074,12 @@ impl Registry {
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 },
             )
             .ok()
-            .map(|(id, name, room_id, created_at, states_json)| {
+            .map(|(id, name, room_id, created_at, states_json, position)| {
                 let states: Vec<DeviceSnapshot> =
                     serde_json::from_str(&states_json).unwrap_or_default();
                 SceneRecord {
@@ -1000,6 +1087,7 @@ impl Registry {
                     name,
                     room_id,
                     created_at,
+                    position,
                     states,
                 }
             })
@@ -1968,14 +2056,19 @@ mod tests {
     }
 
     #[test]
-    fn list_scenes_ordered_by_created_at_desc() {
+    fn list_scenes_ordered_by_position_then_created_at() {
         let mut reg = Registry::new();
         let a = reg.save_scene("First", None, vec![]);
         std::thread::sleep(std::time::Duration::from_millis(2));
         let b = reg.save_scene("Second", None, vec![]);
         let scenes = reg.list_scenes();
         assert_eq!(scenes.len(), 2);
-        // Most recent first — b was saved later so must come first
+        // New scenes get sequential positions (0, 1), so First comes before Second
+        assert_eq!(scenes[0].id, a.id);
+        assert_eq!(scenes[1].id, b.id);
+        // After reorder, Second should come first
+        reg.reorder_scenes(&[b.id.clone(), a.id.clone()]);
+        let scenes = reg.list_scenes();
         assert_eq!(scenes[0].id, b.id);
         assert_eq!(scenes[1].id, a.id);
     }
@@ -2357,5 +2450,33 @@ mod tests {
         assert_eq!(rooms[0].orientation_degrees, 0.0);
         assert!(!rooms[0].has_window);
         assert!(rooms[0].window_facing.is_none());
+    }
+
+    #[test]
+    fn set_room_solar_persists_flag() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        assert!(!reg.list_rooms()[0].solar_enabled);
+        reg.set_room_solar(&room.id, true);
+        assert!(reg.list_rooms()[0].solar_enabled);
+        reg.set_room_solar(&room.id, false);
+        assert!(!reg.list_rooms()[0].solar_enabled);
+    }
+
+    #[test]
+    fn get_room_for_device_solar_returns_room_flag() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Office");
+        reg.add_device_to_room(&room.id, "bulb-a");
+        // default is false
+        assert_eq!(reg.get_room_for_device_solar("bulb-a"), Some(false));
+        reg.set_room_solar(&room.id, true);
+        assert_eq!(reg.get_room_for_device_solar("bulb-a"), Some(true));
+    }
+
+    #[test]
+    fn get_room_for_device_solar_returns_none_for_unassigned() {
+        let reg = Registry::new();
+        assert_eq!(reg.get_room_for_device_solar("unassigned-bulb"), None);
     }
 }

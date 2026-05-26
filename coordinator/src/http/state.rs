@@ -6,7 +6,7 @@ use shared::messages::{LightStateReport, NodeRecordLite};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc};
 use tracing::warn;
 
 /// Live TCP sender channels keyed by node ID — shared between the TCP server and the HTTP API.
@@ -56,6 +56,7 @@ pub struct RoomInfo {
     pub orientation_degrees: f32,
     pub has_window: bool,
     pub window_facing: Option<f32>,
+    pub solar_enabled: bool,
 }
 
 impl From<RoomRecord> for RoomInfo {
@@ -68,6 +69,7 @@ impl From<RoomRecord> for RoomInfo {
             orientation_degrees: r.orientation_degrees,
             has_window: r.has_window,
             window_facing: r.window_facing,
+            solar_enabled: r.solar_enabled,
         }
     }
 }
@@ -79,6 +81,7 @@ pub struct SceneInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub room_id: Option<String>,
     pub created_at: i64,
+    pub position: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_color: Option<[f32; 2]>,
 }
@@ -150,6 +153,8 @@ pub struct DashboardState {
     last_manual_states: Mutex<HashMap<String, LightStateReport>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
+    /// Poked when solar is enabled on a room — wakes the SpatialEngine for an immediate sweep.
+    pub solar_sweep_notify: Arc<Notify>,
 }
 
 impl DashboardState {
@@ -166,6 +171,7 @@ impl DashboardState {
             scene_snapshot: Mutex::new(Vec::new()),
             last_manual_states: Mutex::new(HashMap::new()),
             connections,
+            solar_sweep_notify: Arc::new(Notify::new()),
         })
     }
 
@@ -1182,6 +1188,7 @@ mod tests {
             orientation_degrees: 0.0,
             has_window: false,
             window_facing: None,
+            solar_enabled: false,
         }
     }
 
@@ -1249,6 +1256,7 @@ mod tests {
                 orientation_degrees: 0.0,
                 has_window: false,
                 window_facing: None,
+                solar_enabled: false,
             }],
             device_names: std::collections::HashMap::new(),
         };
@@ -1276,6 +1284,7 @@ mod tests {
             name: name.into(),
             room_id: room_id.map(|s| s.into()),
             created_at: 1_000_000,
+            position: 0,
             preview_color: None,
         }
     }
@@ -1342,6 +1351,7 @@ mod tests {
                 name: "Evening".into(),
                 room_id: Some("room-456".into()),
                 created_at: 1_700_000_000,
+                position: 0,
                 preview_color: None,
             }],
         };
@@ -1369,6 +1379,7 @@ mod tests {
                 name: "Global".into(),
                 room_id: None,
                 created_at: 0,
+                position: 0,
                 preview_color: None,
             }],
         };

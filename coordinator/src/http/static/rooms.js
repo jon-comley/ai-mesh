@@ -11,13 +11,51 @@ let deviceNamesMap = new Map();
 let dragSrc = null;       // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;    // room reorder drag: room id being dragged
 let effectDragSrc = null; // effect palette drag: effect name e.g. 'solar'
-const openPickerIds = new Set(); // device IDs whose colour picker is currently open
+const openPickerIds = new Set();      // device IDs whose colour picker is currently open
+const activeSceneByRoom = new Map();   // roomId → sceneId of last-recalled scene
+const preSceneStateByRoom = new Map(); // roomId → Map<deviceId, snapshot> before last recall
+let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
+let _sceneReorderTimer = null;
 
-// Close all colour pickers on Escape
+function updateSceneChipStates(roomId) {
+  const card = document.querySelector(`[data-room-id="${CSS.escape(roomId)}"]`);
+  if (!card) return;
+  const activeId = activeSceneByRoom.get(roomId);
+  card.querySelectorAll('.room-quick-scene-chip[data-scene-id]').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.sceneId === activeId);
+  });
+}
+
+function clearRoomActiveScene(roomId) {
+  if (!activeSceneByRoom.has(roomId)) return;
+  activeSceneByRoom.delete(roomId);
+  updateSceneChipStates(roomId);
+}
+
+function cancelSceneEdit() {
+  if (!activeSceneEdit) return;
+  const card = document.querySelector(`[data-room-id="${CSS.escape(activeSceneEdit.roomId)}"]`);
+  card?.querySelector('.room-scene-name-input')?.style.setProperty('display', 'none');
+  const sb = card?.querySelector('.room-scene-save-btn');
+  if (sb) sb.style.display = '';
+  activeSceneEdit = null;
+}
+
+// Close pickers and scene input on Escape or click-outside
 document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape' || openPickerIds.size === 0) return;
+  if (e.key !== 'Escape') return;
   openPickerIds.clear();
-  document.querySelectorAll('[data-ctrl="colour-picker"].open').forEach(el => el.classList.remove('open'));
+  document.querySelectorAll('.light-colour-picker.open').forEach(el => el.classList.remove('open'));
+  cancelSceneEdit();
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('.light-colour-picker')) {
+    openPickerIds.clear();
+    document.querySelectorAll('.light-colour-picker.open').forEach(el => el.classList.remove('open'));
+  }
+  if (activeSceneEdit && !e.target.closest('.room-scene-save-row')) {
+    cancelSceneEdit();
+  }
 });
 
 // ── Bulb-identify pulse (triggered on drag-grab) ─────────────────────────────
@@ -141,10 +179,28 @@ function render() {
   container.appendChild(roomList);
   wireRoomListDrag(roomList);
 
+  // Prune stale picker IDs (device removed or moved between rooms since last render)
+  for (const deviceId of openPickerIds) {
+    if (!devicesMap.has(deviceId)) openPickerIds.delete(deviceId);
+  }
+
   // Restore open colour pickers after re-render
   for (const deviceId of openPickerIds) {
     document.querySelector(`[data-device-id="${CSS.escape(deviceId)}"] [data-ctrl="colour-picker"]`)
       ?.classList.add('open');
+  }
+
+  // Restore active scene name input after re-render
+  if (activeSceneEdit) {
+    const card = document.querySelector(`[data-room-id="${CSS.escape(activeSceneEdit.roomId)}"]`);
+    const ni = card?.querySelector('.room-scene-name-input');
+    const sb = card?.querySelector('.room-scene-save-btn');
+    if (ni && sb) {
+      sb.style.display = 'none';
+      ni.style.display = '';
+      ni.value = activeSceneEdit.value;
+      ni.focus();
+    }
   }
 }
 
@@ -244,6 +300,7 @@ function renderNewRoomBtn() {
 function renderUnassigned(deviceIds) {
   const strip = document.createElement('div');
   strip.className = 'room-unassigned';
+  strip.id = 'unassigned-strip';
 
   const label = document.createElement('div');
   label.className = 'room-unassigned-label';
@@ -256,13 +313,17 @@ function renderUnassigned(deviceIds) {
   if (devicesMap.size === 0) {
     chips.innerHTML = '<span class="room-empty-hint">No lighting devices discovered yet.</span>';
   } else if (deviceIds.length === 0) {
-    chips.innerHTML = '<span class="room-unassigned-drop-hint">Drag a device here to remove it from its room.</span>';
+    chips.innerHTML = '<span class="room-unassigned-drop-hint">Drop here to unassign.</span>';
   } else {
     for (const id of deviceIds) chips.appendChild(renderChip(id, 'unassigned', false));
   }
 
   strip.appendChild(chips);
   wireDropZone(strip, 'unassigned');
+
+  // Hide when all devices are assigned; shown as a drop target during device drags
+  if (devicesMap.size > 0 && deviceIds.length === 0) strip.style.display = 'none';
+
   return strip;
 }
 
@@ -302,7 +363,7 @@ function renderRoomCard(room) {
   const roomDevicesAll = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
   const anyOn = roomDevicesAll.some(d => d.on);
   const hasColour = roomDevicesAll.some(d => d.color_xy != null);
-  const solarActive = roomDevicesAll.some(d => d.solar_enabled);
+  const solarActive = room.solar_enabled;
   const empty = room.device_ids.length === 0;
 
   // Header: collapse chevron + name + quick controls + layout button + actions
@@ -399,22 +460,26 @@ function renderRoomCard(room) {
   }
 
   // Quick scenes bar — always visible, horizontal scroll
-  const roomScenesList = scenesData.filter(s => s.room_id === room.id).sort((a, b) => b.created_at - a.created_at);
+  const roomScenesList = scenesData.filter(s => s.room_id === room.id).sort((a, b) => (a.position - b.position) || (b.created_at - a.created_at));
   if (roomScenesList.length > 0) {
     const sceneBar = document.createElement('div');
     sceneBar.className = 'room-quick-scenes';
     for (const scene of roomScenesList) {
       const chip = document.createElement('button');
       chip.className = 'room-quick-scene-chip';
+      chip.dataset.sceneId = scene.id;
+      chip.setAttribute('draggable', 'true');
       chip.textContent = scene.name;
       chip.title = `Recall "${scene.name}"`;
       if (scene.preview_color) {
         const { r, g, b } = xyToRgb(scene.preview_color[0], scene.preview_color[1], 180);
         chip.style.setProperty('--scene-chip-color', `rgb(${r},${g},${b})`);
       }
+      if (activeSceneByRoom.get(room.id) === scene.id) chip.classList.add('active');
       chip.addEventListener('click', e => { e.stopPropagation(); recallScene(scene.id); });
       sceneBar.appendChild(chip);
     }
+    wireSceneBarDrag(sceneBar, room.id);
     card.appendChild(sceneBar);
   }
 
@@ -441,7 +506,7 @@ function renderRoomCard(room) {
     for (const deviceId of room.device_ids) {
       const dev = devicesMap.get(deviceId);
       if (dev) {
-        const devCard = buildDeviceCard(dev, room.id);
+        const devCard = buildDeviceCard(dev, room.id, room.solar_enabled);
         devicesEl.appendChild(devCard);
         wireDeviceControls(devCard, dev, room.id);
         wireDeviceDrag(devCard, dev.device_id, room.id);
@@ -457,6 +522,28 @@ function renderRoomCard(room) {
   body.appendChild(buildScenesSection(room.id));
 
   card.appendChild(body);
+
+  // Effect drops must land on the whole card so they work when the body is collapsed.
+  // Drop bubbles up from body's wireDropZone (which clears effectDragSrc first), so
+  // by the time it reaches here effectDragSrc is already null — no double-fire.
+  card.addEventListener('dragover', e => {
+    if (!effectDragSrc) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    card.classList.add('room-drop-active');
+  });
+  card.addEventListener('dragleave', e => {
+    if (!card.contains(e.relatedTarget)) card.classList.remove('room-drop-active');
+  });
+  card.addEventListener('drop', e => {
+    if (!effectDragSrc) return;
+    e.preventDefault();
+    card.classList.remove('room-drop-active');
+    const effect = effectDragSrc;
+    effectDragSrc = null;
+    if (effect === 'solar') setSolarMode(room.id, true);
+  });
+
   return card;
 }
 
@@ -485,11 +572,17 @@ function buildScenesSection(roomId) {
 
   section.appendChild(saveRow);
 
-  saveBtn.addEventListener('click', () => {
+  saveBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    activeSceneEdit = { roomId, value: '' };
     saveBtn.style.display = 'none';
     nameInput.style.display = '';
     nameInput.value = '';
     nameInput.focus();
+  });
+
+  nameInput.addEventListener('input', () => {
+    if (activeSceneEdit) activeSceneEdit.value = nameInput.value;
   });
 
   let savingScene = false;
@@ -498,20 +591,20 @@ function buildScenesSection(roomId) {
     const name = nameInput.value.trim();
     nameInput.style.display = 'none';
     saveBtn.style.display = '';
+    activeSceneEdit = null;
     if (!name) return;
     savingScene = true;
     saveScene(name, roomId).finally(() => { savingScene = false; });
   };
   nameInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') doSave();
-    if (e.key === 'Escape') { nameInput.style.display = 'none'; saveBtn.style.display = ''; }
+    if (e.key === 'Enter') { e.stopPropagation(); doSave(); }
+    if (e.key === 'Escape') { e.stopPropagation(); cancelSceneEdit(); }
   });
-  nameInput.addEventListener('blur', doSave);
 
   // Scene list
   const roomScenes = scenesData
     .filter(s => s.room_id === roomId)
-    .sort((a, b) => b.created_at - a.created_at);
+    .sort((a, b) => (a.position - b.position) || (b.created_at - a.created_at));
 
   if (roomScenes.length > 0) {
     const list = document.createElement('ul');
@@ -609,15 +702,15 @@ function wireRoomColourPicker(pickerEl, roomId, swatchBtn) {
 
 // ── Device card inside a room ────────────────────────────────────────────────
 
-function buildDeviceCard(dev, roomId) {
+function buildDeviceCard(dev, roomId, roomSolarEnabled = false) {
   const card = document.createElement('div');
   card.className = 'light-card room-device-card';
   card.dataset.deviceId = dev.device_id;
-  card.innerHTML = deviceCardHtml(dev);
+  card.innerHTML = deviceCardHtml(dev, roomSolarEnabled);
   return card;
 }
 
-function deviceCardHtml(dev) {
+function deviceCardHtml(dev, roomSolarEnabled = false) {
   const badgeClass = dev.on ? 'badge-green' : 'badge-muted';
   const badgeLabel = dev.on ? 'On' : 'Off';
   const displayName = formatDeviceName(dev.device_id);
@@ -689,6 +782,10 @@ function deviceCardHtml(dev) {
       </div>
       <div class="light-card-header-right">
         ${swatch}
+        ${roomSolarEnabled ? `<button class="solar-dot ${dev.solar_enabled ? 'solar-dot-active' : 'solar-dot-dim'}"
+          data-ctrl="restore-solar"
+          title="${dev.solar_enabled ? 'Solar active' : 'Solar overridden — click to restore'}"
+          aria-label="${dev.solar_enabled ? 'Solar active' : 'Restore solar for this device'}">&#9728;</button>` : ''}
         <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(displayName)}">
           <span class="badge ${badgeClass}">${badgeLabel}</span>
         </button>
@@ -734,6 +831,9 @@ function wireDeviceDrag(card, deviceId, roomId) {
     e.dataTransfer.setData('text/plain', deviceId);
     requestAnimationFrame(() => card.classList.add('dragging'));
     startPulse(deviceId);
+    // Reveal the unassigned strip so there's a visible drop target
+    const strip = document.getElementById('unassigned-strip');
+    if (strip) strip.style.display = '';
   });
   card.addEventListener('dragend', () => {
     card.classList.remove('dragging');
@@ -741,10 +841,40 @@ function wireDeviceDrag(card, deviceId, roomId) {
     card.setAttribute('draggable', 'true');
     card.closest('.room-card')?.setAttribute('draggable', 'true');
     stopPulse();
+    // Re-hide the unassigned strip if nothing was dropped into it
+    const strip = document.getElementById('unassigned-strip');
+    if (strip && !strip.querySelector('.room-chip')) strip.style.display = 'none';
+  });
+  // Allow effect chips (e.g. solar) to be dropped onto device cards; the drop
+  // event bubbles up to the room body's wireDropZone handler which applies the effect.
+  card.addEventListener('dragover', e => {
+    if (!effectDragSrc) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
   });
 }
 
 function wireDeviceControls(card, dev, roomId) {
+  card.querySelector('[data-ctrl="restore-solar"]')?.addEventListener('click', async e => {
+    e.stopPropagation();
+    const cur = devicesMap.get(dev.device_id);
+    if (!cur || cur.solar_enabled) return; // already active, dot is just an indicator
+    devicesMap.set(dev.device_id, { ...cur, solar_enabled: true });
+    render();
+    try {
+      const res = await fetch(
+        `/api/lights/${encodeURIComponent(dev.device_id)}/restore-solar?token=${encodeURIComponent(tok())}`,
+        { method: 'POST' }
+      );
+      if (!res.ok) throw new Error(`${res.status}`);
+    } catch (err) {
+      // Revert optimistic update on failure
+      devicesMap.set(dev.device_id, { ...cur, solar_enabled: false });
+      render();
+      showToast(`Restore solar error: ${err.message}`, true);
+    }
+  });
+
   card.querySelector('[data-ctrl="toggle"]')?.addEventListener('click', e => {
     e.stopPropagation();
     devicesMap.set(dev.device_id, { ...dev, on: !dev.on });
@@ -1004,6 +1134,60 @@ async function removeDeviceFromRoom(roomId, deviceId) {
   } catch (e) { showToast(`Remove device error: ${e.message}`, true); }
 }
 
+// ── Scene bar drag-to-reorder ─────────────────────────────────────────────────
+
+let sceneDragId = null; // sceneId being dragged within the bar
+
+function wireSceneBarDrag(bar, roomId) {
+  bar.addEventListener('dragstart', e => {
+    const chip = e.target.closest('.room-quick-scene-chip[data-scene-id]');
+    if (!chip) return;
+    sceneDragId = chip.dataset.sceneId;
+    chip.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.stopPropagation();
+  });
+
+  bar.addEventListener('dragend', e => {
+    const chip = e.target.closest('.room-quick-scene-chip');
+    chip?.classList.remove('dragging');
+    if (sceneDragId) {
+      const ids = [...bar.querySelectorAll('.room-quick-scene-chip[data-scene-id]')]
+        .map(c => c.dataset.sceneId);
+      clearTimeout(_sceneReorderTimer);
+      _sceneReorderTimer = setTimeout(() => reorderScenes(ids), 80);
+    }
+    sceneDragId = null;
+  });
+
+  bar.addEventListener('dragover', e => {
+    if (!sceneDragId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const dragging = bar.querySelector('.room-quick-scene-chip.dragging');
+    if (!dragging) return;
+    const others = [...bar.querySelectorAll('.room-quick-scene-chip:not(.dragging)')];
+    const after = others.reduce((closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = e.clientX - box.left - box.width / 2;
+      if (offset < 0 && offset > closest.offset) return { offset, element: child };
+      return closest;
+    }, { offset: Number.NEGATIVE_INFINITY }).element;
+    if (after == null) bar.appendChild(dragging);
+    else bar.insertBefore(dragging, after);
+  });
+}
+
+async function reorderScenes(ids) {
+  try {
+    const res = await fetch(`/api/scenes/reorder?token=${encodeURIComponent(tok())}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) showToast(`Scene reorder failed (${res.status})`, true);
+  } catch (e) { showToast(`Scene reorder error: ${e.message}`, true); }
+}
+
 async function reorderRooms(ids) {
   try {
     const res = await fetch(`/api/rooms/reorder?token=${encodeURIComponent(tok())}`, {
@@ -1017,29 +1201,36 @@ async function reorderRooms(ids) {
 async function setSolarMode(roomId, enable) {
   const room = roomsData.find(r => r.id === roomId);
   if (!room) return;
-  // Optimistic update of solar_enabled on each device
+  // Optimistic update
+  const idx = roomsData.indexOf(room);
+  if (idx !== -1) roomsData[idx] = { ...room, solar_enabled: enable };
   for (const deviceId of room.device_ids) {
     const dev = devicesMap.get(deviceId);
     if (dev) devicesMap.set(deviceId, { ...dev, solar_enabled: enable });
   }
   render();
   try {
-    const res = await fetch(`/api/rooms/${roomId}/command?token=${encodeURIComponent(tok())}`, {
+    const res = await fetch(`/api/rooms/${roomId}/solar?token=${encodeURIComponent(tok())}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'solar_mode', value: enable ? 1 : 0 }),
+      body: JSON.stringify({ enabled: enable }),
     });
     if (!res.ok) showToast(`Solar mode failed (${res.status})`, true);
   } catch (e) { showToast(`Solar mode error: ${e.message}`, true); }
 }
 
 async function sendRoomCommand(roomId, body, room) {
+  clearRoomActiveScene(roomId);
   // Optimistic update
   if (room) {
     for (const deviceId of room.device_ids) {
       const dev = devicesMap.get(deviceId);
       if (dev) {
-        if (body.action === 'on') devicesMap.set(deviceId, { ...dev, on: true });
-        else if (body.action === 'off') devicesMap.set(deviceId, { ...dev, on: false });
+        let updated = dev;
+        if (body.action === 'on') updated = { ...updated, on: true };
+        else if (body.action === 'off') updated = { ...updated, on: false };
+        // Manual room command suspends solar for each device if room has solar
+        if (room.solar_enabled && updated.solar_enabled) updated = { ...updated, solar_enabled: false };
+        devicesMap.set(deviceId, updated);
       }
     }
     render();
@@ -1057,6 +1248,13 @@ async function sendRoomCommand(roomId, body, room) {
 }
 
 async function sendDeviceCommand(deviceId, body) {
+  const owningRoom = roomsData.find(r => r.device_ids.includes(deviceId));
+  if (owningRoom) clearRoomActiveScene(owningRoom.id);
+  // Manual command suspends solar for this device if the room has solar active
+  if (owningRoom?.solar_enabled) {
+    const dev = devicesMap.get(deviceId);
+    if (dev?.solar_enabled) { devicesMap.set(deviceId, { ...dev, solar_enabled: false }); render(); }
+  }
   try {
     const res = await fetch(
       `/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(tok())}`,
@@ -1081,17 +1279,66 @@ async function saveScene(name, roomId) {
 }
 
 async function recallScene(id) {
+  const scene = scenesData.find(s => s.id === id);
+  const roomId = scene?.room_id;
+
+  // Toggle: clicking the active scene reverts to pre-scene state
+  if (roomId && activeSceneByRoom.get(roomId) === id) {
+    const preState = preSceneStateByRoom.get(roomId);
+    activeSceneByRoom.delete(roomId);
+    preSceneStateByRoom.delete(roomId);
+    updateSceneChipStates(roomId);
+    if (preState) {
+      const room = roomsData.find(r => r.id === roomId);
+      for (const deviceId of (room?.device_ids ?? [])) {
+        const snap = preState.get(deviceId);
+        if (!snap) continue;
+        if (!snap.on) { sendDeviceCommand(deviceId, { action: 'off' }); continue; }
+        // brightness transition implicitly turns the bulb on — no separate 'on' needed
+        if (snap.brightness != null)
+          sendDeviceCommand(deviceId, { action: 'brightness', value: snap.brightness, transition_secs: 0.8 });
+        else
+          sendDeviceCommand(deviceId, { action: 'on' });
+        if (snap.color_xy != null)
+          sendDeviceCommand(deviceId, { action: 'color_xy', x: snap.color_xy[0], y: snap.color_xy[1], transition_secs: 0.8 });
+        else if (snap.color_temp != null)
+          sendDeviceCommand(deviceId, { action: 'color_temp', value: snap.color_temp, transition_secs: 0.8 });
+      }
+    }
+    return;
+  }
+
+  // Snapshot current device state before recalling
+  if (roomId) {
+    const room = roomsData.find(r => r.id === roomId);
+    const snap = new Map();
+    for (const deviceId of (room?.device_ids ?? [])) {
+      const dev = devicesMap.get(deviceId);
+      if (dev) snap.set(deviceId, { on: dev.on, brightness: dev.brightness ?? null, color_xy: dev.color_xy ?? null, color_temp: dev.color_temp ?? null });
+    }
+    preSceneStateByRoom.set(roomId, snap);
+  }
+
   try {
     const res = await fetch(`/api/scenes/${id}/recall?token=${encodeURIComponent(tok())}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ transition_secs: 1.0 }),
     });
-    if (!res.ok) {
+    if (res.ok || res.status === 503) {
+      if (roomId) {
+        activeSceneByRoom.set(roomId, id);
+        updateSceneChipStates(roomId);
+      }
       if (res.status === 503) showToast('Some devices offline — others recalled', false);
-      else showToast(`Recall failed (${res.status})`, true);
+    } else {
+      preSceneStateByRoom.delete(roomId);
+      showToast(`Recall failed (${res.status})`, true);
     }
-  } catch (e) { showToast(`Recall error: ${e.message}`, true); }
+  } catch (e) {
+    preSceneStateByRoom.delete(roomId);
+    showToast(`Recall error: ${e.message}`, true);
+  }
 }
 
 async function deleteSceneApi(id) {
