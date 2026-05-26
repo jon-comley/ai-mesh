@@ -208,12 +208,11 @@ function wireCompass() {
   const svg = document.getElementById('layout-canvas');
   if (!svg) return;
 
-  let handle;
-  // Handle may not exist yet — use event delegation on the svg
   svg.addEventListener('pointerdown', e => {
     if (e.target.id !== 'lc-compass-handle') return;
     compassDragging = true;
-    e.target.setPointerCapture(e.pointerId);
+    // Capture to svg so pointermove/pointerup on svg still fire during fast drags
+    svg.setPointerCapture(e.pointerId);
     e.target.style.cursor = 'grabbing';
   });
 
@@ -232,7 +231,8 @@ function wireCompass() {
   svg.addEventListener('pointerup', e => {
     if (!compassDragging) return;
     compassDragging = false;
-    if (e.target.id === 'lc-compass-handle') e.target.style.cursor = 'grab';
+    const handle = document.getElementById('lc-compass-handle');
+    if (handle) handle.style.cursor = 'grab';
     clearTimeout(compassOrientTimer);
     compassOrientTimer = setTimeout(() => patchOrientation(layoutRoom?.id, compassDeg), 400);
   });

@@ -305,6 +305,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn layout_js_returns_correct_content_type() {
+        let (status, ct) = get("/static/layout.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            ct.contains("javascript"),
+            "expected application/javascript, got {ct}"
+        );
+    }
+
+    #[tokio::test]
     async fn manifest_returns_correct_content_type() {
         let (status, ct) = get("/manifest.json").await;
         assert_eq!(status, StatusCode::OK);
