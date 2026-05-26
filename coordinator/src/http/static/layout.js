@@ -1083,28 +1083,37 @@ function buildCone(o, azimuth, elevation) {
 // ── Openings — move drag ──────────────────────────────────────────────────────
 
 function makeMoveDraggable(body, openingId) {
-  let dragging = false;
-  let moved = false;
+  let pressing = false;  // pointerdown received, drag not yet confirmed
+  let moving = false;    // drag confirmed (past distance threshold)
+  let startX = 0, startY = 0;
 
   body.addEventListener('pointerdown', e => {
-    e.stopPropagation(); e.preventDefault();
-    dragging = true;
-    moved = false;
-    body.setPointerCapture(e.pointerId);
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    pressing = true;
+    moving = false;
+    startX = e.clientX;
+    startY = e.clientY;
+    // Pointer capture deferred — held only while actually dragging so that
+    // a short tap falls through to the click/popover path.
   });
 
   body.addEventListener('pointermove', e => {
-    if (!dragging) return;
-    if (Math.abs(e.movementX) < 2 && Math.abs(e.movementY) < 2 && !moved) return;
-    moved = true;
-    body.style.cursor = 'grabbing';
+    if (!pressing) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+
+    if (!moving) {
+      if (Math.sqrt(dx * dx + dy * dy) < 6) return; // below drag threshold
+      moving = true;
+      body.setPointerCapture(e.pointerId);
+      body.style.cursor = 'grabbing';
+    }
 
     const o = placedOpenings[openingId];
     if (!o) return;
     const svg = document.getElementById('layout-canvas');
     const pt = svgPoint(svg, e.clientX, e.clientY);
-
-    // Snap to whichever wall the pointer is nearest; fall back to current wall
     const wall = detectWall(pt.nx, pt.ny) ?? o.wall_edge;
     const coord = isHorizontalWall(wall) ? pt.nx : pt.ny;
     o.wall_edge = wall;
@@ -1113,12 +1122,14 @@ function makeMoveDraggable(body, openingId) {
   });
 
   body.addEventListener('pointerup', e => {
-    if (!dragging) return;
-    dragging = false;
-    body.releasePointerCapture(e.pointerId);
+    if (!pressing) return;
+    const wasDrag = moving;
+    pressing = false;
+    moving = false;
     body.style.cursor = 'grab';
+    if (body.hasPointerCapture(e.pointerId)) body.releasePointerCapture(e.pointerId);
 
-    if (!moved) {
+    if (!wasDrag) {
       openOpeningPopover(openingId, body);
       return;
     }
@@ -1126,7 +1137,9 @@ function makeMoveDraggable(body, openingId) {
     if (o) patchOpening(openingId, { wall_edge: o.wall_edge, x_norm: o.x_norm });
   });
 
-  body.addEventListener('pointercancel', () => { dragging = false; body.style.cursor = 'grab'; });
+  body.addEventListener('pointercancel', () => {
+    pressing = false; moving = false; body.style.cursor = 'grab';
+  });
 }
 
 // ── Openings — resize drag ────────────────────────────────────────────────────
@@ -1263,14 +1276,14 @@ function openOpeningPopover(openingId, anchorEl) {
 
 // ── Openings — remove ─────────────────────────────────────────────────────────
 
-function removeOpening(id) {
+async function removeOpening(id) {
   const entry = placedOpenings[id];
   if (!entry) return;
+  await apiDeleteOpening(id);
   entry.el?.remove();
   const cone = document.getElementById(`cone-${CSS.escape(id)}`);
   if (cone) cone.remove();
   delete placedOpenings[id];
-  apiDeleteOpening(id);
 }
 
 // ── Openings — server I/O ─────────────────────────────────────────────────────

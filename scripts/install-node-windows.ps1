@@ -136,15 +136,15 @@ function Disable-Sleep {
 }
 
 function Harden-Stability {
-    # Three registry/driver fixes for the SER8 hang pattern:
-    #   1. TDR timeout — AMD Radeon 780M can miss the 2s default under heavy
-    #      Vulkan load; Windows kills the driver and the display stack dies.
-    #      60s gives the driver time to finish a large GPU dispatch.
-    #   2. Fast Startup — powercfg /h off disables hibernate but not Fast
+    # Two registry fixes for the SER8 hang pattern:
+    #   1. Fast Startup — powercfg /h off disables hibernate but not Fast
     #      Startup (hybrid shutdown); can produce a half-suspended state.
-    #   3. NIC power management — belt-and-braces; adapter should stay live
-    #      even if it wasn't the cause of the hang.
-    reg add "HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" /v TdrDelay /t REG_DWORD /d 60 /f | Out-Null
+    #   2. NIC power management — adapter should stay live across idle periods.
+    #
+    # NOTE: TdrDelay intentionally NOT set here. Setting it to 60s was tried
+    # and correlated with severe GPU overheating (DPC_WATCHDOG_VIOLATION crashes
+    # followed by thermal shutdown). The Windows default (2s) is safer — it
+    # resets a hung GPU driver quickly rather than letting it cook.
     reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f | Out-Null
     Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002bE10318}" -ErrorAction SilentlyContinue | ForEach-Object {
         $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
@@ -152,7 +152,68 @@ function Harden-Stability {
             Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 24 -Type DWord -ErrorAction SilentlyContinue
         }
     }
-    Write-Host ">>> Stability hardening applied (TDR=60s, Fast Startup off, NIC power save off)."
+    Write-Host ">>> Stability hardening applied (Fast Startup off, NIC power save off)."
+}
+
+function Ensure-StartupHardeningTask {
+    # Writes a small hardening script to C:\ai-mesh\harden-boot.ps1 and registers
+    # a Scheduled Task that runs it as SYSTEM at every boot.  This re-applies
+    # Harden-Stability after Windows driver updates or BSOD-triggered driver resets
+    # which can silently restore NIC power-save settings and GPU TDR values.
+    $hardenScript = Join-Path $aiMeshRoot "harden-boot.ps1"
+    $taskName     = "ai-mesh-harden-boot"
+
+    $scriptContent = @'
+# Re-applied at every boot by the ai-mesh-harden-boot Scheduled Task.
+# Mirrors the Harden-Stability block in install-node-windows.ps1.
+#
+# TdrDelay is intentionally NOT set — 60s was correlated with GPU overheating.
+# Windows default (2s) resets a hung driver quickly; leave it alone.
+
+# Disable Fast Startup (hybrid shutdown can leave NIC and GPU in a half-suspended state).
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f | Out-Null
+
+# NIC power management: PnPCapabilities=24 tells Windows not to power down the
+# adapter or use it as a wake source.  Applied to every adapter in the NIC class
+# so it survives driver updates that reset the per-adapter registry key.
+Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002bE10318}" -ErrorAction SilentlyContinue | ForEach-Object {
+    $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+    if ($props -and $props.DriverDesc) {
+        Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 24 -Type DWord -ErrorAction SilentlyContinue
+    }
+}
+
+# Belt-and-braces: also clear WoL flags via the NetAdapter cmdlets.
+# This affects the live driver state in addition to the registry key above.
+Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | ForEach-Object {
+    Set-NetAdapterPowerManagement -Name $_.Name `
+        -WakeOnMagicPacket Disabled `
+        -WakeOnPattern Disabled `
+        -ErrorAction SilentlyContinue
+}
+
+Write-EventLog -LogName Application -Source "ai-mesh" -EventId 1 -EntryType Information `
+    -Message "ai-mesh-harden-boot: stability hardening re-applied." -ErrorAction SilentlyContinue
+'@
+
+    Set-Content -Path $hardenScript -Value $scriptContent -Encoding UTF8
+
+    # Register event log source so Write-EventLog above doesn't throw.
+    if (-not [System.Diagnostics.EventLog]::SourceExists("ai-mesh")) {
+        New-EventLog -LogName Application -Source "ai-mesh" -ErrorAction SilentlyContinue
+    }
+
+    $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+                   -Argument "-NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$hardenScript`""
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
+                    -MultipleInstances IgnoreNew
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+        -Settings $settings -Principal $principal -Force | Out-Null
+
+    Write-Host ">>> Startup hardening task registered: '$taskName' (runs as SYSTEM at every boot)."
 }
 
 function Enable-SshElevation {
@@ -224,6 +285,7 @@ Ensure-Directory -Path $logDir
 
 Disable-Sleep
 Harden-Stability
+Ensure-StartupHardeningTask
 Enable-SshElevation
 
 Ensure-LlamaCpp

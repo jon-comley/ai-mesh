@@ -103,7 +103,7 @@ impl SpatialEngine {
             let mut effective_azimuth = azimuth;
             let mut intensity_scale = 1.0;
 
-            let room_orientation = room.map(|r| r.orientation_degrees).unwrap_or(0.0);
+            let room_orientation = room.map(|r| r.orientation_degrees as f64).unwrap_or(0.0);
             if let Some(r) = room {
                 effective_azimuth = (azimuth - r.orientation_degrees as f64 + 360.0) % 360.0;
             }
@@ -120,7 +120,7 @@ impl SpatialEngine {
                 let mut contribution = 0.0_f32;
                 for o in room_openings {
                     let facing = wall_edge_to_degrees(&o.wall_edge);
-                    let adj = (facing - room_orientation as f64 + 360.0) % 360.0;
+                    let adj = (facing - room_orientation + 360.0) % 360.0;
                     let diff = (effective_azimuth - adj).abs();
                     let norm = if diff > 180.0 { 360.0 - diff } else { diff };
                     if norm <= 90.0 {
