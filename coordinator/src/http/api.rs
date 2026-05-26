@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::state::{DashboardState, RoomInfo, SceneInfo};
-use crate::registry::{DeviceSnapshot, Registry};
+use crate::registry::{DeviceSnapshot, Opening, Registry};
 
 fn gen_request_id() -> String {
     let ms = SystemTime::now()
@@ -754,6 +754,137 @@ pub async fn get_room_positions(
         })
         .collect();
     Json(body).into_response()
+}
+
+// ── Openings CRUD ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct CreateOpeningBody {
+    opening_type: String,
+    wall_edge: String,
+    x_norm: f32,
+    width_norm: f32,
+    transmission: Option<f32>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateOpeningBody {
+    x_norm: Option<f32>,
+    width_norm: Option<f32>,
+    transmission: Option<f32>,
+    wall_edge: Option<String>,
+}
+
+const VALID_WALL_EDGES: &[&str] = &["N", "S", "E", "W"];
+
+pub async fn list_openings(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let openings: Vec<Opening> = registry.lock().unwrap().get_openings_for_room(&room_id);
+    Json(openings).into_response()
+}
+
+pub async fn create_opening(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<CreateOpeningBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let opening_type = body.opening_type.as_str();
+    if opening_type != "window" && opening_type != "door" {
+        return (
+            StatusCode::BAD_REQUEST,
+            "opening_type must be 'window' or 'door'",
+        )
+            .into_response();
+    }
+    if !VALID_WALL_EDGES.contains(&body.wall_edge.as_str()) {
+        return (StatusCode::BAD_REQUEST, "wall_edge must be N, S, E, or W").into_response();
+    }
+    {
+        let reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    }
+    let default_transmission = if opening_type == "window" { 1.0 } else { 0.1 };
+    let transmission = body
+        .transmission
+        .unwrap_or(default_transmission)
+        .clamp(0.0, 1.0);
+    let opening = registry.lock().unwrap().create_opening(
+        &room_id,
+        opening_type,
+        &body.wall_edge,
+        body.x_norm.clamp(0.0, 1.0),
+        body.width_norm.clamp(0.01, 1.0),
+        transmission,
+    );
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": opening.id })),
+    )
+        .into_response()
+}
+
+pub async fn update_opening(
+    Path((room_id, opening_id)): Path<(String, String)>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<UpdateOpeningBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let _ = room_id; // validated implicitly via FK; opening_id is the authority
+    {
+        let reg = registry.lock().unwrap();
+        if !reg.opening_exists(&opening_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    }
+    if let Some(ref we) = body.wall_edge
+        && !VALID_WALL_EDGES.contains(&we.as_str())
+    {
+        return (StatusCode::BAD_REQUEST, "wall_edge must be N, S, E, or W").into_response();
+    }
+    registry.lock().unwrap().update_opening(
+        &opening_id,
+        body.x_norm.map(|v| v.clamp(0.0, 1.0)),
+        body.width_norm.map(|v| v.clamp(0.01, 1.0)),
+        body.transmission.map(|v| v.clamp(0.0, 1.0)),
+        body.wall_edge.as_deref(),
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn delete_opening(
+    Path((room_id, opening_id)): Path<(String, String)>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let _ = room_id;
+    let mut reg = registry.lock().unwrap();
+    if !reg.opening_exists(&opening_id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    reg.delete_opening(&opening_id);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[cfg(test)]
@@ -2189,5 +2320,160 @@ mod tests {
         );
         let status = send(router, "GET", "/api/lights/bulb1/position?token=wrong", "").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── openings ──────────────────────────────────────────────────────────────
+
+    fn openings_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
+        Router::new()
+            .route(
+                "/api/rooms/{id}/openings",
+                get(list_openings).post(create_opening),
+            )
+            .route(
+                "/api/rooms/{id}/openings/{oid}",
+                axum::routing::patch(update_opening).delete(delete_opening),
+            )
+            .layer(axum::Extension(registry))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn create_opening_returns_201_with_id() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let (status, body) = send_with_body(
+            openings_router(make_state(vec![], empty_connections()), registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/openings?token="),
+            r#"{"opening_type":"window","wall_edge":"S","x_norm":0.5,"width_norm":0.3}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(
+            body.contains("\"id\""),
+            "response should contain id: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_opening_rejects_invalid_type() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Hall");
+        let status = send(
+            openings_router(make_state(vec![], empty_connections()), registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/openings?token="),
+            r#"{"opening_type":"skylight","wall_edge":"N","x_norm":0.5,"width_norm":0.3}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_opening_rejects_invalid_wall_edge() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Hall");
+        let status = send(
+            openings_router(make_state(vec![], empty_connections()), registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/openings?token="),
+            r#"{"opening_type":"window","wall_edge":"X","x_norm":0.5,"width_norm":0.3}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_openings_returns_created_opening() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        registry
+            .lock()
+            .unwrap()
+            .create_opening(&room_id, "door", "W", 0.5, 0.15, 0.1);
+        let (_status, body) = send_with_body(
+            openings_router(make_state(vec![], empty_connections()), registry),
+            "GET",
+            &format!("/api/rooms/{room_id}/openings?token="),
+            "",
+        )
+        .await;
+        assert!(
+            body.contains("\"door\""),
+            "listing should include door: {body}"
+        );
+        assert!(
+            body.contains("\"W\""),
+            "listing should include wall edge: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_opening_can_move_wall_but_not_type() {
+        // wall_edge is mutable (move feature); opening_type is immutable.
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Study");
+        let o = registry
+            .lock()
+            .unwrap()
+            .create_opening(&room_id, "window", "S", 0.5, 0.3, 1.0);
+        let status = send(
+            openings_router(
+                make_state(vec![], empty_connections()),
+                Arc::clone(&registry),
+            ),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/openings/{}?token=", o.id),
+            r#"{"opening_type":"door","wall_edge":"N","transmission":0.5}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let openings = registry.lock().unwrap().get_openings_for_room(&room_id);
+        assert_eq!(openings[0].opening_type, "window"); // type unchanged — not in UpdateOpeningBody
+        assert_eq!(openings[0].wall_edge, "N"); // wall moved
+        assert!((openings[0].transmission - 0.5).abs() < 1e-4);
+    }
+
+    #[tokio::test]
+    async fn delete_opening_returns_204() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let o = registry
+            .lock()
+            .unwrap()
+            .create_opening(&room_id, "window", "E", 0.5, 0.3, 1.0);
+        let status = send(
+            openings_router(
+                make_state(vec![], empty_connections()),
+                Arc::clone(&registry),
+            ),
+            "DELETE",
+            &format!("/api/rooms/{room_id}/openings/{}?token=", o.id),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_openings_for_room(&room_id)
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_opening_returns_404_for_unknown_id() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Office");
+        let status = send(
+            openings_router(make_state(vec![], empty_connections()), registry),
+            "DELETE",
+            &format!("/api/rooms/{room_id}/openings/ghost-id?token="),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

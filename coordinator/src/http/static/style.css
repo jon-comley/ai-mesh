@@ -1288,3 +1288,57 @@ body {
   font-size: 12px;
 }
 .layout-popover-remove:hover { background: var(--red); color: #fff; }
+
+/* ── Layout — openings ────────────────────────────────────────────────────── */
+.lc-opening-window {
+  fill: rgba(100, 180, 255, 0.75);
+  stroke: #4af;
+  stroke-width: 2;
+  cursor: pointer;
+}
+.lc-opening-window:hover { fill: rgba(100, 200, 255, 0.95); }
+
+.lc-opening-door {
+  fill: rgba(160, 110, 60, 0.75);
+  stroke: #c87;
+  stroke-width: 2;
+  cursor: pointer;
+}
+.lc-opening-door:hover { fill: rgba(180, 130, 80, 0.95); }
+
+.lc-resize-handle {
+  fill: #fff;
+  stroke: #888;
+  stroke-width: 1;
+}
+.lc-resize-handle:hover { fill: var(--accent); }
+
+#lc-shadow polygon { pointer-events: none; transition: opacity 0.8s ease; }
+.lc-opening-window, .lc-opening-door { transition: fill 0.3s ease-out, opacity 0.3s ease-out; }
+
+/* Opening chips in sidebar */
+.layout-opening-chip {
+  background: var(--surface-2);
+  border: 1px solid #4af;
+  color: #9df;
+  font-size: 12px;
+}
+.layout-opening-chip:hover { background: rgba(100,180,255,0.15); }
+
+/* Popover preset buttons */
+.layout-popover-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0;
+}
+.layout-popover-preset-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: 4px;
+  padding: 3px 6px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.layout-popover-preset-btn:hover { border-color: var(--accent); color: var(--accent); }

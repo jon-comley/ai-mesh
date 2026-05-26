@@ -88,6 +88,10 @@ export function notifyDevices(devices) {
   render();
 }
 
+export function notifySolar(azimuth, elevation) {
+  layout.notifySolarUpdate(azimuth, elevation);
+}
+
 // ── Main render ──────────────────────────────────────────────────────────────
 
 function render() {

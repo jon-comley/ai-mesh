@@ -1,4 +1,4 @@
-const CACHE = 'mesh-v2';
+const CACHE = 'mesh-v3';
 const PRECACHE = [
   '/',
   '/static/style.css',
