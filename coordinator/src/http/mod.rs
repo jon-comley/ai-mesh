@@ -166,6 +166,14 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
         .route("/api/rooms/{id}/name", patch(api::rename_room))
         .route("/api/rooms/{id}/devices", patch(api::modify_room_devices))
         .route("/api/rooms/{id}/positions", get(api::get_room_positions))
+        .route(
+            "/api/rooms/{id}/openings",
+            get(api::list_openings).post(api::create_opening),
+        )
+        .route(
+            "/api/rooms/{id}/openings/{oid}",
+            patch(api::update_opening).delete(api::delete_opening),
+        )
         .route("/api/rooms/{id}/command", post(api::room_command))
         .route("/api/scenes", post(api::save_scene))
         .route("/api/scenes/{id}/recall", post(api::recall_scene))

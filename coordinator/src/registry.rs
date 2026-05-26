@@ -8,6 +8,19 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 use tracing::warn;
 
+fn degrees_to_cardinal(deg: f32) -> &'static str {
+    let d = ((deg % 360.0) + 360.0) % 360.0;
+    if !(45.0..315.0).contains(&d) {
+        "N"
+    } else if d < 135.0 {
+        "E"
+    } else if d < 225.0 {
+        "S"
+    } else {
+        "W"
+    }
+}
+
 fn gen_uuid() -> String {
     let mut b = [0u8; 16];
     getrandom::getrandom(&mut b).expect("rng failed");
@@ -41,6 +54,20 @@ pub struct LightPosition {
     pub z: f32,
     pub room_id: Option<String>,
     pub fixture_type: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Opening {
+    pub id: String,
+    pub room_id: String,
+    pub opening_type: String,
+    pub wall_edge: String,
+    pub x_norm: f32,
+    pub width_norm: f32,
+    pub transmission: f32,
+    pub opening_scope: String,
+    pub height_norm: f32,
+    pub height_span: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +186,18 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             y         REAL NOT NULL DEFAULT 0.0,
             z         REAL NOT NULL DEFAULT 0.0,
             room_id   TEXT REFERENCES rooms(id)
+        );
+        CREATE TABLE IF NOT EXISTS openings (
+            id            TEXT PRIMARY KEY,
+            room_id       TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            opening_type  TEXT NOT NULL,
+            wall_edge     TEXT NOT NULL,
+            x_norm        REAL NOT NULL,
+            width_norm    REAL NOT NULL,
+            transmission  REAL NOT NULL DEFAULT 1.0,
+            opening_scope TEXT NOT NULL DEFAULT 'exterior',
+            height_norm   REAL NOT NULL DEFAULT 0.3,
+            height_span   REAL NOT NULL DEFAULT 0.5
         );",
     )?;
 
@@ -214,6 +253,28 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE light_positions ADD COLUMN fixture_type TEXT",
             [],
         )?;
+    }
+
+    // Legacy migration: convert has_window/window_facing rows to openings rows (idempotent).
+    let legacy: Vec<(String, f32)> = {
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.window_facing FROM rooms r
+             WHERE r.has_window = 1 AND r.window_facing IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM openings o WHERE o.room_id = r.id)",
+        )?;
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for (room_id, facing_deg) in legacy {
+        let id = gen_uuid();
+        let wall_edge = degrees_to_cardinal(facing_deg);
+        if let Err(e) = conn.execute(
+            "INSERT INTO openings (id, room_id, opening_type, wall_edge, x_norm, width_norm, transmission)
+             VALUES (?1, ?2, 'window', ?3, 0.5, 0.3, 1.0)",
+            params![id, room_id, wall_edge],
+        ) {
+            warn!(error = %e, "legacy window migration failed for room {room_id}");
+        }
     }
 
     Ok(())
@@ -990,6 +1051,162 @@ impl Registry {
             .filter(|(_, p)| p.room_id.as_deref() == Some(room_id))
             .map(|(id, p)| (id.clone(), p.clone()))
             .collect()
+    }
+
+    // ── Openings ─────────────────────────────────────────────────────────────
+
+    pub fn create_opening(
+        &mut self,
+        room_id: &str,
+        opening_type: &str,
+        wall_edge: &str,
+        x_norm: f32,
+        width_norm: f32,
+        transmission: f32,
+    ) -> Opening {
+        let id = gen_uuid();
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO openings (id, room_id, opening_type, wall_edge, x_norm, width_norm, transmission)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, room_id, opening_type, wall_edge, x_norm, width_norm, transmission],
+        ) {
+            warn!(error = %e, "create_opening failed");
+        }
+        Opening {
+            id,
+            room_id: room_id.to_owned(),
+            opening_type: opening_type.to_owned(),
+            wall_edge: wall_edge.to_owned(),
+            x_norm,
+            width_norm,
+            transmission,
+            opening_scope: "exterior".to_owned(),
+            height_norm: 0.3,
+            height_span: 0.5,
+        }
+    }
+
+    pub fn get_openings_for_room(&self, room_id: &str) -> Vec<Opening> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, room_id, opening_type, wall_edge, x_norm, width_norm, transmission,
+                    opening_scope, height_norm, height_span
+             FROM openings WHERE room_id = ?1",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "get_openings_for_room prepare failed");
+                return vec![];
+            }
+        };
+        stmt.query_map(params![room_id], |row| {
+            Ok(Opening {
+                id: row.get(0)?,
+                room_id: row.get(1)?,
+                opening_type: row.get(2)?,
+                wall_edge: row.get(3)?,
+                x_norm: row.get(4)?,
+                width_norm: row.get(5)?,
+                transmission: row.get(6)?,
+                opening_scope: row.get(7)?,
+                height_norm: row.get(8)?,
+                height_span: row.get(9)?,
+            })
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    pub fn get_all_openings_by_room(&self) -> HashMap<String, Vec<Opening>> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, room_id, opening_type, wall_edge, x_norm, width_norm, transmission,
+                    opening_scope, height_norm, height_span
+             FROM openings",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "get_all_openings_by_room prepare failed");
+                return HashMap::new();
+            }
+        };
+        let mut map: HashMap<String, Vec<Opening>> = HashMap::new();
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok(Opening {
+                id: row.get(0)?,
+                room_id: row.get(1)?,
+                opening_type: row.get(2)?,
+                wall_edge: row.get(3)?,
+                x_norm: row.get(4)?,
+                width_norm: row.get(5)?,
+                transmission: row.get(6)?,
+                opening_scope: row.get(7)?,
+                height_norm: row.get(8)?,
+                height_span: row.get(9)?,
+            })
+        }) {
+            for o in rows.filter_map(|r| r.ok()) {
+                map.entry(o.room_id.clone()).or_default().push(o);
+            }
+        }
+        map
+    }
+
+    pub fn update_opening(
+        &mut self,
+        id: &str,
+        x_norm: Option<f32>,
+        width_norm: Option<f32>,
+        transmission: Option<f32>,
+        wall_edge: Option<&str>,
+    ) {
+        if let Some(v) = wall_edge
+            && let Err(e) = self.conn.execute(
+                "UPDATE openings SET wall_edge = ?1 WHERE id = ?2",
+                params![v, id],
+            )
+        {
+            warn!(error = %e, "update_opening wall_edge failed");
+        }
+        if let Some(v) = x_norm
+            && let Err(e) = self.conn.execute(
+                "UPDATE openings SET x_norm = ?1 WHERE id = ?2",
+                params![v, id],
+            )
+        {
+            warn!(error = %e, "update_opening x_norm failed");
+        }
+        if let Some(v) = width_norm
+            && let Err(e) = self.conn.execute(
+                "UPDATE openings SET width_norm = ?1 WHERE id = ?2",
+                params![v, id],
+            )
+        {
+            warn!(error = %e, "update_opening width_norm failed");
+        }
+        if let Some(v) = transmission
+            && let Err(e) = self.conn.execute(
+                "UPDATE openings SET transmission = ?1 WHERE id = ?2",
+                params![v, id],
+            )
+        {
+            warn!(error = %e, "update_opening transmission failed");
+        }
+    }
+
+    pub fn opening_exists(&self, id: &str) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM openings WHERE id = ?1", params![id], |_| {
+                Ok(())
+            })
+            .is_ok()
+    }
+
+    pub fn delete_opening(&mut self, id: &str) {
+        if let Err(e) = self
+            .conn
+            .execute("DELETE FROM openings WHERE id = ?1", params![id])
+        {
+            warn!(error = %e, "delete_opening failed");
+        }
     }
 
     pub fn update_light_position(
@@ -1876,6 +2093,147 @@ mod tests {
     }
 
     // ── Room spatial fields ───────────────────────────────────────────────────
+
+    // ── degrees_to_cardinal helper ────────────────────────────────────────────
+
+    #[test]
+    fn degrees_to_cardinal_covers_all_quadrants() {
+        assert_eq!(degrees_to_cardinal(0.0), "N");
+        assert_eq!(degrees_to_cardinal(359.0), "N");
+        assert_eq!(degrees_to_cardinal(315.0), "N");
+        assert_eq!(degrees_to_cardinal(44.9), "N");
+        assert_eq!(degrees_to_cardinal(90.0), "E");
+        assert_eq!(degrees_to_cardinal(45.0), "E");
+        assert_eq!(degrees_to_cardinal(134.9), "E");
+        assert_eq!(degrees_to_cardinal(180.0), "S");
+        assert_eq!(degrees_to_cardinal(135.0), "S");
+        assert_eq!(degrees_to_cardinal(224.9), "S");
+        assert_eq!(degrees_to_cardinal(270.0), "W");
+        assert_eq!(degrees_to_cardinal(225.0), "W");
+        assert_eq!(degrees_to_cardinal(314.9), "W");
+    }
+
+    // ── Openings ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn create_opening_appears_in_get() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        let o = reg.create_opening(&room.id, "window", "S", 0.5, 0.3, 1.0);
+        assert!(!o.id.is_empty());
+        let openings = reg.get_openings_for_room(&room.id);
+        assert_eq!(openings.len(), 1);
+        assert_eq!(openings[0].opening_type, "window");
+        assert_eq!(openings[0].wall_edge, "S");
+        assert!((openings[0].x_norm - 0.5).abs() < 1e-4);
+        assert!((openings[0].transmission - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn get_all_openings_by_room_groups_correctly() {
+        let mut reg = Registry::new();
+        let r1 = reg.create_room("Room 1");
+        let r2 = reg.create_room("Room 2");
+        reg.create_opening(&r1.id, "window", "S", 0.5, 0.3, 1.0);
+        reg.create_opening(&r1.id, "door", "W", 0.2, 0.1, 0.1);
+        reg.create_opening(&r2.id, "window", "E", 0.5, 0.4, 0.8);
+        let map = reg.get_all_openings_by_room();
+        assert_eq!(map.get(&r1.id).map(|v| v.len()), Some(2));
+        assert_eq!(map.get(&r2.id).map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn update_opening_changes_fields() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Study");
+        let o = reg.create_opening(&room.id, "window", "N", 0.5, 0.3, 1.0);
+        reg.update_opening(&o.id, Some(0.7), None, Some(0.5), None);
+        let openings = reg.get_openings_for_room(&room.id);
+        assert!((openings[0].x_norm - 0.7).abs() < 1e-4);
+        assert!((openings[0].width_norm - 0.3).abs() < 1e-4); // unchanged
+        assert!((openings[0].transmission - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn delete_opening_removes_it() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Hall");
+        let o = reg.create_opening(&room.id, "door", "E", 0.5, 0.15, 0.1);
+        assert!(reg.opening_exists(&o.id));
+        reg.delete_opening(&o.id);
+        assert!(!reg.opening_exists(&o.id));
+        assert!(reg.get_openings_for_room(&room.id).is_empty());
+    }
+
+    #[test]
+    fn delete_room_cascades_to_openings() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Bedroom");
+        reg.create_opening(&room.id, "window", "S", 0.5, 0.3, 1.0);
+        reg.delete_room(&room.id);
+        assert!(reg.get_openings_for_room(&room.id).is_empty());
+    }
+
+    #[test]
+    fn legacy_migration_creates_opening_for_window_room() {
+        let path = "/tmp/test-openings-legacy-migration.db";
+        let _ = std::fs::remove_file(path);
+
+        // Simulate an old DB: insert a room with has_window=1, window_facing=180 directly.
+        {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            init_schema(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO rooms (id, name, position, orientation_degrees, has_window, window_facing) VALUES ('room1', 'Lounge', 0, 0.0, 1, 180.0)",
+                [],
+            ).unwrap();
+            // Manually delete any auto-created opening so we can re-test migration
+            conn.execute("DELETE FROM openings", []).unwrap();
+        }
+
+        // Re-open: init_schema should run the legacy migration
+        let reg = Registry::open(path).unwrap();
+        let openings = reg.get_openings_for_room("room1");
+        assert_eq!(
+            openings.len(),
+            1,
+            "legacy migration should create one opening"
+        );
+        assert_eq!(openings[0].wall_edge, "S", "180° should map to South wall");
+        assert_eq!(openings[0].opening_type, "window");
+        assert!((openings[0].x_norm - 0.5).abs() < 1e-4);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_migration_is_idempotent() {
+        let path = "/tmp/test-openings-migration-idempotent.db";
+        let _ = std::fs::remove_file(path);
+
+        // First open creates migration opening
+        {
+            let conn = rusqlite::Connection::open(path).unwrap();
+            init_schema(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO rooms (id, name, position, orientation_degrees, has_window, window_facing) VALUES ('room1', 'Lounge', 0, 0.0, 1, 90.0)",
+                [],
+            ).unwrap();
+            conn.execute("DELETE FROM openings", []).unwrap();
+        }
+        // open1: migration creates 1 opening
+        let _ = Registry::open(path).unwrap();
+        // open2: migration must not create a duplicate
+        let reg2 = Registry::open(path).unwrap();
+        let openings = reg2.get_openings_for_room("room1");
+        assert_eq!(
+            openings.len(),
+            1,
+            "second open must not duplicate the opening"
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn create_room_has_default_spatial_fields() {

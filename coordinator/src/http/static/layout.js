@@ -7,11 +7,14 @@
 let layoutRoom = null;          // RoomRecord currently in view
 let devicesRef = new Map();     // reference to rooms.js devicesMap — set via init()
 let placedBulbs = {};           // device_id → { x, y, z, fixture_type, el, labelEl }
+let placedOpenings = {};        // opening_id → { opening_type, wall_edge, x_norm, width_norm, transmission, el }
+let lastSolar = { azimuth: 180, elevation: -90 };
 let undoStack = [];             // position snapshots for Ctrl+Z
 let redoStack = [];
 let snapDivisions = 20;         // invisible grid: 1/N of canvas width
 let showLabels = true;
 let activePopover = null;       // currently open popover element
+let dragType = null;            // 'bulb' | 'opening' — set on dragstart since getData is unavailable in dragover
 
 const FIXTURE_TYPES = [
   { id: 'ceiling_spot', label: 'Ceiling spot', defaultZ: 1.0 },
@@ -43,6 +46,7 @@ export function openLayout(room) {
   container.appendChild(view);
 
   loadPlacedBulbs(room.id);
+  loadPlacedOpenings(room.id);
 
   document.addEventListener('keydown', onKeyDown);
 }
@@ -61,6 +65,7 @@ export function closeLayout() {
 
   layoutRoom = null;
   placedBulbs = {};
+  placedOpenings = {};
 }
 
 // Called by rooms.js when a LightingUpdate WS event arrives so canvas icons stay live.
@@ -68,6 +73,18 @@ export function notifyDeviceUpdate(deviceId, state) {
   const entry = placedBulbs[deviceId];
   if (!entry) return;
   updateBulbIcon(entry, state);
+}
+
+// Called by rooms.js when a SolarUpdate WS event arrives — redraws all light cones.
+export function notifySolarUpdate(azimuth, elevation) {
+  lastSolar = { azimuth, elevation };
+  const shadowLayer = document.getElementById('lc-shadow');
+  if (!shadowLayer) return;
+  shadowLayer.innerHTML = '';
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const cone = buildCone(o, azimuth, elevation);
+    if (cone) { cone.id = `cone-${id}`; shadowLayer.appendChild(cone); }
+  }
 }
 
 // ── View construction ─────────────────────────────────────────────────────────
@@ -152,7 +169,7 @@ function buildSidebar(room) {
 
   const label = document.createElement('div');
   label.className = 'layout-sidebar-label';
-  label.textContent = 'Drag onto canvas:';
+  label.textContent = 'Bulbs:';
   sidebar.appendChild(label);
 
   const chips = document.createElement('div');
@@ -160,7 +177,33 @@ function buildSidebar(room) {
   chips.id = 'layout-sidebar-chips';
   sidebar.appendChild(chips);
 
-  // Populated after bulbs load so we can filter already-placed ones
+  // Openings section — always shown
+  const openingsLabel = document.createElement('div');
+  openingsLabel.className = 'layout-sidebar-label';
+  openingsLabel.style.marginTop = '12px';
+  openingsLabel.textContent = 'Openings (drop to wall):';
+  sidebar.appendChild(openingsLabel);
+
+  const openingChips = document.createElement('div');
+  openingChips.className = 'layout-sidebar-chips';
+  for (const { type, label: lbl } of [
+    { type: 'window', label: '⬜ Window' },
+    { type: 'door',   label: '▯ Door'   },
+  ]) {
+    const chip = document.createElement('div');
+    chip.className = 'layout-chip layout-opening-chip';
+    chip.draggable = true;
+    chip.textContent = lbl;
+    chip.addEventListener('dragstart', e => {
+      dragType = 'opening';
+      e.dataTransfer.effectAllowed = 'copy';
+      e.dataTransfer.setData('text/plain', `opening:${type}`);
+    });
+    chip.addEventListener('dragend', () => { dragType = null; });
+    openingChips.appendChild(chip);
+  }
+  sidebar.appendChild(openingChips);
+
   sidebar._room = room;
   return sidebar;
 }
@@ -205,6 +248,7 @@ function makeSidebarChip(deviceId) {
   }
 
   chip.addEventListener('dragstart', e => {
+    dragType = 'bulb';
     e.dataTransfer.effectAllowed = 'copy';
     e.dataTransfer.setData('text/plain', `bulb:${deviceId}`);
     // Trigger pulse-on-grab via rooms.js exported function
@@ -213,6 +257,7 @@ function makeSidebarChip(deviceId) {
     }
   });
   chip.addEventListener('dragend', () => {
+    dragType = null;
     if (typeof window.__roomsStopPulse === 'function') {
       window.__roomsStopPulse(true);
     }
@@ -238,7 +283,7 @@ function buildCanvas() {
   svg.appendChild(floor);
 
   // Layer groups (matching the plan)
-  for (const id of ['lc-openings', 'lc-bulbs', 'lc-preview', 'lc-sun-arc']) {
+  for (const id of ['lc-openings', 'lc-shadow', 'lc-bulbs', 'lc-preview', 'lc-sun-arc']) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.id = id;
     svg.appendChild(g);
@@ -272,25 +317,45 @@ function snap(v) {
 
 function onCanvasDragOver(e) {
   e.preventDefault();
-  const data = e.dataTransfer.types.includes('text/plain');
-  if (!data) return;
+  if (!e.dataTransfer.types.includes('text/plain')) return;
 
   const svg = document.getElementById('layout-canvas');
   const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-  const sx = snap(nx);
-  const sy = snap(ny);
-
   const preview = document.getElementById('lc-preview');
+  if (!preview) return;
   preview.innerHTML = '';
 
-  const glow = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-  glow.setAttribute('cx', sx * 1000);
-  glow.setAttribute('cy', sy * 1000);
-  glow.setAttribute('r', '28');
-  glow.setAttribute('fill', 'rgba(255,255,200,0.25)');
-  glow.setAttribute('stroke', 'rgba(255,255,200,0.7)');
-  glow.setAttribute('stroke-width', '2');
-  preview.appendChild(glow);
+  if (dragType === 'opening') {
+    const wall = detectWall(nx, ny);
+    if (wall) {
+      // Snap x_norm to midpoint (0.5) when close
+      const rawPos = isHorizontalWall(wall) ? nx : ny;
+      const xNorm = Math.abs(rawPos - 0.5) < 0.06 ? 0.5 : snap(rawPos);
+      const r = openingToSvgRect({ wall_edge: wall, x_norm: xNorm, width_norm: 0.3 });
+      const ghost = svgEl('rect', {
+        x: r.x, y: r.y, width: r.w, height: r.h, rx: 3,
+        fill: 'rgba(100,200,255,0.45)', stroke: 'rgba(100,200,255,0.9)',
+        'stroke-width': 2, 'pointer-events': 'none',
+      });
+      preview.appendChild(ghost);
+    } else {
+      const reject = svgEl('text', {
+        x: snap(nx) * 1000, y: snap(ny) * 1000,
+        'text-anchor': 'middle', 'dominant-baseline': 'central',
+        fill: 'rgba(255,80,80,0.85)', 'font-size': 48, 'pointer-events': 'none',
+      });
+      reject.textContent = '✕';
+      preview.appendChild(reject);
+    }
+  } else {
+    const sx = snap(nx), sy = snap(ny);
+    const glow = svgEl('circle', {
+      cx: sx * 1000, cy: sy * 1000, r: 28,
+      fill: 'rgba(255,255,200,0.25)', stroke: 'rgba(255,255,200,0.7)', 'stroke-width': 2,
+      'pointer-events': 'none',
+    });
+    preview.appendChild(glow);
+  }
 }
 
 function onCanvasDragLeave() {
@@ -300,15 +365,28 @@ function onCanvasDragLeave() {
 
 function onCanvasDrop(e) {
   e.preventDefault();
+  dragType = null;
   const preview = document.getElementById('lc-preview');
   if (preview) preview.innerHTML = '';
 
   const raw = e.dataTransfer.getData('text/plain');
+  const svg = document.getElementById('layout-canvas');
+  const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+
+  if (raw.startsWith('opening:')) {
+    const openingType = raw.slice(8);
+    const wall = detectWall(nx, ny);
+    if (!wall || !layoutRoom) return;
+    const rawPos = isHorizontalWall(wall) ? nx : ny;
+    const xNorm = Math.abs(rawPos - 0.5) < 0.06 ? 0.5 : snap(rawPos);
+    const transmission = openingType === 'window' ? 1.0 : 0.1;
+    postCreateOpening(layoutRoom.id, openingType, wall, xNorm, 0.3, transmission);
+    return;
+  }
+
   if (!raw.startsWith('bulb:')) return;
   const deviceId = raw.slice(5);
 
-  const svg = document.getElementById('layout-canvas');
-  const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
   const x = snap(nx);
   const y = snap(ny);
 
@@ -850,4 +928,411 @@ function ctToHex(mireds) {
   const g = Math.round(200 + (1 - t) * 55);
   const b = Math.round(100 + (1 - t) * 155);
   return `rgb(${r},${g},${b})`;
+}
+
+// ── Openings — geometry helpers ───────────────────────────────────────────────
+
+const WALL_THICKNESS = 18;
+
+function isHorizontalWall(wallEdge) {
+  return wallEdge === 'N' || wallEdge === 'S';
+}
+
+function detectWall(nx, ny) {
+  const Z = 0.08;
+  if (ny < Z) return 'N';
+  if (ny > 1 - Z) return 'S';
+  if (nx < Z) return 'W';
+  if (nx > 1 - Z) return 'E';
+  return null;
+}
+
+function openingToSvgRect(o) {
+  const hw = (o.width_norm * 1000) / 2;
+  switch (o.wall_edge) {
+    case 'N': return { x: o.x_norm * 1000 - hw, y: 0,                         w: o.width_norm * 1000, h: WALL_THICKNESS };
+    case 'S': return { x: o.x_norm * 1000 - hw, y: 1000 - WALL_THICKNESS,     w: o.width_norm * 1000, h: WALL_THICKNESS };
+    case 'E': return { x: 1000 - WALL_THICKNESS, y: o.x_norm * 1000 - hw,     w: WALL_THICKNESS, h: o.width_norm * 1000 };
+    case 'W': return { x: 0,                     y: o.x_norm * 1000 - hw,     w: WALL_THICKNESS, h: o.width_norm * 1000 };
+    default:  return { x: 0, y: 0, w: 0, h: 0 };
+  }
+}
+
+function openingHandlePositions(o, rect) {
+  if (isHorizontalWall(o.wall_edge)) {
+    const my = rect.y + rect.h / 2;
+    return [{ x: rect.x + 5, y: my }, { x: rect.x + rect.w - 5, y: my }];
+  } else {
+    const mx = rect.x + rect.w / 2;
+    return [{ x: mx, y: rect.y + 5 }, { x: mx, y: rect.y + rect.h - 5 }];
+  }
+}
+
+function edgeCursor(wallEdge) {
+  return isHorizontalWall(wallEdge) ? 'ew-resize' : 'ns-resize';
+}
+
+// ── Openings — rendering ──────────────────────────────────────────────────────
+
+function renderOpening(o) {
+  const layer = document.getElementById('lc-openings');
+  if (!layer) return;
+
+  // Remove previous element for this opening
+  placedOpenings[o.id]?.el?.remove();
+
+  const rect = openingToSvgRect(o);
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.dataset.openingId = o.id;
+
+  const body = svgEl('rect', {
+    x: rect.x, y: rect.y, width: rect.w, height: rect.h, rx: 3,
+    class: o.opening_type === 'window' ? 'lc-opening-window' : 'lc-opening-door',
+    cursor: 'grab',
+  });
+  makeMoveDraggable(body, o.id);
+  g.appendChild(body);
+
+  // Resize handles at each end
+  const [h1pos, h2pos] = openingHandlePositions(o, rect);
+  for (const [pos, side] of [[h1pos, 'start'], [h2pos, 'end']]) {
+    const h = svgEl('rect', {
+      x: pos.x - 5, y: pos.y - 5, width: 10, height: 10,
+      rx: 2, class: 'lc-resize-handle', cursor: edgeCursor(o.wall_edge),
+    });
+    makeResizeDraggable(h, o.id, side);
+    g.appendChild(h);
+  }
+
+  layer.appendChild(g);
+  placedOpenings[o.id] = { ...o, el: g };
+  updateOpeningCone(o.id);
+}
+
+function updateOpeningRectAttrs(openingId) {
+  const o = placedOpenings[openingId];
+  if (!o?.el) return;
+  const rect = openingToSvgRect(o);
+  const body = o.el.querySelector('rect');
+  if (body) {
+    body.setAttribute('x', rect.x);
+    body.setAttribute('y', rect.y);
+    body.setAttribute('width', rect.w);
+    body.setAttribute('height', rect.h);
+  }
+  const handles = [...o.el.querySelectorAll('.lc-resize-handle')];
+  const [h1pos, h2pos] = openingHandlePositions(o, rect);
+  const hCursor = edgeCursor(o.wall_edge);
+  for (const [i, pos] of [[0, h1pos], [1, h2pos]]) {
+    if (handles[i]) {
+      handles[i].setAttribute('x', pos.x - 5);
+      handles[i].setAttribute('y', pos.y - 5);
+      handles[i].setAttribute('cursor', hCursor);
+    }
+  }
+  updateOpeningCone(openingId);
+}
+
+function updateOpeningCone(openingId) {
+  const o = placedOpenings[openingId];
+  if (!o) return;
+  const layer = document.getElementById('lc-shadow');
+  if (!layer) return;
+  const old = document.getElementById(`cone-${CSS.escape(openingId)}`);
+  if (old) old.remove();
+  const cone = buildCone(o, lastSolar.azimuth, lastSolar.elevation);
+  if (cone) { cone.id = `cone-${openingId}`; layer.appendChild(cone); }
+}
+
+function buildCone(o, azimuth, elevation) {
+  if (elevation <= -18) return null;
+  const wallFacing = { N: 0, E: 90, S: 180, W: 270 }[o.wall_edge] ?? 0;
+  const diff = Math.abs(((azimuth - wallFacing) + 360) % 360);
+  const norm = diff > 180 ? 360 - diff : diff;
+  if (norm > 90) return null;
+
+  const T = WALL_THICKNESS / 2;
+  let ox, oy;
+  switch (o.wall_edge) {
+    case 'N': ox = o.x_norm * 1000; oy = T;       break;
+    case 'S': ox = o.x_norm * 1000; oy = 1000 - T; break;
+    case 'E': ox = 1000 - T;        oy = o.x_norm * 1000; break;
+    case 'W': ox = T;               oy = o.x_norm * 1000; break;
+    default:  return null;
+  }
+
+  const inwardAngle = ((azimuth + 180) % 360) * Math.PI / 180;
+  const coneLen = 150 + Math.max(elevation, 0) * 2;
+  const halfAngle = (15 + o.width_norm * 30) * Math.PI / 180;
+  const elevFactor = Math.min(Math.max(elevation / 45, 0), 1);
+  const opacity = o.transmission * elevFactor * (1 - norm / 90) * 0.22;
+  if (opacity < 0.01) return null;
+
+  const lx = ox + Math.sin(inwardAngle - halfAngle) * coneLen;
+  const ly = oy - Math.cos(inwardAngle - halfAngle) * coneLen;
+  const rx = ox + Math.sin(inwardAngle + halfAngle) * coneLen;
+  const ry = oy - Math.cos(inwardAngle + halfAngle) * coneLen;
+
+  return svgEl('polygon', {
+    points: `${ox.toFixed(1)},${oy.toFixed(1)} ${lx.toFixed(1)},${ly.toFixed(1)} ${rx.toFixed(1)},${ry.toFixed(1)}`,
+    fill: `rgba(255,220,100,${opacity.toFixed(3)})`,
+    'pointer-events': 'none',
+  });
+}
+
+// ── Openings — move drag ──────────────────────────────────────────────────────
+
+function makeMoveDraggable(body, openingId) {
+  let dragging = false;
+  let moved = false;
+
+  body.addEventListener('pointerdown', e => {
+    e.stopPropagation(); e.preventDefault();
+    dragging = true;
+    moved = false;
+    body.setPointerCapture(e.pointerId);
+  });
+
+  body.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    if (Math.abs(e.movementX) < 2 && Math.abs(e.movementY) < 2 && !moved) return;
+    moved = true;
+    body.style.cursor = 'grabbing';
+
+    const o = placedOpenings[openingId];
+    if (!o) return;
+    const svg = document.getElementById('layout-canvas');
+    const pt = svgPoint(svg, e.clientX, e.clientY);
+
+    // Snap to whichever wall the pointer is nearest; fall back to current wall
+    const wall = detectWall(pt.nx, pt.ny) ?? o.wall_edge;
+    const coord = isHorizontalWall(wall) ? pt.nx : pt.ny;
+    o.wall_edge = wall;
+    o.x_norm = Math.min(1 - o.width_norm / 2 - 0.02, Math.max(o.width_norm / 2 + 0.02, snap(coord)));
+    updateOpeningRectAttrs(openingId);
+  });
+
+  body.addEventListener('pointerup', e => {
+    if (!dragging) return;
+    dragging = false;
+    body.releasePointerCapture(e.pointerId);
+    body.style.cursor = 'grab';
+
+    if (!moved) {
+      openOpeningPopover(openingId, body);
+      return;
+    }
+    const o = placedOpenings[openingId];
+    if (o) patchOpening(openingId, { wall_edge: o.wall_edge, x_norm: o.x_norm });
+  });
+
+  body.addEventListener('pointercancel', () => { dragging = false; body.style.cursor = 'grab'; });
+}
+
+// ── Openings — resize drag ────────────────────────────────────────────────────
+
+function makeResizeDraggable(handle, openingId, side) {
+  let dragging = false;
+  let startCoord, startXNorm, startWidthNorm;
+
+  handle.addEventListener('pointerdown', e => {
+    e.stopPropagation(); e.preventDefault();
+    const o = placedOpenings[openingId];
+    if (!o) return;
+    dragging = true;
+    const svg = document.getElementById('layout-canvas');
+    const pt = svgPoint(svg, e.clientX, e.clientY);
+    startCoord = isHorizontalWall(o.wall_edge) ? pt.nx : pt.ny;
+    startXNorm = o.x_norm;
+    startWidthNorm = o.width_norm;
+    handle.setPointerCapture(e.pointerId);
+  });
+
+  handle.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const o = placedOpenings[openingId];
+    if (!o) return;
+    const svg = document.getElementById('layout-canvas');
+    const pt = svgPoint(svg, e.clientX, e.clientY);
+    const coord = isHorizontalWall(o.wall_edge) ? pt.nx : pt.ny;
+    const delta = coord - startCoord;
+
+    if (side === 'start') {
+      const oldEnd = startXNorm + startWidthNorm / 2;
+      const newStart = Math.max(0.02, Math.min(oldEnd - 0.05, startXNorm - startWidthNorm / 2 + delta));
+      const newWidth = Math.max(0.05, oldEnd - newStart);
+      o.width_norm = Math.min(0.96, Math.max(0.05, snap(newWidth)));
+      o.x_norm    = Math.min(0.97, Math.max(0.03, snap(newStart + o.width_norm / 2)));
+    } else {
+      const oldStart = startXNorm - startWidthNorm / 2;
+      const newEnd = Math.min(0.98, Math.max(oldStart + 0.05, startXNorm + startWidthNorm / 2 + delta));
+      const newWidth = Math.max(0.05, newEnd - oldStart);
+      o.width_norm = Math.min(0.96, Math.max(0.05, snap(newWidth)));
+      o.x_norm    = Math.min(0.97, Math.max(0.03, snap(oldStart + o.width_norm / 2)));
+    }
+    updateOpeningRectAttrs(openingId);
+  });
+
+  handle.addEventListener('pointerup', e => {
+    if (!dragging) return;
+    dragging = false;
+    handle.releasePointerCapture(e.pointerId);
+    const o = placedOpenings[openingId];
+    if (o) patchOpening(openingId, { x_norm: o.x_norm, width_norm: o.width_norm });
+  });
+
+  handle.addEventListener('pointercancel', () => { dragging = false; });
+}
+
+// ── Openings — popover ────────────────────────────────────────────────────────
+
+function openOpeningPopover(openingId, anchorEl) {
+  dismissPopover();
+  const o = placedOpenings[openingId];
+  if (!o) return;
+
+  const pop = document.createElement('div');
+  pop.className = 'layout-popover';
+  activePopover = pop;
+
+  const typeRow = document.createElement('div');
+  typeRow.className = 'layout-popover-label';
+  typeRow.textContent = o.opening_type === 'window' ? '⬜ Window' : '▯ Door';
+  typeRow.style.fontWeight = 'bold';
+  pop.appendChild(typeRow);
+
+  const transLabel = document.createElement('div');
+  transLabel.className = 'layout-popover-label';
+  transLabel.textContent = `Transmission: ${Math.round(o.transmission * 100)}%`;
+  pop.appendChild(transLabel);
+
+  const slider = document.createElement('input');
+  slider.type = 'range'; slider.min = '0'; slider.max = '100';
+  slider.value = Math.round(o.transmission * 100);
+  slider.className = 'layout-popover-slider';
+  slider.addEventListener('input', () => {
+    o.transmission = parseInt(slider.value) / 100;
+    transLabel.textContent = `Transmission: ${slider.value}%`;
+    updateOpeningCone(openingId);
+  });
+  slider.addEventListener('change', () => {
+    patchOpening(openingId, { transmission: o.transmission });
+  });
+  pop.appendChild(slider);
+
+  const presets = o.opening_type === 'window'
+    ? [{ label: 'Clear',       v: 1.0 }, { label: 'Frosted', v: 0.5 }, { label: 'Blind',       v: 0.05 }]
+    : [{ label: 'Solid door',  v: 0.1 }, { label: '½ glazed', v: 0.3 }, { label: 'Full glazed', v: 0.7 }];
+  const presetRow = document.createElement('div');
+  presetRow.className = 'layout-popover-presets';
+  for (const p of presets) {
+    const btn = document.createElement('button');
+    btn.textContent = p.label;
+    btn.className = 'layout-popover-preset-btn';
+    btn.addEventListener('click', () => {
+      o.transmission = p.v;
+      slider.value = Math.round(p.v * 100);
+      transLabel.textContent = `Transmission: ${Math.round(p.v * 100)}%`;
+      patchOpening(openingId, { transmission: p.v });
+      updateOpeningCone(openingId);
+    });
+    presetRow.appendChild(btn);
+  }
+  pop.appendChild(presetRow);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'layout-popover-remove';
+  removeBtn.textContent = 'Remove opening';
+  removeBtn.addEventListener('click', () => {
+    removeOpening(openingId);
+    dismissPopover();
+  });
+  pop.appendChild(removeBtn);
+
+  // Position near opening
+  const svg = document.getElementById('layout-canvas');
+  const r = openingToSvgRect(o);
+  const pt = svg.createSVGPoint();
+  pt.x = r.x + r.w / 2;
+  pt.y = r.y + r.h / 2;
+  const sp = pt.matrixTransform(svg.getScreenCTM());
+  pop.style.left = `${Math.min(sp.x + 12, window.innerWidth - 220)}px`;
+  pop.style.top  = `${Math.min(sp.y + 12, window.innerHeight - 300)}px`;
+  document.body.appendChild(pop);
+}
+
+// ── Openings — remove ─────────────────────────────────────────────────────────
+
+function removeOpening(id) {
+  const entry = placedOpenings[id];
+  if (!entry) return;
+  entry.el?.remove();
+  const cone = document.getElementById(`cone-${CSS.escape(id)}`);
+  if (cone) cone.remove();
+  delete placedOpenings[id];
+  apiDeleteOpening(id);
+}
+
+// ── Openings — server I/O ─────────────────────────────────────────────────────
+
+async function loadPlacedOpenings(roomId) {
+  try {
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/openings?token=${encodeURIComponent(tok())}`);
+    if (!res.ok) return;
+    const items = await res.json();
+    for (const item of items) renderOpening(item);
+  } catch (err) {
+    console.warn('layout: failed to load openings', err);
+  }
+}
+
+async function postCreateOpening(roomId, openingType, wallEdge, xNorm, widthNorm, transmission) {
+  try {
+    const res = await fetch(
+      `/api/rooms/${encodeURIComponent(roomId)}/openings?token=${encodeURIComponent(tok())}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          opening_type: openingType,
+          wall_edge: wallEdge,
+          x_norm: xNorm,
+          width_norm: widthNorm,
+          transmission,
+        }),
+      }
+    );
+    if (!res.ok) return;
+    const { id } = await res.json();
+    renderOpening({ id, room_id: roomId, opening_type: openingType,
+      wall_edge: wallEdge, x_norm: xNorm, width_norm: widthNorm, transmission });
+  } catch (err) {
+    console.warn('layout: postCreateOpening failed', err);
+  }
+}
+
+async function patchOpening(id, data) {
+  const o = placedOpenings[id];
+  if (!o) return;
+  try {
+    await fetch(
+      `/api/rooms/${encodeURIComponent(o.room_id)}/openings/${encodeURIComponent(id)}?token=${encodeURIComponent(tok())}`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }
+    );
+  } catch (err) {
+    console.warn('layout: patchOpening failed', err);
+  }
+}
+
+async function apiDeleteOpening(id) {
+  const o = placedOpenings[id] ?? { room_id: layoutRoom?.id };
+  if (!o.room_id) return;
+  try {
+    await fetch(
+      `/api/rooms/${encodeURIComponent(o.room_id)}/openings/${encodeURIComponent(id)}?token=${encodeURIComponent(tok())}`,
+      { method: 'DELETE' }
+    );
+  } catch (err) {
+    console.warn('layout: apiDeleteOpening failed', err);
+  }
 }

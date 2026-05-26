@@ -66,6 +66,7 @@ const handlers = {
   },
   RoomsUpdate: evt => rooms.handleRoomsUpdate(evt),
   ScenesUpdate: evt => rooms.handleScenesUpdate(evt),
+  SolarUpdate: evt => rooms.notifySolar(evt.azimuth, evt.elevation),
 };
 
 function dispatch(evt) {

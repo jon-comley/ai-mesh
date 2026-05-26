@@ -76,9 +76,13 @@ impl SpatialEngine {
             return;
         }
 
-        let (positions, rooms) = {
+        let (positions, rooms, openings_by_room) = {
             let reg = self.registry.lock().unwrap();
-            (reg.get_all_light_positions(), reg.list_rooms())
+            (
+                reg.get_all_light_positions(),
+                reg.list_rooms(),
+                reg.get_all_openings_by_room(),
+            )
         };
 
         for device_id in enabled_devices {
@@ -87,8 +91,10 @@ impl SpatialEngine {
                 .map(|p| (p.x, p.y, p.z, p.room_id, p.fixture_type))
                 .unwrap_or((0.0, 0.0, 0.0, None, None));
 
-            // Find room metadata
-            let room = room_id.and_then(|rid| rooms.iter().find(|r| r.id == rid));
+            // Find room metadata (borrow room_id so it stays available for openings lookup)
+            let room = room_id
+                .as_deref()
+                .and_then(|rid| rooms.iter().find(|r| r.id == rid));
 
             // 1. Calculate base brightness/CT from elevation
             let (base_bri, base_ct) = calculate_solar_state(elevation);
@@ -97,22 +103,36 @@ impl SpatialEngine {
             let mut effective_azimuth = azimuth;
             let mut intensity_scale = 1.0;
 
+            let room_orientation = room.map(|r| r.orientation_degrees).unwrap_or(0.0);
             if let Some(r) = room {
                 effective_azimuth = (azimuth - r.orientation_degrees as f64 + 360.0) % 360.0;
+            }
 
-                if r.has_window
-                    && let Some(facing) = r.window_facing
-                {
-                    let diff = (effective_azimuth - facing as f64).abs();
-                    let normalized_diff = if diff > 180.0 { 360.0 - diff } else { diff };
-                    if normalized_diff > 90.0 {
-                        intensity_scale *= 0.2;
-                    } else {
-                        intensity_scale *= 1.0 + (1.0 - (normalized_diff / 90.0)) * 0.5;
+            let room_openings = room_id
+                .as_deref()
+                .and_then(|rid| openings_by_room.get(rid))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+
+            if room_openings.is_empty() {
+                intensity_scale *= 0.5;
+            } else {
+                let mut contribution = 0.0_f32;
+                for o in room_openings {
+                    let facing = wall_edge_to_degrees(&o.wall_edge);
+                    let adj = (facing - room_orientation as f64 + 360.0) % 360.0;
+                    let diff = (effective_azimuth - adj).abs();
+                    let norm = if diff > 180.0 { 360.0 - diff } else { diff };
+                    if norm <= 90.0 {
+                        let elev_factor = (elevation as f32 / 45.0).clamp(0.0, 1.0);
+                        contribution += (1.0 - norm / 90.0) as f32
+                            * o.transmission
+                            * o.width_norm
+                            * elev_factor;
                     }
-                } else if !r.has_window {
-                    intensity_scale *= 0.5;
                 }
+                let c = contribution.clamp(0.0, 1.0);
+                intensity_scale *= if c > 0.0 { 1.0 + c * 0.5 } else { 0.2 };
             }
 
             // 3. Fixture type sensitivity multiplier
@@ -148,7 +168,7 @@ impl SpatialEngine {
             };
 
             let final_bri = ((base_bri as f32 + (exposure * fixture_sensitivity * 20.0))
-                * intensity_scale as f32)
+                * intensity_scale)
                 .clamp(1.0, 255.0) as u8;
 
             if let Some(node_id) = self.dashboard.get_node_for_device(&device_id) {
@@ -186,6 +206,16 @@ impl SpatialEngine {
                 warn!(device = %device_id, "Solar: no connected node found for device — skipping");
             }
         }
+    }
+}
+
+fn wall_edge_to_degrees(edge: &str) -> f64 {
+    match edge {
+        "N" => 0.0,
+        "E" => 90.0,
+        "S" => 180.0,
+        "W" => 270.0,
+        _ => 0.0,
     }
 }
 
@@ -259,28 +289,94 @@ mod tests {
     }
 
     #[test]
-    fn test_room_aware_intensity() {
-        // Room with no windows should have 0.5 scale
-        let has_window = false;
-        let _window_facing: Option<f32> = None;
-        let mut scale = 1.0;
-        if !has_window {
-            scale *= 0.5;
-        }
-        assert_eq!(scale, 0.5);
+    fn test_wall_edge_to_degrees() {
+        assert!((wall_edge_to_degrees("N") - 0.0).abs() < 1e-6);
+        assert!((wall_edge_to_degrees("E") - 90.0).abs() < 1e-6);
+        assert!((wall_edge_to_degrees("S") - 180.0).abs() < 1e-6);
+        assert!((wall_edge_to_degrees("W") - 270.0).abs() < 1e-6);
+        assert!((wall_edge_to_degrees("?") - 0.0).abs() < 1e-6);
+    }
 
-        // Room with South window (180°), Sun in North (0°)
-        let has_window = true;
-        let window_facing = Some(180.0);
-        let effective_azimuth: f64 = 0.0;
-        let mut scale = 1.0;
-        if has_window && let Some(facing) = window_facing {
-            let diff = (effective_azimuth - facing).abs();
-            let normalized_diff = if diff > 180.0 { 360.0 - diff } else { diff };
-            if normalized_diff > 90.0 {
-                scale *= 0.2;
+    #[test]
+    fn test_openings_intensity_no_openings() {
+        // No openings → scale * 0.5
+        let openings: &[crate::registry::Opening] = &[];
+        let mut intensity_scale = 1.0_f64;
+        if openings.is_empty() {
+            intensity_scale *= 0.5;
+        }
+        assert!((intensity_scale - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_openings_intensity_south_window_sun_south() {
+        use crate::registry::Opening;
+        // South window (S wall), sun at 180° (south) — full exposure
+        let opening = Opening {
+            id: "test".into(),
+            room_id: "room1".into(),
+            opening_type: "window".into(),
+            wall_edge: "S".into(),
+            x_norm: 0.5,
+            width_norm: 0.5,
+            transmission: 1.0,
+            opening_scope: "exterior".into(),
+            height_norm: 0.3,
+            height_span: 0.5,
+        };
+        let openings = &[opening];
+        let effective_azimuth: f64 = 180.0;
+        let room_orientation: f64 = 0.0;
+        let mut contribution = 0.0_f32;
+        for o in openings {
+            let facing = wall_edge_to_degrees(&o.wall_edge);
+            let adj = (facing - room_orientation + 360.0) % 360.0;
+            let diff = (effective_azimuth - adj).abs();
+            let norm = if diff > 180.0 { 360.0 - diff } else { diff };
+            if norm <= 90.0 {
+                contribution += (1.0 - norm / 90.0) as f32 * o.transmission * o.width_norm;
             }
         }
-        assert_eq!(scale, 0.2);
+        // norm=0, contribution = 1.0 * 1.0 * 0.5 = 0.5
+        assert!((contribution - 0.5).abs() < 1e-4);
+        let c = contribution.clamp(0.0, 1.0);
+        let scale = if c > 0.0 { 1.0 + c * 0.5 } else { 0.2 };
+        assert!((scale - 1.25).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_openings_intensity_north_window_sun_south() {
+        use crate::registry::Opening;
+        // North window, sun at 180° (south) — sun is behind the wall, no contribution
+        let opening = Opening {
+            id: "test".into(),
+            room_id: "room1".into(),
+            opening_type: "window".into(),
+            wall_edge: "N".into(),
+            x_norm: 0.5,
+            width_norm: 0.5,
+            transmission: 1.0,
+            opening_scope: "exterior".into(),
+            height_norm: 0.3,
+            height_span: 0.5,
+        };
+        let openings = &[opening];
+        let effective_azimuth: f64 = 180.0;
+        let room_orientation: f64 = 0.0;
+        let mut contribution = 0.0_f32;
+        for o in openings {
+            let facing = wall_edge_to_degrees(&o.wall_edge);
+            let adj = (facing - room_orientation + 360.0) % 360.0;
+            let diff = (effective_azimuth - adj).abs();
+            let norm = if diff > 180.0 { 360.0 - diff } else { diff };
+            if norm <= 90.0 {
+                contribution += (1.0 - norm / 90.0) as f32 * o.transmission * o.width_norm;
+            }
+        }
+        // norm = 180° > 90° → no contribution → scale = 0.2
+        assert!((contribution - 0.0).abs() < 1e-4);
+        let c = contribution.clamp(0.0, 1.0);
+        let scale = if c > 0.0 { 1.0 + c * 0.5 } else { 0.2_f32 };
+        assert!((scale - 0.2).abs() < 1e-4);
     }
 }
