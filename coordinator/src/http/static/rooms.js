@@ -12,8 +12,9 @@ let dragSrc = null;       // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;    // room reorder drag: room id being dragged
 let effectDragSrc = null; // effect palette drag: effect name e.g. 'solar'
 const openPickerIds = new Set();      // device IDs whose colour picker is currently open
-const activeSceneByRoom = new Map();   // roomId → sceneId of last-recalled scene
-const preSceneStateByRoom = new Map(); // roomId → Map<deviceId, snapshot> before last recall
+const activeSceneByRoom = new Map();      // roomId → sceneId of last-recalled scene
+const preSceneStateByRoom = new Map();    // roomId → Map<deviceId, snapshot> before last recall
+const solarSuspendedByScene = new Set(); // roomIds where solar badge is paused due to active scene
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
 let _sceneReorderTimer = null;
 
@@ -29,6 +30,7 @@ function updateSceneChipStates(roomId) {
 function clearRoomActiveScene(roomId) {
   if (!activeSceneByRoom.has(roomId)) return;
   activeSceneByRoom.delete(roomId);
+  solarSuspendedByScene.delete(roomId);
   updateSceneChipStates(roomId);
 }
 
@@ -153,8 +155,21 @@ export function notifyDevices(devices) {
   render();
 }
 
+let lastKnownSolar = { azimuth: 180, elevation: -90 };
+
 export function notifySolar(azimuth, elevation) {
+  lastKnownSolar = { azimuth, elevation };
   layout.notifySolarUpdate(azimuth, elevation);
+}
+
+// Mirror of calculateSolarState in layout.js — kept in sync manually.
+function solarStateFromElevation(elevation) {
+  if (elevation <= 0) {
+    const t = Math.max(0, Math.min(1, (elevation + 18) / 18));
+    return { bri: Math.round(1 + t * 29), ct: 500 };
+  }
+  const t = Math.min(1, elevation / 90);
+  return { bri: Math.round(30 + t * 225), ct: Math.round(454 - t * 301) };
 }
 
 // ── Main render ──────────────────────────────────────────────────────────────
@@ -440,11 +455,26 @@ function renderRoomCard(room) {
   actions.className = 'room-actions';
   if (solarActive) {
     const solarBadge = document.createElement('span');
-    solarBadge.className = 'badge badge-solar';
-    solarBadge.title = 'Solar mode active — click to disable';
+    const scenePaused = solarSuspendedByScene.has(room.id);
+    solarBadge.className = scenePaused ? 'badge badge-solar badge-solar-paused' : 'badge badge-solar';
     solarBadge.innerHTML = '&#9728; Solar';
     solarBadge.style.cursor = 'pointer';
-    solarBadge.addEventListener('click', () => setSolarMode(room.id, false));
+    if (scenePaused) {
+      solarBadge.title = 'Solar paused by scene — click to resume solar control';
+      solarBadge.addEventListener('click', () => {
+        solarSuspendedByScene.delete(room.id);
+        clearRoomActiveScene(room.id);
+        // Kick a solar restore for each device so the coordinator re-applies solar immediately
+        for (const deviceId of room.device_ids) {
+          fetch(`/api/lights/${encodeURIComponent(deviceId)}/restore-solar?token=${encodeURIComponent(tok())}`,
+            { method: 'POST' }).catch(() => {});
+        }
+        render();
+      });
+    } else {
+      solarBadge.title = 'Solar mode active — click to disable';
+      solarBadge.addEventListener('click', () => setSolarMode(room.id, false));
+    }
     actions.appendChild(solarBadge);
   }
   const deleteBtn = document.createElement('button');
@@ -1214,6 +1244,25 @@ async function setSolarMode(roomId, enable) {
     if (dev) devicesMap.set(deviceId, { ...dev, solar_enabled: enable });
   }
   render();
+
+  // When enabling solar, immediately transition each device to the current solar
+  // state over 3 s so the change looks intentional rather than abrupt.
+  // Use raw fetch (not sendDeviceCommand) to avoid the per-device solar-disable side effect.
+  if (enable) {
+    const { bri, ct } = solarStateFromElevation(lastKnownSolar.elevation);
+    const t = tok();
+    for (const deviceId of room.device_ids) {
+      fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'brightness', value: bri, transition_secs: 3.0 }),
+      }).catch(() => {});
+      fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'color_temp', value: ct, transition_secs: 3.0 }),
+      }).catch(() => {});
+    }
+  }
+
   try {
     const res = await fetch(`/api/rooms/${roomId}/solar?token=${encodeURIComponent(tok())}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1292,6 +1341,7 @@ async function recallScene(id) {
     const preState = preSceneStateByRoom.get(roomId);
     activeSceneByRoom.delete(roomId);
     preSceneStateByRoom.delete(roomId);
+    solarSuspendedByScene.delete(roomId);
     updateSceneChipStates(roomId);
     if (preState) {
       const room = roomsData.find(r => r.id === roomId);
@@ -1334,6 +1384,9 @@ async function recallScene(id) {
       if (roomId) {
         activeSceneByRoom.set(roomId, id);
         updateSceneChipStates(roomId);
+        // If this room has solar active, mark it as paused by the scene
+        const room = roomsData.find(r => r.id === roomId);
+        if (room?.solar_enabled) { solarSuspendedByScene.add(roomId); render(); }
       }
       if (res.status === 503) showToast('Some devices offline — others recalled', false);
     } else {

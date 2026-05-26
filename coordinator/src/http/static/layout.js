@@ -31,6 +31,19 @@ let meshLat = 51.5074;          // populated from GET /api/solar/config on first
 let meshLon = -0.1278;
 let solarConfigLoaded = false;
 let sunCalibMode = false;
+let lightModel = 'parallel-beam';  // persists across room switches
+
+const LIGHT_MODELS = [
+  { id: 'parallel-beam',   label: 'Parallel beam' },
+  { id: 'beam-footprint',  label: 'Beam + footprint' },
+  { id: 'soft-beam',       label: 'Soft beam' },
+  { id: 'cone',            label: 'Cone' },
+  { id: 'gradient-cone',   label: 'Gradient cone' },
+  { id: 'caustic',         label: 'Caustic patch' },
+  { id: 'bright-patch',    label: 'Bright patch' },
+  { id: 'wall-glow',       label: 'Wall glow' },
+  { id: 'sun-arc',         label: 'Sun arc' },
+];
 
 const FIXTURE_TYPES = [
   { id: 'ceiling_spot', label: 'Ceiling spot', defaultZ: 1.0 },
@@ -76,18 +89,28 @@ export async function openLayout(room) {
       solarConfigLoaded = true;
     } catch (_) {}
   }
+  // Seed lastSolar from the JS calculator so the canvas looks correct before the first WS push
+  { const s = solarPosition(Date.now()); lastSolar = { azimuth: s.azimuth, elevation: s.elevation }; }
 
   loadPlacedBulbs(room.id);
   loadPlacedOpenings(room.id);
 
-  // Init compass dial and sun arc now that the SVG exists
-  renderCompassDial();
-  wireCompass();
-  wirePhoneCompass();
-  wireSunCalib();
-  wireScrubber();
-  redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
-  updateSunCalibButton();
+  if (room.solar_enabled) {
+    // Init compass dial and sun arc now that the SVG exists
+    renderCompassDial();
+    wireCompass();
+    wirePhoneCompass();
+    wireSunCalib();
+    wireScrubber();
+    wireModelSelect();
+    redrawSolarOverlay(lastSolar.azimuth, lastSolar.elevation);
+    redrawLightEffect(lastSolar.azimuth, lastSolar.elevation);
+    updateSunCalibButton();
+  } else {
+    // Hide solar controls for rooms without solar
+    const scrubBar = document.getElementById('lc-scrubber-bar');
+    if (scrubBar) scrubBar.style.display = 'none';
+  }
 
   document.addEventListener('keydown', onKeyDown);
 }
@@ -119,14 +142,10 @@ export function notifyDeviceUpdate(deviceId, state) {
 // Called by rooms.js when a SolarUpdate WS event arrives — redraws cones + arc.
 export function notifySolarUpdate(azimuth, elevation) {
   lastSolar = { azimuth, elevation };
-  const shadowLayer = document.getElementById('lc-shadow');
-  if (!shadowLayer) return;
-  shadowLayer.innerHTML = '';
-  for (const [id, o] of Object.entries(placedOpenings)) {
-    const cone = buildCone(o, azimuth, elevation);
-    if (cone) { cone.id = `cone-${id}`; shadowLayer.appendChild(cone); }
+  if (scrubberLive) {
+    redrawLightEffect(azimuth, elevation);
+    redrawSolarOverlay(azimuth, elevation);
   }
-  if (scrubberLive) redrawSunArc(azimuth, elevation);
   updateSunCalibButton();
 }
 
@@ -135,7 +154,7 @@ export function notifyOrientationUpdate(deg) {
   compassDeg = deg;
   const dial = document.getElementById('lc-compass-dial');
   if (dial) dial.setAttribute('transform', `rotate(${deg})`);
-  if (scrubberLive) redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+  if (scrubberLive) previewSolarState(lastSolar.azimuth, lastSolar.elevation);
 }
 
 // ── Phase D: Compass dial ─────────────────────────────────────────────────────
@@ -168,9 +187,20 @@ function renderCompassDial() {
   dial.appendChild(svgEl('circle', { cx: 925, cy: 75, r: 5, fill: '#fff' }));
   g.appendChild(dial);
 
+  // Sun position dot — absolute compass bearing, hidden at night
+  const sunDot = svgEl('circle', {
+    id: 'lc-compass-sun', cx: 925, cy: 33, r: 5,
+    fill: '#FFD700', 'pointer-events': 'none',
+  });
+  sunDot.style.display = 'none';
+  g.appendChild(sunDot);
+
   // Invisible drag handle covering the whole compass circle
   const handle = svgEl('circle', { id: 'lc-compass-handle', cx: 925, cy: 75, r: 52,
     fill: 'transparent', style: 'cursor:grab' });
+  const tip = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+  tip.textContent = 'Drag to rotate. Align N (amber arrow) with the wall in your room that faces true North.';
+  handle.appendChild(tip);
   g.appendChild(handle);
 }
 
@@ -196,8 +226,7 @@ function wireCompass() {
     compassDeg = ((angle % 360) + 360) % 360;
     const dial = document.getElementById('lc-compass-dial');
     if (dial) dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
-    redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
-    redrawLightCones();
+    previewSolarState(lastSolar.azimuth, lastSolar.elevation);
   });
 
   svg.addEventListener('pointerup', e => {
@@ -220,64 +249,208 @@ async function patchOrientation(roomId, deg) {
   } catch (_) {}
 }
 
-// ── Phase D: Phone compass ────────────────────────────────────────────────────
+// ── Phase D: Phone compass wizard ─────────────────────────────────────────────
 
 function wirePhoneCompass() {
-  const btn = document.getElementById('lc-phone-compass');
-  const lockBtn = document.getElementById('lc-phone-lock');
-  if (!btn || !lockBtn) return;
+  const btn = document.getElementById('lc-phone-compass-btn');
+  if (!btn) return;
 
   // Hide on desktop where orientation API is absent
   if (!('ondeviceorientation' in window)) { btn.style.display = 'none'; return; }
 
+  btn.addEventListener('click', () => showCompassWizard());
+}
+
+function showCompassWizard() {
+  // Remove any existing wizard
+  document.getElementById('lc-compass-wizard')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'lc-compass-wizard';
+  overlay.className = 'lc-wizard-overlay';
+
+  let currentStep = 1;
   let orientHandler = null;
+  let lockedHeading = null;
 
-  btn.addEventListener('click', async () => {
-    if (typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
-      const perm = await DeviceOrientationEvent.requestPermission().catch(() => 'denied');
-      if (perm !== 'granted') return;
+  function renderStep() {
+    overlay.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'lc-wizard-box';
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'lc-wizard-close';
+    closeBtn.textContent = '✕';
+    closeBtn.addEventListener('click', closeWizard);
+    box.appendChild(closeBtn);
+
+    if (currentStep === 1) {
+      // Step 1: intro
+      box.innerHTML += `
+        <div class="lc-wizard-step-label">Step 1 of 3</div>
+        <h3 class="lc-wizard-title">Set room orientation with your phone</h3>
+        <p class="lc-wizard-body">
+          Stand in the centre of your room and hold your phone <strong>flat</strong>,
+          screen facing up. Point the <strong>top edge</strong> of your phone
+          toward the wall you want to mark as <strong>North</strong> on the canvas.
+        </p>
+        <p class="lc-wizard-body">
+          Tap <em>Next</em> — your phone compass will begin reading automatically.
+        </p>
+      `;
+      box.querySelector('.lc-wizard-close').remove();
+      box.appendChild(closeBtn);
+      const footer = document.createElement('div');
+      footer.className = 'lc-wizard-footer';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'lc-wizard-btn lc-wizard-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', closeWizard);
+      const nextBtn = document.createElement('button');
+      nextBtn.className = 'lc-wizard-btn lc-wizard-btn-primary';
+      nextBtn.textContent = 'Next →';
+      nextBtn.addEventListener('click', () => { currentStep = 2; renderStep(); });
+      footer.appendChild(cancelBtn);
+      footer.appendChild(nextBtn);
+      box.appendChild(footer);
+
+    } else if (currentStep === 2) {
+      // Step 2: live reading
+      box.innerHTML += `
+        <div class="lc-wizard-step-label">Step 2 of 3</div>
+        <h3 class="lc-wizard-title">Hold steady — reading compass</h3>
+        <p class="lc-wizard-body">
+          Keep your phone flat with its <strong>top edge</strong> pointing at your chosen North wall.
+          Wait for the reading to settle, then tap <em>Lock heading</em>.
+        </p>
+        <div class="lc-wizard-heading-display" id="lc-wizard-heading">— °</div>
+        <div class="lc-wizard-heading-label">averaged compass heading</div>
+      `;
+      box.querySelector('.lc-wizard-close').remove();
+      box.appendChild(closeBtn);
+      const footer = document.createElement('div');
+      footer.className = 'lc-wizard-footer';
+      const backBtn = document.createElement('button');
+      backBtn.className = 'lc-wizard-btn lc-wizard-btn-secondary';
+      backBtn.textContent = '← Back';
+      backBtn.addEventListener('click', () => {
+        stopOrientListener();
+        currentStep = 1;
+        renderStep();
+      });
+      const lockBtn = document.createElement('button');
+      lockBtn.className = 'lc-wizard-btn lc-wizard-btn-primary';
+      lockBtn.id = 'lc-wizard-lock-btn';
+      lockBtn.textContent = 'Lock heading';
+      lockBtn.addEventListener('click', () => {
+        if (lockedHeading == null) return;
+        stopOrientListener();
+        currentStep = 3;
+        renderStep();
+      });
+      footer.appendChild(backBtn);
+      footer.appendChild(lockBtn);
+      box.appendChild(footer);
+
+      // Start listening
+      startOrientListener();
+
+    } else if (currentStep === 3) {
+      // Step 3: confirm
+      const deg = Math.round(lockedHeading ?? compassDeg);
+      box.innerHTML += `
+        <div class="lc-wizard-step-label">Step 3 of 3</div>
+        <h3 class="lc-wizard-title">Confirm orientation</h3>
+        <p class="lc-wizard-body">
+          Your room will be set to face <strong>${deg}°</strong> (from true North).
+          The compass dial and sun arc on the canvas will update immediately.
+        </p>
+        <p class="lc-wizard-body">Tap <em>Apply</em> to save.</p>
+      `;
+      box.querySelector('.lc-wizard-close').remove();
+      box.appendChild(closeBtn);
+      const footer = document.createElement('div');
+      footer.className = 'lc-wizard-footer';
+      const backBtn = document.createElement('button');
+      backBtn.className = 'lc-wizard-btn lc-wizard-btn-secondary';
+      backBtn.textContent = '← Redo';
+      backBtn.addEventListener('click', () => {
+        lockedHeading = null;
+        currentStep = 2;
+        renderStep();
+      });
+      const applyBtn = document.createElement('button');
+      applyBtn.className = 'lc-wizard-btn lc-wizard-btn-primary';
+      applyBtn.textContent = 'Apply';
+      applyBtn.addEventListener('click', () => {
+        compassDeg = lockedHeading ?? compassDeg;
+        const dial = document.getElementById('lc-compass-dial');
+        if (dial) dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
+        previewSolarState(lastSolar.azimuth, lastSolar.elevation);
+        patchOrientation(layoutRoom?.id, compassDeg);
+        closeWizard();
+      });
+      footer.appendChild(backBtn);
+      footer.appendChild(applyBtn);
+      box.appendChild(footer);
     }
-    phoneOrientActive = true;
+
+    overlay.appendChild(box);
+  }
+
+  function startOrientListener() {
     phoneHeadingSamples = [];
-    lockBtn.style.display = '';
 
-    orientHandler = (e) => {
-      if (!phoneOrientActive) return;
-      // iOS provides webkitCompassHeading (true north); Android uses alpha
-      const h = (e.webkitCompassHeading != null)
-        ? e.webkitCompassHeading
-        : (e.alpha != null ? ((e.alpha % 360 + 360) % 360) : null);
-      if (h == null) return;
+    const requestAndStart = async () => {
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const perm = await DeviceOrientationEvent.requestPermission().catch(() => 'denied');
+        if (perm !== 'granted') {
+          document.getElementById('lc-wizard-heading').textContent = 'Permission denied';
+          return;
+        }
+      }
+      orientHandler = (e) => {
+        const h = (e.webkitCompassHeading != null)
+          ? e.webkitCompassHeading
+          : (e.alpha != null ? ((e.alpha % 360 + 360) % 360) : null);
+        if (h == null) return;
 
-      phoneHeadingSamples.push(h);
-      if (phoneHeadingSamples.length > 10) phoneHeadingSamples.shift();
+        phoneHeadingSamples.push(h);
+        if (phoneHeadingSamples.length > 10) phoneHeadingSamples.shift();
 
-      // Circular mean handles 0/360 wrap
-      const sinSum = phoneHeadingSamples.reduce((s, a) => s + Math.sin(a * Math.PI / 180), 0);
-      const cosSum = phoneHeadingSamples.reduce((s, a) => s + Math.cos(a * Math.PI / 180), 0);
-      const avg = (Math.atan2(sinSum, cosSum) * 180 / Math.PI + 360) % 360;
+        const sinSum = phoneHeadingSamples.reduce((s, a) => s + Math.sin(a * Math.PI / 180), 0);
+        const cosSum = phoneHeadingSamples.reduce((s, a) => s + Math.cos(a * Math.PI / 180), 0);
+        const avg = (Math.atan2(sinSum, cosSum) * 180 / Math.PI + 360) % 360;
+        lockedHeading = avg;
 
-      compassDeg = avg;
-      const dial = document.getElementById('lc-compass-dial');
-      if (dial) dial.setAttribute('transform', `rotate(${avg},925,75)`);
-      redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+        const display = document.getElementById('lc-wizard-heading');
+        if (display) display.textContent = `${Math.round(avg)}°`;
+      };
+      window.addEventListener('deviceorientationabsolute', orientHandler);
+      window.addEventListener('deviceorientation', orientHandler);
     };
 
-    window.addEventListener('deviceorientationabsolute', orientHandler);
-    window.addEventListener('deviceorientation', orientHandler);
-  });
+    requestAndStart();
+  }
 
-  lockBtn.addEventListener('click', () => {
-    phoneOrientActive = false;
+  function stopOrientListener() {
     if (orientHandler) {
       window.removeEventListener('deviceorientationabsolute', orientHandler);
       window.removeEventListener('deviceorientation', orientHandler);
       orientHandler = null;
     }
-    lockBtn.style.display = 'none';
-    patchOrientation(layoutRoom?.id, compassDeg);
-  });
+  }
+
+  function closeWizard() {
+    stopOrientListener();
+    overlay.remove();
+  }
+
+  renderStep();
+  // Attach to the canvas-outer div so it floats above the canvas
+  document.querySelector('.layout-canvas-outer')?.appendChild(overlay)
+    ?? document.body.appendChild(overlay);
 }
 
 // ── Phase D: Sun arc overlay ──────────────────────────────────────────────────
@@ -301,7 +474,7 @@ function solarPosition(dateUtc) {
   const gmst = (18.697374558 + 24.06570982441908 * n) % 24;
   const lst = ((gmst + lon / 15) % 24 + 24) % 24;
   const ha = (lst - (Math.atan2(Math.sin(lambda), Math.cos(lambda) * Math.cos(eps)) * 12 / Math.PI) + 24) % 24;
-  const haRad = (ha - 12) * Math.PI / 12;
+  const haRad = ha * Math.PI / 12;
   const sinAlt = Math.sin(lat) * sinDec + Math.cos(lat) * cosDec * Math.cos(haRad);
   const elevation = Math.asin(Math.max(-1, Math.min(1, sinAlt))) * 180 / Math.PI;
   const cosAz = (sinDec - Math.sin(lat) * sinAlt) / (Math.cos(lat) * Math.cos(Math.asin(sinAlt)));
@@ -332,56 +505,16 @@ function azimuthToCanvasPoint(az, orientDeg) {
   return { x: 500 + 570 * Math.cos(rad), y: 500 + 570 * Math.sin(rad) };
 }
 
-function redrawSunArc(azimuth, elevation) {
-  const g = document.getElementById('lc-sun-arc');
-  if (!g) return;
-  g.innerHTML = '';
-
-  const { sunriseAz, sunsetAz, polarDay, polarNight } = todaySunriseSunset();
-  if (polarNight) return;
-
-  const isDaytime = elevation > -18;
-
-  if (polarDay) {
-    // Full circle arc
-    const arc = svgEl('circle', {
-      cx: 500, cy: 500, r: 570,
-      stroke: 'rgba(255,200,50,0.5)', 'stroke-width': 3, fill: 'none',
-      'pointer-events': 'none',
-    });
-    g.appendChild(arc);
-  } else {
-    // Arc from sunrise to sunset (going east → south → west for northern hemisphere)
-    const rPt = azimuthToCanvasPoint(sunriseAz, compassDeg);
-    const sPt = azimuthToCanvasPoint(sunsetAz, compassDeg);
-    // Large arc (sun travels >180° for most latitudes)
-    const path = svgEl('path', {
-      d: `M ${rPt.x} ${rPt.y} A 570 570 0 1 1 ${sPt.x} ${sPt.y}`,
-      stroke: isDaytime ? 'rgba(255,200,50,0.6)' : 'rgba(255,200,50,0.25)',
-      'stroke-width': 3, fill: 'none',
-      'stroke-dasharray': elevation <= 0 ? '8 6' : 'none',
-      'pointer-events': 'none',
-    });
-    g.appendChild(path);
-    // Sunrise marker
-    const rm = svgEl('circle', { cx: rPt.x, cy: rPt.y, r: 5, fill: 'rgba(255,160,50,0.7)', 'pointer-events': 'none' });
-    g.appendChild(rm);
-    // Sunset marker
-    const sm = svgEl('circle', { cx: sPt.x, cy: sPt.y, r: 5, fill: 'rgba(255,100,50,0.7)', 'pointer-events': 'none' });
-    g.appendChild(sm);
-  }
-
-  // Current position pulsing dot
-  if (isDaytime) {
-    const cp = azimuthToCanvasPoint(azimuth, compassDeg);
-    const dot = svgEl('circle', { cx: cp.x, cy: cp.y, r: 9, fill: '#FFD700', 'pointer-events': 'none' });
-    dot.classList.add('lc-sun-dot');
-    // Sun label
-    const lbl = svgEl('text', { x: cp.x, y: cp.y - 16, 'text-anchor': 'middle',
-      'font-size': 18, fill: '#FFD700', 'pointer-events': 'none' });
-    lbl.textContent = '☀';
-    g.appendChild(dot);
-    g.appendChild(lbl);
+function redrawSolarOverlay(azimuth, elevation) {
+  // Compass sun dot — absolute bearing on the compass ring, hidden below civil twilight
+  const sunDot = document.getElementById('lc-compass-sun');
+  if (!sunDot) return;
+  const visible = elevation > -6;
+  sunDot.style.display = visible ? '' : 'none';
+  if (visible) {
+    const rad = (azimuth - 90) * Math.PI / 180;
+    sunDot.setAttribute('cx', (925 + 42 * Math.cos(rad)).toFixed(1));
+    sunDot.setAttribute('cy', (75  + 42 * Math.sin(rad)).toFixed(1));
   }
 }
 
@@ -397,15 +530,25 @@ function calculateSolarState(elevation) {
 }
 
 function previewSolarState(azimuth, elevation) {
-  // Animate bulb icon brightness on canvas without sending any device commands
-  for (const [id, entry] of Object.entries(placedBulbs)) {
-    const { bri } = calculateSolarState(elevation);
-    const alpha = 0.2 + (bri / 255) * 0.8;
-    const circle = entry.el?.querySelector('circle.bulb-glow');
-    if (circle) circle.style.opacity = alpha;
+  lastSolar = { azimuth, elevation };  // keep in sync so model-change redraws use correct position
+  const { bri, ct } = calculateSolarState(elevation);
+  for (const [, entry] of Object.entries(placedBulbs)) {
+    updateBulbIcon(entry, { on: bri > 5, brightness: bri, color_temp: ct, color_xy: null });
   }
-  // Also redraw arc at preview position
-  redrawSunArc(azimuth, elevation);
+  redrawSolarOverlay(azimuth, elevation);
+  redrawLightEffect(azimuth, elevation);
+}
+
+// ── Light model selector ──────────────────────────────────────────────────────
+
+function wireModelSelect() {
+  const sel = document.getElementById('lc-model-select');
+  if (!sel) return;
+  sel.value = lightModel;
+  sel.addEventListener('change', () => {
+    lightModel = sel.value;
+    redrawLightEffect(lastSolar.azimuth, lastSolar.elevation);
+  });
 }
 
 // ── Phase D: Time scrubber ────────────────────────────────────────────────────
@@ -433,13 +576,41 @@ function wireScrubber() {
     });
   });
 
+  // On release: push the simulated solar state to the real bulbs
+  scrubber.addEventListener('change', () => {
+    if (!scrubberLive) sendSimSolarCommands(lastSolar.elevation);
+  });
+
   liveBtn.addEventListener('click', () => {
     scrubberLive = true;
     setScrubberSimMode(false);
     timeEl.textContent = 'Now';
-    redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+    redrawSolarOverlay(lastSolar.azimuth, lastSolar.elevation);
     previewSolarState(lastSolar.azimuth, lastSolar.elevation);
   });
+}
+
+// Send the simulated solar brightness + colour temperature to all solar-enabled
+// devices in the currently open room. Called on scrubber mouse-release only —
+// not on every drag tick — to avoid flooding the Zigbee bus.
+async function sendSimSolarCommands(elevation) {
+  const room = layoutRoom;
+  if (!room) return;
+  const { bri, ct } = calculateSolarState(elevation);
+  const t = tok();
+  for (const deviceId of room.device_ids) {
+    const dev = devicesRef.get(deviceId);
+    if (!dev?.solar_enabled) continue;
+    // brightness command also implicitly turns the device on
+    fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'brightness', value: bri, transition_secs: 1.5 }),
+    }).catch(() => {});
+    fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'color_temp', value: ct, transition_secs: 1.5 }),
+    }).catch(() => {});
+  }
 }
 
 function setScrubberSimMode(active) {
@@ -496,7 +667,7 @@ function enterSunCalibMode() {
       compassDeg = orientation;
       const dial = document.getElementById('lc-compass-dial');
       if (dial) dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
-      redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+      redrawSolarOverlay(lastSolar.azimuth, lastSolar.elevation);
       patchOrientation(layoutRoom?.id, compassDeg);
     });
     preview.appendChild(rect);
@@ -717,12 +888,13 @@ function buildCanvas() {
   floor.setAttribute('rx', '8');
   svg.appendChild(floor);
 
-  // Layer order: sun-arc behind everything, compass on top
+  // Layer order: wall-glow behind everything, compass on top
   for (const id of ['lc-sun-arc', 'lc-openings', 'lc-shadow', 'lc-bulbs', 'lc-preview', 'lc-compass']) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.id = id;
     svg.appendChild(g);
   }
+
 
   svg.addEventListener('dragover', onCanvasDragOver);
   svg.addEventListener('dragleave', onCanvasDragLeave);
@@ -735,13 +907,16 @@ function buildCanvas() {
   // Scrubber bar below canvas
   const scrubBar = document.createElement('div');
   scrubBar.id = 'lc-scrubber-bar';
+  const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
   scrubBar.innerHTML = `
     <span id="lc-scrubber-time">Now</span>
-    <input type="range" id="lc-scrubber" min="0" max="1440" step="5" value="720">
+    <input type="range" id="lc-scrubber" min="0" max="1440" step="5" value="${nowMins}">
     <button id="lc-scrubber-live" title="Return to live">↺ Live</button>
     <button id="lc-sun-calib" title="Calibrate orientation from sun position" style="display:none">☀ Calibrate</button>
-    <button id="lc-phone-compass" title="Use phone compass to set orientation">📱</button>
-    <button id="lc-phone-lock" style="display:none" title="Lock phone heading">🔒 Lock</button>
+    <button id="lc-phone-compass-btn" title="Set orientation using phone compass">📱 Phone compass</button>
+    <select id="lc-model-select" title="Light model">
+      ${LIGHT_MODELS.map(m => `<option value="${m.id}">${m.label}</option>`).join('')}
+    </select>
   `;
   outer.appendChild(scrubBar);
 
@@ -1485,61 +1660,397 @@ function updateOpeningRectAttrs(openingId) {
   updateOpeningCone(openingId);
 }
 
-function redrawLightCones() {
-  const shadowLayer = document.getElementById('lc-shadow');
-  if (!shadowLayer) return;
-  shadowLayer.innerHTML = '';
-  for (const [id, o] of Object.entries(placedOpenings)) {
-    const cone = buildCone(o, lastSolar.azimuth, lastSolar.elevation);
-    if (cone) { cone.id = `cone-${id}`; shadowLayer.appendChild(cone); }
+// ── Light model system ────────────────────────────────────────────────────────
+
+// Single entry point — clears both layers then delegates to current model.
+function redrawLightEffect(azimuth, elevation) {
+  const shadow = document.getElementById('lc-shadow');
+  const arc    = document.getElementById('lc-sun-arc');
+  if (shadow) shadow.innerHTML = '';
+  if (arc)    arc.innerHTML    = '';
+  switch (lightModel) {
+    case 'parallel-beam':  renderParallelBeamModel(shadow, azimuth, elevation);  break;
+    case 'beam-footprint': renderBeamFootprintModel(shadow, azimuth, elevation); break;
+    case 'soft-beam':      renderSoftBeamModel(shadow, azimuth, elevation);      break;
+    case 'cone':           renderConesModel(shadow, azimuth, elevation);         break;
+    case 'gradient-cone':  renderGradientConesModel(shadow, azimuth, elevation); break;
+    case 'caustic':        renderCausticModel(shadow, azimuth, elevation);       break;
+    case 'bright-patch':   renderBrightPatchModel(shadow, azimuth, elevation);   break;
+    case 'wall-glow':      renderWallGlowModel(arc, azimuth, elevation);         break;
+    case 'sun-arc':        renderSunArcModel(arc, azimuth, elevation);           break;
   }
 }
 
-function updateOpeningCone(openingId) {
-  const o = placedOpenings[openingId];
-  if (!o) return;
-  const layer = document.getElementById('lc-shadow');
-  if (!layer) return;
-  const old = document.getElementById(`cone-${CSS.escape(openingId)}`);
-  if (old) old.remove();
-  const cone = buildCone(o, lastSolar.azimuth, lastSolar.elevation);
-  if (cone) { cone.id = `cone-${openingId}`; layer.appendChild(cone); }
+// updateOpeningCone now just redraws everything — cheap since openings are few.
+function updateOpeningCone() {
+  redrawLightEffect(lastSolar.azimuth, lastSolar.elevation);
 }
 
-function buildCone(o, azimuth, elevation) {
-  if (elevation <= -18) return null;
-  const wallFacing = { N: 0, E: 90, S: 180, W: 270 }[o.wall_edge] ?? 0;
-  const diff = Math.abs(((azimuth - wallFacing) + 360) % 360);
+// Shared geometry for all opening-based models.
+function openingCtx(o, azimuth, elevation) {
+  // Civil twilight threshold: below -6° there is no usable solar illumination.
+  if (elevation <= -6) return null;
+  const wallCanvasDeg = { N: 0, E: 90, S: 180, W: 270 }[o.wall_edge] ?? 0;
+  const wallRealDeg   = (wallCanvasDeg + compassDeg + 360) % 360;
+  const diff = ((azimuth - wallRealDeg) + 360) % 360;
   const norm = diff > 180 ? 360 - diff : diff;
-  if (norm > 90) return null;
-
+  if (norm >= 90) return null;
   const T = WALL_THICKNESS / 2;
   let ox, oy;
   switch (o.wall_edge) {
-    case 'N': ox = o.x_norm * 1000; oy = T;       break;
-    case 'S': ox = o.x_norm * 1000; oy = 1000 - T; break;
+    case 'N': ox = o.x_norm * 1000; oy = T;         break;
+    case 'S': ox = o.x_norm * 1000; oy = 1000 - T;  break;
     case 'E': ox = 1000 - T;        oy = o.x_norm * 1000; break;
     case 'W': ox = T;               oy = o.x_norm * 1000; break;
-    default:  return null;
+    default: return null;
+  }
+  const canvasInwardDeg = ((azimuth + 180 - compassDeg) % 360 + 360) % 360;
+  const inwardAngle     = canvasInwardDeg * Math.PI / 180;
+  // elevFactor: full intensity at 40°+; tapers through civil twilight (-6° → 0°)
+  const elevFactor      = elevation <= 0
+    ? Math.max(0, (elevation + 6) / 6) * 0.12   // civil twilight dim glow, max 12%
+    : Math.min(1, elevation / 40);
+  const dirFactor       = 1 - norm / 90;
+  // wallTangent: the fixed axis along the wall — always [1,0] for N/S, [0,1] for E/W
+  const wallTangent     = (o.wall_edge === 'E' || o.wall_edge === 'W') ? [0, 1] : [1, 0];
+  return { ox, oy, inwardAngle, canvasInwardDeg, elevFactor, dirFactor, wallTangent };
+}
+
+// Helper: prepend a <defs> block into a layer (defs cleared with innerHTML each frame).
+function layerDefs(layer) {
+  const d = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  layer.insertBefore(d, layer.firstChild);
+  return d;
+}
+
+// Helper: create a linearGradient element.
+function mkLinearGrad(id, x1, y1, x2, y2, stops) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'linearGradient');
+  g.id = id;
+  g.setAttribute('gradientUnits', 'userSpaceOnUse');
+  g.setAttribute('x1', x1); g.setAttribute('y1', y1);
+  g.setAttribute('x2', x2); g.setAttribute('y2', y2);
+  for (const [offset, color, opacity] of stops) {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    s.setAttribute('offset', offset);
+    s.setAttribute('stop-color', color);
+    s.setAttribute('stop-opacity', opacity);
+    g.appendChild(s);
+  }
+  return g;
+}
+
+// Helper: create a radialGradient element (percentage coords).
+function mkRadialGrad(id, stops) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+  g.id = id; g.setAttribute('cx', '50%'); g.setAttribute('cy', '50%'); g.setAttribute('r', '50%');
+  for (const [offset, color, opacity] of stops) {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+    s.setAttribute('offset', offset);
+    s.setAttribute('stop-color', color);
+    s.setAttribute('stop-opacity', opacity);
+    g.appendChild(s);
+  }
+  return g;
+}
+
+// ── Model 1: Cone ─────────────────────────────────────────────────────────────
+function renderConesModel(layer, azimuth, elevation) {
+  if (!layer) return;
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const c = openingCtx(o, azimuth, elevation);
+    if (!c) continue;
+    const { ox, oy, inwardAngle, elevFactor, dirFactor } = c;
+    const len  = 200 + elevation * 3;
+    const half = (20 + o.width_norm * 35) * Math.PI / 180;
+    const op   = o.transmission * elevFactor * dirFactor * 0.55;
+    if (op < 0.01) continue;
+    const lx = ox + Math.sin(inwardAngle - half) * len;
+    const ly = oy - Math.cos(inwardAngle - half) * len;
+    const rx = ox + Math.sin(inwardAngle + half) * len;
+    const ry = oy - Math.cos(inwardAngle + half) * len;
+    layer.appendChild(svgEl('polygon', {
+      points: `${ox.toFixed(1)},${oy.toFixed(1)} ${lx.toFixed(1)},${ly.toFixed(1)} ${rx.toFixed(1)},${ry.toFixed(1)}`,
+      fill: `rgba(255,220,100,${op.toFixed(3)})`, 'pointer-events': 'none',
+    }));
+  }
+}
+
+// ── Model 2: Gradient cone ────────────────────────────────────────────────────
+function renderGradientConesModel(layer, azimuth, elevation) {
+  if (!layer) return;
+  const defs = layerDefs(layer);
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const c = openingCtx(o, azimuth, elevation);
+    if (!c) continue;
+    const { ox, oy, inwardAngle, elevFactor, dirFactor } = c;
+    const len  = 200 + elevation * 3;
+    const half = (20 + o.width_norm * 35) * Math.PI / 180;
+    const op   = o.transmission * elevFactor * dirFactor * 0.85;
+    if (op < 0.01) continue;
+    const tipX = ox + Math.sin(inwardAngle) * len;
+    const tipY = oy - Math.cos(inwardAngle) * len;
+    const lx = ox + Math.sin(inwardAngle - half) * len;
+    const ly = oy - Math.cos(inwardAngle - half) * len;
+    const rx = ox + Math.sin(inwardAngle + half) * len;
+    const ry = oy - Math.cos(inwardAngle + half) * len;
+    const gid = `lc-gc-${id}`;
+    defs.appendChild(mkLinearGrad(gid,
+      ox.toFixed(1), oy.toFixed(1), tipX.toFixed(1), tipY.toFixed(1),
+      [['0%', '#FFDC64', op.toFixed(3)], ['100%', '#FF8C00', '0']]));
+    layer.appendChild(svgEl('polygon', {
+      points: `${ox.toFixed(1)},${oy.toFixed(1)} ${lx.toFixed(1)},${ly.toFixed(1)} ${rx.toFixed(1)},${ry.toFixed(1)}`,
+      fill: `url(#${gid})`, 'pointer-events': 'none',
+    }));
+  }
+}
+
+// ── Model 3: Caustic patch ────────────────────────────────────────────────────
+function renderCausticModel(layer, azimuth, elevation) {
+  if (!layer) return;
+  const defs = layerDefs(layer);
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const c = openingCtx(o, azimuth, elevation);
+    if (!c) continue;
+    const { ox, oy, inwardAngle, canvasInwardDeg, elevFactor, dirFactor } = c;
+    const op = o.transmission * elevFactor * dirFactor * 0.9;
+    if (op < 0.01) continue;
+    const depth = 60 + 520 * (1 - elevFactor);              // low sun → far throw
+    const cx_c  = ox + Math.sin(inwardAngle) * depth;
+    const cy_c  = oy - Math.cos(inwardAngle) * depth;
+    const winHW = o.width_norm * 350 + 50;
+    const rx_c  = winHW * (0.6 + depth / 700);              // spreads with distance
+    const ry_c  = Math.max(18, rx_c * Math.sin(elevation * Math.PI / 180)); // foreshorten
+    const gid   = `lc-caustic-${id}`;
+    defs.appendChild(mkRadialGrad(gid, [
+      ['0%',   '#FFF0A0', op.toFixed(3)],
+      ['55%',  '#FFAA30', (op * 0.45).toFixed(3)],
+      ['100%', '#FF6000', '0'],
+    ]));
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+    el.setAttribute('cx', cx_c.toFixed(1)); el.setAttribute('cy', cy_c.toFixed(1));
+    el.setAttribute('rx', rx_c.toFixed(1)); el.setAttribute('ry', ry_c.toFixed(1));
+    el.setAttribute('fill', `url(#${gid})`);
+    el.setAttribute('transform', `rotate(${canvasInwardDeg.toFixed(1)},${cx_c.toFixed(1)},${cy_c.toFixed(1)})`);
+    el.setAttribute('pointer-events', 'none');
+    layer.appendChild(el);
+  }
+}
+
+// ── Model 4: Bright patch (parallelogram shaft, correct wall-axis width) ─────
+function renderBrightPatchModel(layer, azimuth, elevation) {
+  if (!layer) return;
+  const defs = layerDefs(layer);
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const c = openingCtx(o, azimuth, elevation);
+    if (!c) continue;
+    const { ox, oy, inwardAngle, elevFactor, dirFactor, wallTangent } = c;
+    const op = o.transmission * elevFactor * dirFactor * 0.9;
+    if (op < 0.01) continue;
+    const [tx, ty] = wallTangent;
+    const winHW = o.width_norm * 500;
+    const len   = Math.min(950, 350 / Math.tan(Math.max(5, elevation) * Math.PI / 180));
+    const x1 = ox + tx * winHW, y1 = oy + ty * winHW;
+    const x2 = ox - tx * winHW, y2 = oy - ty * winHW;
+    const dx = Math.sin(inwardAngle) * len, dy = -Math.cos(inwardAngle) * len;
+    const gid = `lc-bp-${id}`;
+    defs.appendChild(mkLinearGrad(gid,
+      ox.toFixed(1), oy.toFixed(1), (ox + dx).toFixed(1), (oy + dy).toFixed(1),
+      [['0%', '#FFF4A0', op.toFixed(3)], ['100%', '#FFCC40', '0']]));
+    layer.appendChild(svgEl('polygon', {
+      points: `${x1.toFixed(1)},${y1.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)} ${(x2+dx).toFixed(1)},${(y2+dy).toFixed(1)} ${(x1+dx).toFixed(1)},${(y1+dy).toFixed(1)}`,
+      fill: `url(#${gid})`, 'pointer-events': 'none',
+    }));
+  }
+}
+
+// ── Model 5: Parallel beam (physically correct — window width along wall axis) ─
+function renderParallelBeamModel(layer, azimuth, elevation) {
+  if (!layer) return;
+  const defs = layerDefs(layer);
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const c = openingCtx(o, azimuth, elevation);
+    if (!c) continue;
+    const { ox, oy, inwardAngle, elevFactor, dirFactor, wallTangent } = c;
+    const op = o.transmission * elevFactor * dirFactor * 0.8;
+    if (op < 0.01) continue;
+    const [tx, ty] = wallTangent;
+    const winHW = o.width_norm * 500;
+    const len   = Math.min(950, 350 / Math.tan(Math.max(5, elevation) * Math.PI / 180));
+    const ax = ox + tx * winHW, ay = oy + ty * winHW;
+    const bx = ox - tx * winHW, by = oy - ty * winHW;
+    const bdx = Math.sin(inwardAngle) * len;
+    const bdy = -Math.cos(inwardAngle) * len;
+    const gid = `lc-pb-${id}`;
+    defs.appendChild(mkLinearGrad(gid,
+      ox.toFixed(1), oy.toFixed(1), (ox + bdx).toFixed(1), (oy + bdy).toFixed(1),
+      [['0%', '#FFF8C0', op.toFixed(3)], ['70%', '#FFCC40', (op * 0.55).toFixed(3)], ['100%', '#FF8C00', '0']]));
+    layer.appendChild(svgEl('polygon', {
+      points: `${ax.toFixed(1)},${ay.toFixed(1)} ${bx.toFixed(1)},${by.toFixed(1)} ${(bx+bdx).toFixed(1)},${(by+bdy).toFixed(1)} ${(ax+bdx).toFixed(1)},${(ay+bdy).toFixed(1)}`,
+      fill: `url(#${gid})`, 'pointer-events': 'none',
+    }));
+  }
+}
+
+// ── Model 6: Beam + footprint (parallel beam + bright landing patch) ──────────
+function renderBeamFootprintModel(layer, azimuth, elevation) {
+  if (!layer) return;
+  const defs = layerDefs(layer);
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const c = openingCtx(o, azimuth, elevation);
+    if (!c) continue;
+    const { ox, oy, inwardAngle, canvasInwardDeg, elevFactor, dirFactor, wallTangent } = c;
+    const op = o.transmission * elevFactor * dirFactor * 0.75;
+    if (op < 0.01) continue;
+    const [tx, ty] = wallTangent;
+    const winHW = o.width_norm * 500;
+    const len   = Math.min(950, 350 / Math.tan(Math.max(5, elevation) * Math.PI / 180));
+    const bdx   = Math.sin(inwardAngle) * len;
+    const bdy   = -Math.cos(inwardAngle) * len;
+    const ax = ox + tx * winHW, ay = oy + ty * winHW;
+    const bx = ox - tx * winHW, by = oy - ty * winHW;
+
+    // Semi-transparent beam shaft
+    const gbid = `lc-bfb-${id}`;
+    defs.appendChild(mkLinearGrad(gbid,
+      ox.toFixed(1), oy.toFixed(1), (ox + bdx).toFixed(1), (oy + bdy).toFixed(1),
+      [['0%', '#FFF8C0', (op * 0.45).toFixed(3)], ['100%', '#FFCC40', '0']]));
+    layer.appendChild(svgEl('polygon', {
+      points: `${ax.toFixed(1)},${ay.toFixed(1)} ${bx.toFixed(1)},${by.toFixed(1)} ${(bx+bdx).toFixed(1)},${(by+bdy).toFixed(1)} ${(ax+bdx).toFixed(1)},${(ay+bdy).toFixed(1)}`,
+      fill: `url(#${gbid})`, 'pointer-events': 'none',
+    }));
+
+    // Bright footprint ellipse where beam lands
+    const fcx = ox + bdx, fcy = oy + bdy;
+    const frx = winHW * (1 + 0.25 * len / 500);
+    const fry = Math.max(14, frx * Math.sin(elevation * Math.PI / 180));
+    const gfid = `lc-bff-${id}`;
+    defs.appendChild(mkRadialGrad(gfid, [
+      ['0%',   '#FFFCE0', (op * 0.95).toFixed(3)],
+      ['55%',  '#FFCC40', (op * 0.45).toFixed(3)],
+      ['100%', '#FF8C00', '0'],
+    ]));
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'ellipse');
+    el.setAttribute('cx', fcx.toFixed(1)); el.setAttribute('cy', fcy.toFixed(1));
+    el.setAttribute('rx', frx.toFixed(1)); el.setAttribute('ry', fry.toFixed(1));
+    el.setAttribute('fill', `url(#${gfid})`);
+    el.setAttribute('transform', `rotate(${canvasInwardDeg.toFixed(1)},${fcx.toFixed(1)},${fcy.toFixed(1)})`);
+    el.setAttribute('pointer-events', 'none');
+    layer.appendChild(el);
+  }
+}
+
+// ── Model 7: Soft beam (parallel beam with Gaussian blur) ─────────────────────
+function renderSoftBeamModel(layer, azimuth, elevation) {
+  if (!layer) return;
+  const defs = layerDefs(layer);
+  const fid = 'lc-sb-filter';
+  const filter = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
+  filter.id = fid;
+  filter.setAttribute('x', '-25%'); filter.setAttribute('y', '-25%');
+  filter.setAttribute('width', '150%'); filter.setAttribute('height', '150%');
+  const blur = document.createElementNS('http://www.w3.org/2000/svg', 'feGaussianBlur');
+  blur.setAttribute('stdDeviation', '22');
+  filter.appendChild(blur);
+  defs.appendChild(filter);
+
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const c = openingCtx(o, azimuth, elevation);
+    if (!c) continue;
+    const { ox, oy, inwardAngle, elevFactor, dirFactor, wallTangent } = c;
+    const op = o.transmission * elevFactor * dirFactor * 1.1; // boosted to compensate blur dimming
+    if (op < 0.01) continue;
+    const [tx, ty] = wallTangent;
+    const winHW = o.width_norm * 500;
+    const len   = Math.min(950, 350 / Math.tan(Math.max(5, elevation) * Math.PI / 180));
+    const ax = ox + tx * winHW, ay = oy + ty * winHW;
+    const bx = ox - tx * winHW, by = oy - ty * winHW;
+    const bdx = Math.sin(inwardAngle) * len;
+    const bdy = -Math.cos(inwardAngle) * len;
+    const gid = `lc-sbg-${id}`;
+    defs.appendChild(mkLinearGrad(gid,
+      ox.toFixed(1), oy.toFixed(1), (ox + bdx).toFixed(1), (oy + bdy).toFixed(1),
+      [['0%', '#FFF8C0', op.toFixed(3)], ['65%', '#FFCC40', (op * 0.5).toFixed(3)], ['100%', '#FF8C00', '0']]));
+    layer.appendChild(svgEl('polygon', {
+      points: `${ax.toFixed(1)},${ay.toFixed(1)} ${bx.toFixed(1)},${by.toFixed(1)} ${(bx+bdx).toFixed(1)},${(by+bdy).toFixed(1)} ${(ax+bdx).toFixed(1)},${(ay+bdy).toFixed(1)}`,
+      fill: `url(#${gid})`, filter: `url(#${fid})`, 'pointer-events': 'none',
+    }));
+  }
+}
+
+// ── Model 8: Wall glow ────────────────────────────────────────────────────────
+function renderWallGlowModel(layer, azimuth, elevation) {
+  if (!layer || elevation <= -6) return;
+  const defs = layerDefs(layer);
+  for (const [wid, facing, x1, y1, x2, y2, rx, ry, rw, rh] of [
+    ['N', 0,   500, 0,    500, 220,  0,   0,   1000, 220],
+    ['S', 180, 500, 1000, 500, 780,  0,   780, 1000, 220],
+    ['E', 90,  1000,500,  780, 500,  780, 0,   220,  1000],
+    ['W', 270, 0,   500,  220, 500,  0,   0,   220,  1000],
+  ]) {
+    const wallReal = (facing + compassDeg + 360) % 360;
+    const diff = ((azimuth - wallReal) + 360) % 360;
+    const norm = diff > 180 ? 360 - diff : diff;
+    if (norm >= 90) continue;
+    const dir  = Math.max(0, Math.cos(norm * Math.PI / 180));
+    const elev = Math.min(1, Math.max(0, (elevation + 6) / 35));
+    const intensity = dir * elev * 0.65;
+    if (intensity < 0.02) continue;
+    const gid = `lc-wg-${wid}`;
+    defs.appendChild(mkLinearGrad(gid, x1, y1, x2, y2,
+      [['0%', '#FFA020', intensity.toFixed(2)], ['100%', '#FFA020', '0']]));
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', rx); rect.setAttribute('y', ry);
+    rect.setAttribute('width', rw); rect.setAttribute('height', rh);
+    rect.setAttribute('fill', `url(#${gid})`);
+    rect.setAttribute('pointer-events', 'none');
+    layer.appendChild(rect);
+  }
+}
+
+// ── Model 6: Sun arc ──────────────────────────────────────────────────────────
+function renderSunArcModel(layer, azimuth, elevation) {
+  if (!layer) return;
+  const { sunriseAz, sunsetAz, polarDay, polarNight } = todaySunriseSunset();
+  if (polarNight) return;
+  const R = 490;
+  const isDaytime = elevation > 0;
+
+  const azPt = az => {
+    const adj = ((az - compassDeg) % 360 + 360) % 360;
+    const r   = (adj - 90) * Math.PI / 180;
+    return { x: 500 + R * Math.cos(r), y: 500 + R * Math.sin(r) };
+  };
+
+  if (polarDay) {
+    layer.appendChild(svgEl('circle', { cx: 500, cy: 500, r: R,
+      stroke: 'rgba(255,200,50,0.4)', 'stroke-width': 3, fill: 'none', 'pointer-events': 'none' }));
+  } else {
+    const rPt = azPt(sunriseAz), sPt = azPt(sunsetAz);
+    layer.appendChild(svgEl('path', {
+      d: `M ${rPt.x.toFixed(1)} ${rPt.y.toFixed(1)} A ${R} ${R} 0 1 1 ${sPt.x.toFixed(1)} ${sPt.y.toFixed(1)}`,
+      stroke: isDaytime ? 'rgba(255,200,50,0.65)' : 'rgba(255,200,50,0.2)',
+      'stroke-width': 3, fill: 'none',
+      'stroke-dasharray': isDaytime ? 'none' : '8 6',
+      'pointer-events': 'none',
+    }));
+    layer.appendChild(svgEl('circle', { cx: rPt.x.toFixed(1), cy: rPt.y.toFixed(1), r: 6,
+      fill: 'rgba(255,160,50,0.85)', 'pointer-events': 'none' }));
+    layer.appendChild(svgEl('circle', { cx: sPt.x.toFixed(1), cy: sPt.y.toFixed(1), r: 6,
+      fill: 'rgba(255,80,50,0.85)',  'pointer-events': 'none' }));
   }
 
-  const inwardAngle = ((azimuth + 180) % 360) * Math.PI / 180;
-  const coneLen = 150 + Math.max(elevation, 0) * 2;
-  const halfAngle = (15 + o.width_norm * 30) * Math.PI / 180;
-  const elevFactor = Math.min(Math.max(elevation / 45, 0), 1);
-  const opacity = o.transmission * elevFactor * (1 - norm / 90) * 0.22;
-  if (opacity < 0.01) return null;
-
-  const lx = ox + Math.sin(inwardAngle - halfAngle) * coneLen;
-  const ly = oy - Math.cos(inwardAngle - halfAngle) * coneLen;
-  const rx = ox + Math.sin(inwardAngle + halfAngle) * coneLen;
-  const ry = oy - Math.cos(inwardAngle + halfAngle) * coneLen;
-
-  return svgEl('polygon', {
-    points: `${ox.toFixed(1)},${oy.toFixed(1)} ${lx.toFixed(1)},${ly.toFixed(1)} ${rx.toFixed(1)},${ry.toFixed(1)}`,
-    fill: `rgba(255,220,100,${opacity.toFixed(3)})`,
-    'pointer-events': 'none',
-  });
+  if (isDaytime) {
+    const cp  = azPt(azimuth);
+    const dot = svgEl('circle', { cx: cp.x.toFixed(1), cy: cp.y.toFixed(1), r: 10,
+      fill: '#FFD700', 'pointer-events': 'none' });
+    dot.classList.add('lc-sun-dot');
+    const lbl = svgEl('text', { x: cp.x.toFixed(1), y: (cp.y - 18).toFixed(1),
+      'text-anchor': 'middle', 'font-size': 18, fill: '#FFD700', 'pointer-events': 'none' });
+    lbl.textContent = '☀';
+    layer.appendChild(dot);
+    layer.appendChild(lbl);
+  }
 }
 
 // ── Openings — move drag ──────────────────────────────────────────────────────
