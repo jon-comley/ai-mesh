@@ -891,6 +891,17 @@ impl Registry {
             .ok()
     }
 
+    /// Set the room compass orientation and persist to SQLite.
+    pub fn set_room_orientation(&mut self, room_id: &str, degrees: f32) {
+        let clamped = degrees.rem_euclid(360.0);
+        if let Err(e) = self.conn.execute(
+            "UPDATE rooms SET orientation_degrees = ?1 WHERE id = ?2",
+            params![clamped, room_id],
+        ) {
+            warn!(error = %e, "set_room_orientation failed");
+        }
+    }
+
     /// Returns true if a room with this id exists.
     pub fn room_exists(&self, id: &str) -> bool {
         self.conn
@@ -2450,6 +2461,18 @@ mod tests {
         assert_eq!(rooms[0].orientation_degrees, 0.0);
         assert!(!rooms[0].has_window);
         assert!(rooms[0].window_facing.is_none());
+    }
+
+    #[test]
+    fn set_room_orientation_persists_and_clamps() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Hall");
+        assert!((reg.list_rooms()[0].orientation_degrees - 0.0).abs() < 1e-4);
+        reg.set_room_orientation(&room.id, 270.0);
+        assert!((reg.list_rooms()[0].orientation_degrees - 270.0).abs() < 1e-4);
+        // Values ≥ 360 are clamped via rem_euclid
+        reg.set_room_orientation(&room.id, 400.0);
+        assert!((reg.list_rooms()[0].orientation_degrees - 40.0).abs() < 1e-2);
     }
 
     #[test]

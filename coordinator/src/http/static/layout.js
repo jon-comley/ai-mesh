@@ -19,6 +19,19 @@ let dragType = null;            // 'bulb' | 'opening' — set on dragstart since
 window.addEventListener('dragend', () => { dragType = null; });
 window.addEventListener('drop', () => { dragType = null; });
 
+// ── Phase D: compass + sun arc state ─────────────────────────────────────────
+let compassDeg = 0;             // current orientation_degrees for the open room
+let compassDragging = false;
+let compassOrientTimer = null;
+let scrubberLive = true;        // false while time scrubber is in preview mode
+let scrubberRafPending = false;
+let phoneOrientActive = false;
+let phoneHeadingSamples = [];
+let meshLat = 51.5074;          // populated from GET /api/solar/config on first open
+let meshLon = -0.1278;
+let solarConfigLoaded = false;
+let sunCalibMode = false;
+
 const FIXTURE_TYPES = [
   { id: 'ceiling_spot', label: 'Ceiling spot', defaultZ: 1.0 },
   { id: 'pendant',      label: 'Pendant',      defaultZ: 0.6 },
@@ -33,24 +46,48 @@ export function init(devicesMap) {
   devicesRef = devicesMap;
 }
 
-export function openLayout(room) {
+export function currentLayoutRoomId() {
+  return layoutRoom?.id ?? null;
+}
+
+export async function openLayout(room) {
   layoutRoom = room;
   placedBulbs = {};
   placedOpenings = {};
   undoStack = [];
   redoStack = [];
+  scrubberLive = true;
+  sunCalibMode = false;
+  compassDeg = room.orientation_degrees ?? 0;
 
   const container = document.getElementById('lighting-list');
   for (const child of container.children) child.style.display = 'none';
 
-  // Make the panel fill-height so the canvas has room
   document.getElementById('panel-lighting')?.classList.add('layout-open');
 
   const view = buildLayoutView(room);
   container.appendChild(view);
 
+  // Load solar config (lat/lon) once; used by JS solar position calculator
+  if (!solarConfigLoaded) {
+    try {
+      const cfg = await fetch('/api/solar/config').then(r => r.json());
+      meshLat = cfg.lat; meshLon = cfg.lon;
+      solarConfigLoaded = true;
+    } catch (_) {}
+  }
+
   loadPlacedBulbs(room.id);
   loadPlacedOpenings(room.id);
+
+  // Init compass dial and sun arc now that the SVG exists
+  renderCompassDial();
+  wireCompass();
+  wirePhoneCompass();
+  wireSunCalib();
+  wireScrubber();
+  redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+  updateSunCalibButton();
 
   document.addEventListener('keydown', onKeyDown);
 }
@@ -79,7 +116,7 @@ export function notifyDeviceUpdate(deviceId, state) {
   updateBulbIcon(entry, state);
 }
 
-// Called by rooms.js when a SolarUpdate WS event arrives — redraws all light cones.
+// Called by rooms.js when a SolarUpdate WS event arrives — redraws cones + arc.
 export function notifySolarUpdate(azimuth, elevation) {
   lastSolar = { azimuth, elevation };
   const shadowLayer = document.getElementById('lc-shadow');
@@ -89,6 +126,390 @@ export function notifySolarUpdate(azimuth, elevation) {
     const cone = buildCone(o, azimuth, elevation);
     if (cone) { cone.id = `cone-${id}`; shadowLayer.appendChild(cone); }
   }
+  if (scrubberLive) redrawSunArc(azimuth, elevation);
+  updateSunCalibButton();
+}
+
+// Called by rooms.js when a RoomsUpdate arrives with a new orientation for this room.
+export function notifyOrientationUpdate(deg) {
+  compassDeg = deg;
+  const dial = document.getElementById('lc-compass-dial');
+  if (dial) dial.setAttribute('transform', `rotate(${deg})`);
+  if (scrubberLive) redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+}
+
+// ── Phase D: Compass dial ─────────────────────────────────────────────────────
+
+function renderCompassDial() {
+  const g = document.getElementById('lc-compass');
+  if (!g) return;
+  g.innerHTML = '';
+
+  // Outer ring
+  g.appendChild(svgEl('circle', { cx: 925, cy: 75, r: 52, fill: 'rgba(0,0,0,0.6)', stroke: '#555', 'stroke-width': 1.5 }));
+
+  // Cardinal labels — pointer-events:none so they don't block the drag handle
+  for (const [txt, x, y] of [['N', 925, 35], ['S', 925, 121], ['E', 969, 79], ['W', 881, 79]]) {
+    const t = svgEl('text', { x, y, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+      'font-size': 18, 'font-weight': 700, fill: '#ccc', 'pointer-events': 'none' });
+    t.textContent = txt;
+    g.appendChild(t);
+  }
+
+  // Rotating dial group
+  const dial = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  dial.id = 'lc-compass-dial';
+  dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
+  // N pointer (amber)
+  dial.appendChild(svgEl('polygon', { points: '925,37 929,57 921,57', fill: '#e8c84a' }));
+  // S pointer (grey)
+  dial.appendChild(svgEl('polygon', { points: '925,113 929,93 921,93', fill: '#555' }));
+  // Centre dot
+  dial.appendChild(svgEl('circle', { cx: 925, cy: 75, r: 5, fill: '#fff' }));
+  g.appendChild(dial);
+
+  // Invisible drag handle covering the whole compass circle
+  const handle = svgEl('circle', { id: 'lc-compass-handle', cx: 925, cy: 75, r: 52,
+    fill: 'transparent', style: 'cursor:grab' });
+  g.appendChild(handle);
+}
+
+function wireCompass() {
+  const svg = document.getElementById('layout-canvas');
+  if (!svg) return;
+
+  let handle;
+  // Handle may not exist yet — use event delegation on the svg
+  svg.addEventListener('pointerdown', e => {
+    if (e.target.id !== 'lc-compass-handle') return;
+    compassDragging = true;
+    e.target.setPointerCapture(e.pointerId);
+    e.target.style.cursor = 'grabbing';
+  });
+
+  svg.addEventListener('pointermove', e => {
+    if (!compassDragging) return;
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const sp = pt.matrixTransform(svg.getScreenCTM().inverse());
+    const angle = Math.atan2(sp.y - 75, sp.x - 925) * 180 / Math.PI + 90;
+    compassDeg = ((angle % 360) + 360) % 360;
+    const dial = document.getElementById('lc-compass-dial');
+    if (dial) dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
+    redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+    redrawLightCones();
+  });
+
+  svg.addEventListener('pointerup', e => {
+    if (!compassDragging) return;
+    compassDragging = false;
+    if (e.target.id === 'lc-compass-handle') e.target.style.cursor = 'grab';
+    clearTimeout(compassOrientTimer);
+    compassOrientTimer = setTimeout(() => patchOrientation(layoutRoom?.id, compassDeg), 400);
+  });
+}
+
+async function patchOrientation(roomId, deg) {
+  if (!roomId) return;
+  try {
+    await fetch(`/api/rooms/${encodeURIComponent(roomId)}/orientation?token=${encodeURIComponent(tok())}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orientation_degrees: deg }),
+    });
+  } catch (_) {}
+}
+
+// ── Phase D: Phone compass ────────────────────────────────────────────────────
+
+function wirePhoneCompass() {
+  const btn = document.getElementById('lc-phone-compass');
+  const lockBtn = document.getElementById('lc-phone-lock');
+  if (!btn || !lockBtn) return;
+
+  // Hide on desktop where orientation API is absent
+  if (!('ondeviceorientation' in window)) { btn.style.display = 'none'; return; }
+
+  let orientHandler = null;
+
+  btn.addEventListener('click', async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const perm = await DeviceOrientationEvent.requestPermission().catch(() => 'denied');
+      if (perm !== 'granted') return;
+    }
+    phoneOrientActive = true;
+    phoneHeadingSamples = [];
+    lockBtn.style.display = '';
+
+    orientHandler = (e) => {
+      if (!phoneOrientActive) return;
+      // iOS provides webkitCompassHeading (true north); Android uses alpha
+      const h = (e.webkitCompassHeading != null)
+        ? e.webkitCompassHeading
+        : (e.alpha != null ? ((e.alpha % 360 + 360) % 360) : null);
+      if (h == null) return;
+
+      phoneHeadingSamples.push(h);
+      if (phoneHeadingSamples.length > 10) phoneHeadingSamples.shift();
+
+      // Circular mean handles 0/360 wrap
+      const sinSum = phoneHeadingSamples.reduce((s, a) => s + Math.sin(a * Math.PI / 180), 0);
+      const cosSum = phoneHeadingSamples.reduce((s, a) => s + Math.cos(a * Math.PI / 180), 0);
+      const avg = (Math.atan2(sinSum, cosSum) * 180 / Math.PI + 360) % 360;
+
+      compassDeg = avg;
+      const dial = document.getElementById('lc-compass-dial');
+      if (dial) dial.setAttribute('transform', `rotate(${avg},925,75)`);
+      redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+    };
+
+    window.addEventListener('deviceorientationabsolute', orientHandler);
+    window.addEventListener('deviceorientation', orientHandler);
+  });
+
+  lockBtn.addEventListener('click', () => {
+    phoneOrientActive = false;
+    if (orientHandler) {
+      window.removeEventListener('deviceorientationabsolute', orientHandler);
+      window.removeEventListener('deviceorientation', orientHandler);
+      orientHandler = null;
+    }
+    lockBtn.style.display = 'none';
+    patchOrientation(layoutRoom?.id, compassDeg);
+  });
+}
+
+// ── Phase D: Sun arc overlay ──────────────────────────────────────────────────
+
+// NOAA simplified solar position (±1-2° accuracy — sufficient for arc preview).
+// Returns { azimuth: 0-360, elevation: -90..90 }.
+function solarPosition(dateUtc) {
+  const lat = meshLat * Math.PI / 180;
+  const lon = meshLon;
+  const jd = dateUtc / 86400000 + 2440587.5;
+  const n = jd - 2451545.0;
+  const L = (280.46 + 0.9856474 * n) % 360;
+  const g = (357.528 + 0.9856003 * n) % 360;
+  const gr = g * Math.PI / 180;
+  const lambda = (L + 1.915 * Math.sin(gr) + 0.020 * Math.sin(2 * gr)) * Math.PI / 180;
+  const eps = 23.439 * Math.PI / 180;
+  const sinDec = Math.sin(eps) * Math.sin(lambda);
+  const dec = Math.asin(sinDec);
+  const cosDec = Math.cos(dec);
+  // Greenwich Mean Sidereal Time → hour angle
+  const gmst = (18.697374558 + 24.06570982441908 * n) % 24;
+  const lst = ((gmst + lon / 15) % 24 + 24) % 24;
+  const ha = (lst - (Math.atan2(Math.sin(lambda), Math.cos(lambda) * Math.cos(eps)) * 12 / Math.PI) + 24) % 24;
+  const haRad = (ha - 12) * Math.PI / 12;
+  const sinAlt = Math.sin(lat) * sinDec + Math.cos(lat) * cosDec * Math.cos(haRad);
+  const elevation = Math.asin(Math.max(-1, Math.min(1, sinAlt))) * 180 / Math.PI;
+  const cosAz = (sinDec - Math.sin(lat) * sinAlt) / (Math.cos(lat) * Math.cos(Math.asin(sinAlt)));
+  let az = Math.acos(Math.max(-1, Math.min(1, cosAz))) * 180 / Math.PI;
+  if (Math.sin(haRad) > 0) az = 360 - az;
+  return { azimuth: az, elevation };
+}
+
+function todaySunriseSunset() {
+  const base = new Date(); base.setHours(0, 0, 0, 0);
+  let riseAz = null, setAz = null, wasUp = null;
+  for (let m = 0; m <= 1440; m += 5) {
+    const d = new Date(base.getTime() + m * 60000);
+    const { azimuth, elevation } = solarPosition(d.getTime());
+    const up = elevation > 0;
+    if (wasUp === false && up)  riseAz = azimuth;
+    if (wasUp === true  && !up) setAz  = azimuth;
+    wasUp = up;
+  }
+  const polarDay   = riseAz == null && wasUp === true;
+  const polarNight = riseAz == null && wasUp === false;
+  return { sunriseAz: riseAz ?? 90, sunsetAz: setAz ?? 270, polarDay, polarNight };
+}
+
+function azimuthToCanvasPoint(az, orientDeg) {
+  const adjusted = ((az - orientDeg) % 360 + 360) % 360;
+  const rad = (adjusted - 90) * Math.PI / 180;
+  return { x: 500 + 570 * Math.cos(rad), y: 500 + 570 * Math.sin(rad) };
+}
+
+function redrawSunArc(azimuth, elevation) {
+  const g = document.getElementById('lc-sun-arc');
+  if (!g) return;
+  g.innerHTML = '';
+
+  const { sunriseAz, sunsetAz, polarDay, polarNight } = todaySunriseSunset();
+  if (polarNight) return;
+
+  const isDaytime = elevation > -18;
+
+  if (polarDay) {
+    // Full circle arc
+    const arc = svgEl('circle', {
+      cx: 500, cy: 500, r: 570,
+      stroke: 'rgba(255,200,50,0.5)', 'stroke-width': 3, fill: 'none',
+      'pointer-events': 'none',
+    });
+    g.appendChild(arc);
+  } else {
+    // Arc from sunrise to sunset (going east → south → west for northern hemisphere)
+    const rPt = azimuthToCanvasPoint(sunriseAz, compassDeg);
+    const sPt = azimuthToCanvasPoint(sunsetAz, compassDeg);
+    // Large arc (sun travels >180° for most latitudes)
+    const path = svgEl('path', {
+      d: `M ${rPt.x} ${rPt.y} A 570 570 0 1 1 ${sPt.x} ${sPt.y}`,
+      stroke: isDaytime ? 'rgba(255,200,50,0.6)' : 'rgba(255,200,50,0.25)',
+      'stroke-width': 3, fill: 'none',
+      'stroke-dasharray': elevation <= 0 ? '8 6' : 'none',
+      'pointer-events': 'none',
+    });
+    g.appendChild(path);
+    // Sunrise marker
+    const rm = svgEl('circle', { cx: rPt.x, cy: rPt.y, r: 5, fill: 'rgba(255,160,50,0.7)', 'pointer-events': 'none' });
+    g.appendChild(rm);
+    // Sunset marker
+    const sm = svgEl('circle', { cx: sPt.x, cy: sPt.y, r: 5, fill: 'rgba(255,100,50,0.7)', 'pointer-events': 'none' });
+    g.appendChild(sm);
+  }
+
+  // Current position pulsing dot
+  if (isDaytime) {
+    const cp = azimuthToCanvasPoint(azimuth, compassDeg);
+    const dot = svgEl('circle', { cx: cp.x, cy: cp.y, r: 9, fill: '#FFD700', 'pointer-events': 'none' });
+    dot.classList.add('lc-sun-dot');
+    // Sun label
+    const lbl = svgEl('text', { x: cp.x, y: cp.y - 16, 'text-anchor': 'middle',
+      'font-size': 18, fill: '#FFD700', 'pointer-events': 'none' });
+    lbl.textContent = '☀';
+    g.appendChild(dot);
+    g.appendChild(lbl);
+  }
+}
+
+// ── Phase D: client-side solar state (matches Rust calculate_solar_state) ────
+
+function calculateSolarState(elevation) {
+  if (elevation <= 0) {
+    const t = Math.max(0, Math.min(1, (elevation + 18) / 18));
+    return { bri: Math.round(1 + t * 29), ct: 500 };
+  }
+  const t = Math.min(1, elevation / 90);
+  return { bri: Math.round(30 + t * 225), ct: Math.round(454 - t * 301) };
+}
+
+function previewSolarState(azimuth, elevation) {
+  // Animate bulb icon brightness on canvas without sending any device commands
+  for (const [id, entry] of Object.entries(placedBulbs)) {
+    const { bri } = calculateSolarState(elevation);
+    const alpha = 0.2 + (bri / 255) * 0.8;
+    const circle = entry.el?.querySelector('circle.bulb-glow');
+    if (circle) circle.style.opacity = alpha;
+  }
+  // Also redraw arc at preview position
+  redrawSunArc(azimuth, elevation);
+}
+
+// ── Phase D: Time scrubber ────────────────────────────────────────────────────
+
+function wireScrubber() {
+  const scrubber = document.getElementById('lc-scrubber');
+  const liveBtn  = document.getElementById('lc-scrubber-live');
+  const timeEl   = document.getElementById('lc-scrubber-time');
+  if (!scrubber || !liveBtn || !timeEl) return;
+
+  scrubber.addEventListener('input', () => {
+    scrubberLive = false;
+    setScrubberSimMode(true);
+    if (scrubberRafPending) return;
+    scrubberRafPending = true;
+    requestAnimationFrame(() => {
+      scrubberRafPending = false;
+      const mins = parseInt(scrubber.value);
+      const base = new Date(); base.setHours(0, mins, 0, 0);
+      const { azimuth, elevation } = solarPosition(base.getTime());
+      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+      const mm = String(mins % 60).padStart(2, '0');
+      timeEl.textContent = `${hh}:${mm}`;
+      previewSolarState(azimuth, elevation);
+    });
+  });
+
+  liveBtn.addEventListener('click', () => {
+    scrubberLive = true;
+    setScrubberSimMode(false);
+    timeEl.textContent = 'Now';
+    redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+    previewSolarState(lastSolar.azimuth, lastSolar.elevation);
+  });
+}
+
+function setScrubberSimMode(active) {
+  const canvas = document.getElementById('layout-canvas');
+  const chip   = document.getElementById('lc-sim-chip');
+  if (canvas) canvas.classList.toggle('lc-sim-mode', active);
+  if (chip)   chip.style.display = active ? '' : 'none';
+}
+
+// ── Phase D: Sun calibration ──────────────────────────────────────────────────
+
+function updateSunCalibButton() {
+  const btn = document.getElementById('lc-sun-calib');
+  if (btn) btn.style.display = lastSolar.elevation > 5 ? '' : 'none';
+}
+
+function wireSunCalib() {
+  const btn = document.getElementById('lc-sun-calib');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    if (sunCalibMode) { exitSunCalibMode(); return; }
+    enterSunCalibMode();
+  });
+}
+
+function enterSunCalibMode() {
+  sunCalibMode = true;
+  const canvas = document.getElementById('layout-canvas');
+  if (canvas) canvas.classList.add('lc-calib-mode');
+  const preview = document.getElementById('lc-preview');
+  if (!preview) return;
+  preview.innerHTML = '';
+  const walls = [
+    { label: 'N', facing: 0,   d: 'M 0 0 L 1000 0',     hitX: 0,   hitY: 0,   hitW: 1000, hitH: 40 },
+    { label: 'S', facing: 180, d: 'M 0 1000 L 1000 1000', hitX: 0,   hitY: 960, hitW: 1000, hitH: 40 },
+    { label: 'E', facing: 90,  d: 'M 1000 0 L 1000 1000', hitX: 960, hitY: 0,   hitW: 40,   hitH: 1000 },
+    { label: 'W', facing: 270, d: 'M 0 0 L 0 1000',       hitX: 0,   hitY: 0,   hitW: 40,   hitH: 1000 },
+  ];
+  for (const wall of walls) {
+    const rect = svgEl('rect', {
+      x: wall.hitX, y: wall.hitY, width: wall.hitW, height: wall.hitH,
+      class: 'lc-wall-calib-target',
+    });
+    const lbl = svgEl('text', {
+      x: wall.hitX + wall.hitW / 2,
+      y: wall.hitY + wall.hitH / 2,
+      'text-anchor': 'middle', 'dominant-baseline': 'central',
+      'font-size': 40, fill: 'var(--amber)', 'pointer-events': 'none',
+    });
+    lbl.textContent = wall.label;
+    rect.addEventListener('click', () => {
+      const orientation = ((lastSolar.azimuth - wall.facing) % 360 + 360) % 360;
+      exitSunCalibMode();
+      compassDeg = orientation;
+      const dial = document.getElementById('lc-compass-dial');
+      if (dial) dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
+      redrawSunArc(lastSolar.azimuth, lastSolar.elevation);
+      patchOrientation(layoutRoom?.id, compassDeg);
+    });
+    preview.appendChild(rect);
+    preview.appendChild(lbl);
+  }
+}
+
+function exitSunCalibMode() {
+  sunCalibMode = false;
+  const canvas = document.getElementById('layout-canvas');
+  if (canvas) canvas.classList.remove('lc-calib-mode');
+  const preview = document.getElementById('lc-preview');
+  if (preview) preview.innerHTML = '';
 }
 
 // ── View construction ─────────────────────────────────────────────────────────
@@ -270,6 +691,16 @@ function makeSidebarChip(deviceId) {
 }
 
 function buildCanvas() {
+  const outer = document.createElement('div');
+  outer.className = 'layout-canvas-outer';
+
+  // Simulation mode chip — floats above canvas
+  const simChip = document.createElement('div');
+  simChip.id = 'lc-sim-chip';
+  simChip.textContent = '⏱ Simulation';
+  simChip.style.display = 'none';
+  outer.appendChild(simChip);
+
   const wrap = document.createElement('div');
   wrap.className = 'layout-canvas-wrap';
 
@@ -286,8 +717,8 @@ function buildCanvas() {
   floor.setAttribute('rx', '8');
   svg.appendChild(floor);
 
-  // Layer groups (matching the plan)
-  for (const id of ['lc-openings', 'lc-shadow', 'lc-bulbs', 'lc-preview', 'lc-sun-arc']) {
+  // Layer order: sun-arc behind everything, compass on top
+  for (const id of ['lc-sun-arc', 'lc-openings', 'lc-shadow', 'lc-bulbs', 'lc-preview', 'lc-compass']) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.id = id;
     svg.appendChild(g);
@@ -299,7 +730,22 @@ function buildCanvas() {
   svg.addEventListener('click', onCanvasClick);
 
   wrap.appendChild(svg);
-  return wrap;
+  outer.appendChild(wrap);
+
+  // Scrubber bar below canvas
+  const scrubBar = document.createElement('div');
+  scrubBar.id = 'lc-scrubber-bar';
+  scrubBar.innerHTML = `
+    <span id="lc-scrubber-time">Now</span>
+    <input type="range" id="lc-scrubber" min="0" max="1440" step="5" value="720">
+    <button id="lc-scrubber-live" title="Return to live">↺ Live</button>
+    <button id="lc-sun-calib" title="Calibrate orientation from sun position" style="display:none">☀ Calibrate</button>
+    <button id="lc-phone-compass" title="Use phone compass to set orientation">📱</button>
+    <button id="lc-phone-lock" style="display:none" title="Lock phone heading">🔒 Lock</button>
+  `;
+  outer.appendChild(scrubBar);
+
+  return outer;
 }
 
 // ── Drag / drop ───────────────────────────────────────────────────────────────
@@ -1037,6 +1483,16 @@ function updateOpeningRectAttrs(openingId) {
     }
   }
   updateOpeningCone(openingId);
+}
+
+function redrawLightCones() {
+  const shadowLayer = document.getElementById('lc-shadow');
+  if (!shadowLayer) return;
+  shadowLayer.innerHTML = '';
+  for (const [id, o] of Object.entries(placedOpenings)) {
+    const cone = buildCone(o, lastSolar.azimuth, lastSolar.elevation);
+    if (cone) { cone.id = `cone-${id}`; shadowLayer.appendChild(cone); }
+  }
 }
 
 function updateOpeningCone(openingId) {

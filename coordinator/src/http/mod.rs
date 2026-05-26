@@ -181,7 +181,12 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
             patch(api::update_opening).delete(api::delete_opening),
         )
         .route("/api/rooms/{id}/solar", post(api::set_room_solar))
+        .route(
+            "/api/rooms/{id}/orientation",
+            patch(api::set_room_orientation),
+        )
         .route("/api/rooms/{id}/command", post(api::room_command))
+        .route("/api/solar/config", get(api::solar_config))
         .route("/api/scenes", post(api::save_scene))
         .route("/api/scenes/reorder", post(api::reorder_scenes))
         .route("/api/scenes/{id}/recall", post(api::recall_scene))
