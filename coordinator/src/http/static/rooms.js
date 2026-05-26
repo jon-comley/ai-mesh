@@ -121,6 +121,11 @@ fetchDeviceNames();
 export function handleRoomsUpdate(evt) {
   roomsData = evt.rooms ?? [];
   if (evt.device_names) notifyDeviceNames(evt.device_names);
+  // Forward orientation to layout canvas if a room is open (layout guards on dial presence)
+  if (evt.rooms && layout.currentLayoutRoomId()) {
+    const r = evt.rooms.find(r => r.id === layout.currentLayoutRoomId());
+    if (r != null) layout.notifyOrientationUpdate(r.orientation_degrees);
+  }
   render();
 }
 

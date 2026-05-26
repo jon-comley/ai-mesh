@@ -155,10 +155,21 @@ pub struct DashboardState {
     pub connections: NodeConnections,
     /// Poked when solar is enabled on a room — wakes the SpatialEngine for an immediate sweep.
     pub solar_sweep_notify: Arc<Notify>,
+    /// Location used by the JS solar calculator (served via GET /api/solar/config).
+    pub lat: f64,
+    pub lon: f64,
 }
 
 impl DashboardState {
     pub fn new(auth_tokens: Arc<Vec<String>>, connections: NodeConnections) -> Arc<Self> {
+        let lat = std::env::var("MESH_LATITUDE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(51.5074);
+        let lon = std::env::var("MESH_LONGITUDE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(-0.1278);
         let (tx, _) = broadcast::channel(128);
         Arc::new(Self {
             tx,
@@ -172,6 +183,8 @@ impl DashboardState {
             last_manual_states: Mutex::new(HashMap::new()),
             connections,
             solar_sweep_notify: Arc::new(Notify::new()),
+            lat,
+            lon,
         })
     }
 

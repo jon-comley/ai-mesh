@@ -573,6 +573,53 @@ pub async fn restore_device_solar(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ── Solar config ──────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct SolarConfigResponse {
+    lat: f64,
+    lon: f64,
+}
+
+pub async fn solar_config(State(state): State<Arc<DashboardState>>) -> impl IntoResponse {
+    Json(SolarConfigResponse {
+        lat: state.lat,
+        lon: state.lon,
+    })
+}
+
+// ── Room orientation ──────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SetOrientationBody {
+    orientation_degrees: f32,
+}
+
+pub async fn set_room_orientation(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<SetOrientationBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !body.orientation_degrees.is_finite() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        reg.set_room_orientation(&room_id, body.orientation_degrees);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    state.solar_sweep_notify.notify_one();
+    StatusCode::NO_CONTENT.into_response()
+}
+
 // ── Scenes ────────────────────────────────────────────────────────────────────
 
 fn scenes_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<SceneInfo> {
@@ -2769,6 +2816,104 @@ mod tests {
             state
                 .get_solar_enabled_devices()
                 .contains(&"bulb1".to_string())
+        );
+    }
+
+    // ── solar_config ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn solar_config_returns_lat_lon() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let router = Router::new()
+            .route("/api/solar/config", axum::routing::get(solar_config))
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let (status, body) = send_with_body(router, "GET", "/api/solar/config", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"lat\""), "body: {body}");
+        assert!(body.contains("\"lon\""), "body: {body}");
+    }
+
+    // ── set_room_orientation ──────────────────────────────────────────────────
+
+    fn orientation_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
+        Router::new()
+            .route(
+                "/api/rooms/{id}/orientation",
+                axum::routing::patch(set_room_orientation),
+            )
+            .layer(axum::Extension(registry))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn patch_orientation_returns_401_for_wrong_token() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Office");
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let status = send(
+            orientation_router(state, registry),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/orientation?token=wrong"),
+            r#"{"orientation_degrees":90.0}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn patch_orientation_returns_404_for_unknown_room() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            orientation_router(state, registry),
+            "PATCH",
+            "/api/rooms/ghost/orientation?token=",
+            r#"{"orientation_degrees":90.0}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn patch_orientation_persists_and_clamps() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            orientation_router(Arc::clone(&state), Arc::clone(&registry)),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/orientation?token="),
+            r#"{"orientation_degrees":400.0}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let rooms = registry.lock().unwrap().list_rooms();
+        let deg = rooms
+            .iter()
+            .find(|r| r.id == room_id)
+            .unwrap()
+            .orientation_degrees;
+        assert!((deg - 40.0).abs() < 0.01, "expected ~40°, got {deg}");
+    }
+
+    #[tokio::test]
+    async fn patch_orientation_rejects_nan() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            orientation_router(state, registry),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/orientation?token="),
+            r#"{"orientation_degrees":null}"#,
+        )
+        .await;
+        // null deserialises to a 422 Unprocessable from axum, or 400 from our guard
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
+            "expected 400 or 422, got {status}"
         );
     }
 }

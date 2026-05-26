@@ -1482,3 +1482,109 @@ body {
   width: 140px;
   outline: none;
 }
+
+/* ── Phase D: Canvas outer wrapper ──────────────────────────────────────────── */
+.layout-canvas-outer {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+/* ── Phase D: Compass dial ───────────────────────────────────────────────────── */
+#lc-compass { user-select: none; }
+#lc-compass text { pointer-events: none; }
+#lc-compass-handle { cursor: grab; }
+#lc-compass-handle:active { cursor: grabbing; }
+
+/* ── Phase D: Sun arc ────────────────────────────────────────────────────────── */
+#lc-sun-arc { pointer-events: none; }
+.lc-sun-dot {
+  animation: lc-sun-pulse 1.8s ease-in-out infinite;
+}
+@keyframes lc-sun-pulse {
+  0%, 100% { r: 9; opacity: 1; }
+  50%       { r: 13; opacity: 0.6; }
+}
+
+/* ── Phase D: Scrubber bar ───────────────────────────────────────────────────── */
+#lc-scrubber-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface2, #1e1e2e);
+  border-top: 1px solid var(--border, #333);
+  flex-shrink: 0;
+}
+#lc-scrubber-time {
+  font-size: 12px;
+  color: var(--text-muted, #888);
+  min-width: 36px;
+  text-align: right;
+}
+#lc-scrubber {
+  flex: 1;
+  accent-color: var(--amber, #e8c84a);
+  cursor: pointer;
+}
+#lc-scrubber-live, #lc-sun-calib {
+  font-size: 12px;
+  padding: 2px 8px;
+  background: var(--surface3, #2a2a3e);
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  color: var(--text, #eee);
+  cursor: pointer;
+  white-space: nowrap;
+}
+#lc-scrubber-live:hover, #lc-sun-calib:hover {
+  background: var(--surface4, #333350);
+}
+#lc-phone-compass, #lc-phone-lock {
+  font-size: 16px;
+  background: none;
+  border: 1px solid var(--border, #333);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  color: var(--text, #eee);
+}
+#lc-phone-compass:hover, #lc-phone-lock:hover {
+  background: var(--surface3, #2a2a3e);
+}
+
+/* ── Phase D: Simulation mode ────────────────────────────────────────────────── */
+#lc-canvas-wrapper { position: relative; }
+#lc-sim-chip {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--amber, #e8c84a);
+  color: #111;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: 10;
+  white-space: nowrap;
+}
+#layout-canvas.lc-sim-mode {
+  outline: 2px solid var(--amber, #e8c84a);
+  border-radius: 4px;
+}
+
+/* ── Phase D: Sun calibration mode ──────────────────────────────────────────── */
+#layout-canvas.lc-calib-mode { filter: brightness(0.5); }
+.lc-wall-calib-target {
+  fill: rgba(232, 200, 74, 0.12);
+  stroke: var(--amber, #e8c84a);
+  stroke-width: 4;
+  cursor: pointer;
+  pointer-events: all;
+  filter: brightness(2.5);
+}
+.lc-wall-calib-target:hover { fill: rgba(232, 200, 74, 0.35); }
