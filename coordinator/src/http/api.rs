@@ -165,11 +165,25 @@ fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
                 _ => LightAction::Brightness(value),
             }
         }),
-        "color_temp" => body
-            .value
-            .map(|v| LightAction::ColorTemp(v.clamp(1.0, 65535.0) as u16)),
+        "color_temp" => body.value.map(|v| {
+            let value = v.clamp(1.0, 65535.0) as u16;
+            match body.transition_secs {
+                Some(t) if t > 0.0 => LightAction::ColorTempTransition {
+                    value,
+                    transition_secs: t,
+                },
+                _ => LightAction::ColorTemp(value),
+            }
+        }),
         "color_xy" => match (body.x, body.y) {
-            (Some(x), Some(y)) => Some(LightAction::ColorXY { x, y }),
+            (Some(x), Some(y)) => match body.transition_secs {
+                Some(t) if t > 0.0 => Some(LightAction::ColorXYTransition {
+                    x,
+                    y,
+                    transition_secs: t,
+                }),
+                _ => Some(LightAction::ColorXY { x, y }),
+            },
             _ => None,
         },
         "solar_mode" => body.value.map(|v| LightAction::SolarMode(v > 0.0)),
@@ -500,11 +514,15 @@ fn scenes_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<SceneInfo> {
         .unwrap()
         .list_scenes()
         .into_iter()
-        .map(|s| SceneInfo {
-            id: s.id,
-            name: s.name,
-            room_id: s.room_id,
-            created_at: s.created_at,
+        .map(|s| {
+            let preview_color = s.preview_color();
+            SceneInfo {
+                id: s.id,
+                name: s.name,
+                room_id: s.room_id,
+                created_at: s.created_at,
+                preview_color,
+            }
         })
         .collect()
 }
@@ -579,12 +597,31 @@ pub async fn save_scene(
         .into_response()
 }
 
+#[derive(Deserialize, Default)]
+pub struct RecallBody {
+    #[serde(default)]
+    transition_secs: Option<f32>,
+}
+
 pub async fn recall_scene(
     Path(scene_id): Path<String>,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
     Query(q): Query<TokenQuery>,
     State(state): State<Arc<DashboardState>>,
+    req: axum::extract::Request,
 ) -> impl IntoResponse {
+    let transition_secs = {
+        let bytes = axum::body::to_bytes(req.into_body(), 4096)
+            .await
+            .unwrap_or_default();
+        if bytes.is_empty() {
+            None
+        } else {
+            serde_json::from_slice::<RecallBody>(&bytes)
+                .ok()
+                .and_then(|b| b.transition_secs)
+        }
+    };
     if !state.auth_ok(&q.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -602,25 +639,47 @@ pub async fn recall_scene(
             }
         };
         if let Some((x, y)) = snap.color_xy {
+            let command = match transition_secs {
+                Some(t) if t > 0.0 => LightAction::ColorXYTransition {
+                    x,
+                    y,
+                    transition_secs: t,
+                },
+                _ => LightAction::ColorXY { x, y },
+            };
             let cmd = LightCommandRequest {
                 request_id: gen_request_id(),
                 target: LightTarget::Device(snap.device_id.clone()),
-                command: LightAction::ColorXY { x, y },
+                command,
             };
             let _ = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
         } else if let Some(ct) = snap.color_temp {
+            let command = match transition_secs {
+                Some(t) if t > 0.0 => LightAction::ColorTempTransition {
+                    value: ct,
+                    transition_secs: t,
+                },
+                _ => LightAction::ColorTemp(ct),
+            };
             let cmd = LightCommandRequest {
                 request_id: gen_request_id(),
                 target: LightTarget::Device(snap.device_id.clone()),
-                command: LightAction::ColorTemp(ct),
+                command,
             };
             let _ = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
         }
         if let Some(brightness) = snap.brightness {
+            let command = match transition_secs {
+                Some(t) if t > 0.0 => LightAction::BrightnessTransition {
+                    value: brightness,
+                    transition_secs: t,
+                },
+                _ => LightAction::Brightness(brightness),
+            };
             let cmd = LightCommandRequest {
                 request_id: gen_request_id(),
                 target: LightTarget::Device(snap.device_id.clone()),
-                command: LightAction::Brightness(brightness),
+                command,
             };
             let _ = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
         }
@@ -674,6 +733,46 @@ pub async fn delete_scene(
     }
     state.push_scenes_update(scenes_from_registry(&registry));
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ── Device names ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct RenameDeviceBody {
+    name: String,
+}
+
+pub async fn rename_device(
+    Path(device_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<RenameDeviceBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
+    }
+    registry.lock().unwrap().set_device_name(&device_id, &name);
+    let names = registry.lock().unwrap().get_all_device_names();
+    let rooms = rooms_from_registry(&registry);
+    state.push_rooms_update_with_names(rooms, names);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn get_device_names(
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let names = registry.lock().unwrap().get_all_device_names();
+    Json(names).into_response()
 }
 
 // ── Spatial ──────────────────────────────────────────────────────────────────
@@ -1499,7 +1598,7 @@ mod tests {
         .await;
         use super::super::state::DashboardEvent;
         match rx.try_recv().unwrap() {
-            DashboardEvent::RoomsUpdate { rooms } => {
+            DashboardEvent::RoomsUpdate { rooms, .. } => {
                 assert_eq!(rooms.len(), 1);
                 assert_eq!(rooms[0].name, "Bedroom");
             }

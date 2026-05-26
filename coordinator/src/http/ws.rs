@@ -84,7 +84,10 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
     // Push current rooms snapshot so the Rooms panel populates immediately on connect.
     let rooms = state.get_room_snapshot();
     if !rooms.is_empty() {
-        let evt = DashboardEvent::RoomsUpdate { rooms };
+        let evt = DashboardEvent::RoomsUpdate {
+            rooms,
+            device_names: std::collections::HashMap::new(),
+        };
         match serde_json::to_string(&evt) {
             Ok(json) => {
                 if socket.send(Message::Text(json.into())).await.is_err() {

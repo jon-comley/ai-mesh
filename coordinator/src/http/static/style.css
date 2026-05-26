@@ -974,34 +974,15 @@ body {
 
   .app-header { position: sticky; top: 0; z-index: 10; }
 
-  /* Hide mobile tab bar; show desktop sidebar nav instead */
-  .tab-bar {
-    position: fixed;
-    top: var(--header-h);
-    left: 0;
-    bottom: 0;
-    width: 80px;
-    height: auto;
-    flex-direction: column;
-    border-top: none;
-    border-right: 1px solid var(--border);
-    padding-bottom: 0;
-  }
-
-  .tab {
-    height: 72px;
-    flex: none;
-    width: 100%;
-  }
+  /* Tab bar stays at bottom on all screen sizes */
 
   .panels {
-    margin-left: 80px;
     overflow: auto;
     height: auto;
     min-height: calc(100vh - var(--header-h));
   }
 
-  /* Tabs still switch panels on desktop; only tweak sizing */
+  /* Tabs still switch panels on desktop */
   .panel.active {
     height: auto;
     overflow-y: visible;
@@ -1389,3 +1370,69 @@ body {
   font-size: 11px;
 }
 .layout-popover-preset-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Global room controls ───────────────────────────────────────────────────── */
+.room-global-controls {
+  display: flex;
+  gap: 8px;
+  padding: 8px 0 4px;
+  grid-column: 1 / -1;
+}
+
+/* ── Header quick controls (on/off + swatch, always visible) ─────────────────── */
+.room-header-quick {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* ── Quick scenes bar (always visible, horizontal scroll) ────────────────────── */
+.room-quick-scenes {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px 10px 6px;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border);
+}
+.room-quick-scenes::-webkit-scrollbar { display: none; }
+
+.room-quick-scene-chip {
+  --scene-chip-color: var(--surface-2);
+  background: color-mix(in srgb, var(--scene-chip-color) 35%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--scene-chip-color) 60%, var(--border));
+  border-radius: 12px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.15s, border-color 0.15s;
+}
+.room-quick-scene-chip:hover {
+  background: color-mix(in srgb, var(--scene-chip-color) 70%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--scene-chip-color) 90%, var(--border));
+}
+
+/* ── Unassigned drop hint when empty ────────────────────────────────────────── */
+.room-unassigned-drop-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 6px 0;
+}
+
+/* ── Device rename input ─────────────────────────────────────────────────────── */
+.room-rename-input {
+  background: var(--surface-2);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 1px 4px;
+  width: 140px;
+  outline: none;
+}

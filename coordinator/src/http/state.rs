@@ -35,6 +35,8 @@ pub enum DashboardEvent {
     },
     RoomsUpdate {
         rooms: Vec<RoomInfo>,
+        #[serde(default)]
+        device_names: HashMap<String, String>,
     },
     ScenesUpdate {
         scenes: Vec<SceneInfo>,
@@ -77,6 +79,8 @@ pub struct SceneInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub room_id: Option<String>,
     pub created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_color: Option<[f32; 2]>,
 }
 
 /// Per-model entry in a `ModelUpdate` event — one per non-Unloaded allocation.
@@ -330,9 +334,20 @@ impl DashboardState {
 
     /// Store and broadcast the current rooms state.
     pub fn push_rooms_update(&self, rooms: Vec<RoomInfo>) {
+        self.push_rooms_update_with_names(rooms, HashMap::new());
+    }
+
+    pub fn push_rooms_update_with_names(
+        &self,
+        rooms: Vec<RoomInfo>,
+        device_names: HashMap<String, String>,
+    ) {
         *self.room_snapshot.lock().unwrap() = rooms.clone();
         if self.tx.receiver_count() > 0 {
-            let _ = self.tx.send(DashboardEvent::RoomsUpdate { rooms });
+            let _ = self.tx.send(DashboardEvent::RoomsUpdate {
+                rooms,
+                device_names,
+            });
         }
     }
 
@@ -1205,7 +1220,7 @@ mod tests {
         let mut rx = state.tx.subscribe();
         state.push_rooms_update(vec![make_room_info("r1", "Bedroom")]);
         match rx.try_recv().unwrap() {
-            DashboardEvent::RoomsUpdate { rooms } => {
+            DashboardEvent::RoomsUpdate { rooms, .. } => {
                 assert_eq!(rooms.len(), 1);
                 assert_eq!(rooms[0].name, "Bedroom");
             }
@@ -1235,6 +1250,7 @@ mod tests {
                 has_window: false,
                 window_facing: None,
             }],
+            device_names: std::collections::HashMap::new(),
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(
@@ -1260,6 +1276,7 @@ mod tests {
             name: name.into(),
             room_id: room_id.map(|s| s.into()),
             created_at: 1_000_000,
+            preview_color: None,
         }
     }
 
@@ -1325,6 +1342,7 @@ mod tests {
                 name: "Evening".into(),
                 room_id: Some("room-456".into()),
                 created_at: 1_700_000_000,
+                preview_color: None,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();
@@ -1351,6 +1369,7 @@ mod tests {
                 name: "Global".into(),
                 room_id: None,
                 created_at: 0,
+                preview_color: None,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();
