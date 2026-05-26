@@ -199,7 +199,7 @@ function renderCompassDial() {
   const handle = svgEl('circle', { id: 'lc-compass-handle', cx: 925, cy: 75, r: 52,
     fill: 'transparent', style: 'cursor:grab' });
   const tip = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-  tip.textContent = 'Drag to rotate. Align N (amber arrow) with the wall in your room that faces true North.';
+  tip.textContent = 'Drag to set orientation: point N toward the real-world compass direction your top canvas wall actually faces.';
   handle.appendChild(tip);
   g.appendChild(handle);
 }
