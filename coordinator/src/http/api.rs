@@ -148,6 +148,8 @@ pub struct LightCommandBody {
     y: Option<f32>,
     #[serde(default)]
     transition_secs: Option<f32>,
+    #[serde(default)]
+    is_solar: Option<bool>,
 }
 
 fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
@@ -275,8 +277,12 @@ pub async fn light_command(
     };
     let sent = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
     // Manual command in a solar-enabled room suspends solar for this device.
-    if let Some(true) = registry.lock().unwrap().get_room_for_device_solar(&device) {
-        state.set_solar_enabled(&device, false);
+    // Simulation commands (is_solar: true) bypass this so they don't disable tracking.
+    if body.is_solar != Some(true) {
+        let solar_room = registry.lock().unwrap().get_room_for_device_solar(&device);
+        if let Some(true) = solar_room {
+            state.set_solar_enabled(&device, false);
+        }
     }
     if sent {
         StatusCode::NO_CONTENT.into_response()
@@ -562,11 +568,20 @@ pub async fn set_room_solar(
 
 pub async fn restore_device_solar(
     Path(device): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
     Query(q): Query<TokenQuery>,
     State(state): State<Arc<DashboardState>>,
 ) -> impl IntoResponse {
     if !state.auth_ok(&q.token) {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        let mut reports = reg.load_light_states();
+        if let Some(report) = reports.iter_mut().find(|r| r.device_id == device) {
+            report.solar_enabled = true;
+            reg.save_light_state(report);
+        }
     }
     state.set_solar_enabled(&device, true);
     state.solar_sweep_notify.notify_one();
@@ -2375,6 +2390,7 @@ mod tests {
                 x,
                 y,
                 transition_secs: None,
+                is_solar: None,
             })
         };
         assert!(matches!(mk("on", None, None, None), Some(LightAction::On)));

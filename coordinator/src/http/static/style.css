@@ -878,6 +878,19 @@ body {
 .room-action-delete:hover {
   color: var(--red);
   border-color: var(--red);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--red) 40%, transparent);
+}
+
+.room-action-on:hover {
+  color: var(--green);
+  border-color: var(--green);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--green) 40%, transparent);
+}
+
+.room-card.drag-leaving {
+  border-color: var(--amber);
+  opacity: 0.65;
+  transition: opacity 0.15s, border-color 0.15s;
 }
 
 .room-controls {
