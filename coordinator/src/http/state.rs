@@ -234,9 +234,17 @@ impl DashboardState {
     }
 
     /// Store the latest state for one device and broadcast a LightingUpdate with all devices + groups.
-    pub fn push_lighting_update(&self, report: LightStateReport) {
+    pub fn push_lighting_update(&self, mut report: LightStateReport) {
         let devices = {
             let mut snap = self.light_snapshot.lock().unwrap();
+            // Preserve solar_enabled flag if it was already true in our snapshot.
+            // Reports from agents usually have it as false because they don't track it.
+            if let Some(true) = snap
+                .get(&report.device_id)
+                .map(|e| e.solar_enabled && !report.solar_enabled)
+            {
+                report.solar_enabled = true;
+            }
             snap.insert(report.device_id.clone(), report);
             snap.values().cloned().collect::<Vec<_>>()
         };

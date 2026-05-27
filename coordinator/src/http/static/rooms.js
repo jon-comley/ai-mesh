@@ -123,10 +123,14 @@ fetchDeviceNames();
 export function handleRoomsUpdate(evt) {
   roomsData = evt.rooms ?? [];
   if (evt.device_names) notifyDeviceNames(evt.device_names);
-  // Forward orientation to layout canvas if a room is open (layout guards on dial presence)
+  
+  // Forward orientation/room state to layout canvas if a room is open
   if (evt.rooms && layout.currentLayoutRoomId()) {
     const r = evt.rooms.find(r => r.id === layout.currentLayoutRoomId());
-    if (r != null) layout.notifyOrientationUpdate(r.orientation_degrees);
+    if (r != null) {
+      layout.notifyOrientationUpdate(r.orientation_degrees);
+      layout.notifyRoomUpdate(r);
+    }
   }
   render();
 }
@@ -231,7 +235,7 @@ function renderGlobalControls() {
   bar.className = 'room-global-controls';
 
   const allOnBtn = document.createElement('button');
-  allOnBtn.className = 'room-action-btn';
+  allOnBtn.className = 'room-action-btn room-action-on';
   allOnBtn.textContent = 'All On';
   allOnBtn.addEventListener('click', () => {
     for (const r of roomsData) sendRoomCommand(r.id, { action: 'on' }, r);
@@ -866,6 +870,8 @@ function wireDeviceDrag(card, deviceId, roomId) {
     e.dataTransfer.setData('text/plain', deviceId);
     requestAnimationFrame(() => card.classList.add('dragging'));
     startPulse(deviceId);
+    // Mark source room card as "losing" a device
+    document.querySelector(`[data-room-id="${CSS.escape(roomId)}"]`)?.classList.add('drag-leaving');
     // Reveal the unassigned strip so there's a visible drop target
     const strip = document.getElementById('unassigned-strip');
     if (strip) strip.style.display = '';
@@ -876,6 +882,7 @@ function wireDeviceDrag(card, deviceId, roomId) {
     card.setAttribute('draggable', 'true');
     card.closest('.room-card')?.setAttribute('draggable', 'true');
     stopPulse();
+    document.querySelectorAll('.drag-leaving').forEach(el => el.classList.remove('drag-leaving'));
     // Re-hide the unassigned strip if nothing was dropped into it
     const strip = document.getElementById('unassigned-strip');
     if (strip && !strip.querySelector('.room-chip')) strip.style.display = 'none';
@@ -1020,11 +1027,17 @@ function renderChip(deviceId, fromRoomId, showRemove) {
     e.dataTransfer.setData('text/plain', deviceId);
     requestAnimationFrame(() => chip.classList.add('dragging'));
     startPulse(deviceId);
+    document.querySelector(`[data-room-id="${CSS.escape(fromRoomId)}"]`)?.classList.add('drag-leaving');
+    const strip = document.getElementById('unassigned-strip');
+    if (strip) strip.style.display = '';
   });
   chip.addEventListener('dragend', () => {
     chip.classList.remove('dragging');
     dragSrc = null;
     stopPulse();
+    document.querySelectorAll('.drag-leaving').forEach(el => el.classList.remove('drag-leaving'));
+    const strip = document.getElementById('unassigned-strip');
+    if (strip && !strip.querySelector('.room-chip')) strip.style.display = 'none';
   });
 
   return chip;
