@@ -271,6 +271,15 @@ Full design spec: `plans/phase11-dashboard.md`
     - **Source-of-truth rule**: The compass dial is always the single source of truth. Phone compass and sun calibration both set the dial value and then PATCH — they never bypass the dial. This keeps the UI consistent and prevents competing orientation sources.
     - **Backend**: `PATCH /api/rooms/{id}/orientation { orientation_degrees: f32 }` → clamp to `[0, 360)` → `UPDATE rooms SET orientation_degrees`. `SpatialEngine` unchanged — it already reads `orientation_degrees` on every sweep. No schema changes needed.
     - **Deferred — OSM building footprint auto-detect**: Geocode address → Overpass API building polygon → derive longest wall axis. Too many edge cases and external API dependency for marginal gain; revisit if users request it.
+  - **Phase E ✓ Complete — Room dimensions, draggable crosshair, mobile UX polish**
+    - **Room dimensions**: `rooms` table gains `width_m`, `depth_m`, `height_m` floats and `origin_x`, `origin_y` normalised origin (default 3 × 6 × 2.5 m, origin 0.5, 0.5) via idempotent ALTER TABLE migrations. `PATCH /api/rooms/{id}/origin` and `PATCH /api/rooms/{id}/dimensions` endpoints (Phase E-1, commit `1118061`). Sidebar W/D/H number inputs PATCH on change.
+    - **Origin crosshair restyle (E-2)**: 16 px cyan ring + inner plus replaces the offset `⊕` glyph. Invisible 36 px-radius hit area on top — ~9× the previous tappable area. Touch input requires double-tap to start drag (first tap thickens the ring as armed-hint; second tap within 400 ms enters drag mode); mouse retains single-press-drag. **Live dimensions during drag**: two cyan labels — `↑ X.XX m` (distance to top edge, on the vertical line) and `X.XX m →` (distance to right edge, on the horizontal line above the crosshair) — with a black stroke outline so they stay readable over any room contents. Both vanish on release.
+    - **Sidebar collapsibles**: `Bulbs` / `Openings` / `Room size` become collapsible sections with the same `▾`/`▸` chevron pattern as the room cards, state persisted in `localStorage` per section. Sidebar width narrowed 150 → 110 px, chip padding tightened, freeing ~40 px of canvas width.
+    - **Touch-device tap-target media query**: `@media (hover: none) and (pointer: coarse)` block bumps icon/badge buttons (`.room-collapse-btn`, `.room-remove-btn`, `.room-layout-btn`, `.room-action-btn`, `.light-toggle-btn`, `.layout-toolbar-btn`) to `min-width/height: 36px`, `.color-swatch-btn` and `.solar-dot` to 32 × 32, slider thumbs 14 → 22 px, slider tracks 4 → 6 px, chip padding/font bumped. Desktop with a mouse is untouched.
+    - **Slider lock during automatic control**: brightness and color-temp sliders get `disabled` + faded label/value when `dev.solar_enabled` (or any future per-device effect) is true, with tooltip "Disabled while solar is active — click ☀ to take manual control". Browsers don't fire pointer events on disabled inputs, so the `slider-active` race path is short-circuited as a side effect.
+    - **Slider race fix (server + client)**: previously, releasing a brightness/CT slider could snap back to the pre-command value because the next WS snapshot (triggered by another device's report) still carried the stale value. Fixed in two places: (1) coordinator `DashboardState::apply_command_to_snapshot(device, action)` mutates the in-memory light snapshot at the moment the command is sent, so subsequent broadcasts carry the intended value; (2) client `pendingCommands` overlay in `rooms.js` reconciles incoming snapshots against pending optimistic values with a 2 s TTL, dropping the overlay on snapshot agreement. Net: the slider stays where the user released it, even if multiple devices report concurrently.
+    - **Light cone shadow camera tightening (3D view)**: directional-light shadow camera frustum sized to the room diagonal × 1.5 (was `±(W+D)`, ~3× oversize) — roughly 3× more shadow-map texels per surface unit.
+    - **`dashboard-mobile` recipe**: `just dashboard-mobile` adds idempotent Windows portproxy 9001 → WSL2:9001 (folded into the existing `update-portproxy` so a single UAC prompt handles both 9000 and 9001), opens the Windows firewall for TCP/9001, then prints the LAN URL with the auth token. Pre-cutover convenience — retired in Phase 11.6 when the coordinator moves to pi1.
   - **Engineering**: Room layout view is a new `layout.js` module. Canvas coordinates are always 0–1 so the SVG scales to any screen. Bulb icons on canvas reflect live state (colour swatch, brightness) from the existing `devicesMap`. DB migration in Phase B: existing `rooms.has_window` / `window_facing` rows are converted to `openings` rows on first startup with the new schema.
     - **3D solar weighting** — `SpatialEngine` upgrades from a 2D azimuth dot-product to a full 3D calculation once Z is populated. The sun direction vector is `(sin(az)·cos(el), cos(az)·cos(el), sin(el))`; each bulb's normalised position vector is `(x−0.5, y−0.5, z−0.5)`. The dot-product of these two gives solar exposure: a table lamp near a south-facing window at the same height gets high weighting; a ceiling spot directly above gets much less because the sun vector is nearly perpendicular to the vertical offset. Bulbs with no Z set (legacy) fall back to the existing 2D calculation so old behaviour is preserved until the user sets up the canvas.
     - **`fixture_type` column** added to `light_positions` table (TEXT, nullable — null treated as `ceiling_spot` for backward compat).
@@ -392,6 +401,45 @@ mesh security-report        # one-shot snapshot of current failure counts
 - Historical inference latency per model.
 - Live intent log (query, routed-to node, latency, response preview).
 - Mobile-friendly layout.
+
+---
+
+## Phase 11.6 — Always-On Coordinator + Remote Access (Planned)
+
+Full design spec: `plans/coordinator-on-pi1.md`
+
+Move the coordinator role off the WSL2 laptop (`OmniLink1`) onto the always-on Pi 5 (`pi1`, `192.168.1.11`) so the laptop can be closed without taking the smart-home dashboard offline. Add Tailscale for outside-LAN phone access (cellular, public Wi-Fi, anywhere) without exposing the dashboard to the public internet.
+
+**Key decisions**
+
+- **pi1 hosts the coordinator.** Co-locates with the existing Zigbee stack (zigbee2mqtt + Mosquitto) → localhost MQTT round-trip for every light command. Beelink stays free for heavy compute. Pi 5 is fanless, low-power, always-on.
+- **Tailscale for remote access.** Phone gets a stable `100.x.x.x` address that always reaches pi1; MagicDNS makes the bookmark `http://pi1:9001/?token=…`. No port forwarding, no Let's Encrypt. Run with `--qr --ssh` for headless QR-code auth and emergency SSH-over-tunnel.
+- **Coordinator state survives the move.** `~/.config/ai-mesh/coordinator.{crt,key,state}` and `ai_mesh.db` (currently in repo cwd — must move to `/var/lib/ai-mesh/` with explicit `WorkingDirectory=` in the systemd unit). Existing token reused via the auto-load fix in `state::read()` so the phone bookmark keeps working post-cutover.
+
+**Phases**
+
+1. Build & install coordinator on pi1 (cross-build `aarch64-unknown-linux-gnu`, systemd unit with `After=network-online.target`, `ProtectSystem=full`, `RUST_LOG=info`, 0700 on `/var/lib/ai-mesh/`).
+2. Repoint BEELINK1 + OmniLink1 agents at pi1 (existing `set-auth-token` / `start-agents` recipes already handle the cross-OS plumbing). Hard health-check gate before cutover: agents connected, fingerprints match, Zigbee → Mosquitto on `localhost`, dashboard loads, light command reaches a bulb.
+3. Tailscale install on pi1 + phone; MagicDNS enabled; verified on cellular.
+4. Retire WSL2 portproxy from the dashboard path; update `dashboard-mobile` recipe; update topology memory file.
+
+**Artefacts to produce**
+
+- `systemd/ai-mesh-coordinator.service` in the repo (source-controlled).
+- `just deploy-coordinator <host>` — idempotent cross-build → scp binary + state + DB → install unit → enable + start → run health check.
+- `just verify-coordinator <host>` — Phase-2 health check, standalone and re-runnable.
+- `just rollback-coordinator` — emergency revert path (stop pi1, restart on laptop using preserved state backup) until cutover is proven stable.
+
+**Coordinator-side fix already landed (enabler)**
+
+- `state::read()` / `read_from_path()` parse the persisted state file at coordinator startup. If `MESH_AUTH_TOKEN` env is not set, the coordinator now reuses the persisted token from `coordinator.state` instead of generating a fresh one. Means restarting the coordinator any way (cargo run, systemctl restart, IDE relaunch) keeps the same token — bookmarked phone URLs survive. Logs `auth token reused from coordinator.state` when this path fires. 3 new tests in `state.rs`.
+
+**Future hardening (deferred from this migration)**
+
+- `ProtectHome=true` on the systemd unit (currently blocked by `dirs::config_dir()` resolving to `~/.config/ai-mesh/`; requires either a `MESH_CONFIG_DIR` env override or moving state under `/var/lib/ai-mesh/`).
+- SQLite `journal_mode=WAL` + `synchronous=NORMAL` for SD-card longevity on pi1.
+- `LimitNOFILE=4096` if the cluster grows past ~100 agents.
+- Per-node TLS certs instead of one self-signed cert pinned across all agents.
 
 ---
 

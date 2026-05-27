@@ -18,6 +18,36 @@ const solarSuspendedByScene = new Set(); // roomIds where solar badge is paused 
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
 let _sceneReorderTimer = null;
 
+// Pending optimistic command values per (deviceId, field). Each entry { value, ts }.
+// Overlaid onto incoming WS snapshots so the slider doesn't snap back to the
+// pre-command server value while the round-trip is still in flight.
+const pendingCommands = new Map();
+const PENDING_TTL_MS = 2000;
+
+function markPending(deviceId, field, value) {
+  let fields = pendingCommands.get(deviceId);
+  if (!fields) { fields = {}; pendingCommands.set(deviceId, fields); }
+  fields[field] = { value, ts: Date.now() };
+}
+
+function reconcilePending(dev) {
+  const fields = pendingCommands.get(dev.device_id);
+  if (!fields) return dev;
+  const now = Date.now();
+  let out = dev;
+  for (const field of Object.keys(fields)) {
+    const { value, ts } = fields[field];
+    if (dev[field] === value || now - ts > PENDING_TTL_MS) {
+      delete fields[field];
+      continue;
+    }
+    if (out === dev) out = { ...dev };
+    out[field] = value;
+  }
+  if (Object.keys(fields).length === 0) pendingCommands.delete(dev.device_id);
+  return out;
+}
+
 function updateSceneChipStates(roomId) {
   const card = document.querySelector(`[data-room-id="${CSS.escape(roomId)}"]`);
   if (!card) return;
@@ -153,9 +183,13 @@ export function handleScenesUpdate(evt) {
 
 export function notifyDevices(devices) {
   devicesMap.clear();
-  for (const dev of devices) devicesMap.set(dev.device_id, dev);
-  // Forward live state to canvas if layout is open
-  for (const dev of devices) layout.notifyDeviceUpdate(dev.device_id, dev);
+  for (const dev of devices) {
+    const reconciled = reconcilePending(dev);
+    devicesMap.set(dev.device_id, reconciled);
+    layout.notifyDeviceUpdate(dev.device_id, reconciled);
+  }
+  // Skip full re-render while a slider is being dragged to prevent mid-drag jumps
+  if (document.querySelector('.slider-active')) return;
   render();
 }
 
@@ -790,24 +824,30 @@ function deviceCardHtml(dev, roomSolarEnabled = false) {
       </div>`;
   }
 
+  // When solar is driving the bulb, brightness + color temp are owned by the
+  // solar engine — disable the sliders so user drags don't fight the engine.
+  const autoControlled = dev.solar_enabled;
+  const autoTip = autoControlled ? 'Disabled while solar is active — click ☀ to take manual control' : '';
+  const disabledAttr = autoControlled ? 'disabled' : '';
+
   let controls = '';
   if (dev.brightness != null) {
     const pct = Math.round((dev.brightness / 255) * 100);
     controls += `
-      <div class="light-detail-row">
+      <div class="light-detail-row${autoControlled ? ' light-detail-row-disabled' : ''}">
         <span class="light-detail-label">Brightness</span>
         <input class="light-slider" type="range" min="0" max="255" value="${dev.brightness}"
-               data-ctrl="brightness" title="${pct}%" aria-label="Brightness">
+               data-ctrl="brightness" title="${autoTip || `${pct}%`}" aria-label="Brightness" ${disabledAttr}>
         <span class="light-detail-value">${pct}%</span>
       </div>`;
   }
   if (dev.color_temp != null) {
     const kelvin = Math.round(1_000_000 / dev.color_temp);
     controls += `
-      <div class="light-detail-row">
+      <div class="light-detail-row${autoControlled ? ' light-detail-row-disabled' : ''}">
         <span class="light-detail-label">Color temp</span>
         <input class="light-slider" type="range" min="154" max="500" value="${dev.color_temp}"
-               data-ctrl="color_temp" title="${kelvin} K" aria-label="Color temperature">
+               data-ctrl="color_temp" title="${autoTip || `${kelvin} K`}" aria-label="Color temperature" ${disabledAttr}>
         <span class="light-detail-value">${kelvin} K</span>
       </div>`;
   }
@@ -823,8 +863,8 @@ function deviceCardHtml(dev, roomSolarEnabled = false) {
         ${swatch}
         ${roomSolarEnabled ? `<button class="solar-dot ${dev.solar_enabled ? 'solar-dot-active' : 'solar-dot-dim'}"
           data-ctrl="restore-solar"
-          title="${dev.solar_enabled ? 'Solar active' : 'Solar overridden — click to restore'}"
-          aria-label="${dev.solar_enabled ? 'Solar active' : 'Restore solar for this device'}">&#9728;</button>` : ''}
+          title="${dev.solar_enabled ? 'Solar on — click to disable' : 'Solar off — click to enable'}"
+          aria-label="${dev.solar_enabled ? 'Disable solar for this device' : 'Enable solar for this device'}">&#9728;</button>` : ''}
         <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(displayName)}">
           <span class="badge ${badgeClass}">${badgeLabel}</span>
         </button>
@@ -900,20 +940,20 @@ function wireDeviceControls(card, dev, roomId) {
   card.querySelector('[data-ctrl="restore-solar"]')?.addEventListener('click', async e => {
     e.stopPropagation();
     const cur = devicesMap.get(dev.device_id);
-    if (!cur || cur.solar_enabled) return; // already active, dot is just an indicator
-    devicesMap.set(dev.device_id, { ...cur, solar_enabled: true });
+    if (!cur) return;
+    const enabling = !cur.solar_enabled;
+    devicesMap.set(dev.device_id, { ...cur, solar_enabled: enabling });
     render();
     try {
       const res = await fetch(
-        `/api/lights/${encodeURIComponent(dev.device_id)}/restore-solar?token=${encodeURIComponent(tok())}`,
-        { method: 'POST' }
+        `/api/lights/${encodeURIComponent(dev.device_id)}/solar?token=${encodeURIComponent(tok())}`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabling }) }
       );
       if (!res.ok) throw new Error(`${res.status}`);
     } catch (err) {
-      // Revert optimistic update on failure
-      devicesMap.set(dev.device_id, { ...cur, solar_enabled: false });
+      devicesMap.set(dev.device_id, { ...cur, solar_enabled: cur.solar_enabled });
       render();
-      showToast(`Restore solar error: ${err.message}`, true);
+      showToast(`Solar toggle error: ${err.message}`, true);
     }
   });
 
@@ -935,28 +975,38 @@ function wireDeviceControls(card, dev, roomId) {
 
   const bri = card.querySelector('[data-ctrl="brightness"]');
   if (bri) {
+    bri.addEventListener('pointerdown', () => bri.classList.add('slider-active'));
+    bri.addEventListener('pointercancel', () => bri.classList.remove('slider-active'));
     bri.addEventListener('input', () => {
       const pct = Math.round((bri.value / 255) * 100);
       bri.title = `${pct}%`;
       bri.parentElement.querySelector('.light-detail-value').textContent = `${pct}%`;
     });
     bri.addEventListener('change', () => {
+      bri.classList.remove('slider-active');
       const val = parseInt(bri.value, 10);
-      devicesMap.set(dev.device_id, { ...dev, brightness: val });
+      const cur = devicesMap.get(dev.device_id) ?? dev;
+      devicesMap.set(dev.device_id, { ...cur, brightness: val });
+      markPending(dev.device_id, 'brightness', val);
       sendDeviceCommand(dev.device_id, { action: 'brightness', value: val, transition_secs: 0.4 });
     });
   }
 
   const ct = card.querySelector('[data-ctrl="color_temp"]');
   if (ct) {
+    ct.addEventListener('pointerdown', () => ct.classList.add('slider-active'));
+    ct.addEventListener('pointercancel', () => ct.classList.remove('slider-active'));
     ct.addEventListener('input', () => {
       const kelvin = Math.round(1_000_000 / ct.value);
       ct.title = `${kelvin} K`;
       ct.parentElement.querySelector('.light-detail-value').textContent = `${kelvin} K`;
     });
     ct.addEventListener('change', () => {
+      ct.classList.remove('slider-active');
       const val = parseInt(ct.value, 10);
-      devicesMap.set(dev.device_id, { ...dev, color_temp: val });
+      const cur = devicesMap.get(dev.device_id) ?? dev;
+      devicesMap.set(dev.device_id, { ...cur, color_temp: val });
+      markPending(dev.device_id, 'color_temp', val);
       sendDeviceCommand(dev.device_id, { action: 'color_temp', value: val, transition_secs: 0.4 });
     });
   }
@@ -1260,18 +1310,22 @@ async function setSolarMode(roomId, enable) {
 
   // When enabling solar, immediately transition each device to the current solar
   // state over 3 s so the change looks intentional rather than abrupt.
-  // Use raw fetch (not sendDeviceCommand) to avoid the per-device solar-disable side effect.
+  // `is_solar: true` tells the coordinator this is the solar engine's own
+  // command, NOT a manual override — without it, the server's light_command
+  // handler would interpret these commands as a user override and immediately
+  // clear per-device solar_enabled flags, leaving the room "solar" but the
+  // bulbs untracked.
   if (enable) {
     const { bri, ct } = solarStateFromElevation(lastKnownSolar.elevation);
     const t = tok();
     for (const deviceId of room.device_ids) {
       fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'brightness', value: bri, transition_secs: 3.0 }),
+        body: JSON.stringify({ action: 'brightness', value: bri, transition_secs: 3.0, is_solar: true }),
       }).catch(() => {});
       fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'color_temp', value: ct, transition_secs: 3.0 }),
+        body: JSON.stringify({ action: 'color_temp', value: ct, transition_secs: 3.0, is_solar: true }),
       }).catch(() => {});
     }
   }

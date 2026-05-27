@@ -11,13 +11,44 @@ let placedOpenings = {};        // opening_id → { opening_type, wall_edge, x_n
 let lastSolar = { azimuth: 180, elevation: -90 };
 let undoStack = [];             // position snapshots for Ctrl+Z
 let redoStack = [];
-let snapDivisions = 20;         // invisible grid: 1/N of canvas width
+// Snap step is 1 cm of real-world distance — applied per-axis using the
+// room's actual width_m / depth_m so the grid is uniform in cm regardless
+// of canvas aspect ratio. See snapTo / snapX / snapY below.
 let showLabels = true;
 let activePopover = null;       // currently open popover element
-let dragType = null;            // 'bulb' | 'opening' — set on dragstart since getData is unavailable in dragover
+let dragType = null;            // 'bulb' | 'opening' — set on dragstart
+
+function setCanvasDragClass(on) {
+  const svg = document.getElementById('layout-canvas');
+  if (!svg) return;
+  svg.classList.toggle('layout-dragging', on);
+  // Belt and braces: directly set pointer-events on the crosshair hit so the
+  // drop is never absorbed mid-drag, regardless of CSS specificity quirks.
+  const hit = svg.querySelector('.lc-crosshair-hit');
+  if (hit) hit.setAttribute('pointer-events', on ? 'none' : 'auto');
+}
 // Global safety net: clear dragType if a drag is cancelled or ends outside the canvas
 window.addEventListener('dragend', () => { dragType = null; });
 window.addEventListener('drop', () => { dragType = null; });
+
+// ── Three.js state ────────────────────────────────────────────────────────────
+let THREE = null;
+let ThreeOrbitControls = null;
+let threeRenderer = null;
+let threeScene = null;
+let threeRoomGroup = null;
+let threePerspCamera = null;
+let threeControls = null;
+let threeSunLight = null;
+let threeBulbMeshes = {};     // deviceId → { mesh, ptLight, mat }
+let threeOpeningMeshes = {};  // openingId → mesh
+let threeNeedsRender = false; // on-demand rendering — only draw when something changed
+let threeIs3D = false;
+let threeAnimFrameId = null;
+let threeRaycaster = null;
+let threeFloorPlane = null;   // THREE.Plane at y=0
+// 3D view is view-only — no drag-to-move, no sidebar drop target. Layout
+// edits happen in the 2D view; 3D is purely for visualising effects/solar/scenes.
 
 // ── Phase D: compass + sun arc state ─────────────────────────────────────────
 let compassDeg = 0;             // current orientation_degrees for the open room
@@ -96,12 +127,15 @@ export async function openLayout(room) {
   loadPlacedBulbs(room.id);
   loadPlacedOpenings(room.id);
   renderCrosshair(room);
+  initThree(room).catch(() => {});
+
+  // Compass dial sets the room's orientation — useful regardless of whether
+  // the room is currently solar-enabled, so render it always.
+  renderCompassDial();
+  wireCompass();
+  wirePhoneCompass();
 
   if (room.solar_enabled) {
-    // Init compass dial and sun arc now that the SVG exists
-    renderCompassDial();
-    wireCompass();
-    wirePhoneCompass();
     wireSunCalib();
     wireScrubber();
     wireModelSelect();
@@ -109,7 +143,7 @@ export async function openLayout(room) {
     redrawLightEffect(lastSolar.azimuth, lastSolar.elevation);
     updateSunCalibButton();
   } else {
-    // Hide solar controls for rooms without solar
+    // Hide solar-specific controls for rooms without solar effect
     const scrubBar = document.getElementById('lc-scrubber-bar');
     if (scrubBar) scrubBar.style.display = 'none';
   }
@@ -120,6 +154,7 @@ export async function openLayout(room) {
 export function closeLayout() {
   document.removeEventListener('keydown', onKeyDown);
   dismissPopover();
+  teardownThree();
 
   document.getElementById('panel-lighting')?.classList.remove('layout-open');
 
@@ -139,6 +174,7 @@ export function notifyDeviceUpdate(deviceId, state) {
   const entry = placedBulbs[deviceId];
   if (!entry || !scrubberLive) return;
   updateBulbIcon(entry, state);
+  threeUpdateBulbColor(deviceId, state);
 }
 
 // Called by rooms.js when a RoomsUpdate WS event arrives — updates the active room object.
@@ -158,6 +194,7 @@ export function notifySolarUpdate(azimuth, elevation) {
     redrawSolarOverlay(azimuth, elevation);
   }
   updateSunCalibButton();
+  threeUpdateSun(azimuth, elevation);
 }
 
 // Called by rooms.js when a RoomsUpdate arrives with a new orientation for this room.
@@ -543,11 +580,14 @@ function calculateSolarState(elevation) {
 function previewSolarState(azimuth, elevation) {
   lastSolar = { azimuth, elevation };  // keep in sync so model-change redraws use correct position
   const { bri, ct } = calculateSolarState(elevation);
-  for (const [, entry] of Object.entries(placedBulbs)) {
-    updateBulbIcon(entry, { on: true, brightness: bri, color_temp: ct, color_xy: null });
+  for (const [id, entry] of Object.entries(placedBulbs)) {
+    const state = { on: true, brightness: bri, color_temp: ct, color_xy: null };
+    updateBulbIcon(entry, state);
+    threeUpdateBulbColor(id, state);
   }
   redrawSolarOverlay(azimuth, elevation);
   redrawLightEffect(azimuth, elevation);
+  threeUpdateSun(azimuth, elevation);
 }
 
 // ── Light model selector ──────────────────────────────────────────────────────
@@ -790,6 +830,14 @@ function buildLayoutView(room) {
   redoBtn.addEventListener('click', redo);
   controls.appendChild(redoBtn);
 
+  const btn3d = document.createElement('button');
+  btn3d.id = 'lc-3d-toggle';
+  btn3d.className = 'layout-toolbar-btn';
+  btn3d.textContent = '3D';
+  btn3d.title = 'Switch to 3D perspective view';
+  btn3d.addEventListener('click', () => toggle3D(btn3d));
+  controls.appendChild(btn3d);
+
   header.appendChild(controls);
   view.appendChild(header);
 
@@ -804,26 +852,79 @@ function buildLayoutView(room) {
   return view;
 }
 
+function makeCollapsibleSection(titleText, storageKey, defaultCollapsed = false) {
+  const wrap = document.createElement('div');
+  wrap.className = 'layout-sidebar-section';
+
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'layout-sidebar-section-head';
+  const chev = document.createElement('span');
+  chev.className = 'layout-sidebar-section-chevron';
+  const titleEl = document.createElement('span');
+  titleEl.className = 'layout-sidebar-section-title';
+  titleEl.textContent = titleText;
+  head.appendChild(chev);
+  head.appendChild(titleEl);
+
+  const body = document.createElement('div');
+  body.className = 'layout-sidebar-section-body';
+
+  const stored = localStorage.getItem(storageKey);
+  const isCollapsed = stored === '1' || (stored === null && defaultCollapsed);
+  chev.textContent = isCollapsed ? '▸' : '▾';
+  if (isCollapsed) body.classList.add('collapsed');
+
+  head.addEventListener('click', () => {
+    const willCollapse = !body.classList.contains('collapsed');
+    body.classList.toggle('collapsed', willCollapse);
+    chev.textContent = willCollapse ? '▸' : '▾';
+    localStorage.setItem(storageKey, willCollapse ? '1' : '0');
+  });
+
+  wrap.appendChild(head);
+  wrap.appendChild(body);
+  return { wrap, body };
+}
+
 function buildSidebar(room) {
   const sidebar = document.createElement('div');
   sidebar.className = 'layout-sidebar';
 
-  const label = document.createElement('div');
-  label.className = 'layout-sidebar-label';
-  label.textContent = 'Bulbs:';
-  sidebar.appendChild(label);
+  // Top-level collapse — slides the whole panel down to a thin strip so the
+  // canvas gets the freed space. Click the chevron to expand again.
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'layout-sidebar-toggle';
+  toggle.title = 'Show / hide menu';
+  const sidebarCollapsedKey = 'mesh-layout-sidebar-collapsed';
+  const updateToggle = () => {
+    const collapsed = sidebar.classList.contains('collapsed');
+    toggle.textContent = collapsed ? '»' : '«';
+    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  };
+  if (localStorage.getItem(sidebarCollapsedKey) === '1') {
+    sidebar.classList.add('collapsed');
+  }
+  updateToggle();
+  toggle.addEventListener('click', () => {
+    const nowCollapsed = !sidebar.classList.contains('collapsed');
+    sidebar.classList.toggle('collapsed', nowCollapsed);
+    localStorage.setItem(sidebarCollapsedKey, nowCollapsed ? '1' : '0');
+    updateToggle();
+  });
+  sidebar.appendChild(toggle);
+
+  const bulbs = makeCollapsibleSection('Bulbs', 'mesh-layout-sb-bulbs');
+  sidebar.appendChild(bulbs.wrap);
 
   const chips = document.createElement('div');
   chips.className = 'layout-sidebar-chips';
   chips.id = 'layout-sidebar-chips';
-  sidebar.appendChild(chips);
+  bulbs.body.appendChild(chips);
 
-  // Openings section — always shown
-  const openingsLabel = document.createElement('div');
-  openingsLabel.className = 'layout-sidebar-label';
-  openingsLabel.style.marginTop = '12px';
-  openingsLabel.textContent = 'Openings (drop to wall):';
-  sidebar.appendChild(openingsLabel);
+  const openings = makeCollapsibleSection('Openings', 'mesh-layout-sb-openings', true);
+  sidebar.appendChild(openings.wrap);
 
   const openingChips = document.createElement('div');
   openingChips.className = 'layout-sidebar-chips';
@@ -837,20 +938,18 @@ function buildSidebar(room) {
     chip.textContent = lbl;
     chip.addEventListener('dragstart', e => {
       dragType = 'opening';
+      setCanvasDragClass(true);
       e.dataTransfer.effectAllowed = 'copy';
       e.dataTransfer.setData('text/plain', `opening:${type}`);
     });
-    chip.addEventListener('dragend', () => { dragType = null; });
+    chip.addEventListener('dragend', () => { dragType = null; setCanvasDragClass(false); });
+    wireChipTouchDrag(chip, 'opening', type);
     openingChips.appendChild(chip);
   }
-  sidebar.appendChild(openingChips);
+  openings.body.appendChild(openingChips);
 
-  // Dimensions panel
-  const dimsLabel = document.createElement('div');
-  dimsLabel.className = 'layout-sidebar-label';
-  dimsLabel.style.marginTop = '16px';
-  dimsLabel.textContent = 'Room size (m):';
-  sidebar.appendChild(dimsLabel);
+  const dims = makeCollapsibleSection('Room size (m)', 'mesh-layout-sb-dims', true);
+  sidebar.appendChild(dims.wrap);
 
   const dimsRow = document.createElement('div');
   dimsRow.className = 'layout-dims-row';
@@ -884,7 +983,7 @@ function buildSidebar(room) {
     wrap.appendChild(inp);
     dimsRow.appendChild(wrap);
   }
-  sidebar.appendChild(dimsRow);
+  dims.body.appendChild(dimsRow);
 
   sidebar._room = room;
   return sidebar;
@@ -931,6 +1030,7 @@ function makeSidebarChip(deviceId) {
 
   chip.addEventListener('dragstart', e => {
     dragType = 'bulb';
+    setCanvasDragClass(true);
     e.dataTransfer.effectAllowed = 'copy';
     e.dataTransfer.setData('text/plain', `bulb:${deviceId}`);
     // Trigger pulse-on-grab via rooms.js exported function
@@ -940,10 +1040,12 @@ function makeSidebarChip(deviceId) {
   });
   chip.addEventListener('dragend', () => {
     dragType = null;
+    setCanvasDragClass(false);
     if (typeof window.__roomsStopPulse === 'function') {
       window.__roomsStopPulse(true);
     }
   });
+  wireChipTouchDrag(chip, 'bulb', deviceId);
   return chip;
 }
 
@@ -974,8 +1076,12 @@ function buildCanvas() {
   floor.setAttribute('rx', '8');
   svg.appendChild(floor);
 
-  // Layer order: wall-glow behind everything, compass on top
-  for (const id of ['lc-sun-arc', 'lc-openings', 'lc-shadow', 'lc-crosshair', 'lc-bulbs', 'lc-preview', 'lc-compass']) {
+  // Layer order: wall-glow behind everything, compass on top.
+  // `lc-crosshair-hit` sits above bulbs so the crosshair grab handle remains
+  // grabbable even when a bulb has been dropped on the origin — visually the
+  // bulb is on top of the crosshair ring (good), but the user can still tap
+  // the centre to drag the crosshair away.
+  for (const id of ['lc-sun-arc', 'lc-openings', 'lc-shadow', 'lc-crosshair', 'lc-bulbs', 'lc-preview', 'lc-crosshair-hit', 'lc-compass']) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.id = id;
     svg.appendChild(g);
@@ -988,6 +1094,13 @@ function buildCanvas() {
   svg.addEventListener('click', onCanvasClick);
 
   wrap.appendChild(svg);
+
+  // Three.js container — hidden by default, shown when 3D toggle is active
+  const canvas3d = document.createElement('div');
+  canvas3d.id = 'lc-3d-container';
+  canvas3d.style.display = 'none';
+  wrap.appendChild(canvas3d);
+
   outer.appendChild(wrap);
 
   // Scrubber bar below canvas
@@ -1022,36 +1135,53 @@ function svgPoint(svg, clientX, clientY) {
   };
 }
 
-function snap(v) {
-  return Math.round(v * snapDivisions) / snapDivisions;
+// Round a normalised coord (0..1) along an axis of length `length_m` (metres)
+// to the nearest 1 cm in real-world distance. e.g. snapTo(0.5, 3) on a 3 m
+// width snaps to (150 cm) / (300 cm) = 0.5 exactly.
+function snapTo(v, length_m) {
+  if (!length_m || length_m <= 0) return v;
+  const cm = Math.round(v * length_m * 100);
+  return cm / (length_m * 100);
 }
 
-function onCanvasDragOver(e) {
-  e.preventDefault();
-  if (!e.dataTransfer.types.includes('text/plain')) return;
+// Crosshair magnet: when placing a bulb inside the crosshair's visible inner
+// ring (r=16 in the 0..1000 SVG viewBox), snap precisely to the origin point.
+// Returns { nx, ny } when in range, or null when the cursor is outside.
+const CROSSHAIR_MAGNET_RADIUS = 16 / 1000;
+function magnetToOrigin(nx, ny) {
+  if (!layoutRoom) return null;
+  const ox = layoutRoom.origin_x ?? 0.5;
+  const oy = layoutRoom.origin_y ?? 0.5;
+  if (Math.hypot(nx - ox, ny - oy) < CROSSHAIR_MAGNET_RADIUS) {
+    return { nx: ox, ny: oy };
+  }
+  return null;
+}
+function snapX(v) { return snapTo(v, layoutRoom?.width_m ?? 3); }
+function snapY(v) { return snapTo(v, layoutRoom?.depth_m ?? 6); }
+// Walls run along one room axis: top/bottom along width, left/right along depth.
+function snapAlongWall(v, wall) {
+  return isHorizontalWall(wall) ? snapX(v) : snapY(v);
+}
 
-  const svg = document.getElementById('layout-canvas');
-  const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+function renderDragPreviewAt(nx, ny, kind) {
   const preview = document.getElementById('lc-preview');
   if (!preview) return;
   preview.innerHTML = '';
-
-  if (dragType === 'opening') {
+  if (kind === 'opening') {
     const wall = detectWall(nx, ny);
     if (wall) {
-      // Snap x_norm to midpoint (0.5) when close
       const rawPos = isHorizontalWall(wall) ? nx : ny;
-      const xNorm = Math.abs(rawPos - 0.5) < 0.06 ? 0.5 : snap(rawPos);
+      const xNorm = Math.abs(rawPos - 0.5) < 0.06 ? 0.5 : snapAlongWall(rawPos, wall);
       const r = openingToSvgRect({ wall_edge: wall, x_norm: xNorm, width_norm: 0.3 });
-      const ghost = svgEl('rect', {
+      preview.appendChild(svgEl('rect', {
         x: r.x, y: r.y, width: r.w, height: r.h, rx: 3,
         fill: 'rgba(100,200,255,0.45)', stroke: 'rgba(100,200,255,0.9)',
         'stroke-width': 2, 'pointer-events': 'none',
-      });
-      preview.appendChild(ghost);
+      }));
     } else {
       const reject = svgEl('text', {
-        x: snap(nx) * 1000, y: snap(ny) * 1000,
+        x: snapX(nx) * 1000, y: snapY(ny) * 1000,
         'text-anchor': 'middle', 'dominant-baseline': 'central',
         fill: 'rgba(255,80,80,0.85)', 'font-size': 48, 'pointer-events': 'none',
       });
@@ -1059,14 +1189,30 @@ function onCanvasDragOver(e) {
       preview.appendChild(reject);
     }
   } else {
-    const sx = snap(nx), sy = snap(ny);
-    const glow = svgEl('circle', {
+    const magnet = magnetToOrigin(nx, ny);
+    const sx = magnet ? magnet.nx : snapX(nx);
+    const sy = magnet ? magnet.ny : snapY(ny);
+    preview.appendChild(svgEl('circle', {
       cx: sx * 1000, cy: sy * 1000, r: 28,
-      fill: 'rgba(255,255,200,0.25)', stroke: 'rgba(255,255,200,0.7)', 'stroke-width': 2,
+      fill: magnet ? 'rgba(0,255,255,0.30)' : 'rgba(255,255,200,0.25)',
+      stroke: magnet ? 'rgba(0,255,255,0.9)' : 'rgba(255,255,200,0.7)',
+      'stroke-width': magnet ? 3 : 2,
       'pointer-events': 'none',
-    });
-    preview.appendChild(glow);
+    }));
   }
+}
+
+function clearDragPreview() {
+  const preview = document.getElementById('lc-preview');
+  if (preview) preview.innerHTML = '';
+}
+
+function onCanvasDragOver(e) {
+  e.preventDefault();
+  if (!e.dataTransfer.types.includes('text/plain')) return;
+  const svg = document.getElementById('layout-canvas');
+  const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+  renderDragPreviewAt(nx, ny, dragType);
 }
 
 function onCanvasDragLeave() {
@@ -1074,39 +1220,139 @@ function onCanvasDragLeave() {
   if (preview) preview.innerHTML = '';
 }
 
-function onCanvasDrop(e) {
-  e.preventDefault();
-  dragType = null;
-  const preview = document.getElementById('lc-preview');
-  if (preview) preview.innerHTML = '';
-
-  const raw = e.dataTransfer.getData('text/plain');
-  const svg = document.getElementById('layout-canvas');
-  const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-
-  if (raw.startsWith('opening:')) {
-    const openingType = raw.slice(8);
+function commitDropAt(kind, payload, nx, ny) {
+  if (kind === 'opening') {
     const wall = detectWall(nx, ny);
     if (!wall || !layoutRoom) return;
     const rawPos = isHorizontalWall(wall) ? nx : ny;
-    const xNorm = Math.abs(rawPos - 0.5) < 0.06 ? 0.5 : snap(rawPos);
-    const transmission = openingType === 'window' ? 1.0 : 0.1;
-    postCreateOpening(layoutRoom.id, openingType, wall, xNorm, 0.3, transmission);
+    const xNorm = Math.abs(rawPos - 0.5) < 0.06 ? 0.5 : snapAlongWall(rawPos, wall);
+    const transmission = payload === 'window' ? 1.0 : 0.1;
+    postCreateOpening(layoutRoom.id, payload, wall, xNorm, 0.3, transmission);
     return;
   }
+  if (kind === 'bulb') {
+    const magnet = magnetToOrigin(nx, ny);
+    const x = magnet ? magnet.nx : snapX(nx);
+    const y = magnet ? magnet.ny : snapY(ny);
+    const existing = placedBulbs[payload];
+    const fixtureType = existing?.fixture_type ?? 'ceiling_spot';
+    const z = existing?.z ?? defaultZ(fixtureType);
+    pushUndo();
+    placeBulb(payload, x, y, z, fixtureType, true);
+  }
+}
 
-  if (!raw.startsWith('bulb:')) return;
-  const deviceId = raw.slice(5);
+function onCanvasDrop(e) {
+  e.preventDefault();
+  dragType = null;
+  clearDragPreview();
+  const raw = e.dataTransfer.getData('text/plain');
+  const svg = document.getElementById('layout-canvas');
+  const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+  if (raw.startsWith('opening:')) commitDropAt('opening', raw.slice(8), nx, ny);
+  else if (raw.startsWith('bulb:')) commitDropAt('bulb', raw.slice(5), nx, ny);
+}
 
-  const x = snap(nx);
-  const y = snap(ny);
+// Touch / pen drag for sidebar chips. HTML5 native drag-and-drop never fires
+// from a touch event, so on phones the chips would otherwise be inert. This
+// path uses pointer events directly: on movement past a threshold a floating
+// ghost element follows the finger, the canvas preview is updated as the
+// finger moves over it, and release commits the drop via commitDropAt().
+function wireChipTouchDrag(chip, kind, payload) {
+  let startX = 0, startY = 0;
+  let dragging = false;
+  let ghost = null;
+  let pointerId = null;
 
-  const existing = placedBulbs[deviceId];
-  const fixtureType = existing?.fixture_type ?? 'ceiling_spot';
-  const z = existing?.z ?? defaultZ(fixtureType);
+  const cleanup = () => {
+    if (ghost) { ghost.remove(); ghost = null; }
+    clearDragPreview();
+    dragType = null;
+    dragging = false;
+    pointerId = null;
+    setCanvasDragClass(false);
+    if (kind === 'bulb' && typeof window.__roomsStopPulse === 'function') {
+      window.__roomsStopPulse(true);
+    }
+  };
 
-  pushUndo();
-  placeBulb(deviceId, x, y, z, fixtureType, true);
+  chip.addEventListener('pointerdown', e => {
+    // Mouse falls through to native HTML5 DnD (already wired). Touch/pen
+    // take this path because dragstart never fires from them.
+    if (e.pointerType === 'mouse') return;
+    if (e.button !== 0 && e.button !== -1) return;
+    startX = e.clientX;
+    startY = e.clientY;
+    pointerId = e.pointerId;
+    dragging = false;
+    chip.setPointerCapture(e.pointerId);
+  });
+
+  chip.addEventListener('pointermove', e => {
+    if (e.pointerType === 'mouse') return;
+    if (e.pointerId !== pointerId) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (!dragging) {
+      if (Math.hypot(dx, dy) < 8) return;
+      // Commit to drag mode
+      dragging = true;
+      dragType = kind;
+      setCanvasDragClass(true);
+      ghost = chip.cloneNode(true);
+      ghost.style.position = 'fixed';
+      ghost.style.left = `${e.clientX}px`;
+      ghost.style.top = `${e.clientY}px`;
+      ghost.style.transform = 'translate(-50%, -50%)';
+      ghost.style.pointerEvents = 'none';
+      ghost.style.opacity = '0.85';
+      ghost.style.zIndex = '9999';
+      ghost.style.boxShadow = '0 4px 16px rgba(0,0,0,0.4)';
+      document.body.appendChild(ghost);
+      if (kind === 'bulb' && typeof window.__roomsStartPulse === 'function') {
+        window.__roomsStartPulse(payload);
+      }
+      e.preventDefault();
+    }
+    if (dragging) {
+      ghost.style.left = `${e.clientX}px`;
+      ghost.style.top = `${e.clientY}px`;
+      const svg = document.getElementById('layout-canvas');
+      if (svg) {
+        const rect = svg.getBoundingClientRect();
+        if (e.clientX >= rect.left && e.clientX <= rect.right &&
+            e.clientY >= rect.top  && e.clientY <= rect.bottom) {
+          const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+          renderDragPreviewAt(nx, ny, kind);
+        } else {
+          clearDragPreview();
+        }
+      }
+    }
+  });
+
+  chip.addEventListener('pointerup', e => {
+    if (e.pointerType === 'mouse') return;
+    if (e.pointerId !== pointerId) return;
+    if (chip.hasPointerCapture(e.pointerId)) chip.releasePointerCapture(e.pointerId);
+    if (!dragging) { cleanup(); return; }
+    const svg = document.getElementById('layout-canvas');
+    if (svg) {
+      const rect = svg.getBoundingClientRect();
+      if (e.clientX >= rect.left && e.clientX <= rect.right &&
+          e.clientY >= rect.top  && e.clientY <= rect.bottom) {
+        const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+        commitDropAt(kind, payload, nx, ny);
+      }
+    }
+    cleanup();
+  });
+
+  chip.addEventListener('pointercancel', e => {
+    if (e.pointerType === 'mouse') return;
+    if (e.pointerId !== pointerId) return;
+    cleanup();
+  });
 }
 
 function onCanvasClick(e) {
@@ -1169,6 +1415,7 @@ function placeBulb(deviceId, x, y, z, fixtureType, postToServer) {
   layer.appendChild(g);
 
   placedBulbs[deviceId] = { x, y, z, fixture_type: fixtureType, el: g, labelEl };
+  syncBulbToThree(deviceId, placedBulbs[deviceId], devicesRef.get(deviceId));
 
   if (postToServer) {
     postPosition(deviceId, x, y, z, fixtureType);
@@ -1353,8 +1600,12 @@ function makeBulbDraggable(g, deviceId) {
     if (Math.abs(dx) > 0.005 || Math.abs(dy) > 0.005) moved = true;
     if (!moved) return;
 
-    const newX = Math.max(0, Math.min(1, snap(startBulbX + dx)));
-    const newY = Math.max(0, Math.min(1, snap(startBulbY + dy)));
+    // Where the bulb WOULD land at this pointer position (pre-magnet)
+    const candidateX = startBulbX + dx;
+    const candidateY = startBulbY + dy;
+    const magnet = magnetToOrigin(candidateX, candidateY);
+    const newX = magnet ? magnet.nx : Math.max(0, Math.min(1, snapX(candidateX)));
+    const newY = magnet ? magnet.ny : Math.max(0, Math.min(1, snapY(candidateY)));
     // Translate the group visually without re-creating it
     const entry = placedBulbs[deviceId];
     const tx = (newX - entry.x) * 1000;
@@ -1380,8 +1631,11 @@ function makeBulbDraggable(g, deviceId) {
 
     const svg = document.getElementById('layout-canvas');
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-    const newX = Math.max(0, Math.min(1, snap(startBulbX + (nx - startNx))));
-    const newY = Math.max(0, Math.min(1, snap(startBulbY + (ny - startNy))));
+    const candidateX = startBulbX + (nx - startNx);
+    const candidateY = startBulbY + (ny - startNy);
+    const magnet = magnetToOrigin(candidateX, candidateY);
+    const newX = magnet ? magnet.nx : Math.max(0, Math.min(1, snapX(candidateX)));
+    const newY = magnet ? magnet.ny : Math.max(0, Math.min(1, snapY(candidateY)));
 
     const entry = placedBulbs[deviceId];
     if (newX !== entry.x || newY !== entry.y) {
@@ -1432,7 +1686,7 @@ function updateBulbIcon(entry, state) {
 
 // ── Popover ───────────────────────────────────────────────────────────────────
 
-function openPopover(deviceId, anchorEl) {
+function openPopover(deviceId, anchorEl, screenX, screenY) {
   dismissPopover();
 
   const entry = placedBulbs[deviceId];
@@ -1482,6 +1736,7 @@ function openPopover(deviceId, anchorEl) {
     heightLabel.textContent = `Height: ${slider.value}%`;
     entry.z = z;
     drawFixtureIcon(entry.el, entry.x * 1000, entry.y * 1000, z, entry.fixture_type, devicesRef.get(deviceId));
+    syncBulbToThree(deviceId, entry, devicesRef.get(deviceId));
   });
   slider.addEventListener('change', () => {
     pushUndo();
@@ -1500,14 +1755,17 @@ function openPopover(deviceId, anchorEl) {
   });
   pop.appendChild(removeBtn);
 
-  // Position popover near the bulb using proper SVG coordinates
-  const svg = document.getElementById('layout-canvas');
-  const pt = svg.createSVGPoint();
-  pt.x = entry.x * 1000;
-  pt.y = entry.y * 1000;
-  const screenPt = pt.matrixTransform(svg.getScreenCTM());
-  const cx = screenPt.x;
-  const cy = screenPt.y;
+  // Position popover — use provided screen coords (3D click) or derive from SVG
+  let cx, cy;
+  if (screenX != null) {
+    cx = screenX; cy = screenY;
+  } else {
+    const svg = document.getElementById('layout-canvas');
+    const pt = svg.createSVGPoint();
+    pt.x = entry.x * 1000; pt.y = entry.y * 1000;
+    const screenPt = pt.matrixTransform(svg.getScreenCTM());
+    cx = screenPt.x; cy = screenPt.y;
+  }
   pop.style.left = `${Math.min(cx + 30, window.innerWidth - 220)}px`;
   pop.style.top = `${Math.min(cy - 20, window.innerHeight - 260)}px`;
 
@@ -1565,7 +1823,7 @@ function autoArrange() {
       y = 0.15 + (row / Math.max(rows - 1, 1)) * 0.7;
     }
 
-    x = snap(x); y = snap(y);
+    x = snapX(x); y = snapY(y);
     placeBulb(id, x, y, z, fixtureType, true);
   });
 }
@@ -1778,28 +2036,95 @@ function renderCrosshair(room) {
   if (!layer) return;
   while (layer.firstChild) layer.firstChild.remove();
 
-  const ox = (room.origin_x ?? 0.5) * 1000;
-  const oy = (room.origin_y ?? 0.5) * 1000;
+  const ox0 = (room.origin_x ?? 0.5) * 1000;
+  const oy0 = (room.origin_y ?? 0.5) * 1000;
+  const W = room.width_m  || 3;
+  const D = room.depth_m  || 6;
 
   const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   g.id = 'lc-crosshair-marker';
 
-  const hLine = svgEl('line', { x1: 0, y1: oy, x2: 1000, y2: oy,
-    stroke: '#0ff', 'stroke-width': 1.5, 'stroke-dasharray': '10 5', 'pointer-events': 'none' });
-  const vLine = svgEl('line', { x1: ox, y1: 0, x2: ox, y2: 1000,
-    stroke: '#0ff', 'stroke-width': 1.5, 'stroke-dasharray': '10 5', 'pointer-events': 'none' });
-  const circle = svgEl('circle', { cx: ox, cy: oy, r: 12,
-    fill: 'none', stroke: '#0ff', 'stroke-width': 2, cursor: 'move' });
-  const label = svgEl('text', { x: ox + 16, y: oy - 8,
-    fill: '#0ff', 'font-size': 22, 'font-family': 'monospace',
-    style: 'cursor:move;user-select:none' });
-  label.textContent = '⊕';
+  // Full-width / full-height dashed guide lines
+  const hLine = svgEl('line', { x1: 0, y1: oy0, x2: 1000, y2: oy0,
+    stroke: '#0ff', 'stroke-width': 1.5, 'stroke-dasharray': '10 5',
+    'pointer-events': 'none', opacity: 0.7 });
+  const vLine = svgEl('line', { x1: ox0, y1: 0, x2: ox0, y2: 1000,
+    stroke: '#0ff', 'stroke-width': 1.5, 'stroke-dasharray': '10 5',
+    'pointer-events': 'none', opacity: 0.7 });
+
+  // Visible ring + inner plus
+  const ring = svgEl('circle', { cx: ox0, cy: oy0, r: 16,
+    fill: 'rgba(0, 200, 220, 0.12)', stroke: '#0ff', 'stroke-width': 2.5,
+    'pointer-events': 'none' });
+  const plusH = svgEl('line', { x1: ox0 - 8, y1: oy0, x2: ox0 + 8, y2: oy0,
+    stroke: '#0ff', 'stroke-width': 2, 'stroke-linecap': 'round',
+    'pointer-events': 'none' });
+  const plusV = svgEl('line', { x1: ox0, y1: oy0 - 8, x2: ox0, y2: oy0 + 8,
+    stroke: '#0ff', 'stroke-width': 2, 'stroke-linecap': 'round',
+    'pointer-events': 'none' });
+
+  // Invisible hit area — bigger than the visible ring so it's easy to tap,
+  // but small enough that it doesn't block bulb drops near the origin.
+  // CSS sets pointer-events:none on this element while a sidebar chip drag
+  // is in progress (.layout-dragging on the canvas) so the hit never absorbs
+  // a drop intended for the canvas underneath.
+  const hit = svgEl('circle', { cx: ox0, cy: oy0, r: 24,
+    fill: 'rgba(0,0,0,0.001)', cursor: 'move', class: 'lc-crosshair-hit' });
+  const hitTitle = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+  hitTitle.textContent = 'Origin point — double-tap (touch) or drag (mouse) to move';
+  hit.appendChild(hitTitle);
+
+  // Live dimension labels — hidden until drag
+  const mkDim = () => {
+    const t = svgEl('text', {
+      fill: '#0ff', 'font-size': 26, 'font-family': 'monospace',
+      'font-weight': 'bold', 'text-anchor': 'middle', 'dominant-baseline': 'middle',
+      'pointer-events': 'none', 'paint-order': 'stroke',
+      stroke: '#000', 'stroke-width': 4, 'stroke-linejoin': 'round',
+      opacity: 0,
+    });
+    return t;
+  };
+  const topDim = mkDim();
+  const rightDim = mkDim();
 
   g.appendChild(hLine);
   g.appendChild(vLine);
-  g.appendChild(circle);
-  g.appendChild(label);
+  g.appendChild(ring);
+  g.appendChild(plusH);
+  g.appendChild(plusV);
+  g.appendChild(topDim);
+  g.appendChild(rightDim);
   layer.appendChild(g);
+
+  // Hit handle lives in a separate top-layer so it remains grabbable even when
+  // a bulb has been dropped on the origin. Visible parts (ring, plus, dims)
+  // stay in lc-crosshair below bulbs so a placed bulb naturally occludes them.
+  const hitLayer = document.getElementById('lc-crosshair-hit');
+  while (hitLayer && hitLayer.firstChild) hitLayer.firstChild.remove();
+  hitLayer?.appendChild(hit);
+
+  const setPos = (px, py) => {
+    hLine.setAttribute('y1', py); hLine.setAttribute('y2', py);
+    vLine.setAttribute('x1', px); vLine.setAttribute('x2', px);
+    ring.setAttribute('cx', px); ring.setAttribute('cy', py);
+    plusH.setAttribute('x1', px - 8); plusH.setAttribute('x2', px + 8);
+    plusH.setAttribute('y1', py); plusH.setAttribute('y2', py);
+    plusV.setAttribute('x1', px); plusV.setAttribute('x2', px);
+    plusV.setAttribute('y1', py - 8); plusV.setAttribute('y2', py + 8);
+    hit.setAttribute('cx', px); hit.setAttribute('cy', py);
+
+    const dTop = (py / 1000) * D;
+    const dRight = ((1000 - px) / 1000) * W;
+    // Distance-to-top: sits on the vertical line, midway between crosshair and top edge
+    topDim.setAttribute('x', px);
+    topDim.setAttribute('y', Math.max(28, py / 2));
+    topDim.textContent = `↑ ${dTop.toFixed(2)} m`;
+    // Distance-to-right: sits on the horizontal line, midway between crosshair and right edge
+    rightDim.setAttribute('x', Math.min(1000 - 80, (px + 1000) / 2));
+    rightDim.setAttribute('y', py - 22);
+    rightDim.textContent = `${dRight.toFixed(2)} m →`;
+  };
 
   // Drag behaviour — attach to SVG using AbortController so old listeners are
   // cleaned up on the next renderCrosshair call (notifyRoomUpdate may re-render).
@@ -1810,30 +2135,69 @@ function renderCrosshair(room) {
   const sig = { signal: ac.signal };
 
   let dragging = false;
+  let lastTapTime = 0;
+  let armedTimer = null;
+
+  const enterDrag = (pointerId) => {
+    dragging = true;
+    try { svg.setPointerCapture(pointerId); } catch (_) {}
+    ring.setAttribute('fill', 'rgba(0, 255, 255, 0.35)');
+    ring.setAttribute('r', 18);
+    topDim.setAttribute('opacity', 1);
+    rightDim.setAttribute('opacity', 1);
+  };
+  const exitDrag = (pointerId) => {
+    dragging = false;
+    try { svg.releasePointerCapture(pointerId); } catch (_) {}
+    ring.setAttribute('fill', 'rgba(0, 200, 220, 0.12)');
+    ring.setAttribute('r', 16);
+    topDim.setAttribute('opacity', 0);
+    rightDim.setAttribute('opacity', 0);
+  };
 
   svg.addEventListener('pointerdown', e => {
-    if (e.target !== circle && e.target !== label) return;
+    if (e.target !== hit) return;
     e.preventDefault();
-    dragging = true;
-    svg.setPointerCapture(e.pointerId);
+    e.stopPropagation();
+    if (e.pointerType === 'mouse') {
+      enterDrag(e.pointerId);
+      return;
+    }
+    // Touch / pen: require double-tap to start drag
+    const now = performance.now();
+    if (now - lastTapTime < 400) {
+      lastTapTime = 0;
+      clearTimeout(armedTimer);
+      ring.setAttribute('stroke-width', 2.5);
+      enterDrag(e.pointerId);
+    } else {
+      lastTapTime = now;
+      // Brief visual hint that a second tap will grab
+      ring.setAttribute('stroke-width', 4);
+      clearTimeout(armedTimer);
+      armedTimer = setTimeout(() => {
+        if (!dragging) ring.setAttribute('stroke-width', 2.5);
+      }, 450);
+    }
   }, sig);
+
   svg.addEventListener('pointermove', e => {
     if (!dragging) return;
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-    const px = Math.max(0, Math.min(1000, nx * 1000));
-    const py = Math.max(0, Math.min(1000, ny * 1000));
-    hLine.setAttribute('y1', py); hLine.setAttribute('y2', py);
-    vLine.setAttribute('x1', px); vLine.setAttribute('x2', px);
-    circle.setAttribute('cx', px); circle.setAttribute('cy', py);
-    label.setAttribute('x', px + 16); label.setAttribute('y', py - 8);
+    // Snap to the same 1 cm grid as bulbs / openings so the crosshair clicks
+    // into the same positions a bulb would; the live dimensions update in
+    // step rather than smoothly drifting.
+    const sx = Math.max(0, Math.min(1, snapX(nx)));
+    const sy = Math.max(0, Math.min(1, snapY(ny)));
+    setPos(sx * 1000, sy * 1000);
   }, sig);
+
   svg.addEventListener('pointerup', e => {
     if (!dragging) return;
-    dragging = false;
-    svg.releasePointerCapture(e.pointerId);
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-    const ox = Math.max(0, Math.min(1, nx));
-    const oy = Math.max(0, Math.min(1, ny));
+    const ox = Math.max(0, Math.min(1, snapX(nx)));
+    const oy = Math.max(0, Math.min(1, snapY(ny)));
+    exitDrag(e.pointerId);
     if (layoutRoom) {
       layoutRoom.origin_x = ox;
       layoutRoom.origin_y = oy;
@@ -1844,6 +2208,13 @@ function renderCrosshair(room) {
       }).catch(() => {});
     }
   }, sig);
+
+  svg.addEventListener('pointercancel', e => {
+    if (!dragging) return;
+    exitDrag(e.pointerId);
+  }, sig);
+
+  setPos(ox0, oy0);
 }
 
 // ── Openings — rendering ──────────────────────────────────────────────────────
@@ -1882,6 +2253,7 @@ function renderOpening(o) {
   layer.appendChild(g);
   placedOpenings[o.id] = { ...o, el: g };
   updateOpeningCone(o.id);
+  syncOpeningToThree(o);
 }
 
 function updateOpeningRectAttrs(openingId) {
@@ -2338,7 +2710,7 @@ function makeMoveDraggable(body, openingId) {
     const wall = detectWall(pt.nx, pt.ny) ?? o.wall_edge;
     const coord = isHorizontalWall(wall) ? pt.nx : pt.ny;
     o.wall_edge = wall;
-    o.x_norm = Math.min(1 - o.width_norm / 2 - 0.02, Math.max(o.width_norm / 2 + 0.02, snap(coord)));
+    o.x_norm = Math.min(1 - o.width_norm / 2 - 0.02, Math.max(o.width_norm / 2 + 0.02, snapAlongWall(coord, wall)));
     updateOpeningRectAttrs(openingId);
   });
 
@@ -2395,14 +2767,14 @@ function makeResizeDraggable(handle, openingId, side) {
       const oldEnd = startXNorm + startWidthNorm / 2;
       const newStart = Math.max(0.02, Math.min(oldEnd - 0.05, startXNorm - startWidthNorm / 2 + delta));
       const newWidth = Math.max(0.05, oldEnd - newStart);
-      o.width_norm = Math.min(0.96, Math.max(0.05, snap(newWidth)));
-      o.x_norm    = Math.min(0.97, Math.max(0.03, snap(newStart + o.width_norm / 2)));
+      o.width_norm = Math.min(0.96, Math.max(0.05, snapAlongWall(newWidth, o.wall_edge)));
+      o.x_norm    = Math.min(0.97, Math.max(0.03, snapAlongWall(newStart + o.width_norm / 2, o.wall_edge)));
     } else {
       const oldStart = startXNorm - startWidthNorm / 2;
       const newEnd = Math.min(0.98, Math.max(oldStart + 0.05, startXNorm + startWidthNorm / 2 + delta));
       const newWidth = Math.max(0.05, newEnd - oldStart);
-      o.width_norm = Math.min(0.96, Math.max(0.05, snap(newWidth)));
-      o.x_norm    = Math.min(0.97, Math.max(0.03, snap(oldStart + o.width_norm / 2)));
+      o.width_norm = Math.min(0.96, Math.max(0.05, snapAlongWall(newWidth, o.wall_edge)));
+      o.x_norm    = Math.min(0.97, Math.max(0.03, snapAlongWall(oldStart + o.width_norm / 2, o.wall_edge)));
     }
     updateOpeningRectAttrs(openingId);
   });
@@ -2504,6 +2876,7 @@ async function removeOpening(id) {
   entry.el?.remove();
   const cone = document.getElementById(`cone-${CSS.escape(id)}`);
   if (cone) cone.remove();
+  removeOpeningFromThree(id);
   delete placedOpenings[id];
 }
 
@@ -2570,3 +2943,441 @@ async function apiDeleteOpening(id) {
     console.warn('layout: apiDeleteOpening failed', err);
   }
 }
+
+// ── Three.js 3D view ──────────────────────────────────────────────────────────
+
+async function ensureThree() {
+  if (THREE) return true;
+  try {
+    THREE = await import('three');
+    const oc = await import('three/addons/controls/OrbitControls.js');
+    ThreeOrbitControls = oc.OrbitControls;
+    return true;
+  } catch (e) {
+    console.warn('[3D] Three.js failed to load:', e);
+    return false;
+  }
+}
+
+async function initThree(room) {
+  if (!await ensureThree()) return;
+  teardownThree();
+
+  const container = document.getElementById('lc-3d-container');
+  if (!container) return;
+
+  const W = room.width_m  || 3;
+  const D = room.depth_m  || 6;
+  const H = room.height_m || 2.5;
+
+  // Renderer
+  threeRenderer = new THREE.WebGLRenderer({ antialias: true });
+  threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  threeRenderer.setSize(container.clientWidth || 600, container.clientHeight || 600);
+  threeRenderer.shadowMap.enabled = true;
+  threeRenderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  container.appendChild(threeRenderer.domElement);
+
+  // Scene + room group
+  threeScene = new THREE.Scene();
+  threeScene.background = new THREE.Color(0x0d0d1a);
+  threeRoomGroup = new THREE.Group();
+  threeScene.add(threeRoomGroup);
+
+  // Floor
+  const floorMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(W, D),
+    new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.9 })
+  );
+  floorMesh.rotation.x = -Math.PI / 2;
+  floorMesh.receiveShadow = true;
+  threeRoomGroup.add(floorMesh);
+
+  // Walls — semi-transparent so you can see inside
+  const wallMat = () => new THREE.MeshStandardMaterial({
+    color: 0x22223b, roughness: 0.8, transparent: true, opacity: 0.4,
+    side: THREE.DoubleSide, depthWrite: false,
+  });
+  const walls = [
+    { geom: new THREE.PlaneGeometry(W, H), pos: [0, H/2, -D/2], ry: 0 },
+    { geom: new THREE.PlaneGeometry(W, H), pos: [0, H/2,  D/2], ry: Math.PI },
+    { geom: new THREE.PlaneGeometry(D, H), pos: [ W/2, H/2, 0], ry: -Math.PI/2 },
+    { geom: new THREE.PlaneGeometry(D, H), pos: [-W/2, H/2, 0], ry:  Math.PI/2 },
+  ];
+  for (const { geom, pos, ry } of walls) {
+    const m = new THREE.Mesh(geom, wallMat());
+    m.position.set(...pos);
+    m.rotation.y = ry;
+    threeRoomGroup.add(m);
+  }
+
+  // Ceiling edges (wireframe box outline so room reads clearly)
+  const edges = new THREE.EdgesGeometry(new THREE.BoxGeometry(W, H, D));
+  const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x334455 }));
+  line.position.y = H / 2;
+  threeRoomGroup.add(line);
+
+  // Lighting
+  threeScene.add(new THREE.AmbientLight(0xffffff, 0.35));
+  threeSunLight = new THREE.DirectionalLight(0xfff8e0, 1.2);
+  threeSunLight.castShadow = true;
+  threeSunLight.shadow.mapSize.set(1024, 1024);
+  threeSunLight.shadow.camera.near = 0.5;
+  threeSunLight.shadow.camera.far = 200;
+  // Frustum sized to room diagonal + margin for low-sun shadow stretch
+  const shadowSpan = Math.hypot(W, D) / 2 * 1.5;
+  threeSunLight.shadow.camera.left = -shadowSpan;
+  threeSunLight.shadow.camera.right = shadowSpan;
+  threeSunLight.shadow.camera.top = shadowSpan;
+  threeSunLight.shadow.camera.bottom = -shadowSpan;
+  threeScene.add(threeSunLight);
+  threeScene.add(threeSunLight.target);
+  threeUpdateSun(lastSolar.azimuth, lastSolar.elevation);
+
+  // Grid on floor
+  const grid = new THREE.GridHelper(Math.max(W, D) * 1.5, 10, 0x223344, 0x1a2233);
+  grid.position.y = 0.001;
+  threeRoomGroup.add(grid);
+
+  // Crosshair on floor
+  const cxW = (room.origin_x - 0.5) * W;
+  const czD = (room.origin_y - 0.5) * D;
+  const chMat = new THREE.LineBasicMaterial({ color: 0x00ffff });
+  const hPts = [new THREE.Vector3(-W/2, 0.003, czD), new THREE.Vector3(W/2, 0.003, czD)];
+  const vPts = [new THREE.Vector3(cxW, 0.003, -D/2), new THREE.Vector3(cxW, 0.003, D/2)];
+  threeRoomGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(hPts), chMat));
+  threeRoomGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(vPts), chMat.clone()));
+
+  // Wall cardinal labels (N/S/E/W sprites)
+  const cardinals = [
+    { txt: 'N', x: 0,    z: -D/2 - 0.2 },
+    { txt: 'S', x: 0,    z:  D/2 + 0.2 },
+    { txt: 'E', x:  W/2 + 0.2, z: 0 },
+    { txt: 'W', x: -W/2 - 0.2, z: 0 },
+  ];
+  for (const { txt, x, z } of cardinals) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const ctx2d = canvas.getContext('2d');
+    ctx2d.fillStyle = '#88aacc';
+    ctx2d.font = 'bold 48px sans-serif';
+    ctx2d.textAlign = 'center';
+    ctx2d.textBaseline = 'middle';
+    ctx2d.fillText(txt, 32, 32);
+    const tex = new THREE.CanvasTexture(canvas);
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.7 }));
+    sp.position.set(x, H * 0.5, z);
+    sp.scale.set(0.4, 0.4, 1);
+    threeRoomGroup.add(sp);
+  }
+
+  // Camera
+  const aspect = (container.clientWidth || 600) / (container.clientHeight || 600);
+  threePerspCamera = new THREE.PerspectiveCamera(45, aspect, 0.1, 500);
+  threePerspCamera.position.set(W * 0.9, H * 2.2, D * 0.9);
+  threePerspCamera.lookAt(0, H * 0.3, 0);
+
+  // Orbit controls — with damping for smooth deceleration
+  threeControls = new ThreeOrbitControls(threePerspCamera, threeRenderer.domElement);
+  threeControls.target.set(0, H * 0.3, 0);
+  threeControls.minDistance = 0.5;
+  threeControls.maxDistance = Math.max(W, D) * 5;
+  threeControls.enableDamping = true;
+  threeControls.dampingFactor = 0.08;
+  threeControls.addEventListener('change', threeMarkDirty);
+  threeControls.update();
+
+  // Sync all already-placed bulbs
+  for (const [id, entry] of Object.entries(placedBulbs)) {
+    syncBulbToThree(id, entry, devicesRef.get(id));
+  }
+
+  // Sync all already-placed openings
+  for (const o of Object.values(placedOpenings)) {
+    syncOpeningToThree(o);
+  }
+
+  // Raycaster + interactions
+  threeRaycaster = new THREE.Raycaster();
+  threeFloorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  wireThreeInteractions(container);
+
+  // Resize observer
+  const ro = new ResizeObserver(() => {
+    if (!threeRenderer || !threePerspCamera) return;
+    const w = container.clientWidth, h = container.clientHeight;
+    if (!w || !h) return;
+    threeRenderer.setSize(w, h);
+    threePerspCamera.aspect = w / h;
+    threePerspCamera.updateProjectionMatrix();
+  });
+  ro.observe(container);
+  container._ro = ro;
+
+  // Render loop
+  threeNeedsRender = true;
+  function animate() {
+    threeAnimFrameId = requestAnimationFrame(animate);
+    if (threeControls.update()) threeNeedsRender = true; // damping still settling
+    if (!threeNeedsRender) return;
+    threeNeedsRender = false;
+    threeRenderer.render(threeScene, threePerspCamera);
+  }
+  animate();
+}
+
+function teardownThree() {
+  if (threeAnimFrameId) { cancelAnimationFrame(threeAnimFrameId); threeAnimFrameId = null; }
+  if (threeControls) { threeControls.dispose(); threeControls = null; }
+  if (threeRenderer) { threeRenderer.dispose(); threeRenderer.domElement.remove(); threeRenderer = null; }
+  const c = document.getElementById('lc-3d-container');
+  if (c?._ro) { c._ro.disconnect(); delete c._ro; }
+  threeScene = null; threeRoomGroup = null; threePerspCamera = null;
+  threeSunLight = null; threeBulbMeshes = {}; threeOpeningMeshes = {};
+  threeIs3D = false;
+  threeRaycaster = null; threeFloorPlane = null;
+}
+
+function syncBulbToThree(deviceId, entry, dev) {
+  if (!threeScene || !THREE || !threeRoomGroup || !layoutRoom) return;
+  removeBulbFromThree(deviceId);
+
+  const W = layoutRoom.width_m  || 3;
+  const D = layoutRoom.depth_m  || 6;
+  const H = layoutRoom.height_m || 2.5;
+
+  const x3 = (entry.x - 0.5) * W;
+  const y3 = (entry.z ?? 0.9) * H;
+  const z3 = (entry.y - 0.5) * D;
+
+  const colorStr = dev ? devStateColor(dev) : '#111133';
+  const color = new THREE.Color(colorStr);
+  const bri = dev?.on ? (dev.brightness ?? 200) / 254 : 0;
+
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x222222,
+    emissive: color,
+    emissiveIntensity: Math.max(bri, 0.1),
+    roughness: 0.4,
+  });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.07, 16, 16), mat);
+  mesh.position.set(x3, y3, z3);
+  mesh.castShadow = true;
+  mesh.userData.deviceId = deviceId;
+
+  const ptLight = new THREE.PointLight(color, bri * 3, W * 2.5);
+  ptLight.castShadow = false;
+  mesh.add(ptLight);
+
+  threeRoomGroup.add(mesh);
+  threeBulbMeshes[deviceId] = { mesh, ptLight, mat };
+  threeMarkDirty();
+}
+
+function removeBulbFromThree(deviceId) {
+  const b = threeBulbMeshes[deviceId];
+  if (!b) return;
+  b.mesh.removeFromParent();
+  b.mat.dispose();
+  delete threeBulbMeshes[deviceId];
+  threeMarkDirty();
+}
+
+function syncOpeningToThree(o) {
+  if (!threeScene || !THREE || !threeRoomGroup || !layoutRoom) return;
+  removeOpeningFromThree(o.id);
+
+  const W = layoutRoom.width_m  || 3;
+  const D = layoutRoom.depth_m  || 6;
+  const H = layoutRoom.height_m || 2.5;
+  const isWindow = o.opening_type === 'window';
+
+  // Physical dimensions
+  const wallLen = (o.wall_edge === 'N' || o.wall_edge === 'S') ? W : D;
+  const openW = o.width_norm * wallLen;
+  const openH = isWindow ? H * 0.45 : H * 0.8;
+  const openY = isWindow ? H * 0.65 : H * 0.4;   // centre height
+
+  // Position along wall axis
+  const posAlong = (o.x_norm - 0.5) * wallLen;
+  const eps = 0.015; // offset from wall face to avoid z-fighting
+
+  let x, y = openY, z, ry;
+  switch (o.wall_edge) {
+    case 'N': x = posAlong;  z = -D/2 + eps; ry = 0;           break;
+    case 'S': x = posAlong;  z =  D/2 - eps; ry = Math.PI;     break;
+    case 'E': x =  W/2 - eps; z = posAlong;  ry = -Math.PI/2;  break;
+    case 'W': x = -W/2 + eps; z = posAlong;  ry =  Math.PI/2;  break;
+    default: return;
+  }
+
+  const mat = new THREE.MeshStandardMaterial({
+    color:       isWindow ? 0x88ccff : 0x7a5230,
+    transparent: isWindow,
+    opacity:     isWindow ? 0.45 : 1.0,
+    side:        THREE.DoubleSide,
+    roughness:   isWindow ? 0.05 : 0.8,
+    metalness:   isWindow ? 0.1  : 0.0,
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(openW, openH), mat);
+  mesh.position.set(x, y, z);
+  mesh.rotation.y = ry;
+  threeRoomGroup.add(mesh);
+  threeOpeningMeshes[o.id] = mesh;
+  threeMarkDirty();
+}
+
+function removeOpeningFromThree(id) {
+  const mesh = threeOpeningMeshes[id];
+  if (!mesh) return;
+  mesh.material.dispose();
+  mesh.geometry.dispose();
+  mesh.removeFromParent();
+  delete threeOpeningMeshes[id];
+  threeMarkDirty();
+}
+
+function threeMarkDirty() { threeNeedsRender = true; }
+
+function threeUpdateSun(azimuth, elevation) {
+  if (!threeSunLight) return;
+  const phi   = (90 - elevation) * (Math.PI / 180);
+  const theta = azimuth * (Math.PI / 180);
+  const R = 50;
+  threeSunLight.position.set(
+    R * Math.sin(phi) * Math.sin(theta),
+    R * Math.cos(phi),
+    R * Math.sin(phi) * Math.cos(theta),
+  );
+  threeSunLight.intensity = Math.max(0, Math.sin(Math.max(elevation, 0) * Math.PI / 180)) * 1.5 + 0.1;
+  threeMarkDirty();
+}
+
+function threeUpdateBulbColor(deviceId, dev) {
+  const b = threeBulbMeshes[deviceId];
+  if (!b || !THREE) return;
+  const colorStr = dev ? devStateColor(dev) : '#111133';
+  const color = new THREE.Color(colorStr);
+  const bri = dev?.on ? (dev.brightness ?? 200) / 254 : 0;
+  b.mat.emissive.set(color);
+  b.mat.emissiveIntensity = Math.max(bri, 0.1);
+  b.ptLight.color.set(color);
+  b.ptLight.intensity = bri * 3;
+  threeMarkDirty();
+}
+
+function toggle3D(btn) {
+  threeIs3D = !threeIs3D;
+  const svg   = document.getElementById('layout-canvas');
+  const c3d   = document.getElementById('lc-3d-container');
+  if (threeIs3D) {
+    if (svg) svg.style.display = 'none';
+    if (c3d) c3d.style.display = '';
+    btn.textContent = '2D';
+    btn.title = 'Switch to 2D editing view';
+    // Force a renderer resize now that the container is visible
+    if (threeRenderer && threePerspCamera && c3d) {
+      const w = c3d.clientWidth, h = c3d.clientHeight;
+      if (w && h) {
+        threeRenderer.setSize(w, h);
+        threePerspCamera.aspect = w / h;
+        threePerspCamera.updateProjectionMatrix();
+      }
+    }
+  } else {
+    if (svg) svg.style.display = '';
+    if (c3d) c3d.style.display = 'none';
+    btn.textContent = '3D';
+    btn.title = 'Switch to 3D perspective view';
+  }
+  threeMarkDirty();
+}
+
+// ── Three.js raycaster interactions ───────────────────────────────────────────
+
+function threeMouseNDC(e, el) {
+  const r = el.getBoundingClientRect();
+  return new THREE.Vector2(
+    ((e.clientX - r.left) / r.width)  *  2 - 1,
+    ((e.clientY - r.top)  / r.height) * -2 + 1,
+  );
+}
+
+function threeFloorHit(ndc) {
+  if (!threeRaycaster || !threePerspCamera || !threeFloorPlane) return null;
+  threeRaycaster.setFromCamera(ndc, threePerspCamera);
+  const pt = new THREE.Vector3();
+  return threeRaycaster.ray.intersectPlane(threeFloorPlane, pt) ? pt : null;
+}
+
+function wireThreeInteractions(_container) {
+  const el = threeRenderer.domElement;
+
+  // The 3D view is a demo / visualisation surface only — no layout editing.
+  // Bulbs cannot be dragged or placed here; the user does layout work in the
+  // 2D view and uses 3D to see effects / solar / scenes light up.
+  // A tap on a bulb still opens its popover so the user can tweak the device
+  // without switching views; orbit controls (rotate / zoom) remain active.
+  el.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    dismissPopover();
+    document.getElementById('three-opening-menu')?.remove();
+
+    const ndc = threeMouseNDC(e, el);
+    threeRaycaster.setFromCamera(ndc, threePerspCamera);
+
+    // Bulb tap → open popover (no drag)
+    const bulbMeshList = Object.values(threeBulbMeshes).map(b => b.mesh);
+    const bulbHits = threeRaycaster.intersectObjects(bulbMeshList);
+    if (bulbHits.length > 0) {
+      e.stopPropagation();
+      const deviceId = bulbHits[0].object.userData.deviceId;
+      openPopover(deviceId, null, e.clientX, e.clientY);
+      return;
+    }
+
+    // Opening tap → context menu (toggle window/door state)
+    const openingMeshList = Object.values(threeOpeningMeshes);
+    const openingHits = threeRaycaster.intersectObjects(openingMeshList);
+    if (openingHits.length > 0) {
+      e.stopPropagation();
+      const mesh = openingHits[0].object;
+      const id = Object.keys(threeOpeningMeshes).find(k => threeOpeningMeshes[k] === mesh);
+      if (id) showOpeningContextMenu(id, e.clientX, e.clientY);
+    }
+  });
+}
+
+function showOpeningContextMenu(openingId, screenX, screenY) {
+  // Dismiss any existing menu
+  document.getElementById('three-opening-menu')?.remove();
+
+  const menu = document.createElement('div');
+  menu.id = 'three-opening-menu';
+  menu.className = 'layout-popover';
+  menu.style.left = `${Math.min(screenX + 8, window.innerWidth - 160)}px`;
+  menu.style.top  = `${Math.min(screenY - 8, window.innerHeight - 80)}px`;
+
+  const o = placedOpenings[openingId];
+  const label = document.createElement('div');
+  label.className = 'layout-popover-label';
+  label.textContent = o ? `${o.opening_type === 'window' ? 'Window' : 'Door'}` : 'Opening';
+  menu.appendChild(label);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'layout-popover-remove';
+  removeBtn.textContent = 'Remove';
+  removeBtn.addEventListener('click', () => {
+    menu.remove();
+    removeOpening(openingId);
+  });
+  menu.appendChild(removeBtn);
+
+  document.body.appendChild(menu);
+
+  const dismiss = e => {
+    if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('pointerdown', dismiss); }
+  };
+  setTimeout(() => document.addEventListener('pointerdown', dismiss), 0);
+}
+

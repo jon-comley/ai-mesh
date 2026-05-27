@@ -2,7 +2,7 @@ use crate::registry::RoomRecord;
 use serde::Serialize;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
-use shared::messages::{LightStateReport, NodeRecordLite};
+use shared::messages::{LightAction, LightStateReport, NodeRecordLite};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -280,6 +280,37 @@ impl DashboardState {
             let _ = self
                 .tx
                 .send(DashboardEvent::LightingUpdate { devices, groups });
+        }
+    }
+
+    /// Apply an outbound command's intended effect to the in-memory light snapshot.
+    ///
+    /// Subsequent broadcasts (triggered by any device's later LightState report)
+    /// will then carry the user's intended value rather than the pre-command
+    /// value, preventing UI sliders from snapping back when another device's
+    /// status report races ahead of the bulb's own confirmation.
+    pub fn apply_command_to_snapshot(&self, device_id: &str, action: &LightAction) {
+        let mut snap = self.light_snapshot.lock().unwrap();
+        let Some(entry) = snap.get_mut(device_id) else {
+            return;
+        };
+        match action {
+            LightAction::On => entry.on = true,
+            LightAction::Off => entry.on = false,
+            LightAction::Toggle => entry.on = !entry.on,
+            LightAction::Brightness(b) => {
+                entry.brightness = Some(*b);
+                entry.on = true;
+            }
+            LightAction::BrightnessTransition { value, .. } => {
+                entry.brightness = Some(*value);
+                entry.on = true;
+            }
+            LightAction::ColorTemp(ct) => entry.color_temp = Some(*ct),
+            LightAction::ColorTempTransition { value, .. } => entry.color_temp = Some(*value),
+            LightAction::ColorXY { x, y } => entry.color_xy = Some((*x, *y)),
+            LightAction::ColorXYTransition { x, y, .. } => entry.color_xy = Some((*x, *y)),
+            LightAction::SolarMode(_) => {} // handled via set_solar_enabled
         }
     }
 

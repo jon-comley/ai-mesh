@@ -1096,14 +1096,30 @@ update-portproxy:
     #!/usr/bin/env bash
     set -e
     WSL_IP=$(ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
-    CURRENT=$(netsh.exe interface portproxy show all | awk '/9000/{print $3}' | head -1)
-    if [ "$CURRENT" = "$WSL_IP" ]; then
-        echo ">>> Portproxy OK (0.0.0.0:9000 → ${WSL_IP}:9000)"
+    CUR_9000=$(netsh.exe interface portproxy show all | awk '/9000/{print $3}' | head -1 | tr -d '\r')
+    CUR_9001=$(netsh.exe interface portproxy show all | awk '/9001/{print $3}' | head -1 | tr -d '\r')
+    if [ "$CUR_9000" = "$WSL_IP" ] && [ "$CUR_9001" = "$WSL_IP" ]; then
+        echo ">>> Portproxy OK (9000 + 9001 → ${WSL_IP})"
         exit 0
     fi
-    echo ">>> WSL IP changed: ${CURRENT:-none} → ${WSL_IP} — updating (UAC prompt will appear)..."
-    powershell.exe -Command "Start-Process powershell -ArgumentList \"-NoProfile -Command netsh interface portproxy delete v4tov4 listenport=9000 listenaddress=0.0.0.0; netsh interface portproxy add v4tov4 listenport=9000 listenaddress=0.0.0.0 connectport=9000 connectaddress=${WSL_IP}\" -Verb RunAs -Wait"
-    echo ">>> Portproxy updated: 0.0.0.0:9000 → ${WSL_IP}:9000"
+    echo ">>> Portproxy update: 9000(${CUR_9000:-none}) 9001(${CUR_9001:-none}) → ${WSL_IP} (UAC prompt will appear)..."
+    powershell.exe -Command "Start-Process powershell -ArgumentList \"-NoProfile -Command netsh interface portproxy delete v4tov4 listenport=9000 listenaddress=0.0.0.0; netsh interface portproxy add v4tov4 listenport=9000 listenaddress=0.0.0.0 connectport=9000 connectaddress=${WSL_IP}; netsh interface portproxy delete v4tov4 listenport=9001 listenaddress=0.0.0.0; netsh interface portproxy add v4tov4 listenport=9001 listenaddress=0.0.0.0 connectport=9001 connectaddress=${WSL_IP}; netsh advfirewall firewall delete rule name=WSL-Mesh-Dashboard; netsh advfirewall firewall add rule name=WSL-Mesh-Dashboard dir=in action=allow protocol=TCP localport=9001\" -Verb RunAs -Wait"
+    echo ">>> Portproxy updated: 9000 + 9001 → ${WSL_IP}"
+
+# Print the dashboard URL for phone access on the same LAN.
+# Ensures the Windows portproxy is current first.
+dashboard-mobile: update-portproxy
+    #!/usr/bin/env bash
+    set -e
+    WIN_IP=$(powershell.exe -NoProfile -Command "(Get-NetIPConfiguration | Where-Object IPv4DefaultGateway -ne \$null | Select-Object -First 1).IPv4Address.IPAddress" | tr -d '\r\n ')
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    TOKEN=""
+    if [ -f "$STATE" ]; then source "$STATE"; TOKEN="${MESH_AUTH_TOKEN:-}"; fi
+    URL="http://${WIN_IP}:9001/"
+    [ -n "$TOKEN" ] && URL="${URL}?token=${TOKEN}"
+    echo ""
+    echo ">>> Open this on your phone (same Wi-Fi):"
+    echo ">>> ${URL}"
 
 # ── Full cluster operations ───────────────────────────────────────────────────
 
