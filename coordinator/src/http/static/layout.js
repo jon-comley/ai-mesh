@@ -95,6 +95,7 @@ export async function openLayout(room) {
 
   loadPlacedBulbs(room.id);
   loadPlacedOpenings(room.id);
+  renderCrosshair(room);
 
   if (room.solar_enabled) {
     // Init compass dial and sun arc now that the SVG exists
@@ -145,6 +146,7 @@ export function notifyRoomUpdate(room) {
   if (layoutRoom && layoutRoom.id === room.id) {
     layoutRoom = room;
     redrawLightEffect(lastSolar.azimuth, lastSolar.elevation);
+    renderCrosshair(room);
   }
 }
 
@@ -162,7 +164,7 @@ export function notifySolarUpdate(azimuth, elevation) {
 export function notifyOrientationUpdate(deg) {
   compassDeg = deg;
   const dial = document.getElementById('lc-compass-dial');
-  if (dial) dial.setAttribute('transform', `rotate(${deg})`);
+  if (dial) dial.setAttribute('transform', `rotate(${deg},925,75)`);
   if (scrubberLive) previewSolarState(lastSolar.azimuth, lastSolar.elevation);
 }
 
@@ -843,6 +845,47 @@ function buildSidebar(room) {
   }
   sidebar.appendChild(openingChips);
 
+  // Dimensions panel
+  const dimsLabel = document.createElement('div');
+  dimsLabel.className = 'layout-sidebar-label';
+  dimsLabel.style.marginTop = '16px';
+  dimsLabel.textContent = 'Room size (m):';
+  sidebar.appendChild(dimsLabel);
+
+  const dimsRow = document.createElement('div');
+  dimsRow.className = 'layout-dims-row';
+  for (const { key, label: lbl, def } of [
+    { key: 'width_m',  label: 'W', def: room.width_m  ?? 3.0 },
+    { key: 'depth_m',  label: 'D', def: room.depth_m  ?? 6.0 },
+    { key: 'height_m', label: 'H', def: room.height_m ?? 2.5 },
+  ]) {
+    const wrap = document.createElement('label');
+    wrap.className = 'layout-dims-field';
+    wrap.textContent = lbl + ' ';
+    const inp = document.createElement('input');
+    inp.type = 'number';
+    inp.min = '0.5';
+    inp.max = '50';
+    inp.step = '0.1';
+    inp.value = def;
+    inp.addEventListener('change', () => {
+      const val = parseFloat(inp.value);
+      if (!isFinite(val) || val < 0.1) return;
+      if (layoutRoom) {
+        const body = {};
+        body[key] = val;
+        fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/dimensions?token=${encodeURIComponent(tok())}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).catch(() => {});
+      }
+    });
+    wrap.appendChild(inp);
+    dimsRow.appendChild(wrap);
+  }
+  sidebar.appendChild(dimsRow);
+
   sidebar._room = room;
   return sidebar;
 }
@@ -932,7 +975,7 @@ function buildCanvas() {
   svg.appendChild(floor);
 
   // Layer order: wall-glow behind everything, compass on top
-  for (const id of ['lc-sun-arc', 'lc-openings', 'lc-shadow', 'lc-bulbs', 'lc-preview', 'lc-compass']) {
+  for (const id of ['lc-sun-arc', 'lc-openings', 'lc-shadow', 'lc-crosshair', 'lc-bulbs', 'lc-preview', 'lc-compass']) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.id = id;
     svg.appendChild(g);
@@ -1725,6 +1768,82 @@ function openingHandlePositions(o, rect) {
 
 function edgeCursor(wallEdge) {
   return isHorizontalWall(wallEdge) ? 'ew-resize' : 'ns-resize';
+}
+
+// ── Origin crosshair ─────────────────────────────────────────────────────────
+
+function renderCrosshair(room) {
+  if (!room) return;
+  const layer = document.getElementById('lc-crosshair');
+  if (!layer) return;
+  while (layer.firstChild) layer.firstChild.remove();
+
+  const ox = (room.origin_x ?? 0.5) * 1000;
+  const oy = (room.origin_y ?? 0.5) * 1000;
+
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.id = 'lc-crosshair-marker';
+
+  const hLine = svgEl('line', { x1: 0, y1: oy, x2: 1000, y2: oy,
+    stroke: '#0ff', 'stroke-width': 1.5, 'stroke-dasharray': '10 5', 'pointer-events': 'none' });
+  const vLine = svgEl('line', { x1: ox, y1: 0, x2: ox, y2: 1000,
+    stroke: '#0ff', 'stroke-width': 1.5, 'stroke-dasharray': '10 5', 'pointer-events': 'none' });
+  const circle = svgEl('circle', { cx: ox, cy: oy, r: 12,
+    fill: 'none', stroke: '#0ff', 'stroke-width': 2, cursor: 'move' });
+  const label = svgEl('text', { x: ox + 16, y: oy - 8,
+    fill: '#0ff', 'font-size': 22, 'font-family': 'monospace',
+    style: 'cursor:move;user-select:none' });
+  label.textContent = '⊕';
+
+  g.appendChild(hLine);
+  g.appendChild(vLine);
+  g.appendChild(circle);
+  g.appendChild(label);
+  layer.appendChild(g);
+
+  // Drag behaviour — attach to SVG using AbortController so old listeners are
+  // cleaned up on the next renderCrosshair call (notifyRoomUpdate may re-render).
+  const svg = document.getElementById('layout-canvas');
+  if (svg._crosshairAbort) svg._crosshairAbort.abort();
+  const ac = new AbortController();
+  svg._crosshairAbort = ac;
+  const sig = { signal: ac.signal };
+
+  let dragging = false;
+
+  svg.addEventListener('pointerdown', e => {
+    if (e.target !== circle && e.target !== label) return;
+    e.preventDefault();
+    dragging = true;
+    svg.setPointerCapture(e.pointerId);
+  }, sig);
+  svg.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+    const px = Math.max(0, Math.min(1000, nx * 1000));
+    const py = Math.max(0, Math.min(1000, ny * 1000));
+    hLine.setAttribute('y1', py); hLine.setAttribute('y2', py);
+    vLine.setAttribute('x1', px); vLine.setAttribute('x2', px);
+    circle.setAttribute('cx', px); circle.setAttribute('cy', py);
+    label.setAttribute('x', px + 16); label.setAttribute('y', py - 8);
+  }, sig);
+  svg.addEventListener('pointerup', e => {
+    if (!dragging) return;
+    dragging = false;
+    svg.releasePointerCapture(e.pointerId);
+    const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+    const ox = Math.max(0, Math.min(1, nx));
+    const oy = Math.max(0, Math.min(1, ny));
+    if (layoutRoom) {
+      layoutRoom.origin_x = ox;
+      layoutRoom.origin_y = oy;
+      fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/origin?token=${encodeURIComponent(tok())}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ origin_x: ox, origin_y: oy }),
+      }).catch(() => {});
+    }
+  }, sig);
 }
 
 // ── Openings — rendering ──────────────────────────────────────────────────────

@@ -185,6 +185,11 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
             "/api/rooms/{id}/orientation",
             patch(api::set_room_orientation),
         )
+        .route("/api/rooms/{id}/origin", patch(api::set_room_origin))
+        .route(
+            "/api/rooms/{id}/dimensions",
+            patch(api::set_room_dimensions),
+        )
         .route("/api/rooms/{id}/command", post(api::room_command))
         .route("/api/solar/config", get(api::solar_config))
         .route("/api/scenes", post(api::save_scene))
