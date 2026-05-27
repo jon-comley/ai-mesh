@@ -100,7 +100,13 @@ impl Coordinator {
             let fingerprint = coord_tls::log_fingerprint(&cert_der);
             server.tls = Some(coord_tls::make_acceptor(cert_der, key_der));
 
-            // Collect valid auth tokens from env.
+            // Collect valid auth tokens. Precedence:
+            //  1. MESH_AUTH_TOKEN env var (explicit override)
+            //  2. Token persisted in ~/.config/ai-mesh/coordinator.state from a prior run
+            //  3. Freshly generated token (first run, or persisted state missing)
+            // Step 2 keeps the token stable across `cargo run` restarts so that
+            // bookmarked dashboard URLs (e.g. on a phone) keep working.
+            let persisted = crate::state::read().unwrap_or_default();
             let mut tokens: Vec<String> = vec![];
             if let Ok(t) = std::env::var("MESH_AUTH_TOKEN") {
                 let t = t.trim().to_string();
@@ -108,24 +114,28 @@ impl Coordinator {
                     tokens.push(t);
                 }
             }
-            let next_token: Option<String> =
-                std::env::var("MESH_AUTH_TOKEN_NEXT").ok().and_then(|t| {
+            let next_token: Option<String> = std::env::var("MESH_AUTH_TOKEN_NEXT")
+                .ok()
+                .and_then(|t| {
                     let t = t.trim().to_string();
                     if t.is_empty() { None } else { Some(t) }
-                });
+                })
+                .or(persisted.next_token);
             if let Some(ref t) = next_token {
                 tokens.push(t.clone());
             }
 
-            // Auto-generate a token when none is configured so the cluster is
-            // always authenticated. The generated token is written to
-            // coordinator.state and distributed to nodes by restart-coordinator.
             if tokens.is_empty() {
-                let token = generate_auth_token();
-                info!(
-                    "auth token auto-generated — run 'just restart-coordinator' to distribute to nodes"
-                );
-                tokens.push(token);
+                if let Some(prior) = persisted.auth_token {
+                    info!("auth token reused from coordinator.state");
+                    tokens.push(prior);
+                } else {
+                    let token = generate_auth_token();
+                    info!(
+                        "auth token auto-generated — run 'just restart-coordinator' to distribute to nodes"
+                    );
+                    tokens.push(token);
+                }
             } else {
                 info!(
                     "auth token validation enabled ({} token(s) accepted)",

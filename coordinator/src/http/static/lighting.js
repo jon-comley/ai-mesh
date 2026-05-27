@@ -6,16 +6,58 @@ let devicesMap = new Map();
 let groupsSet = new Set();
 let dragSrc = null;
 let roomsActive = false;
+let renderedIds = new Set();
 
 export function setRoomsActive() { roomsActive = true; }
 
 export function handleLightingUpdate(evt) {
   devicesMap.clear();
-  for (const dev of evt.devices) {
-    devicesMap.set(dev.device_id, dev);
-  }
+  for (const dev of evt.devices) devicesMap.set(dev.device_id, dev);
   groupsSet = new Set(evt.groups ?? []);
-  render();
+
+  const newIds = new Set(evt.devices.map(d => d.device_id));
+  const idsChanged = newIds.size !== renderedIds.size || [...newIds].some(id => !renderedIds.has(id));
+  if (idsChanged) { render(); } else { patchCards(); }
+}
+
+function patchCards() {
+  const container = document.getElementById('lighting-list');
+  if (!container || dragSrc || roomsActive) return;
+  for (const dev of devicesMap.values()) {
+    const card = container.querySelector(`[data-drag-id="${CSS.escape(dev.device_id)}"]`);
+    if (!card) continue;
+
+    const badge = card.querySelector('.badge');
+    if (badge) {
+      badge.className = `badge ${dev.on ? 'badge-green' : 'badge-muted'}`;
+      badge.textContent = dev.on ? 'On' : 'Off';
+    }
+
+    const bri = card.querySelector('[data-ctrl="brightness"]');
+    if (bri && !bri.classList.contains('slider-active') && document.activeElement !== bri) {
+      bri.value = dev.brightness ?? 200;
+      const pct = Math.round(((dev.brightness ?? 200) / 255) * 100);
+      bri.title = `${pct}%`;
+      const label = bri.parentElement?.querySelector('.light-detail-value');
+      if (label) label.textContent = `${pct}%`;
+    }
+
+    const ct = card.querySelector('[data-ctrl="color_temp"]');
+    if (ct && !ct.classList.contains('slider-active') && document.activeElement !== ct) {
+      ct.value = dev.color_temp ?? 300;
+      const kelvin = Math.round(1_000_000 / (dev.color_temp ?? 300));
+      ct.title = `${kelvin} K`;
+      const label = ct.parentElement?.querySelector('.light-detail-value');
+      if (label) label.textContent = `${kelvin} K`;
+    }
+
+    const colourToggle = card.querySelector('[data-ctrl="colour-toggle"]');
+    if (colourToggle && dev.color_xy) {
+      const [x, y] = dev.color_xy;
+      const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
+      colourToggle.style.background = `rgb(${r},${g},${b})`;
+    }
+  }
 }
 
 function render() {
@@ -51,6 +93,7 @@ function render() {
     enableDrag(card);
     wireControls(card, dev);
   }
+  renderedIds = new Set(devicesMap.keys());
 }
 
 function deviceCard(dev) {
@@ -143,6 +186,8 @@ function wireControls(card, dev) {
 
   const bri = card.querySelector('[data-ctrl="brightness"]');
   if (bri) {
+    bri.addEventListener('pointerdown', () => bri.classList.add('slider-active'));
+    bri.addEventListener('pointercancel', () => bri.classList.remove('slider-active'));
     bri.addEventListener('input', () => {
       const pct = Math.round((bri.value / 255) * 100);
       bri.title = `${pct}%`;
@@ -150,14 +195,18 @@ function wireControls(card, dev) {
       if (label) label.textContent = `${pct}%`;
     });
     bri.addEventListener('change', () => {
+      bri.classList.remove('slider-active');
       const val = parseInt(bri.value, 10);
-      devicesMap.set(dev.device_id, { ...dev, brightness: val });
+      const cur = devicesMap.get(dev.device_id) ?? dev;
+      devicesMap.set(dev.device_id, { ...cur, brightness: val });
       sendCommand(dev.device_id, { action: 'brightness', value: val });
     });
   }
 
   const ct = card.querySelector('[data-ctrl="color_temp"]');
   if (ct) {
+    ct.addEventListener('pointerdown', () => ct.classList.add('slider-active'));
+    ct.addEventListener('pointercancel', () => ct.classList.remove('slider-active'));
     ct.addEventListener('input', () => {
       const kelvin = Math.round(1_000_000 / ct.value);
       ct.title = `${kelvin} K`;
@@ -165,8 +214,10 @@ function wireControls(card, dev) {
       if (label) label.textContent = `${kelvin} K`;
     });
     ct.addEventListener('change', () => {
+      ct.classList.remove('slider-active');
       const val = parseInt(ct.value, 10);
-      devicesMap.set(dev.device_id, { ...dev, color_temp: val });
+      const cur = devicesMap.get(dev.device_id) ?? dev;
+      devicesMap.set(dev.device_id, { ...cur, color_temp: val });
       sendCommand(dev.device_id, { action: 'color_temp', value: val });
     });
   }

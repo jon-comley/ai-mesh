@@ -554,6 +554,12 @@ body {
   border: none;
 }
 
+.light-slider:disabled { cursor: not-allowed; opacity: 0.4; }
+.light-slider:disabled::-webkit-slider-thumb { background: var(--text-muted); cursor: not-allowed; }
+.light-slider:disabled::-moz-range-thumb { background: var(--text-muted); cursor: not-allowed; }
+.light-detail-row-disabled .light-detail-label,
+.light-detail-row-disabled .light-detail-value { opacity: 0.5; }
+
 .light-toast {
   position: fixed;
   bottom: calc(var(--tab-h) + 12px + var(--safe-bottom));
@@ -1251,23 +1257,89 @@ body {
 }
 
 .layout-sidebar {
-  width: 150px;
+  width: 110px;
   flex-shrink: 0;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 8px;
+  padding: 6px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   overflow-y: auto;
+  transition: width 0.22s ease, padding 0.22s ease;
 }
+.layout-sidebar.collapsed {
+  width: 30px;
+  padding: 6px 3px;
+  overflow: hidden;
+}
+.layout-sidebar.collapsed .layout-sidebar-section {
+  display: none;
+}
+.layout-sidebar-toggle {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  font-family: monospace;
+  line-height: 1;
+  padding: 4px 6px;
+  text-align: center;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+}
+.layout-sidebar-toggle:hover { color: var(--text); border-color: var(--accent); }
 
 .layout-sidebar-label {
   font-size: 11px;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.layout-sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.layout-sidebar-section-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+}
+.layout-sidebar-section-head:hover { color: var(--text); }
+.layout-sidebar-section-chevron {
+  display: inline-block;
+  width: 10px;
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1;
+}
+.layout-sidebar-section-title { flex: 1; }
+.layout-sidebar-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow: hidden;
+  transition: max-height 0.2s ease, opacity 0.15s ease;
+  max-height: 800px;
+}
+.layout-sidebar-section-body.collapsed {
+  max-height: 0;
+  opacity: 0;
 }
 
 .layout-sidebar-chips {
@@ -1280,13 +1352,16 @@ body {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 5px 8px;
-  font-size: 12px;
+  padding: 4px 6px;
+  font-size: 11px;
   cursor: grab;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   border-left: 3px solid var(--chip-color, var(--accent));
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .layout-chip:hover { background: var(--border); }
 .layout-chip:active { cursor: grabbing; }
@@ -1304,6 +1379,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+  position: relative;
   display: flex;
   align-items: stretch;
 }
@@ -1311,6 +1387,49 @@ body {
 #layout-canvas {
   width: 100%;
   height: 100%;
+  touch-action: none;
+}
+/* While a sidebar chip is being dragged, the crosshair hit area must not
+   intercept the drop — otherwise a bulb dropped on the origin point gets
+   lost. The chip drag flow toggles .layout-dragging on the SVG.
+   !important needed because the JS also sets the pointer-events attribute
+   directly on the element (belt and braces); CSS would otherwise lose to
+   the SVG presentation attribute in some browsers. */
+#layout-canvas.layout-dragging .lc-crosshair-hit {
+  pointer-events: none !important;
+}
+
+#lc-3d-container {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #0d0d1a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+#lc-3d-container canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* 3D toggle button */
+.layout-toolbar-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.layout-toolbar-btn:hover {
+  background: var(--surface-3, #2a2a3e);
+  border-color: var(--accent);
 }
 
 /* Live state transitions on canvas bulb shapes */
@@ -1749,3 +1868,41 @@ body {
   color: var(--text, #e6edf3);
 }
 .lc-wizard-btn-secondary:hover { background: var(--surface, #161b22); }
+
+/* ── Touch-device tap targets ─────────────────────────────────────────────────
+   Phones and tablets — bump small icon/badge buttons to a 36px+ minimum so
+   they're reliably tappable. Desktop with a mouse is unaffected. */
+@media (hover: none) and (pointer: coarse) {
+  .room-collapse-btn,
+  .room-remove-btn,
+  .room-layout-btn,
+  .room-action-btn,
+  .light-toggle-btn,
+  .layout-toolbar-btn {
+    min-width: 36px;
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 10px;
+  }
+  .color-swatch-btn,
+  .solar-dot {
+    width: 32px;
+    height: 32px;
+  }
+  .room-header-quick { gap: 8px; }
+  .light-card-header-right { gap: 10px; }
+  .room-quick-scene-chip,
+  .effect-chip,
+  .layout-chip {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  /* Sliders are easier to grab with a bigger thumb */
+  .light-slider::-webkit-slider-thumb { width: 22px; height: 22px; }
+  .light-slider::-moz-range-thumb { width: 22px; height: 22px; }
+  .light-slider { height: 6px; }
+  /* Layout view controls — make compass + scrubber thumbs grabbable */
+  #lc-scrubber { height: 24px; }
+}

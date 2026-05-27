@@ -270,6 +270,10 @@ pub async fn light_command(
         return StatusCode::NO_CONTENT.into_response();
     }
 
+    // Optimistically update the snapshot so subsequent broadcasts (triggered by
+    // any other device's status report) carry the intended value, not the stale
+    // pre-command value that would otherwise snap UI sliders back.
+    state.apply_command_to_snapshot(&device, &command);
     let cmd = LightCommandRequest {
         request_id: gen_request_id(),
         target: LightTarget::Device(device.clone()),
@@ -504,6 +508,7 @@ pub async fn room_command(
             any_unavailable = true;
             continue;
         };
+        state.apply_command_to_snapshot(device_id, &command);
         let cmd = LightCommandRequest {
             request_id: gen_request_id(),
             target: LightTarget::Device(device_id.clone()),
@@ -549,11 +554,26 @@ pub async fn set_room_solar(
             return StatusCode::NOT_FOUND.into_response();
         }
         reg.set_room_solar(&room_id, body.enabled);
-        reg.list_rooms()
+        let ids = reg
+            .list_rooms()
             .into_iter()
             .find(|r| r.id == room_id)
             .map(|r| r.device_ids)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Persist per-device solar_enabled to SQLite for every bulb in the room
+        // so the flag survives coordinator restarts and so subsequent agent
+        // status reports don't reset it (push_lighting_update's preserve-true
+        // logic relies on the in-memory snapshot having solar_enabled=true).
+        // Without this, dragging the Solar effect into a room sets the room
+        // flag but the bulbs revert to non-solar on the next restart.
+        let mut reports = reg.load_light_states();
+        for device_id in &ids {
+            if let Some(report) = reports.iter_mut().find(|r| &r.device_id == device_id) {
+                report.solar_enabled = body.enabled;
+                reg.save_light_state(report);
+            }
+        }
+        ids
     };
     for device_id in &device_ids {
         state.set_solar_enabled(device_id, body.enabled);
@@ -566,11 +586,17 @@ pub async fn set_room_solar(
     StatusCode::NO_CONTENT.into_response()
 }
 
-pub async fn restore_device_solar(
+#[derive(serde::Deserialize)]
+pub struct SetDeviceSolarBody {
+    pub enabled: bool,
+}
+
+pub async fn set_device_solar(
     Path(device): Path<String>,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
     Query(q): Query<TokenQuery>,
     State(state): State<Arc<DashboardState>>,
+    Json(body): Json<SetDeviceSolarBody>,
 ) -> impl IntoResponse {
     if !state.auth_ok(&q.token) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -579,13 +605,32 @@ pub async fn restore_device_solar(
         let mut reg = registry.lock().unwrap();
         let mut reports = reg.load_light_states();
         if let Some(report) = reports.iter_mut().find(|r| r.device_id == device) {
-            report.solar_enabled = true;
+            report.solar_enabled = body.enabled;
             reg.save_light_state(report);
         }
     }
-    state.set_solar_enabled(&device, true);
-    state.solar_sweep_notify.notify_one();
+    state.set_solar_enabled(&device, body.enabled);
+    if body.enabled {
+        state.solar_sweep_notify.notify_one();
+    }
     StatusCode::NO_CONTENT.into_response()
+}
+
+// Keep the old POST restore-solar route working as an alias
+pub async fn restore_device_solar(
+    Path(device): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    set_device_solar(
+        Path(device),
+        Extension(registry),
+        Query(q),
+        State(state),
+        Json(SetDeviceSolarBody { enabled: true }),
+    )
+    .await
 }
 
 // ── Solar config ──────────────────────────────────────────────────────────────

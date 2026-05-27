@@ -63,6 +63,42 @@ pub(crate) fn write_to_path(
     std::fs::rename(&tmp_path, path)
 }
 
+/// Parsed persisted state. Only fields actually used at coordinator startup
+/// are surfaced; the file may contain other keys.
+#[derive(Debug, Default)]
+pub struct PersistedState {
+    pub auth_token: Option<String>,
+    pub next_token: Option<String>,
+}
+
+/// Read and parse the persisted state file at `~/.config/ai-mesh/coordinator.state`.
+/// Returns `None` if the file is missing or unreadable. Logs a warning on parse
+/// errors but does not fail — callers should treat absence as "no persisted token".
+pub fn read() -> Option<PersistedState> {
+    read_from_path(&state_path())
+}
+
+pub(crate) fn read_from_path(path: &std::path::Path) -> Option<PersistedState> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut out = PersistedState::default();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        match key.trim() {
+            "MESH_AUTH_TOKEN" if !value.is_empty() => out.auth_token = Some(value),
+            "MESH_AUTH_TOKEN_NEXT" if !value.is_empty() => out.next_token = Some(value),
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::write_to_path;
@@ -166,6 +202,37 @@ mod tests {
                 "value must not be quoted (bash source reads bare): {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn read_returns_persisted_token_after_write() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coordinator.state");
+        write_to_path(&path, "FP", &["mytoken".into()], Some("nexttoken")).unwrap();
+        let parsed = super::read_from_path(&path).unwrap();
+        assert_eq!(parsed.auth_token.as_deref(), Some("mytoken"));
+        assert_eq!(parsed.next_token.as_deref(), Some("nexttoken"));
+    }
+
+    #[test]
+    fn read_returns_none_when_file_missing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("does-not-exist");
+        assert!(super::read_from_path(&path).is_none());
+    }
+
+    #[test]
+    fn read_ignores_unknown_keys_and_blank_lines() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("coordinator.state");
+        fs::write(
+            &path,
+            "# a comment\nMESH_AUTH_TOKEN=tok\nWEIRD_KEY=ignored\n\nMESH_AUTH_TOKEN_NEXT=next\n",
+        )
+        .unwrap();
+        let parsed = super::read_from_path(&path).unwrap();
+        assert_eq!(parsed.auth_token.as_deref(), Some("tok"));
+        assert_eq!(parsed.next_token.as_deref(), Some("next"));
     }
 
     /// Only the three known keys are written; no extra lines should appear.
