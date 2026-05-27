@@ -57,6 +57,11 @@ pub struct RoomInfo {
     pub has_window: bool,
     pub window_facing: Option<f32>,
     pub solar_enabled: bool,
+    pub width_m: f64,
+    pub depth_m: f64,
+    pub height_m: f64,
+    pub origin_x: f64,
+    pub origin_y: f64,
 }
 
 impl From<RoomRecord> for RoomInfo {
@@ -70,6 +75,11 @@ impl From<RoomRecord> for RoomInfo {
             has_window: r.has_window,
             window_facing: r.window_facing,
             solar_enabled: r.solar_enabled,
+            width_m: r.width_m,
+            depth_m: r.depth_m,
+            height_m: r.height_m,
+            origin_x: r.origin_x,
+            origin_y: r.origin_y,
         }
     }
 }
@@ -1210,6 +1220,11 @@ mod tests {
             has_window: false,
             window_facing: None,
             solar_enabled: false,
+            width_m: 3.0,
+            depth_m: 6.0,
+            height_m: 2.5,
+            origin_x: 0.5,
+            origin_y: 0.5,
         }
     }
 
@@ -1278,6 +1293,11 @@ mod tests {
                 has_window: false,
                 window_facing: None,
                 solar_enabled: false,
+                width_m: 3.0,
+                depth_m: 6.0,
+                height_m: 2.5,
+                origin_x: 0.5,
+                origin_y: 0.5,
             }],
             device_names: std::collections::HashMap::new(),
         };

@@ -635,6 +635,72 @@ pub async fn set_room_orientation(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ── Room origin + dimensions ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SetOriginBody {
+    origin_x: f64,
+    origin_y: f64,
+}
+
+pub async fn set_room_origin(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<SetOriginBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        reg.set_room_origin(&room_id, body.origin_x, body.origin_y);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SetDimensionsBody {
+    width_m: Option<f64>,
+    depth_m: Option<f64>,
+    height_m: Option<f64>,
+}
+
+pub async fn set_room_dimensions(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<SetDimensionsBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let (width_m, depth_m, height_m) = {
+        let reg = registry.lock().unwrap();
+        let room = match reg.get_room(&room_id) {
+            Some(r) => r,
+            None => return StatusCode::NOT_FOUND.into_response(),
+        };
+        (
+            body.width_m.unwrap_or(room.width_m),
+            body.depth_m.unwrap_or(room.depth_m),
+            body.height_m.unwrap_or(room.height_m),
+        )
+    };
+    registry
+        .lock()
+        .unwrap()
+        .set_room_dimensions(&room_id, width_m, depth_m, height_m);
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
 // ── Scenes ────────────────────────────────────────────────────────────────────
 
 fn scenes_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<SceneInfo> {

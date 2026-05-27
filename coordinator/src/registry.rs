@@ -80,6 +80,11 @@ pub struct RoomRecord {
     pub has_window: bool,
     pub window_facing: Option<f32>,
     pub solar_enabled: bool,
+    pub width_m: f64,
+    pub depth_m: f64,
+    pub height_m: f64,
+    pub origin_x: f64,
+    pub origin_y: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -253,6 +258,36 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !columns.contains(&"solar_enabled".to_string()) {
         conn.execute(
             "ALTER TABLE rooms ADD COLUMN solar_enabled INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains(&"width_m".to_string()) {
+        conn.execute(
+            "ALTER TABLE rooms ADD COLUMN width_m REAL NOT NULL DEFAULT 3.0",
+            [],
+        )?;
+    }
+    if !columns.contains(&"depth_m".to_string()) {
+        conn.execute(
+            "ALTER TABLE rooms ADD COLUMN depth_m REAL NOT NULL DEFAULT 6.0",
+            [],
+        )?;
+    }
+    if !columns.contains(&"height_m".to_string()) {
+        conn.execute(
+            "ALTER TABLE rooms ADD COLUMN height_m REAL NOT NULL DEFAULT 2.5",
+            [],
+        )?;
+    }
+    if !columns.contains(&"origin_x".to_string()) {
+        conn.execute(
+            "ALTER TABLE rooms ADD COLUMN origin_x REAL NOT NULL DEFAULT 0.5",
+            [],
+        )?;
+    }
+    if !columns.contains(&"origin_y".to_string()) {
+        conn.execute(
+            "ALTER TABLE rooms ADD COLUMN origin_y REAL NOT NULL DEFAULT 0.5",
             [],
         )?;
     }
@@ -798,7 +833,8 @@ impl Registry {
 
     pub fn list_rooms(&self) -> Vec<RoomRecord> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, name, position, orientation_degrees, has_window, window_facing, solar_enabled FROM rooms ORDER BY position, name",
+            "SELECT id, name, position, orientation_degrees, has_window, window_facing, solar_enabled, \
+             width_m, depth_m, height_m, origin_x, origin_y FROM rooms ORDER BY position, name",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -807,7 +843,20 @@ impl Registry {
             }
         };
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, String, i64, f32, bool, Option<f32>, bool)> = stmt
+        let rows: Vec<(
+            String,
+            String,
+            i64,
+            f32,
+            bool,
+            Option<f32>,
+            bool,
+            f64,
+            f64,
+            f64,
+            f64,
+            f64,
+        )> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get(0)?,
@@ -817,6 +866,11 @@ impl Registry {
                     row.get::<_, i32>(4)? != 0,
                     row.get(5)?,
                     row.get::<_, i32>(6)? != 0,
+                    row.get::<_, f64>(7).unwrap_or(3.0),
+                    row.get::<_, f64>(8).unwrap_or(6.0),
+                    row.get::<_, f64>(9).unwrap_or(2.5),
+                    row.get::<_, f64>(10).unwrap_or(0.5),
+                    row.get::<_, f64>(11).unwrap_or(0.5),
                 ))
             })
             .map(|r| r.collect::<rusqlite::Result<_>>().unwrap_or_default())
@@ -831,6 +885,11 @@ impl Registry {
                     has_window,
                     window_facing,
                     solar_enabled,
+                    width_m,
+                    depth_m,
+                    height_m,
+                    origin_x,
+                    origin_y,
                 )| {
                     let device_ids = self.room_device_ids(&id);
                     RoomRecord {
@@ -842,6 +901,11 @@ impl Registry {
                         has_window,
                         window_facing,
                         solar_enabled,
+                        width_m,
+                        depth_m,
+                        height_m,
+                        origin_x,
+                        origin_y,
                     }
                 },
             )
@@ -865,6 +929,11 @@ impl Registry {
             has_window: false,
             window_facing: None,
             solar_enabled: false,
+            width_m: 3.0,
+            depth_m: 6.0,
+            height_m: 2.5,
+            origin_x: 0.5,
+            origin_y: 0.5,
         }
     }
 
@@ -900,6 +969,41 @@ impl Registry {
         ) {
             warn!(error = %e, "set_room_orientation failed");
         }
+    }
+
+    pub fn set_room_origin(&mut self, room_id: &str, origin_x: f64, origin_y: f64) {
+        let ox = origin_x.clamp(0.0, 1.0);
+        let oy = origin_y.clamp(0.0, 1.0);
+        if let Err(e) = self.conn.execute(
+            "UPDATE rooms SET origin_x = ?1, origin_y = ?2 WHERE id = ?3",
+            params![ox, oy, room_id],
+        ) {
+            warn!(error = %e, "set_room_origin failed");
+        }
+    }
+
+    pub fn set_room_dimensions(
+        &mut self,
+        room_id: &str,
+        width_m: f64,
+        depth_m: f64,
+        height_m: f64,
+    ) {
+        if let Err(e) = self.conn.execute(
+            "UPDATE rooms SET width_m = ?1, depth_m = ?2, height_m = ?3 WHERE id = ?4",
+            params![
+                width_m.max(0.1),
+                depth_m.max(0.1),
+                height_m.max(0.1),
+                room_id
+            ],
+        ) {
+            warn!(error = %e, "set_room_dimensions failed");
+        }
+    }
+
+    pub fn get_room(&self, id: &str) -> Option<RoomRecord> {
+        self.list_rooms().into_iter().find(|r| r.id == id)
     }
 
     /// Returns true if a room with this id exists.

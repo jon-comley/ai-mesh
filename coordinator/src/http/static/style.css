@@ -1394,6 +1394,38 @@ body {
 #lc-shadow polygon { pointer-events: none; transition: opacity 0.8s ease; }
 .lc-opening-window, .lc-opening-door { transition: fill 0.3s ease-out, opacity 0.3s ease-out; }
 
+/* Origin crosshair */
+#lc-crosshair line { pointer-events: none; }
+#lc-crosshair circle, #lc-crosshair text { cursor: move; }
+#lc-crosshair circle:hover { stroke: #7ff; stroke-width: 3; }
+
+/* Room dimensions panel */
+.layout-dims-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.layout-dims-field {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.layout-dims-field input[type="number"] {
+  width: 52px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 2px 4px;
+  font-size: 12px;
+}
+.layout-dims-field input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* Opening chips in sidebar */
 .layout-opening-chip {
   background: var(--surface-2);
