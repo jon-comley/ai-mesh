@@ -1843,35 +1843,30 @@ function makeBulbDraggable(g, deviceId) {
   let dropzoneShown = false;
   let ghost = null;
   let tapTarget = null;
+  let capturedPointerId = null;
   let startNx, startNy, startBulbX, startBulbY;
 
-  g.addEventListener('pointerdown', e => {
-    if (e.button !== 0) return;
-    e.stopPropagation();
+  function resetCrosshairRing() {
+    const xRing = document.querySelector('#lc-crosshair-marker circle');
+    if (xRing) {
+      xRing.setAttribute('r', 16);
+      xRing.setAttribute('fill', 'rgba(0, 200, 220, 0.12)');
+      xRing.setAttribute('stroke-width', 2.5);
+    }
+  }
+
+  function cleanup() {
+    document.removeEventListener('pointermove', onDocMove);
+    document.removeEventListener('pointerup',   onDocUp);
+    document.removeEventListener('pointercancel', onDocCancel);
+    dragging = false;
+    capturedPointerId = null;
+    g.style.cursor = 'grab';
+  }
+
+  function onDocMove(e) {
+    if (e.pointerId !== capturedPointerId) return;
     e.preventDefault();
-    dismissPopover();
-    tapTarget = e.target;
-
-    const svg = document.getElementById('layout-canvas');
-    const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-    const entry = placedBulbs[deviceId];
-    if (!entry) return;
-
-    dragging = true;
-    moved = false;
-    dropzoneShown = false;
-    startNx = nx; startNy = ny;
-    startBulbX = entry.x; startBulbY = entry.y;
-
-    g.setPointerCapture(e.pointerId);
-    g.style.cursor = 'grabbing';
-
-    if (typeof window.__roomsStartPulse === 'function') window.__roomsStartPulse(deviceId);
-  });
-
-  g.addEventListener('pointermove', e => {
-    if (!dragging) return;
-    e.stopPropagation();
 
     const svg = document.getElementById('layout-canvas');
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
@@ -1885,7 +1880,6 @@ function makeBulbDraggable(g, deviceId) {
       dropzoneShown = true;
       showLightsDropzone();
 
-      // Create a chip-ghost that follows the pointer outside the SVG canvas
       const gDev = devicesRef.get(deviceId);
       const gName = gDev?.friendly_name ?? deviceId;
       ghost = document.createElement('div');
@@ -1899,7 +1893,6 @@ function makeBulbDraggable(g, deviceId) {
       document.body.appendChild(ghost);
     }
 
-    // Keep ghost positioned at pointer; only show it outside the SVG canvas
     if (ghost) {
       ghost.style.left = `${e.clientX - 44}px`;
       ghost.style.top  = `${e.clientY - 14}px`;
@@ -1911,18 +1904,16 @@ function makeBulbDraggable(g, deviceId) {
       ghost.style.opacity = outsideSvg ? '1' : '0';
     }
 
-    // Where the bulb WOULD land at this pointer position (pre-magnet)
     const candidateX = startBulbX + dx;
     const candidateY = startBulbY + dy;
     const magnet = magnetToOrigin(candidateX, candidateY);
     const newX = magnet ? magnet.nx : Math.max(0, Math.min(1, snapX(candidateX)));
     const newY = magnet ? magnet.ny : Math.max(0, Math.min(1, snapY(candidateY)));
-    // Translate the group visually without re-creating it
     const entry = placedBulbs[deviceId];
     const tx = (newX - entry.x) * 1000;
     const ty = (newY - entry.y) * 1000;
     g.setAttribute('transform', `translate(${tx},${ty})`);
-    // Pulse crosshair ring when bulb is in magnet zone
+
     const xRing = document.querySelector('#lc-crosshair-marker circle');
     if (xRing) {
       if (magnet) {
@@ -1930,9 +1921,7 @@ function makeBulbDraggable(g, deviceId) {
         xRing.setAttribute('fill', 'rgba(0, 255, 255, 0.3)');
         xRing.setAttribute('stroke-width', 3.5);
       } else {
-        xRing.setAttribute('r', 16);
-        xRing.setAttribute('fill', 'rgba(0, 200, 220, 0.12)');
-        xRing.setAttribute('stroke-width', 2.5);
+        resetCrosshairRing();
       }
     }
 
@@ -1943,15 +1932,14 @@ function makeBulbDraggable(g, deviceId) {
         e.clientX >= r.left && e.clientX <= r.right &&
         e.clientY >= r.top  && e.clientY <= r.bottom);
     }
-  });
+  }
 
-  g.addEventListener('pointerup', e => {
-    if (!dragging) return;
-    dragging = false;
-    g.style.cursor = 'grab';
-    g.releasePointerCapture(e.pointerId);
+  function onDocUp(e) {
+    if (e.pointerId !== capturedPointerId) return;
+    const wasMoved = moved;
+    cleanup();
 
-    if (!moved) {
+    if (!wasMoved) {
       const entry = placedBulbs[deviceId];
       if (tapTarget && entry && tapTarget === entry.labelEl) {
         if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(false);
@@ -1962,7 +1950,6 @@ function makeBulbDraggable(g, deviceId) {
       return;
     }
 
-    // Check if dropped onto the unplace drop zone
     const dzUp = document.getElementById('layout-chips-dropzone');
     if (dzUp) {
       dzUp.classList.remove('dz-hover');
@@ -1970,11 +1957,9 @@ function makeBulbDraggable(g, deviceId) {
       if (e.clientX >= r.left && e.clientX <= r.right &&
           e.clientY >= r.top  && e.clientY <= r.bottom) {
         if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(false);
-        const xRingDz = document.querySelector('#lc-crosshair-marker circle');
-        if (xRingDz) { xRingDz.setAttribute('r', 16); xRingDz.setAttribute('fill', 'rgba(0, 200, 220, 0.12)'); xRingDz.setAttribute('stroke-width', 2.5); }
+        resetCrosshairRing();
         g.removeAttribute('transform');
 
-        // Animate ghost chip flying into the drop zone, then unplace
         if (ghost) {
           const gr = ghost.getBoundingClientRect();
           const tdx = (r.left + r.width  / 2) - (gr.left + gr.width  / 2);
@@ -1992,18 +1977,15 @@ function makeBulbDraggable(g, deviceId) {
         }
 
         pushUndo();
-        removeBulb(deviceId);   // → rebuildSidebar will show the chip + section
+        removeBulb(deviceId);
         return;
       }
     }
+
     if (ghost) { ghost.remove(); ghost = null; }
     hideLightsDropzone();
-
     if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(true);
-
-    const xRingUp = document.querySelector('#lc-crosshair-marker circle');
-    if (xRingUp) { xRingUp.setAttribute('r', 16); xRingUp.setAttribute('fill', 'rgba(0, 200, 220, 0.12)'); xRingUp.setAttribute('stroke-width', 2.5); }
-
+    resetCrosshairRing();
     g.removeAttribute('transform');
 
     const svg = document.getElementById('layout-canvas');
@@ -2019,19 +2001,45 @@ function makeBulbDraggable(g, deviceId) {
       pushUndo();
       placeBulb(deviceId, newX, newY, entry.z, entry.fixture_type, true);
     }
-  });
+  }
 
-  g.addEventListener('pointercancel', () => {
-    if (!dragging) return;
-    dragging = false;
+  function onDocCancel(e) {
+    if (e.pointerId !== capturedPointerId) return;
+    cleanup();
     dropzoneShown = false;
     g.removeAttribute('transform');
-    g.style.cursor = 'grab';
-    const xRingC = document.querySelector('#lc-crosshair-marker circle');
-    if (xRingC) { xRingC.setAttribute('r', 16); xRingC.setAttribute('fill', 'rgba(0, 200, 220, 0.12)'); xRingC.setAttribute('stroke-width', 2.5); }
+    resetCrosshairRing();
     if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(false);
     if (ghost) { ghost.remove(); ghost = null; }
     hideLightsDropzone();
+  }
+
+  g.addEventListener('pointerdown', e => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    e.stopPropagation();
+    e.preventDefault();
+    dismissPopover();
+    tapTarget = e.target;
+
+    const svg = document.getElementById('layout-canvas');
+    const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+    const entry = placedBulbs[deviceId];
+    if (!entry) return;
+
+    dragging = true;
+    moved = false;
+    dropzoneShown = false;
+    startNx = nx; startNy = ny;
+    startBulbX = entry.x; startBulbY = entry.y;
+    capturedPointerId = e.pointerId;
+
+    g.style.cursor = 'grabbing';
+
+    document.addEventListener('pointermove',   onDocMove,   { passive: false });
+    document.addEventListener('pointerup',     onDocUp);
+    document.addEventListener('pointercancel', onDocCancel);
+
+    if (typeof window.__roomsStartPulse === 'function') window.__roomsStartPulse(deviceId);
   });
 }
 

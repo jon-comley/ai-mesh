@@ -136,23 +136,42 @@ function Disable-Sleep {
 }
 
 function Harden-Stability {
-    # Two registry fixes for the SER8 hang pattern:
+    # Registry fixes for the SER8 DPC_WATCHDOG_VIOLATION crash pattern:
     #   1. Fast Startup — powercfg /h off disables hibernate but not Fast
     #      Startup (hybrid shutdown); can produce a half-suspended state.
     #   2. NIC power management — adapter should stay live across idle periods.
+    #   3. GPU ULPS (Ultra Low Power State) — the AMD Radeon 780M DPC routine
+    #      for waking out of ULPS overruns the watchdog timeout, causing
+    #      0x00000133 BSODs at idle. Confirmed root cause 2026-05-28.
+    #      AMD driver updates silently restore EnableUlps=1, so this must be
+    #      re-applied at every boot via the Scheduled Task below.
     #
     # NOTE: TdrDelay intentionally NOT set here. Setting it to 60s was tried
     # and correlated with severe GPU overheating (DPC_WATCHDOG_VIOLATION crashes
     # followed by thermal shutdown). The Windows default (2s) is safer — it
     # resets a hung GPU driver quickly rather than letting it cook.
+
+    # Fast Startup off
     reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Power" /v HiberbootEnabled /t REG_DWORD /d 0 /f | Out-Null
+
+    # NIC power management off
     Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002bE10318}" -ErrorAction SilentlyContinue | ForEach-Object {
         $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
         if ($props -and $props.DriverDesc) {
             Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 24 -Type DWord -ErrorAction SilentlyContinue
         }
     }
-    Write-Host ">>> Stability hardening applied (Fast Startup off, NIC power save off)."
+
+    # GPU ULPS off — disable on every display adapter subkey
+    Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002bE10318}" -ErrorAction SilentlyContinue | ForEach-Object {
+        $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+        if ($props -and $props.DriverDesc) {
+            Set-ItemProperty $_.PSPath -Name EnableUlps              -Value 0 -Type DWord -ErrorAction SilentlyContinue
+            Set-ItemProperty $_.PSPath -Name PP_SclkDeepSleepDisable -Value 1 -Type DWord -ErrorAction SilentlyContinue
+        }
+    }
+
+    Write-Host ">>> Stability hardening applied (Fast Startup off, NIC power save off, GPU ULPS off)."
 }
 
 function Ensure-StartupHardeningTask {
@@ -192,8 +211,19 @@ Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | ForEach-Object {
         -ErrorAction SilentlyContinue
 }
 
+# GPU ULPS off — AMD driver updates silently restore EnableUlps=1, causing
+# 0x00000133 DPC_WATCHDOG_VIOLATION at idle (confirmed root cause 2026-05-28).
+# Re-apply on every boot to survive driver reinstalls.
+Get-ChildItem "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002bE10318}" -ErrorAction SilentlyContinue | ForEach-Object {
+    $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+    if ($props -and $props.DriverDesc) {
+        Set-ItemProperty $_.PSPath -Name EnableUlps              -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Set-ItemProperty $_.PSPath -Name PP_SclkDeepSleepDisable -Value 1 -Type DWord -ErrorAction SilentlyContinue
+    }
+}
+
 Write-EventLog -LogName Application -Source "ai-mesh" -EventId 1 -EntryType Information `
-    -Message "ai-mesh-harden-boot: stability hardening re-applied." -ErrorAction SilentlyContinue
+    -Message "ai-mesh-harden-boot: stability hardening re-applied (Fast Startup off, NIC power save off, GPU ULPS off)." -ErrorAction SilentlyContinue
 '@
 
     Set-Content -Path $hardenScript -Value $scriptContent -Encoding UTF8
