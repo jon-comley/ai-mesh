@@ -794,10 +794,21 @@ body {
 
 .room-card-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   margin-bottom: 10px;
+}
+
+.room-header-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.room-header-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .room-collapse-btn {
@@ -1168,6 +1179,7 @@ body {
   display: flex;
   flex-direction: column;
 }
+#panel-lighting.layout-open > h2 { display: none; }
 #panel-lighting.layout-open #lighting-list {
   flex: 1;
   min-height: 0;
@@ -1372,6 +1384,36 @@ body {
   font-style: italic;
 }
 
+/* Ghost chip that follows the pointer when dragging a placed bulb outside the SVG canvas */
+.layout-drag-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 2000;
+  opacity: 0;
+  transition: opacity 0.1s;
+  will-change: transform, opacity;
+}
+.layout-drag-ghost .layout-chip {
+  box-shadow: 0 3px 14px rgba(0,0,0,0.55);
+}
+
+.layout-chips-dropzone {
+  margin: 4px 0;
+  padding: 12px 8px;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  pointer-events: none;
+}
+.layout-chips-dropzone.dz-hover {
+  border-color: var(--accent, #0ff);
+  color: var(--accent, #0ff);
+  background: rgba(0, 255, 255, 0.07);
+}
+
 .layout-canvas-wrap {
   flex: 1;
   min-width: 0;
@@ -1444,13 +1486,82 @@ body {
   z-index: 1000;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 12px;
-  width: 200px;
+  width: 240px;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+}
+
+/* Header row: status dot + tappable name */
+.layout-popover-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.layout-popover-status-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transition: background 0.2s;
+}
+.layout-popover-name-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: text;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.layout-popover-name-btn:hover { color: var(--accent, #0ff); }
+
+/* On / Off toggle */
+.layout-popover-toggle {
+  width: 100%;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  padding: 6px 0;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.layout-popover-toggle.is-on {
+  border-color: var(--accent, #0ff);
+  color: var(--accent, #0ff);
+  background: rgba(0,255,255,0.08);
+}
+.layout-popover-toggle.is-off {
+  border-color: var(--border);
+  color: var(--text-muted);
+  background: var(--surface-2);
+}
+
+/* Label + value row (Brightness / Colour temp / Height) */
+.layout-popover-ctrl-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 2px;
+}
+.layout-popover-ctrl-row span:last-child {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
 }
 
 .layout-popover-label {
@@ -1458,6 +1569,12 @@ body {
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
+}
+
+.layout-popover-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 0;
 }
 
 .layout-popover-select {
@@ -1475,6 +1592,11 @@ body {
   accent-color: var(--accent);
 }
 
+/* Colour-temp slider: warm (amber) → cool (blue) gradient track */
+.layout-popover-slider-ct {
+  accent-color: #a0c4ff;
+}
+
 .layout-popover-remove {
   background: none;
   border: 1px solid var(--red);
@@ -1485,6 +1607,21 @@ body {
   font-size: 12px;
 }
 .layout-popover-remove:hover { background: var(--red); color: #fff; }
+
+/* Inline label rename input */
+.layout-label-rename-input {
+  position: fixed;
+  z-index: 1100;
+  background: var(--surface);
+  border: 1px solid var(--accent, #0ff);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 3px 7px;
+  width: 160px;
+  outline: none;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+}
 
 /* ── Layout — openings ────────────────────────────────────────────────────── */
 .lc-opening-window {
@@ -1545,6 +1682,102 @@ body {
   border-color: var(--accent);
 }
 
+/* Placed-bulbs position panel */
+.layout-placed-header {
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 2px 0 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+.layout-placed-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.layout-placed-entry:last-child { border-bottom: none; }
+.layout-placed-name {
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.layout-placed-coords {
+  display: flex;
+  gap: 4px;
+}
+.layout-placed-coord-field {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.layout-placed-coord-field input[type="number"] {
+  width: 42px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  padding: 1px 3px;
+  font-size: 10px;
+}
+.layout-placed-coord-field input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Inline title rename */
+.layout-title { cursor: pointer; }
+.layout-title:hover { color: var(--accent); }
+.layout-title-input {
+  background: var(--surface-2);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  padding: 1px 6px;
+  width: 160px;
+  outline: none;
+}
+
+/* Canvas wall dimension labels */
+.lc-wall-dim { cursor: pointer; }
+.lc-wall-dim-bg { fill: rgba(0,0,0,0.55); rx: 4; }
+.lc-wall-dim-text { fill: rgba(255,255,255,0.7); font-size: 22px; font-family: monospace; }
+.lc-wall-dim:hover .lc-wall-dim-text { fill: var(--accent, #7ef); }
+
+/* Floating wall-dim edit overlay */
+.layout-wall-dim-edit {
+  position: fixed;
+  z-index: 1100;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.layout-wall-dim-edit input[type="number"] {
+  width: 64px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 3px 5px;
+  font-size: 13px;
+  outline: none;
+}
+.layout-wall-dim-edit input[type="number"]:focus { border-color: var(--accent); }
+
 /* Opening chips in sidebar */
 .layout-opening-chip {
   background: var(--surface-2);
@@ -1585,7 +1818,7 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex-shrink: 0;
+  flex: 1;
 }
 
 /* ── Quick scenes bar (always visible, horizontal scroll) ────────────────────── */

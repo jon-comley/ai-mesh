@@ -2,6 +2,17 @@
 // SVG top-down floor plan for placing bulbs and (Phase B) windows/doors.
 // Coordinates are always 0–1 normalised; the SVG scales to any screen size.
 
+// Prevent click-to-jump on any range slider — user must grab the thumb.
+function lockSliderToThumb(slider) {
+  slider.addEventListener('pointerdown', e => {
+    const rect = slider.getBoundingClientRect();
+    const ratio = (slider.value - slider.min) / (slider.max - slider.min);
+    const thumbX = rect.left + ratio * rect.width;
+    if (Math.abs(e.clientX - thumbX) > (e.pointerType === 'touch' ? 30 : 16))
+      e.preventDefault();
+  }, { capture: true });
+}
+
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let layoutRoom = null;          // RoomRecord currently in view
@@ -54,6 +65,9 @@ let threeFloorPlane = null;   // THREE.Plane at y=0
 let compassDeg = 0;             // current orientation_degrees for the open room
 let compassDragging = false;
 let compassOrientTimer = null;
+let compassUpdateFrozen = false;
+let compassFreezeTimer = null;
+let compassPrevAngle = 0;       // pointer angle at previous pointermove frame (delta rotation)
 let scrubberLive = true;        // false while time scrubber is in preview mode
 let scrubberRafPending = false;
 let scrubberThrottleTimer = null;
@@ -127,6 +141,7 @@ export async function openLayout(room) {
   loadPlacedBulbs(room.id);
   loadPlacedOpenings(room.id);
   renderCrosshair(room);
+  renderWallDims(room);
   initThree(room).catch(() => {});
 
   // Compass dial sets the room's orientation — useful regardless of whether
@@ -172,9 +187,19 @@ export function closeLayout() {
 // Called by rooms.js when a LightingUpdate WS event arrives so canvas icons stay live.
 export function notifyDeviceUpdate(deviceId, state) {
   const entry = placedBulbs[deviceId];
-  if (!entry || !scrubberLive) return;
+  if (!entry || !scrubberLive || iconUpdatesFrozen) return;
   updateBulbIcon(entry, state);
   threeUpdateBulbColor(deviceId, state);
+}
+
+// Temporarily suppress WS-driven icon updates so bulk commands (All On / All Off)
+// don't disturb the current canvas visual. Caller passes the freeze duration in ms.
+let iconUpdatesFrozen = false;
+let iconFreezeTimer = null;
+export function freezeIconUpdates(ms = 3000) {
+  iconUpdatesFrozen = true;
+  clearTimeout(iconFreezeTimer);
+  iconFreezeTimer = setTimeout(() => { iconUpdatesFrozen = false; }, ms);
 }
 
 // Called by rooms.js when a RoomsUpdate WS event arrives — updates the active room object.
@@ -183,6 +208,7 @@ export function notifyRoomUpdate(room) {
     layoutRoom = room;
     redrawLightEffect(lastSolar.azimuth, lastSolar.elevation);
     renderCrosshair(room);
+    renderWallDims(room);
   }
 }
 
@@ -199,13 +225,20 @@ export function notifySolarUpdate(azimuth, elevation) {
 
 // Called by rooms.js when a RoomsUpdate arrives with a new orientation for this room.
 export function notifyOrientationUpdate(deg) {
+  if (compassDragging || compassUpdateFrozen) return;
   compassDeg = deg;
   const dial = document.getElementById('lc-compass-dial');
-  if (dial) dial.setAttribute('transform', `rotate(${deg},925,75)`);
+  if (dial) dial.setAttribute('transform', `rotate(${dialAngle(deg)},925,75)`);
   if (scrubberLive) previewSolarState(lastSolar.azimuth, lastSolar.elevation);
 }
 
 // ── Phase D: Compass dial ─────────────────────────────────────────────────────
+
+// compassDeg = the real-world bearing the top canvas wall faces (0=N, 90=E…).
+// The rose rotates by the INVERSE so that when you spin the rose clockwise,
+// N moves toward the direction where real-world North actually sits in the room.
+// dialAngle() converts compassDeg → rose rotation angle (self-inverse function).
+function dialAngle(deg) { return (360 - ((deg % 360) + 360) % 360) % 360; }
 
 function renderCompassDial() {
   const g = document.getElementById('lc-compass');
@@ -215,24 +248,22 @@ function renderCompassDial() {
   // Outer ring
   g.appendChild(svgEl('circle', { cx: 925, cy: 75, r: 52, fill: 'rgba(0,0,0,0.6)', stroke: '#555', 'stroke-width': 1.5 }));
 
-  // Cardinal labels — pointer-events:none so they don't block the drag handle
-  for (const [txt, x, y] of [['N', 925, 35], ['S', 925, 121], ['E', 969, 79], ['W', 881, 79]]) {
-    const t = svgEl('text', { x, y, 'text-anchor': 'middle', 'dominant-baseline': 'central',
-      'font-size': 18, 'font-weight': 700, fill: '#ccc', 'pointer-events': 'none' });
-    t.textContent = txt;
-    g.appendChild(t);
-  }
+  // Fixed needle — always points up (= canvas top wall direction)
+  g.appendChild(svgEl('polygon', { points: '925,29 929,50 921,50', fill: '#e8c84a', 'pointer-events': 'none' }));
+  g.appendChild(svgEl('polygon', { points: '925,121 929,100 921,100', fill: '#555', 'pointer-events': 'none' }));
+  g.appendChild(svgEl('circle', { cx: 925, cy: 75, r: 5, fill: '#fff', 'pointer-events': 'none' }));
 
-  // Rotating dial group
+  // Rotating compass rose — spin until N faces real-world north in your room
   const dial = document.createElementNS('http://www.w3.org/2000/svg', 'g');
   dial.id = 'lc-compass-dial';
-  dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
-  // N pointer (amber)
-  dial.appendChild(svgEl('polygon', { points: '925,37 929,57 921,57', fill: '#e8c84a' }));
-  // S pointer (grey)
-  dial.appendChild(svgEl('polygon', { points: '925,113 929,93 921,93', fill: '#555' }));
-  // Centre dot
-  dial.appendChild(svgEl('circle', { cx: 925, cy: 75, r: 5, fill: '#fff' }));
+  dial.setAttribute('transform', `rotate(${dialAngle(compassDeg)},925,75)`);
+  for (const [txt, x, y] of [['N', 925, 35], ['S', 925, 118], ['E', 969, 79], ['W', 881, 79]]) {
+    const t = svgEl('text', { x, y, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+      'font-size': txt === 'N' ? 20 : 15, 'font-weight': 700,
+      fill: txt === 'N' ? '#e8c84a' : '#aaa', 'pointer-events': 'none' });
+    t.textContent = txt;
+    dial.appendChild(t);
+  }
   g.appendChild(dial);
 
   // Sun position dot — absolute compass bearing, hidden at night
@@ -247,9 +278,22 @@ function renderCompassDial() {
   const handle = svgEl('circle', { id: 'lc-compass-handle', cx: 925, cy: 75, r: 52,
     fill: 'transparent', style: 'cursor:grab' });
   const tip = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-  tip.textContent = 'Drag to set orientation: point N toward the real-world compass direction your top canvas wall actually faces.';
+  tip.textContent = 'Spin so N points toward real-world north in your room';
   handle.appendChild(tip);
   g.appendChild(handle);
+}
+
+function svgAngleFromClient(svg, clientX, clientY) {
+  const pt = svg.createSVGPoint();
+  pt.x = clientX; pt.y = clientY;
+  const sp = pt.matrixTransform(svg.getScreenCTM().inverse());
+  return Math.atan2(sp.y - 75, sp.x - 925) * 180 / Math.PI;
+}
+
+function freezeCompassUpdate(ms = 2000) {
+  compassUpdateFrozen = true;
+  clearTimeout(compassFreezeTimer);
+  compassFreezeTimer = setTimeout(() => { compassUpdateFrozen = false; }, ms);
 }
 
 function wireCompass() {
@@ -259,20 +303,26 @@ function wireCompass() {
   svg.addEventListener('pointerdown', e => {
     if (e.target.id !== 'lc-compass-handle') return;
     compassDragging = true;
-    // Capture to svg so pointermove/pointerup on svg still fire during fast drags
+    compassUpdateFrozen = true;   // freeze WS updates immediately on grab
+    clearTimeout(compassFreezeTimer);
     svg.setPointerCapture(e.pointerId);
     e.target.style.cursor = 'grabbing';
+    // Record pointer angle at drag start (for delta-based rotation)
+    compassPrevAngle = svgAngleFromClient(svg, e.clientX, e.clientY);
   });
 
   svg.addEventListener('pointermove', e => {
     if (!compassDragging) return;
-    const pt = svg.createSVGPoint();
-    pt.x = e.clientX; pt.y = e.clientY;
-    const sp = pt.matrixTransform(svg.getScreenCTM().inverse());
-    const angle = Math.atan2(sp.y - 75, sp.x - 925) * 180 / Math.PI + 90;
-    compassDeg = ((angle % 360) + 360) % 360;
+    const curAngle = svgAngleFromClient(svg, e.clientX, e.clientY);
+    let delta = curAngle - compassPrevAngle;
+    // Unwrap to [-180, 180] to handle the ±180° seam
+    if (delta > 180) delta -= 360;
+    if (delta < -180) delta += 360;
+    compassPrevAngle = curAngle;
+    // Rose rotates clockwise → compassDeg decreases by the same delta
+    compassDeg = ((compassDeg - delta) % 360 + 360) % 360;
     const dial = document.getElementById('lc-compass-dial');
-    if (dial) dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
+    if (dial) dial.setAttribute('transform', `rotate(${dialAngle(compassDeg)},925,75)`);
     previewSolarState(lastSolar.azimuth, lastSolar.elevation);
   });
 
@@ -283,6 +333,15 @@ function wireCompass() {
     if (handle) handle.style.cursor = 'grab';
     clearTimeout(compassOrientTimer);
     compassOrientTimer = setTimeout(() => patchOrientation(layoutRoom?.id, compassDeg), 400);
+    freezeCompassUpdate(2000);
+  });
+
+  svg.addEventListener('pointercancel', () => {
+    if (!compassDragging) return;
+    compassDragging = false;
+    const handle = document.getElementById('lc-compass-handle');
+    if (handle) handle.style.cursor = 'grab';
+    freezeCompassUpdate(2000);
   });
 }
 
@@ -433,7 +492,7 @@ function showCompassWizard() {
       applyBtn.addEventListener('click', () => {
         compassDeg = lockedHeading ?? compassDeg;
         const dial = document.getElementById('lc-compass-dial');
-        if (dial) dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
+        if (dial) dial.setAttribute('transform', `rotate(${dialAngle(compassDeg)},925,75)`);
         previewSolarState(lastSolar.azimuth, lastSolar.elevation);
         patchOrientation(layoutRoom?.id, compassDeg);
         closeWizard();
@@ -560,7 +619,10 @@ function redrawSolarOverlay(azimuth, elevation) {
   const visible = elevation > -6;
   sunDot.style.display = visible ? '' : 'none';
   if (visible) {
-    const rad = (azimuth - 90) * Math.PI / 180;
+    // Position relative to the rotated rose so the dot tracks the correct
+    // cardinal label. dialAngle(compassDeg) is the rose rotation, so the
+    // dot must be placed at that same offset from the absolute azimuth.
+    const rad = (dialAngle(compassDeg) + azimuth - 90) * Math.PI / 180;
     sunDot.setAttribute('cx', (925 + 42 * Math.cos(rad)).toFixed(1));
     sunDot.setAttribute('cy', (75  + 42 * Math.sin(rad)).toFixed(1));
   }
@@ -610,6 +672,7 @@ function wireScrubber() {
   const timeEl   = document.getElementById('lc-scrubber-time');
   if (!scrubber || !liveBtn || !timeEl) return;
 
+  lockSliderToThumb(scrubber);
   scrubber.addEventListener('input', () => {
     scrubberLive = false;
     setScrubberSimMode(true);
@@ -625,19 +688,22 @@ function wireScrubber() {
       timeEl.textContent = `${hh}:${mm}`;
       previewSolarState(azimuth, elevation);
 
-      // Throttled physical command push — 80ms cap so the bulb tracks the slider
-      // in near real-time without flooding the Zigbee bus.
-      if (!scrubberThrottleTimer) {
-        scrubberThrottleTimer = setTimeout(() => {
-          scrubberThrottleTimer = null;
-          if (!scrubberLive) sendSimSolarCommands(lastSolar.elevation);
-        }, 150);
-      }
+      // Trailing-edge debounce — only send physical commands after the user
+      // pauses scrubbing. Resets on every RAF tick so rapid dragging produces
+      // a single command batch fired 500 ms after the last movement.
+      clearTimeout(scrubberThrottleTimer);
+      scrubberThrottleTimer = setTimeout(() => {
+        scrubberThrottleTimer = null;
+        if (!scrubberLive) sendSimSolarCommands(lastSolar.elevation);
+      }, 500);
     });
   });
 
-  // On release: push the final simulated solar state to the real bulbs
+  // On release: cancel the pending debounce and send immediately so the final
+  // position is always reflected even if the user releases quickly.
   scrubber.addEventListener('change', () => {
+    clearTimeout(scrubberThrottleTimer);
+    scrubberThrottleTimer = null;
     if (!scrubberLive) sendSimSolarCommands(lastSolar.elevation);
   });
 
@@ -751,7 +817,7 @@ function enterSunCalibMode() {
       exitSunCalibMode();
       compassDeg = orientation;
       const dial = document.getElementById('lc-compass-dial');
-      if (dial) dial.setAttribute('transform', `rotate(${compassDeg},925,75)`);
+      if (dial) dial.setAttribute('transform', `rotate(${dialAngle(compassDeg)},925,75)`);
       redrawSolarOverlay(lastSolar.azimuth, lastSolar.elevation);
       patchOrientation(layoutRoom?.id, compassDeg);
     });
@@ -787,6 +853,32 @@ function buildLayoutView(room) {
   const title = document.createElement('span');
   title.className = 'layout-title';
   title.textContent = room.name;
+  title.title = 'Tap to rename room';
+  title.addEventListener('click', () => {
+    const inp = document.createElement('input');
+    inp.className = 'layout-title-input';
+    inp.value = layoutRoom?.name ?? title.textContent;
+    title.replaceWith(inp);
+    inp.select();
+    const commit = () => {
+      const name = inp.value.trim();
+      if (name && layoutRoom && name !== layoutRoom.name) {
+        layoutRoom.name = name;
+        fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/name?token=${encodeURIComponent(tok())}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }).catch(() => {});
+      }
+      title.textContent = layoutRoom?.name ?? name;
+      inp.replaceWith(title);
+    };
+    inp.addEventListener('blur', commit);
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+      if (e.key === 'Escape') { inp.replaceWith(title); }
+    });
+    inp.focus();
+  });
   header.appendChild(title);
 
   const controls = document.createElement('div');
@@ -872,19 +964,49 @@ function makeCollapsibleSection(titleText, storageKey, defaultCollapsed = false)
 
   const stored = localStorage.getItem(storageKey);
   const isCollapsed = stored === '1' || (stored === null && defaultCollapsed);
-  chev.textContent = isCollapsed ? '▸' : '▾';
+  chev.textContent = isCollapsed ? '▶' : '▼';
   if (isCollapsed) body.classList.add('collapsed');
 
   head.addEventListener('click', () => {
     const willCollapse = !body.classList.contains('collapsed');
     body.classList.toggle('collapsed', willCollapse);
-    chev.textContent = willCollapse ? '▸' : '▾';
+    chev.textContent = willCollapse ? '▶' : '▼';
     localStorage.setItem(storageKey, willCollapse ? '1' : '0');
   });
 
   wrap.appendChild(head);
   wrap.appendChild(body);
   return { wrap, body };
+}
+
+function expandLightsSection() {
+  const body = document.getElementById('layout-chips-section-body');
+  if (!body || !body.classList.contains('collapsed')) return;
+  body.classList.remove('collapsed');
+  localStorage.setItem('mesh-layout-sb-bulbs', '0');
+  const chev = body.parentElement?.querySelector('.layout-sidebar-section-chevron');
+  if (chev) chev.textContent = '▼';
+}
+
+function showLightsDropzone() {
+  const section = document.getElementById('layout-lights-section');
+  if (section) section.style.display = '';
+  expandLightsSection();
+  const chips = document.getElementById('layout-sidebar-chips');
+  if (chips && !document.getElementById('layout-chips-dropzone')) {
+    const dz = document.createElement('div');
+    dz.id = 'layout-chips-dropzone';
+    dz.className = 'layout-chips-dropzone';
+    dz.textContent = '↑ Drag a light here to unplace';
+    chips.appendChild(dz);
+  }
+}
+
+function hideLightsDropzone() {
+  document.getElementById('layout-chips-dropzone')?.remove();
+  const unplaced = (layoutRoom?.device_ids || []).filter(id => !placedBulbs[id]);
+  const section = document.getElementById('layout-lights-section');
+  if (section) section.style.display = unplaced.length === 0 ? 'none' : '';
 }
 
 function buildSidebar(room) {
@@ -900,7 +1022,7 @@ function buildSidebar(room) {
   const sidebarCollapsedKey = 'mesh-layout-sidebar-collapsed';
   const updateToggle = () => {
     const collapsed = sidebar.classList.contains('collapsed');
-    toggle.textContent = collapsed ? '»' : '«';
+    toggle.textContent = collapsed ? '▶' : '◀';
     toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   };
   if (localStorage.getItem(sidebarCollapsedKey) === '1') {
@@ -915,8 +1037,10 @@ function buildSidebar(room) {
   });
   sidebar.appendChild(toggle);
 
-  const bulbs = makeCollapsibleSection('Bulbs', 'mesh-layout-sb-bulbs');
+  const bulbs = makeCollapsibleSection('Lights', 'mesh-layout-sb-bulbs');
+  bulbs.wrap.id = 'layout-lights-section';
   sidebar.appendChild(bulbs.wrap);
+  bulbs.body.id = 'layout-chips-section-body';
 
   const chips = document.createElement('div');
   chips.className = 'layout-sidebar-chips';
@@ -971,6 +1095,8 @@ function buildSidebar(room) {
       const val = parseFloat(inp.value);
       if (!isFinite(val) || val < 0.1) return;
       if (layoutRoom) {
+        layoutRoom[key] = val;
+        renderWallDims(layoutRoom);
         const body = {};
         body[key] = val;
         fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/dimensions?token=${encodeURIComponent(tok())}`, {
@@ -985,6 +1111,17 @@ function buildSidebar(room) {
   }
   dims.body.appendChild(dimsRow);
 
+  // Placed bulbs — position panel below room size
+  const placed = makeCollapsibleSection('Placed', 'mesh-layout-sb-placed', false);
+  sidebar.appendChild(placed.wrap);
+  const placedBody = document.createElement('div');
+  placedBody.id = 'layout-placed-body';
+  const placedHdr = document.createElement('div');
+  placedHdr.className = 'layout-placed-header';
+  placedHdr.textContent = '⊕ x, y from ↖ corner (m)';
+  placedBody.appendChild(placedHdr);
+  placed.body.appendChild(placedBody);
+
   sidebar._room = room;
   return sidebar;
 }
@@ -997,12 +1134,11 @@ function rebuildSidebar() {
   const room = layoutRoom;
   const unplaced = (room.device_ids || []).filter(id => !placedBulbs[id]);
 
+  const lightsSection = document.getElementById('layout-lights-section');
   if (unplaced.length === 0) {
-    const hint = document.createElement('span');
-    hint.className = 'layout-sidebar-empty';
-    hint.textContent = 'All bulbs placed';
-    chips.appendChild(hint);
+    if (lightsSection) lightsSection.style.display = 'none';
   } else {
+    if (lightsSection) lightsSection.style.display = '';
     for (const id of unplaced) {
       chips.appendChild(makeSidebarChip(id));
     }
@@ -1014,6 +1150,129 @@ function rebuildSidebar() {
     autoBtn.style.display =
       Object.keys(placedBulbs).length >= 2 && unplaced.length > 0 ? '' : 'none';
   }
+
+  rebuildPlacedPanel();
+}
+
+function rebuildPlacedPanel() {
+  const body = document.getElementById('layout-placed-body');
+  if (!body) return;
+  // Remove previous entries (keep the header)
+  [...body.children].forEach(c => { if (!c.classList.contains('layout-placed-header')) c.remove(); });
+
+  const room = layoutRoom;
+  if (!room) return;
+  const W = room.width_m || 3;
+  const D = room.depth_m || 6;
+
+  for (const [deviceId, entry] of Object.entries(placedBulbs)) {
+    const dev = devicesRef.get(deviceId);
+    const name = dev?.friendly_name ?? deviceId;
+
+    const row = document.createElement('div');
+    row.className = 'layout-placed-entry';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'layout-placed-name';
+    nameEl.textContent = name.length > 14 ? name.slice(0, 13) + '…' : name;
+    row.appendChild(nameEl);
+
+    const coordsRow = document.createElement('div');
+    coordsRow.className = 'layout-placed-coords';
+
+    for (const { axis, label, getValue, setValue } of [
+      { axis: 'x', label: 'x', getValue: () => (entry.x * W), setValue: v => { entry.x = Math.max(0, Math.min(1, v / W)); } },
+      { axis: 'y', label: 'y', getValue: () => (entry.y * D), setValue: v => { entry.y = Math.max(0, Math.min(1, v / D)); } },
+    ]) {
+      const field = document.createElement('label');
+      field.className = 'layout-placed-coord-field';
+      field.textContent = label + ' ';
+      const inp = document.createElement('input');
+      inp.type = 'number';
+      inp.min = '0'; inp.step = '0.01';
+      inp.max = axis === 'x' ? String(W) : String(D);
+      inp.value = getValue().toFixed(2);
+      inp.addEventListener('change', () => {
+        const v = parseFloat(inp.value);
+        if (!isFinite(v)) return;
+        pushUndo();
+        setValue(v);
+        placeBulb(deviceId, entry.x, entry.y, entry.z, entry.fixture_type, true);
+      });
+      field.appendChild(inp);
+      coordsRow.appendChild(field);
+    }
+
+    row.appendChild(coordsRow);
+    body.appendChild(row);
+  }
+}
+
+// ── Wall dimension labels ─────────────────────────────────────────────────────
+// Renders/refreshes clickable W and D labels along the bottom and right walls.
+// Clicking opens a small floating input to edit the value directly.
+function renderWallDims(room) {
+  const layer = document.getElementById('lc-wall-dims');
+  if (!layer) return;
+  layer.innerHTML = '';
+
+  const W = room.width_m || 3;
+  const D = room.depth_m || 6;
+
+  const mkLabel = (x, y, text, rotate, key, currentVal, maxVal) => {
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('class', 'lc-wall-dim');
+    if (rotate) g.setAttribute('transform', `rotate(-90,${x},${y})`);
+
+    const bg = svgEl('rect', { x: x - 52, y: y - 14, width: 104, height: 26, rx: 5,
+      fill: 'rgba(0,0,0,0.5)', class: 'lc-wall-dim-bg', 'pointer-events': 'none' });
+    const txt = svgEl('text', { x, y: y + 1, 'text-anchor': 'middle', 'dominant-baseline': 'middle',
+      fill: 'rgba(255,255,255,0.65)', 'font-size': 20, 'font-family': 'monospace',
+      class: 'lc-wall-dim-text', 'pointer-events': 'none' });
+    txt.textContent = text;
+    g.appendChild(bg); g.appendChild(txt);
+
+    g.addEventListener('click', e => {
+      e.stopPropagation();
+      const svg = document.getElementById('layout-canvas');
+      const pt = svg.createSVGPoint();
+      pt.x = x; pt.y = y;
+      const sc = pt.matrixTransform(svg.getScreenCTM());
+
+      const overlay = document.createElement('div');
+      overlay.className = 'layout-wall-dim-edit';
+      overlay.style.left = `${sc.x - 55}px`;
+      overlay.style.top  = `${Math.min(sc.y - 36, window.innerHeight - 60)}px`;
+      const lbl = document.createElement('span');
+      lbl.textContent = key.toUpperCase() + ' (m):';
+      const inp = document.createElement('input');
+      inp.type = 'number'; inp.min = '0.5'; inp.max = '50'; inp.step = '0.1';
+      inp.value = currentVal.toFixed(2);
+      overlay.appendChild(lbl); overlay.appendChild(inp);
+      document.body.appendChild(overlay);
+      inp.focus(); inp.select();
+
+      const commit = () => {
+        const v = parseFloat(inp.value);
+        overlay.remove();
+        if (!isFinite(v) || v < 0.1 || !layoutRoom) return;
+        const body = {}; body[key + '_m'] = v;
+        fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/dimensions?token=${encodeURIComponent(tok())}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }).catch(() => {});
+      };
+      inp.addEventListener('blur', commit);
+      inp.addEventListener('keydown', e2 => {
+        if (e2.key === 'Enter') { e2.preventDefault(); inp.blur(); }
+        if (e2.key === 'Escape') { overlay.remove(); }
+      });
+    });
+    return g;
+  };
+
+  layer.appendChild(mkLabel(500, 978, `↔ ${W.toFixed(1)} m`, false, 'width', W, 50));
+  layer.appendChild(mkLabel(978, 500, `↕ ${D.toFixed(1)} m`, true,  'depth', D, 50));
 }
 
 function makeSidebarChip(deviceId) {
@@ -1081,7 +1340,7 @@ function buildCanvas() {
   // grabbable even when a bulb has been dropped on the origin — visually the
   // bulb is on top of the crosshair ring (good), but the user can still tap
   // the centre to drag the crosshair away.
-  for (const id of ['lc-sun-arc', 'lc-openings', 'lc-shadow', 'lc-crosshair', 'lc-bulbs', 'lc-preview', 'lc-crosshair-hit', 'lc-compass']) {
+  for (const id of ['lc-sun-arc', 'lc-openings', 'lc-shadow', 'lc-crosshair', 'lc-bulbs', 'lc-preview', 'lc-crosshair-hit', 'lc-wall-dims', 'lc-compass']) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.id = id;
     svg.appendChild(g);
@@ -1144,10 +1403,9 @@ function snapTo(v, length_m) {
   return cm / (length_m * 100);
 }
 
-// Crosshair magnet: when placing a bulb inside the crosshair's visible inner
-// ring (r=16 in the 0..1000 SVG viewBox), snap precisely to the origin point.
-// Returns { nx, ny } when in range, or null when the cursor is outside.
-const CROSSHAIR_MAGNET_RADIUS = 16 / 1000;
+// Crosshair magnet: when placing a bulb near the origin snap precisely to it.
+// Radius is generous so touch users can reliably hit the target.
+const CROSSHAIR_MAGNET_RADIUS = 40 / 1000;
 function magnetToOrigin(nx, ny) {
   if (!layoutRoom) return null;
   const ox = layoutRoom.origin_x ?? 0.5;
@@ -1162,6 +1420,23 @@ function snapY(v) { return snapTo(v, layoutRoom?.depth_m ?? 6); }
 // Walls run along one room axis: top/bottom along width, left/right along depth.
 function snapAlongWall(v, wall) {
   return isHorizontalWall(wall) ? snapX(v) : snapY(v);
+}
+
+// Crosshair alignment snap: when dragging the crosshair, loosely stick to the
+// X or Y coordinate of any placed bulb if within threshold. Falls back to 1cm
+// grid snap for both axes. Returns snapped coords + which bulb ids triggered.
+const BULB_ALIGN_THRESHOLD = 28 / 1000;
+function snapCrosshairToBulbs(nx, ny) {
+  let sx = snapX(nx), sy = snapY(ny);
+  let snapXId = null, snapYId = null;
+  let bestDx = BULB_ALIGN_THRESHOLD, bestDy = BULB_ALIGN_THRESHOLD;
+  for (const [id, entry] of Object.entries(placedBulbs)) {
+    const dx = Math.abs(nx - entry.x);
+    const dy = Math.abs(ny - entry.y);
+    if (dx < bestDx) { bestDx = dx; sx = entry.x; snapXId = id; }
+    if (dy < bestDy) { bestDy = dy; sy = entry.y; snapYId = id; }
+  }
+  return { sx: Math.max(0, Math.min(1, sx)), sy: Math.max(0, Math.min(1, sy)), snapXId, snapYId };
 }
 
 function renderDragPreviewAt(nx, ny, kind) {
@@ -1407,7 +1682,8 @@ function placeBulb(deviceId, x, y, z, fixtureType, postToServer) {
   labelEl.setAttribute('text-anchor', 'middle');
   labelEl.setAttribute('font-size', '18');
   labelEl.setAttribute('fill', 'rgba(255,255,255,0.85)');
-  labelEl.setAttribute('pointer-events', 'none');
+  labelEl.setAttribute('pointer-events', 'all');
+  labelEl.style.cursor = 'text';
   labelEl.textContent = labelText;
   labelEl.style.display = showLabels ? '' : 'none';
   g.appendChild(labelEl);
@@ -1564,6 +1840,9 @@ function drawFixtureIcon(g, cx, cy, z, fixtureType, dev) {
 function makeBulbDraggable(g, deviceId) {
   let dragging = false;
   let moved = false;
+  let dropzoneShown = false;
+  let ghost = null;
+  let tapTarget = null;
   let startNx, startNy, startBulbX, startBulbY;
 
   g.addEventListener('pointerdown', e => {
@@ -1571,6 +1850,7 @@ function makeBulbDraggable(g, deviceId) {
     e.stopPropagation();
     e.preventDefault();
     dismissPopover();
+    tapTarget = e.target;
 
     const svg = document.getElementById('layout-canvas');
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
@@ -1579,6 +1859,7 @@ function makeBulbDraggable(g, deviceId) {
 
     dragging = true;
     moved = false;
+    dropzoneShown = false;
     startNx = nx; startNy = ny;
     startBulbX = entry.x; startBulbY = entry.y;
 
@@ -1600,6 +1881,36 @@ function makeBulbDraggable(g, deviceId) {
     if (Math.abs(dx) > 0.005 || Math.abs(dy) > 0.005) moved = true;
     if (!moved) return;
 
+    if (!dropzoneShown) {
+      dropzoneShown = true;
+      showLightsDropzone();
+
+      // Create a chip-ghost that follows the pointer outside the SVG canvas
+      const gDev = devicesRef.get(deviceId);
+      const gName = gDev?.friendly_name ?? deviceId;
+      ghost = document.createElement('div');
+      ghost.className = 'layout-drag-ghost';
+      const ghostChip = document.createElement('div');
+      ghostChip.className = 'layout-chip';
+      ghostChip.style.setProperty('--chip-color', gDev ? devStateColor(gDev) : 'var(--accent)');
+      ghostChip.style.cursor = 'grabbing';
+      ghostChip.textContent = gName.length > 14 ? gName.slice(0, 13) + '…' : gName;
+      ghost.appendChild(ghostChip);
+      document.body.appendChild(ghost);
+    }
+
+    // Keep ghost positioned at pointer; only show it outside the SVG canvas
+    if (ghost) {
+      ghost.style.left = `${e.clientX - 44}px`;
+      ghost.style.top  = `${e.clientY - 14}px`;
+      const svgEl = document.getElementById('layout-canvas');
+      const sr = svgEl?.getBoundingClientRect();
+      const outsideSvg = !sr ||
+        e.clientX < sr.left || e.clientX > sr.right ||
+        e.clientY < sr.top  || e.clientY > sr.bottom;
+      ghost.style.opacity = outsideSvg ? '1' : '0';
+    }
+
     // Where the bulb WOULD land at this pointer position (pre-magnet)
     const candidateX = startBulbX + dx;
     const candidateY = startBulbY + dy;
@@ -1611,6 +1922,27 @@ function makeBulbDraggable(g, deviceId) {
     const tx = (newX - entry.x) * 1000;
     const ty = (newY - entry.y) * 1000;
     g.setAttribute('transform', `translate(${tx},${ty})`);
+    // Pulse crosshair ring when bulb is in magnet zone
+    const xRing = document.querySelector('#lc-crosshair-marker circle');
+    if (xRing) {
+      if (magnet) {
+        xRing.setAttribute('r', 24);
+        xRing.setAttribute('fill', 'rgba(0, 255, 255, 0.3)');
+        xRing.setAttribute('stroke-width', 3.5);
+      } else {
+        xRing.setAttribute('r', 16);
+        xRing.setAttribute('fill', 'rgba(0, 200, 220, 0.12)');
+        xRing.setAttribute('stroke-width', 2.5);
+      }
+    }
+
+    const dzHover = document.getElementById('layout-chips-dropzone');
+    if (dzHover) {
+      const r = dzHover.getBoundingClientRect();
+      dzHover.classList.toggle('dz-hover',
+        e.clientX >= r.left && e.clientX <= r.right &&
+        e.clientY >= r.top  && e.clientY <= r.bottom);
+    }
   });
 
   g.addEventListener('pointerup', e => {
@@ -1620,12 +1952,57 @@ function makeBulbDraggable(g, deviceId) {
     g.releasePointerCapture(e.pointerId);
 
     if (!moved) {
-      // Tap — open popover; keep pulse running until popover is dismissed
-      openPopover(deviceId, g);
+      const entry = placedBulbs[deviceId];
+      if (tapTarget && entry && tapTarget === entry.labelEl) {
+        if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(false);
+        startInlineRename(deviceId, entry);
+      } else {
+        openPopover(deviceId, g);
+      }
       return;
     }
 
+    // Check if dropped onto the unplace drop zone
+    const dzUp = document.getElementById('layout-chips-dropzone');
+    if (dzUp) {
+      dzUp.classList.remove('dz-hover');
+      const r = dzUp.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX <= r.right &&
+          e.clientY >= r.top  && e.clientY <= r.bottom) {
+        if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(false);
+        const xRingDz = document.querySelector('#lc-crosshair-marker circle');
+        if (xRingDz) { xRingDz.setAttribute('r', 16); xRingDz.setAttribute('fill', 'rgba(0, 200, 220, 0.12)'); xRingDz.setAttribute('stroke-width', 2.5); }
+        g.removeAttribute('transform');
+
+        // Animate ghost chip flying into the drop zone, then unplace
+        if (ghost) {
+          const gr = ghost.getBoundingClientRect();
+          const tdx = (r.left + r.width  / 2) - (gr.left + gr.width  / 2);
+          const tdy = (r.top  + r.height / 2) - (gr.top  + gr.height / 2);
+          ghost.style.transition = 'none';
+          ghost.style.opacity = '1';
+          const flyGhost = ghost; ghost = null;
+          requestAnimationFrame(() => {
+            flyGhost.style.transition =
+              'transform 0.22s cubic-bezier(0.4,0,1,1), opacity 0.18s 0.04s';
+            flyGhost.style.transform = `translate(${tdx}px,${tdy}px) scale(0.25)`;
+            flyGhost.style.opacity = '0';
+            setTimeout(() => flyGhost.remove(), 260);
+          });
+        }
+
+        pushUndo();
+        removeBulb(deviceId);   // → rebuildSidebar will show the chip + section
+        return;
+      }
+    }
+    if (ghost) { ghost.remove(); ghost = null; }
+    hideLightsDropzone();
+
     if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(true);
+
+    const xRingUp = document.querySelector('#lc-crosshair-marker circle');
+    if (xRingUp) { xRingUp.setAttribute('r', 16); xRingUp.setAttribute('fill', 'rgba(0, 200, 220, 0.12)'); xRingUp.setAttribute('stroke-width', 2.5); }
 
     g.removeAttribute('transform');
 
@@ -1647,9 +2024,14 @@ function makeBulbDraggable(g, deviceId) {
   g.addEventListener('pointercancel', () => {
     if (!dragging) return;
     dragging = false;
+    dropzoneShown = false;
     g.removeAttribute('transform');
     g.style.cursor = 'grab';
+    const xRingC = document.querySelector('#lc-crosshair-marker circle');
+    if (xRingC) { xRingC.setAttribute('r', 16); xRingC.setAttribute('fill', 'rgba(0, 200, 220, 0.12)'); xRingC.setAttribute('stroke-width', 2.5); }
     if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(false);
+    if (ghost) { ghost.remove(); ghost = null; }
+    hideLightsDropzone();
   });
 }
 
@@ -1684,6 +2066,65 @@ function updateBulbIcon(entry, state) {
   });
 }
 
+// ── Popover helpers ───────────────────────────────────────────────────────────
+
+function sendLayoutDeviceCommand(deviceId, body) {
+  return fetch(
+    `/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(tok())}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  ).catch(() => {});
+}
+
+function startInlineRename(deviceId, entry) {
+  const labelEl = entry?.labelEl;
+  const dev = devicesRef.get(deviceId);
+  const currentName = dev?.friendly_name ?? deviceId;
+
+  let cx = window.innerWidth / 2 - 80, cy = window.innerHeight / 2 - 16;
+  if (labelEl) {
+    const svg = document.getElementById('layout-canvas');
+    if (svg) {
+      const pt = svg.createSVGPoint();
+      pt.x = parseFloat(labelEl.getAttribute('x') ?? 500);
+      pt.y = parseFloat(labelEl.getAttribute('y') ?? 500);
+      const screen = pt.matrixTransform(svg.getScreenCTM());
+      cx = screen.x - 80; cy = screen.y - 16;
+    }
+  }
+
+  const inp = document.createElement('input');
+  inp.type = 'text';
+  inp.className = 'layout-label-rename-input';
+  inp.value = currentName;
+  inp.style.left = `${Math.max(4, Math.min(cx, window.innerWidth - 164))}px`;
+  inp.style.top = `${Math.max(4, Math.min(cy, window.innerHeight - 40))}px`;
+  document.body.appendChild(inp);
+  requestAnimationFrame(() => { inp.focus(); inp.select(); });
+
+  let committed = false;
+  function commit() {
+    if (committed) return;
+    committed = true;
+    const n = inp.value.trim();
+    inp.remove();
+    if (!n || n === currentName) return;
+    if (dev) dev.friendly_name = n;
+    const labelText = n.length > 14 ? n.slice(0, 13) + '…' : n;
+    if (labelEl) labelEl.textContent = labelText;
+    fetch(`/api/lights/${encodeURIComponent(deviceId)}/name?token=${encodeURIComponent(tok())}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: n }),
+    }).catch(() => {});
+    rebuildSidebar();
+  }
+
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { committed = true; inp.remove(); }
+  });
+  inp.addEventListener('blur', commit);
+}
+
 // ── Popover ───────────────────────────────────────────────────────────────────
 
 function openPopover(deviceId, anchorEl, screenX, screenY) {
@@ -1691,12 +2132,130 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
 
   const entry = placedBulbs[deviceId];
   if (!entry) return;
+  let dev = devicesRef.get(deviceId);
 
   const pop = document.createElement('div');
   pop.className = 'layout-popover';
+  pop.addEventListener('pointerdown', e => e.stopPropagation());
   activePopover = pop;
 
-  // Fixture type picker
+  // ── Header: status dot + name (tap to rename) ─────────────────────────────
+  const header = document.createElement('div');
+  header.className = 'layout-popover-header';
+
+  const dot = document.createElement('span');
+  dot.className = 'layout-popover-status-dot';
+  dot.style.background = devStateColor(dev);
+  header.appendChild(dot);
+
+  const nameBtn = document.createElement('button');
+  nameBtn.className = 'layout-popover-name-btn';
+  nameBtn.textContent = dev?.friendly_name ?? deviceId;
+  nameBtn.title = 'Tap to rename';
+  nameBtn.addEventListener('click', () => { dismissPopover(); startInlineRename(deviceId, entry); });
+  header.appendChild(nameBtn);
+
+  pop.appendChild(header);
+
+  // Helper: refresh dot colour after state changes
+  function refreshDot() { dot.style.background = devStateColor(devicesRef.get(deviceId)); }
+
+  // ── On / Off toggle ───────────────────────────────────────────────────────
+  const toggleBtn = document.createElement('button');
+  let isOn = dev?.on ?? true;
+  toggleBtn.className = `layout-popover-toggle ${isOn ? 'is-on' : 'is-off'}`;
+  toggleBtn.textContent = isOn ? '● On' : '○ Off';
+  toggleBtn.addEventListener('click', () => {
+    isOn = !isOn;
+    const cur = devicesRef.get(deviceId) ?? {};
+    devicesRef.set(deviceId, { ...cur, on: isOn });
+    toggleBtn.className = `layout-popover-toggle ${isOn ? 'is-on' : 'is-off'}`;
+    toggleBtn.textContent = isOn ? '● On' : '○ Off';
+    updateBulbIcon(entry, devicesRef.get(deviceId));
+    refreshDot();
+    if (briSlider) briSlider.disabled = !isOn;
+    sendLayoutDeviceCommand(deviceId, { action: isOn ? 'on' : 'off' });
+  });
+  pop.appendChild(toggleBtn);
+
+  // ── Brightness ────────────────────────────────────────────────────────────
+  let briSlider = null;
+  if (dev?.brightness != null) {
+    const briRow = document.createElement('div');
+    briRow.className = 'layout-popover-ctrl-row';
+    const briLbl = document.createElement('span'); briLbl.textContent = 'Brightness';
+    const briVal = document.createElement('span');
+    briVal.textContent = `${Math.round((dev.brightness / 255) * 100)}%`;
+    briRow.appendChild(briLbl); briRow.appendChild(briVal);
+    pop.appendChild(briRow);
+
+    briSlider = document.createElement('input');
+    briSlider.type = 'range'; briSlider.min = '1'; briSlider.max = '255';
+    briSlider.value = dev.brightness;
+    briSlider.disabled = !(dev?.on ?? true);
+    briSlider.className = 'layout-popover-slider';
+    lockSliderToThumb(briSlider);
+
+    let briTimer = null;
+    briSlider.addEventListener('input', () => {
+      const val = parseInt(briSlider.value);
+      briVal.textContent = `${Math.round((val / 255) * 100)}%`;
+      const cur = devicesRef.get(deviceId) ?? {};
+      devicesRef.set(deviceId, { ...cur, brightness: val, on: true });
+      updateBulbIcon(entry, devicesRef.get(deviceId));
+      refreshDot();
+      clearTimeout(briTimer);
+      briTimer = setTimeout(() =>
+        sendLayoutDeviceCommand(deviceId, { action: 'brightness', value: val, transition_secs: 0.1 }), 80);
+    });
+    briSlider.addEventListener('change', () => {
+      clearTimeout(briTimer);
+      sendLayoutDeviceCommand(deviceId, { action: 'brightness', value: parseInt(briSlider.value), transition_secs: 0.2 });
+    });
+    pop.appendChild(briSlider);
+  }
+
+  // ── Colour temperature ────────────────────────────────────────────────────
+  if (dev?.color_temp != null) {
+    const ctRow = document.createElement('div');
+    ctRow.className = 'layout-popover-ctrl-row';
+    const ctLbl = document.createElement('span'); ctLbl.textContent = 'Colour temp';
+    const ctVal = document.createElement('span');
+    ctVal.textContent = `${Math.round(1e6 / dev.color_temp)} K`;
+    ctRow.appendChild(ctLbl); ctRow.appendChild(ctVal);
+    pop.appendChild(ctRow);
+
+    const ctSlider = document.createElement('input');
+    ctSlider.type = 'range'; ctSlider.min = '154'; ctSlider.max = '500';
+    ctSlider.value = dev.color_temp;
+    ctSlider.className = 'layout-popover-slider layout-popover-slider-ct';
+    lockSliderToThumb(ctSlider);
+
+    let ctTimer = null;
+    ctSlider.addEventListener('input', () => {
+      const val = parseInt(ctSlider.value);
+      ctVal.textContent = `${Math.round(1e6 / val)} K`;
+      const cur = devicesRef.get(deviceId) ?? {};
+      devicesRef.set(deviceId, { ...cur, color_temp: val });
+      updateBulbIcon(entry, devicesRef.get(deviceId));
+      refreshDot();
+      clearTimeout(ctTimer);
+      ctTimer = setTimeout(() =>
+        sendLayoutDeviceCommand(deviceId, { action: 'color_temp', value: val, transition_secs: 0.1 }), 80);
+    });
+    ctSlider.addEventListener('change', () => {
+      clearTimeout(ctTimer);
+      sendLayoutDeviceCommand(deviceId, { action: 'color_temp', value: parseInt(ctSlider.value), transition_secs: 0.2 });
+    });
+    pop.appendChild(ctSlider);
+  }
+
+  // ── Divider ───────────────────────────────────────────────────────────────
+  const divider = document.createElement('div');
+  divider.className = 'layout-popover-divider';
+  pop.appendChild(divider);
+
+  // ── Fixture type ──────────────────────────────────────────────────────────
   const typeLabel = document.createElement('div');
   typeLabel.className = 'layout-popover-label';
   typeLabel.textContent = 'Fixture type';
@@ -1720,20 +2279,23 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
   });
   pop.appendChild(typeSelect);
 
-  // Height slider
-  const heightLabel = document.createElement('div');
-  heightLabel.className = 'layout-popover-label';
-  heightLabel.textContent = `Height: ${Math.round(entry.z * 100)}%`;
-  pop.appendChild(heightLabel);
+  // ── Height (thumb-only slider) ────────────────────────────────────────────
+  const heightRow = document.createElement('div');
+  heightRow.className = 'layout-popover-ctrl-row';
+  const heightLbl = document.createElement('span'); heightLbl.textContent = 'Height';
+  const heightVal = document.createElement('span');
+  heightVal.textContent = `${Math.round(entry.z * 100)}%`;
+  heightRow.appendChild(heightLbl); heightRow.appendChild(heightVal);
+  pop.appendChild(heightRow);
 
   const slider = document.createElement('input');
-  slider.type = 'range';
-  slider.min = '0'; slider.max = '100';
+  slider.type = 'range'; slider.min = '0'; slider.max = '100';
   slider.value = Math.round(entry.z * 100);
   slider.className = 'layout-popover-slider';
+  lockSliderToThumb(slider);
   slider.addEventListener('input', () => {
     const z = parseInt(slider.value) / 100;
-    heightLabel.textContent = `Height: ${slider.value}%`;
+    heightVal.textContent = `${slider.value}%`;
     entry.z = z;
     drawFixtureIcon(entry.el, entry.x * 1000, entry.y * 1000, z, entry.fixture_type, devicesRef.get(deviceId));
     syncBulbToThree(deviceId, entry, devicesRef.get(deviceId));
@@ -1744,18 +2306,14 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
   });
   pop.appendChild(slider);
 
-  // Remove button
+  // ── Remove ────────────────────────────────────────────────────────────────
   const removeBtn = document.createElement('button');
   removeBtn.className = 'layout-popover-remove';
   removeBtn.textContent = 'Remove from canvas';
-  removeBtn.addEventListener('click', () => {
-    pushUndo();
-    removeBulb(deviceId);
-    dismissPopover();
-  });
+  removeBtn.addEventListener('click', () => { pushUndo(); removeBulb(deviceId); dismissPopover(); });
   pop.appendChild(removeBtn);
 
-  // Position popover — use provided screen coords (3D click) or derive from SVG
+  // ── Position ──────────────────────────────────────────────────────────────
   let cx, cy;
   if (screenX != null) {
     cx = screenX; cy = screenY;
@@ -1766,8 +2324,9 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
     const screenPt = pt.matrixTransform(svg.getScreenCTM());
     cx = screenPt.x; cy = screenPt.y;
   }
-  pop.style.left = `${Math.min(cx + 30, window.innerWidth - 220)}px`;
-  pop.style.top = `${Math.min(cy - 20, window.innerHeight - 260)}px`;
+  const pw = 240;
+  pop.style.left = `${Math.min(Math.max(cx + 20, 8), window.innerWidth - pw - 8)}px`;
+  pop.style.top = `${Math.min(Math.max(cy - 20, 8), window.innerHeight - 320)}px`;
 
   document.body.appendChild(pop);
 }
@@ -2063,12 +2622,10 @@ function renderCrosshair(room) {
     stroke: '#0ff', 'stroke-width': 2, 'stroke-linecap': 'round',
     'pointer-events': 'none' });
 
-  // Invisible hit area — bigger than the visible ring so it's easy to tap,
-  // but small enough that it doesn't block bulb drops near the origin.
-  // CSS sets pointer-events:none on this element while a sidebar chip drag
-  // is in progress (.layout-dragging on the canvas) so the hit never absorbs
-  // a drop intended for the canvas underneath.
-  const hit = svgEl('circle', { cx: ox0, cy: oy0, r: 24,
+  // Invisible hit area — large enough for a finger on mobile (r=44).
+  // CSS sets pointer-events:none while a sidebar chip drag is in progress so
+  // the hit never absorbs a drop intended for the canvas underneath.
+  const hit = svgEl('circle', { cx: ox0, cy: oy0, r: 44,
     fill: 'rgba(0,0,0,0.001)', cursor: 'move', class: 'lc-crosshair-hit' });
   const hitTitle = document.createElementNS('http://www.w3.org/2000/svg', 'title');
   hitTitle.textContent = 'Origin point — double-tap (touch) or drag (mouse) to move';
@@ -2085,11 +2642,22 @@ function renderCrosshair(room) {
     });
     return t;
   };
-  const topDim = mkDim();
-  const rightDim = mkDim();
+  const topDim = mkDim();   // x label — centred on H guide, below the line
+  const rightDim = mkDim(); // y label — left-anchored on V guide, to the right
+  rightDim.setAttribute('text-anchor', 'start');
+
+  // Snap guide dots — appear at the reference bulb when H or V line locks to it
+  const mkSnapDot = () => svgEl('circle', {
+    r: 10, fill: 'none', stroke: '#ffdd00', 'stroke-width': 2.5,
+    opacity: 0, 'pointer-events': 'none',
+  });
+  const xSnapDot = mkSnapDot();
+  const ySnapDot = mkSnapDot();
 
   g.appendChild(hLine);
   g.appendChild(vLine);
+  g.appendChild(xSnapDot);
+  g.appendChild(ySnapDot);
   g.appendChild(ring);
   g.appendChild(plusH);
   g.appendChild(plusV);
@@ -2114,16 +2682,17 @@ function renderCrosshair(room) {
     plusV.setAttribute('y1', py - 8); plusV.setAttribute('y2', py + 8);
     hit.setAttribute('cx', px); hit.setAttribute('cy', py);
 
-    const dTop = (py / 1000) * D;
-    const dRight = ((1000 - px) / 1000) * W;
-    // Distance-to-top: sits on the vertical line, midway between crosshair and top edge
-    topDim.setAttribute('x', px);
-    topDim.setAttribute('y', Math.max(28, py / 2));
-    topDim.textContent = `↑ ${dTop.toFixed(2)} m`;
-    // Distance-to-right: sits on the horizontal line, midway between crosshair and right edge
-    rightDim.setAttribute('x', Math.min(1000 - 80, (px + 1000) / 2));
-    rightDim.setAttribute('y', py - 22);
-    rightDim.textContent = `${dRight.toFixed(2)} m →`;
+    // X/Y from top-left corner — both labels sit in the 4th quadrant (below-right)
+    const xFromLeft = (px / 1000) * W;
+    const yFromTop  = (py / 1000) * D;
+    // x label: on the H guide, to the right of origin, just below the line
+    topDim.setAttribute('x', Math.min(960, Math.max(px + 60, (px + 1000) / 2)));
+    topDim.setAttribute('y', Math.min(985, py + 30));
+    topDim.textContent = `x: ${xFromLeft.toFixed(2)} m`;
+    // y label: on the V guide, below origin, just to the right of the line
+    rightDim.setAttribute('x', Math.min(985, px + 30));
+    rightDim.setAttribute('y', Math.min(975, Math.max(py + 60, (py + 1000) / 2)));
+    rightDim.textContent = `y: ${yFromTop.toFixed(2)} m`;
   };
 
   // Drag behaviour — attach to SVG using AbortController so old listeners are
@@ -2135,8 +2704,6 @@ function renderCrosshair(room) {
   const sig = { signal: ac.signal };
 
   let dragging = false;
-  let lastTapTime = 0;
-  let armedTimer = null;
 
   const enterDrag = (pointerId) => {
     dragging = true;
@@ -2153,50 +2720,47 @@ function renderCrosshair(room) {
     ring.setAttribute('r', 16);
     topDim.setAttribute('opacity', 0);
     rightDim.setAttribute('opacity', 0);
+    hLine.setAttribute('stroke', '#0ff');
+    vLine.setAttribute('stroke', '#0ff');
+    xSnapDot.setAttribute('opacity', 0);
+    ySnapDot.setAttribute('opacity', 0);
   };
 
   svg.addEventListener('pointerdown', e => {
     if (e.target !== hit) return;
     e.preventDefault();
     e.stopPropagation();
-    if (e.pointerType === 'mouse') {
-      enterDrag(e.pointerId);
-      return;
-    }
-    // Touch / pen: require double-tap to start drag
-    const now = performance.now();
-    if (now - lastTapTime < 400) {
-      lastTapTime = 0;
-      clearTimeout(armedTimer);
-      ring.setAttribute('stroke-width', 2.5);
-      enterDrag(e.pointerId);
-    } else {
-      lastTapTime = now;
-      // Brief visual hint that a second tap will grab
-      ring.setAttribute('stroke-width', 4);
-      clearTimeout(armedTimer);
-      armedTimer = setTimeout(() => {
-        if (!dragging) ring.setAttribute('stroke-width', 2.5);
-      }, 450);
-    }
+    enterDrag(e.pointerId);
   }, sig);
 
   svg.addEventListener('pointermove', e => {
     if (!dragging) return;
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-    // Snap to the same 1 cm grid as bulbs / openings so the crosshair clicks
-    // into the same positions a bulb would; the live dimensions update in
-    // step rather than smoothly drifting.
-    const sx = Math.max(0, Math.min(1, snapX(nx)));
-    const sy = Math.max(0, Math.min(1, snapY(ny)));
+    const { sx, sy, snapXId, snapYId } = snapCrosshairToBulbs(nx, ny);
     setPos(sx * 1000, sy * 1000);
+
+    // Yellow line = locked to a bulb column/row; cyan = normal grid
+    hLine.setAttribute('stroke', snapYId ? '#ffdd00' : '#0ff');
+    vLine.setAttribute('stroke', snapXId ? '#ffdd00' : '#0ff');
+
+    // Show reference dot on the snapping bulb
+    if (snapXId && placedBulbs[snapXId]) {
+      const b = placedBulbs[snapXId];
+      xSnapDot.setAttribute('cx', b.x * 1000); xSnapDot.setAttribute('cy', b.y * 1000);
+      xSnapDot.setAttribute('opacity', 1);
+    } else { xSnapDot.setAttribute('opacity', 0); }
+
+    if (snapYId && placedBulbs[snapYId]) {
+      const b = placedBulbs[snapYId];
+      ySnapDot.setAttribute('cx', b.x * 1000); ySnapDot.setAttribute('cy', b.y * 1000);
+      ySnapDot.setAttribute('opacity', snapYId === snapXId ? 0 : 1);
+    } else { ySnapDot.setAttribute('opacity', 0); }
   }, sig);
 
   svg.addEventListener('pointerup', e => {
     if (!dragging) return;
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-    const ox = Math.max(0, Math.min(1, snapX(nx)));
-    const oy = Math.max(0, Math.min(1, snapY(ny)));
+    const { sx: ox, sy: oy } = snapCrosshairToBulbs(nx, ny);
     exitDrag(e.pointerId);
     if (layoutRoom) {
       layoutRoom.origin_x = ox;
@@ -2278,6 +2842,7 @@ function updateOpeningRectAttrs(openingId) {
     }
   }
   updateOpeningCone(openingId);
+  if (threeIs3D) syncOpeningToThree(placedOpenings[openingId]);
 }
 
 // ── Light model system ────────────────────────────────────────────────────────
@@ -3268,11 +3833,16 @@ function threeUpdateBulbColor(deviceId, dev) {
 
 function toggle3D(btn) {
   threeIs3D = !threeIs3D;
-  const svg   = document.getElementById('layout-canvas');
-  const c3d   = document.getElementById('lc-3d-container');
+  const svg     = document.getElementById('layout-canvas');
+  const c3d     = document.getElementById('lc-3d-container');
+  const sidebar = document.querySelector('.layout-sidebar');
+  const modelSel = document.getElementById('lc-model-select');
   if (threeIs3D) {
+    dismissPopover();
     if (svg) svg.style.display = 'none';
     if (c3d) c3d.style.display = '';
+    if (sidebar) sidebar.style.display = 'none';
+    if (modelSel) modelSel.style.display = 'none';
     btn.textContent = '2D';
     btn.title = 'Switch to 2D editing view';
     // Force a renderer resize now that the container is visible
@@ -3287,6 +3857,8 @@ function toggle3D(btn) {
   } else {
     if (svg) svg.style.display = '';
     if (c3d) c3d.style.display = 'none';
+    if (sidebar) sidebar.style.display = '';
+    if (modelSel) modelSel.style.display = '';
     btn.textContent = '3D';
     btn.title = 'Switch to 3D perspective view';
   }

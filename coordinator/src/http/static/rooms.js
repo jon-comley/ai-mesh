@@ -2,6 +2,17 @@
 // First-class spatial room objects with drag-and-drop device assignment
 // and drag-to-reorder room cards.
 
+// Prevent click-to-jump on any range slider — user must grab the thumb.
+function lockSliderToThumb(slider) {
+  slider.addEventListener('pointerdown', e => {
+    const rect = slider.getBoundingClientRect();
+    const ratio = (slider.value - slider.min) / (slider.max - slider.min);
+    const thumbX = rect.left + ratio * rect.width;
+    if (Math.abs(e.clientX - thumbX) > (e.pointerType === 'touch' ? 30 : 16))
+      e.preventDefault();
+  }, { capture: true });
+}
+
 import * as layout from '/static/layout.js';
 
 let roomsData = [];
@@ -272,6 +283,7 @@ function renderGlobalControls() {
   allOnBtn.className = 'room-action-btn room-action-on';
   allOnBtn.textContent = 'All On';
   allOnBtn.addEventListener('click', () => {
+    layout.freezeIconUpdates(3000);
     for (const r of roomsData) sendRoomCommand(r.id, { action: 'on' }, r);
   });
 
@@ -279,6 +291,7 @@ function renderGlobalControls() {
   allOffBtn.className = 'room-action-btn room-action-delete';
   allOffBtn.textContent = 'All Off';
   allOffBtn.addEventListener('click', () => {
+    layout.freezeIconUpdates(3000);
     for (const r of roomsData) sendRoomCommand(r.id, { action: 'off' }, r);
   });
 
@@ -424,16 +437,20 @@ function renderRoomCard(room) {
   const solarActive = room.solar_enabled;
   const empty = room.device_ids.length === 0;
 
-  // Header: collapse chevron + name + quick controls + layout button + actions
+  // Header: two rows — name row on top, controls row below
   const header = document.createElement('div');
   header.className = 'room-card-header';
+
+  // Row 1: collapse chevron + room name
+  const nameRow = document.createElement('div');
+  nameRow.className = 'room-header-name-row';
 
   const collapseBtn = document.createElement('button');
   collapseBtn.className = 'room-collapse-btn';
   collapseBtn.title = 'Collapse / expand';
   const isCollapsed = localStorage.getItem(`mesh-room-collapsed-${room.id}`) === '1';
   collapseBtn.textContent = isCollapsed ? '▸' : '▾';
-  header.appendChild(collapseBtn);
+  nameRow.appendChild(collapseBtn);
 
   const nameWrap = document.createElement('span');
   nameWrap.className = 'room-name-wrap';
@@ -447,8 +464,12 @@ function renderRoomCard(room) {
   pencilBtn.textContent = '✎';
   pencilBtn.addEventListener('click', e => { e.stopPropagation(); startRename(nameEl, room); });
   nameWrap.appendChild(pencilBtn);
-  nameWrap.addEventListener('click', () => startRename(nameEl, room));
-  header.appendChild(nameWrap);
+  nameRow.appendChild(nameWrap);
+  header.appendChild(nameRow);
+
+  // Row 2: quick controls + layout button + actions
+  const ctrlRow = document.createElement('div');
+  ctrlRow.className = 'room-header-controls-row';
 
   // Quick on/off + colour swatch in header (always visible when collapsed)
   const quickCtrl = document.createElement('div');
@@ -480,14 +501,14 @@ function renderRoomCard(room) {
     roomSwatchBtn.setAttribute('data-ctrl', 'room-colour-toggle');
     quickCtrl.appendChild(roomSwatchBtn);
   }
-  header.appendChild(quickCtrl);
+  ctrlRow.appendChild(quickCtrl);
 
   const layoutBtn = document.createElement('button');
   layoutBtn.className = 'room-action-btn room-layout-btn';
   layoutBtn.title = 'Open floor plan';
   layoutBtn.textContent = '⊞';
   layoutBtn.addEventListener('click', e => { e.stopPropagation(); layout.openLayout(room); });
-  header.appendChild(layoutBtn);
+  ctrlRow.appendChild(layoutBtn);
 
   const actions = document.createElement('div');
   actions.className = 'room-actions';
@@ -520,7 +541,8 @@ function renderRoomCard(room) {
   deleteBtn.textContent = 'delete';
   deleteBtn.addEventListener('click', () => deleteRoom(room.id));
   actions.appendChild(deleteBtn);
-  header.appendChild(actions);
+  ctrlRow.appendChild(actions);
+  header.appendChild(ctrlRow);
   card.appendChild(header);
 
   // Room colour picker — outside body so it stays accessible when collapsed
@@ -596,25 +618,41 @@ function renderRoomCard(room) {
 
   card.appendChild(body);
 
-  // Effect drops must land on the whole card so they work when the body is collapsed.
-  // Drop bubbles up from body's wireDropZone (which clears effectDragSrc first), so
-  // by the time it reaches here effectDragSrc is already null — no double-fire.
+  // Card-level drop handlers: effect drops always land here (body may be collapsed);
+  // device-chip drops also land here when the body is collapsed (body has zero height
+  // so dragover never fires on it). When expanded, device drops land on body instead
+  // and bubble up — by then dragSrc is already cleared, so no double-fire.
   card.addEventListener('dragover', e => {
-    if (!effectDragSrc) return;
+    const collapsed = body.classList.contains('collapsed');
+    if (!effectDragSrc && !(dragSrc && collapsed)) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
+    e.dataTransfer.dropEffect = effectDragSrc ? 'copy' : 'move';
     card.classList.add('room-drop-active');
   });
   card.addEventListener('dragleave', e => {
     if (!card.contains(e.relatedTarget)) card.classList.remove('room-drop-active');
   });
   card.addEventListener('drop', e => {
-    if (!effectDragSrc) return;
-    e.preventDefault();
     card.classList.remove('room-drop-active');
-    const effect = effectDragSrc;
-    effectDragSrc = null;
-    if (effect === 'solar') setSolarMode(room.id, true);
+    if (effectDragSrc) {
+      e.preventDefault();
+      const effect = effectDragSrc;
+      effectDragSrc = null;
+      if (effect === 'solar') setSolarMode(room.id, true);
+      return;
+    }
+    if (dragSrc && body.classList.contains('collapsed')) {
+      e.preventDefault();
+      const { deviceId, fromRoomId } = dragSrc;
+      dragSrc = null;
+      if (fromRoomId !== room.id) {
+        addDeviceToRoom(room.id, deviceId);
+        // Auto-expand so the user can see the newly assigned device
+        body.classList.remove('collapsed');
+        collapseBtn.textContent = '▾';
+        localStorage.setItem(`mesh-room-collapsed-${room.id}`, '0');
+      }
+    }
   });
 
   return card;
@@ -766,6 +804,8 @@ function wireRoomColourPicker(pickerEl, roomId, swatchBtn) {
     sendRoomCommand(roomId, { action: 'color_xy', x, y });
   }
 
+  lockSliderToThumb(hue);
+  lockSliderToThumb(sat);
   hue.addEventListener('input', syncUI);
   hue.addEventListener('change', sendColour);
   sat.addEventListener('input', syncUI);
@@ -975,6 +1015,7 @@ function wireDeviceControls(card, dev, roomId) {
 
   const bri = card.querySelector('[data-ctrl="brightness"]');
   if (bri) {
+    lockSliderToThumb(bri);
     bri.addEventListener('pointerdown', () => bri.classList.add('slider-active'));
     bri.addEventListener('pointercancel', () => bri.classList.remove('slider-active'));
     bri.addEventListener('input', () => {
@@ -994,6 +1035,7 @@ function wireDeviceControls(card, dev, roomId) {
 
   const ct = card.querySelector('[data-ctrl="color_temp"]');
   if (ct) {
+    lockSliderToThumb(ct);
     ct.addEventListener('pointerdown', () => ct.classList.add('slider-active'));
     ct.addEventListener('pointercancel', () => ct.classList.remove('slider-active'));
     ct.addEventListener('input', () => {
@@ -1040,8 +1082,8 @@ function wireDeviceControls(card, dev, roomId) {
     sendDeviceCommand(dev.device_id, { action: 'color_xy', x, y });
   }
 
-  if (hue) { hue.addEventListener('input', syncColourUI); hue.addEventListener('change', sendColour); }
-  if (sat) { sat.addEventListener('input', syncColourUI); sat.addEventListener('change', sendColour); }
+  if (hue) { lockSliderToThumb(hue); hue.addEventListener('input', syncColourUI); hue.addEventListener('change', sendColour); }
+  if (sat) { lockSliderToThumb(sat); sat.addEventListener('input', syncColourUI); sat.addEventListener('change', sendColour); }
   if (hue || sat) syncColourUI();
 }
 
