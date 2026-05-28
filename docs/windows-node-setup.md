@@ -396,6 +396,8 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 **Key observation:** Crashes occur when the GPU is **idle or under light load**, not during heavy inference. This rules out sustained thermal load as the trigger.
 
+**✅ CONFIRMED ROOT CAUSE (2026-05-28):** AMD fTPM (firmware TPM) — see incident entry below. Fix: disable fTPM in BIOS.
+
 **Diagnostics — run after any recovery:**
 ```bash
 ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
@@ -431,55 +433,44 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 
 ---
 
-#### 2026-05-28 — Crash storm during driver reinstall; ULPS fix applied
+#### 2026-05-28 — Crash storm; ULPS investigated; fTPM confirmed as root cause ✅
 
-- **Context:** Machine went offline. User reverted AMD driver to Beelink-recommended version `32.0.21025.10016` (Aug 2025 build). Multiple BSODs occurred during the driver download and installation process.
-- **Driver after fix:** `32.0.21025.10016`
-- **Minidumps:** `052826-9578-01.dmp` (16:52), `052826-9859-01.dmp` (17:09), `052826-9953-01.dmp` (17:20), `052826-10078-01.dmp` (17:43), `052826-9281-01.dmp` (18:10) — 5 crashes in ~80 minutes
-- **Critical finding:** **Both the May 2026 driver and the Aug 2025 driver produce identical crash signatures** (`0x00000133`, param2=`0x1e00`). This means the root cause is NOT a specific driver version — it is a system-level configuration issue that triggers the DPC watchdog on any AMD driver.
-- **Root cause identified:** `EnableUlps = 0x1` — GPU Ultra Low Power State was enabled. When the GPU is idle it attempts a deep power-state transition; the DPC routine handling wakeup from ULPS takes longer than the watchdog timeout. Crashes at idle (not under load) is the characteristic symptom of ULPS-triggered DPC timeouts.
-- **Actions taken (2026-05-28 ~18:20):**
-  - `EnableUlps = 0` on both `\0000` and `\0001` subkeys
-  - `PP_SclkDeepSleepDisable = 1` on `\0000` — shader clock deep sleep also disabled
-  - Machine rebooted to apply
-  - **Status: monitoring** — if stable for 24–48h with these settings, ULPS was the root cause
+- **Context:** Machine went offline. User reverted AMD driver to Beelink-recommended version `32.0.21025.10016` (Aug 2025 build). Multiple BSODs occurred during and after driver activity, and also during plain desktop use with no driver installs in progress.
+- **Driver at time:** `32.0.21025.10016`
+- **Minidumps:** `052826-9578-01.dmp` (16:52), `052826-9859-01.dmp` (17:09), `052826-9953-01.dmp` (17:20), `052826-10078-01.dmp` (17:43), `052826-9281-01.dmp` (18:10), `052826-9312-01.dmp` (19:19), `052826-9625-01.dmp` (19:49)
+- **Critical finding:** Both the May 2026 driver and the Aug 2025 driver produced identical crash signatures. Machine crashed during plain idle desktop use with no GPU activity. Root cause is not the GPU driver at all.
+- **ULPS investigated (red herring):** `EnableUlps=0` and `PP_SclkDeepSleepDisable=1` were applied and baked into `install-node-windows.ps1`. Machine still crashed. ULPS is harmless to leave disabled but was not the cause.
+- **✅ Actual root cause: AMD fTPM (firmware TPM).** Event log showed `Microsoft-Windows-TPM-WMI` re-provisioning the TPM after every single crash. The AMD PSP (Platform Security Processor — a separate ARM core on the Ryzen die) implements fTPM by periodically writing to SPI flash. During that write it holds a bus lock on the SPI interface, stalling all CPU cores. Windows sees a DPC that cannot complete within `0x1e00` clock intervals and fires `0x00000133`. This is an AMD-acknowledged bug present since Ryzen 5000, not fixed on the SER8's Ryzen 8000 series.
+- **Fix applied (2026-05-28 ~20:00):** fTPM **disabled in BIOS** (AMI BIOS → Advanced → AMD PBS → fTPM Switch → Disabled). Machine stable immediately after.
+- **What is lost by disabling fTPM:** Nothing relevant to this use case. BitLocker not enabled, no Windows Hello, no MDM attestation. Machine boots and runs identically.
 
-```bash
-# Verify current ULPS state:
-ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
-# Should show 0x0
-
-# Re-apply if ever lost:
-ssh jonno@192.168.1.14 "reg add \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps /t REG_DWORD /d 0 /f"
-ssh jonno@192.168.1.14 "reg add \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001\" /v EnableUlps /t REG_DWORD /d 0 /f"
-ssh jonno@192.168.1.14 "reg add \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v PP_SclkDeepSleepDisable /t REG_DWORD /d 1 /f"
-```
-
-> **Warning — AMD driver updates silently restore ULPS.** Any AMD Adrenalin update rewrites the display class registry keys and sets `EnableUlps=1` again. The `ai-mesh-harden-boot` Scheduled Task re-applies `EnableUlps=0` at every boot, but if you update the driver and don't reboot, ULPS will be active until the next restart. After any driver update, either reboot immediately or manually re-run the commands above.
-
-> **Note — ULPS is enabled by default on most OEM AMD builds.** It is not a user setting — AMD turns it on to reduce idle power consumption. On the Radeon 780M iGPU it is unsafe because the power-transition DPC routine exceeds the Windows watchdog threshold. It must be explicitly disabled and kept disabled.
+> **If fTPM option is hard to find in BIOS:** AMI BIOS on the SER8 v2.22.1293 — look under **Advanced → AMD PBS → fTPM Switch**. May also appear as "TPM Device Selection" or "Security Device Support".
 
 ---
 
-#### Verification checklist after any reboot or driver change
+#### Verification checklist after any reboot, driver change, or CMOS reset
 
 ```bash
-# 1. ULPS disabled
+# 1. fTPM disabled — MOST IMPORTANT. CMOS reset restores BIOS defaults (fTPM enabled).
+#    After any CMOS reset, go back into BIOS and disable fTPM before booting Windows.
+#    No software check for this — verify in BIOS: Advanced → AMD PBS → fTPM Switch = Disabled
+
+# 2. ULPS disabled (harmless belt-and-braces, baked into boot task)
 ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
 # Expect: 0x0
 
-# 2. Shader deep sleep disabled
+# 3. Shader deep sleep disabled
 ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v PP_SclkDeepSleepDisable"
 # Expect: 0x1
 
-# 3. TdrDelay NOT set (should error — absence is correct)
+# 4. TdrDelay NOT set (should error — absence is correct)
 ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\" /v TdrDelay"
 # Expect: ERROR (key absent)
 
-# 4. Driver version
+# 5. Driver version
 ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object DriverVersion, DriverDate | Format-List\""
 
-# 5. No recent unexpected shutdowns (Event ID 41)
+# 6. No recent unexpected shutdowns (Event ID 41)
 ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
 ```
 
@@ -490,10 +481,11 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxE
 | Version | Date | Issue |
 |---------|------|-------|
 | pre-26.5.2 | pre-May 2026 | `0xe06d7363` SEH exception under Vulkan load — GPU inference unusable |
-| `32.0.31007.5012` | 2026-05-12 | DPC_WATCHDOG crashes — suspected but unconfirmed since ULPS was also enabled |
-| `32.0.21025.10016` | 2025-08-25 | DPC_WATCHDOG crashes with ULPS enabled — stable with ULPS disabled (monitoring) |
+| `32.0.31007.5012` | 2026-05-12 | Appeared to cause DPC_WATCHDOG — actually fTPM. Fine to use with fTPM disabled. |
+| `32.0.21025.10016` | 2025-08-25 | Appeared to cause DPC_WATCHDOG — actually fTPM. Fine to use with fTPM disabled. |
 
 #### DO NOTs
 
+- **Never leave fTPM enabled.** AMD PSP holds a SPI bus lock during flash writes, stalling all CPU cores and triggering `0x00000133` at idle. Disable in BIOS: Advanced → AMD PBS → fTPM Switch = Disabled. **This is reset by a CMOS clear** — always re-disable after any CMOS reset.
 - **Never set `TdrDelay` > 2s.** Caused GPU to overheat in May 2026 — let Windows reset a stuck GPU quickly rather than waiting. Documented in `install-node-windows.ps1`.
-- **Never enable ULPS** (`EnableUlps=1`) on this hardware. DPC watchdog fires on idle power transitions.
+- **Never enable ULPS** (`EnableUlps=1`) — belt-and-braces, leave disabled via boot task.
