@@ -388,42 +388,112 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 - The NSSM service and agent binary are wiped by a CMOS reset if Windows was reinstalled, but survive a simple CMOS clear if the OS volume is intact
 - If the node doesn't re-appear after `deploy-node`, run `just reset` to clear stale registry entries then `just start-cluster` again
 
-### Beelink SER8 — OS hang (power light on, no network response)
+### Beelink SER8 — DPC_WATCHDOG_VIOLATION crash log
 
-**Symptom:** Machine appears powered on (front LED lit), monitor connected and also unresponsive (black/frozen screen), no ping or SSH response. Recovered by holding the power button for a hard reset. Booted cleanly after. First observed 2026-05-23.
+**Stop code:** `0x00000133 DPC_WATCHDOG_VIOLATION` — a driver DPC (Deferred Procedure Call) routine ran longer than the Windows watchdog timeout. Always param2=`0x1e00` (same clock-interval threshold every crash). Machine BSODs and reboots automatically.
 
-This is distinct from the CMOS/BIOS issue above — no BIOS screen, system hung with display stack dead.
+**Symptom:** No ping or SSH response, or machine reboots unexpectedly. Confirmed via Event ID 1001 (BugCheck) in System event log.
 
-**Confirmed not:** NIC power management (monitor was connected and also unresponsive, so the whole system was hung, not just the network).
+**Key observation:** Crashes occur when the GPU is **idle or under light load**, not during heavy inference. This rules out sustained thermal load as the trigger.
 
-**Primary suspect: GPU driver crash (TDR).** AMD Radeon 780M running Vulkan at `LLAMA_GPU_LAYERS=99` via llama-server. Windows has a watchdog called TDR (Timeout Detection and Recovery) that kills and restarts the GPU driver if the GPU stops responding. On a sustained compute workload it sometimes fails to recover and takes the entire display stack down, leaving the system hung with a black screen and no way to recover except a hard reset.
-
-**Secondary suspect: Fast Startup.** `powercfg /h off` disables hibernate but not Windows Fast Startup (hybrid shutdown), which can produce a half-suspended state on restart.
-
-**Diagnostics — run after next recovery, before restarting agent:**
-
-Check for GPU TDR events and kernel-power (ID 41 = unexpected shutdown):
+**Diagnostics — run after any recovery:**
 ```bash
-ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 200 | Where-Object { \$_.LevelDisplayName -eq 'Critical' -or \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 } | Select-Object TimeCreated, Id, Message | Format-List\""
-```
-Event ID 4101 = TDR (display driver stopped responding). Event ID 41 = unexpected power loss.
-
-Also check the AMD driver log:
-```bash
-ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName 'System' | Where-Object { \$_.ProviderName -like '*amd*' -or \$_.ProviderName -like '*display*' } | Select-Object -First 20 TimeCreated, Id, Message | Format-List\""
+ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
 ```
 
-**Mitigations — baked into `install-node-windows.ps1` (`Harden-Stability` function), applied on every `just deploy-node beelink1`:**
-
-- **TDR timeout 2s → 60s** — gives AMD driver time to finish a large GPU dispatch before Windows declares it hung
-- **Fast Startup disabled** — prevents hybrid-shutdown half-suspended state
-- **NIC power management off** — belt-and-braces
-
-To apply immediately without a full re-provision:
+**Check current driver version:**
 ```bash
-ssh jonno@192.168.1.14 "powershell -Command \"reg add 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers' /v TdrDelay /t REG_DWORD /d 60 /f; reg add 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power' /v HiberbootEnabled /t REG_DWORD /d 0 /f; Get-NetAdapter | Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice Disabled\""
+ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object Caption, DriverVersion, DriverDate | Format-List\""
 ```
 
-If TDR events are confirmed in the logs after a future incident, consider also reducing `LLAMA_GPU_LAYERS` from 99 to a lower value (e.g. 20–30) to reduce sustained GPU pressure.
+---
 
-**Confirmed root cause (2026-05-23):** BSOD 0x00000133 DPC_WATCHDOG_VIOLATION — not a TDR. AMD GPU driver's DPC routine running too long under Vulkan load. **Most likely fix: update AMD GPU drivers** via Device Manager → Display Adapters → AMD Radeon 780M → Update Driver. Minidumps at `C:\WINDOWS\Minidump\052326-8968-01.dmp` and `052326-9078-01.dmp` if deeper analysis needed.
+#### 2026-05-23 — First confirmed BSOD incidents
+
+- **Driver:** unknown at time of writing (pre-26.5.2)
+- **Minidumps:** `052326-8968-01.dmp`, `052326-9078-01.dmp`
+- **Finding:** Confirmed `0x00000133` DPC_WATCHDOG_VIOLATION. Initially suspected TDR (display driver timeout under load) but logs showed no TDR event IDs.
+- **Action taken:** Upgraded AMD driver to Adrenalin 26.5.2 / `32.0.31007.5012` (May 2026). Also set `TdrDelay=60` in registry to give GPU more time to finish dispatches.
+
+---
+
+#### 2026-05-25/26 — Mass crash storm (~25+ BSODs)
+
+- **Driver:** `32.0.31007.5012` (installed ~2026-05-12)
+- **Frequency:** Every 30–90 minutes, day and night. Crashes at idle — not load-gated.
+- **Minidumps:** `052526-9375`, `052526-10046`, `052526-9750`, `052626-9468`, `052626-9609` (and more)
+- **param2:** `0x1e00` every single crash — same DPC code path every time
+- **2026-05-26 escalation:** Machine overheated → required 2× CMOS resets and cooling period before it would POST. Root cause of overheating: `TdrDelay=60` meant the GPU ran at full load for 60s before Windows attempted reset, cooking the hardware.
+- **Actions taken:**
+  - `TdrDelay=60` **reverted** — registry key deleted. Default (2s) restored. Documented in `install-node-windows.ps1` with a DO NOT SET warning.
+  - `install-node-windows.ps1` updated: TdrDelay removed, `ai-mesh-harden-boot` startup task added to re-apply NIC power management at boot.
+- **Remaining suspected cause:** AMD driver `32.0.31007.5012` itself. Rolling back considered, but the previous driver (`32.0.21025.10016`, Aug 2025) was known-bad for a different reason: `0xe06d7363` SEH exception crashes under Vulkan load (unusable for GPU inference).
+
+---
+
+#### 2026-05-28 — Crash storm during driver reinstall; ULPS fix applied
+
+- **Context:** Machine went offline. User reverted AMD driver to Beelink-recommended version `32.0.21025.10016` (Aug 2025 build). Multiple BSODs occurred during the driver download and installation process.
+- **Driver after fix:** `32.0.21025.10016`
+- **Minidumps:** `052826-9578-01.dmp` (16:52), `052826-9859-01.dmp` (17:09), `052826-9953-01.dmp` (17:20), `052826-10078-01.dmp` (17:43), `052826-9281-01.dmp` (18:10) — 5 crashes in ~80 minutes
+- **Critical finding:** **Both the May 2026 driver and the Aug 2025 driver produce identical crash signatures** (`0x00000133`, param2=`0x1e00`). This means the root cause is NOT a specific driver version — it is a system-level configuration issue that triggers the DPC watchdog on any AMD driver.
+- **Root cause identified:** `EnableUlps = 0x1` — GPU Ultra Low Power State was enabled. When the GPU is idle it attempts a deep power-state transition; the DPC routine handling wakeup from ULPS takes longer than the watchdog timeout. Crashes at idle (not under load) is the characteristic symptom of ULPS-triggered DPC timeouts.
+- **Actions taken (2026-05-28 ~18:20):**
+  - `EnableUlps = 0` on both `\0000` and `\0001` subkeys
+  - `PP_SclkDeepSleepDisable = 1` on `\0000` — shader clock deep sleep also disabled
+  - Machine rebooted to apply
+  - **Status: monitoring** — if stable for 24–48h with these settings, ULPS was the root cause
+
+```bash
+# Verify current ULPS state:
+ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
+# Should show 0x0
+
+# Re-apply if ever lost:
+ssh jonno@192.168.1.14 "reg add \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps /t REG_DWORD /d 0 /f"
+ssh jonno@192.168.1.14 "reg add \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001\" /v EnableUlps /t REG_DWORD /d 0 /f"
+ssh jonno@192.168.1.14 "reg add \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v PP_SclkDeepSleepDisable /t REG_DWORD /d 1 /f"
+```
+
+> **Warning — AMD driver updates silently restore ULPS.** Any AMD Adrenalin update rewrites the display class registry keys and sets `EnableUlps=1` again. The `ai-mesh-harden-boot` Scheduled Task re-applies `EnableUlps=0` at every boot, but if you update the driver and don't reboot, ULPS will be active until the next restart. After any driver update, either reboot immediately or manually re-run the commands above.
+
+> **Note — ULPS is enabled by default on most OEM AMD builds.** It is not a user setting — AMD turns it on to reduce idle power consumption. On the Radeon 780M iGPU it is unsafe because the power-transition DPC routine exceeds the Windows watchdog threshold. It must be explicitly disabled and kept disabled.
+
+---
+
+#### Verification checklist after any reboot or driver change
+
+```bash
+# 1. ULPS disabled
+ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
+# Expect: 0x0
+
+# 2. Shader deep sleep disabled
+ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v PP_SclkDeepSleepDisable"
+# Expect: 0x1
+
+# 3. TdrDelay NOT set (should error — absence is correct)
+ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\" /v TdrDelay"
+# Expect: ERROR (key absent)
+
+# 4. Driver version
+ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object DriverVersion, DriverDate | Format-List\""
+
+# 5. No recent unexpected shutdowns (Event ID 41)
+ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
+```
+
+---
+
+#### Known-bad driver versions
+
+| Version | Date | Issue |
+|---------|------|-------|
+| pre-26.5.2 | pre-May 2026 | `0xe06d7363` SEH exception under Vulkan load — GPU inference unusable |
+| `32.0.31007.5012` | 2026-05-12 | DPC_WATCHDOG crashes — suspected but unconfirmed since ULPS was also enabled |
+| `32.0.21025.10016` | 2025-08-25 | DPC_WATCHDOG crashes with ULPS enabled — stable with ULPS disabled (monitoring) |
+
+#### DO NOTs
+
+- **Never set `TdrDelay` > 2s.** Caused GPU to overheat in May 2026 — let Windows reset a stuck GPU quickly rather than waiting. Documented in `install-node-windows.ps1`.
+- **Never enable ULPS** (`EnableUlps=1`) on this hardware. DPC watchdog fires on idle power transitions.
