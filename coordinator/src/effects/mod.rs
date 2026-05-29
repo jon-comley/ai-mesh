@@ -14,6 +14,7 @@ pub mod les;
 pub mod registry;
 pub mod runner;
 pub mod solar;
+pub mod sunset;
 
 // ── Categorisation + cadence ──────────────────────────────────────────────────
 
@@ -161,9 +162,24 @@ pub struct EffectCtx<'a> {
     pub spatial: SpatialHelpers<'a>,
 }
 
-/// Geometric helpers that several effects want to share. The bodies are
-/// stubbed in this scaffolding slice — real implementations land alongside
-/// the effects that need them (Sunset/Sunrise/Aurora).
+/// Compass direction in world-space — what `SpatialHelpers::directional_offset`
+/// uses to map "bulb position along this axis" to a per-bulb time offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    North,
+    South,
+    East,
+    West,
+}
+
+/// Geometric helpers that several effects want to share. Effects pass a
+/// `BulbInRoom` in and get back simple normalised scalars or offsets they can
+/// fold into their curves.
+///
+/// Room orientation: for MVP these helpers use room-local x/y. Once a real
+/// effect needs to honour `RoomContext.orientation_degrees` (rotate the
+/// east/west axis into world-space), the rotation lives here, not in each
+/// effect. TODO(F-Effects-2.5): wire orientation through.
 pub struct SpatialHelpers<'a> {
     _room: &'a RoomContext,
     _openings: &'a [OpeningContext],
@@ -175,6 +191,29 @@ impl<'a> SpatialHelpers<'a> {
             _room: room,
             _openings: openings,
         }
+    }
+
+    /// 0.0 at the west wall, 1.0 at the east wall. Bulbs outside the unit box
+    /// clamp to the nearest edge.
+    pub fn west_to_east(&self, bulb: &BulbInRoom) -> f32 {
+        bulb.x.clamp(0.0, 1.0)
+    }
+
+    /// Per-bulb time offset along a chosen direction, in the range
+    /// [-0.5, +0.5]. Bulbs at the "leading" wall of the chosen direction get
+    /// `+0.5` (their slice of the curve starts earliest); bulbs at the
+    /// opposite wall get `-0.5`.
+    ///
+    /// Use as: `t_bulb = (t_global + offset).clamp(0.0, 1.0)`.
+    pub fn directional_offset(&self, bulb: &BulbInRoom, dir: Direction) -> f32 {
+        // pos = 0.0 at the "leading" wall, 1.0 at the trailing wall.
+        let pos = match dir {
+            Direction::West => bulb.x,
+            Direction::East => 1.0 - bulb.x,
+            Direction::North => bulb.y,
+            Direction::South => 1.0 - bulb.y,
+        };
+        0.5 - pos.clamp(0.0, 1.0)
     }
 }
 
@@ -299,5 +338,68 @@ mod tests {
         assert_eq!(FixtureType::parse(Some("pendant")), FixtureType::Pendant);
         assert_eq!(FixtureType::parse(Some("wat")), FixtureType::Unknown);
         assert_eq!(FixtureType::parse(None), FixtureType::Unknown);
+    }
+
+    fn bulb_at(x: f32, y: f32) -> BulbInRoom {
+        BulbInRoom {
+            device_id: "b".into(),
+            x,
+            y,
+            z: 0.0,
+            fixture_type: FixtureType::CeilingSpot,
+            current: BulbCurrentState::default(),
+        }
+    }
+
+    fn helpers() -> SpatialHelpers<'static> {
+        // Leak the static lifetimes — fine for unit tests; they're never freed.
+        let room = Box::leak(Box::new(RoomContext {
+            id: "r".into(),
+            orientation_degrees: 0.0,
+            width_m: 4.0,
+            depth_m: 4.0,
+            height_m: 2.4,
+        }));
+        let openings: &'static [OpeningContext] = Box::leak(Box::new([]));
+        SpatialHelpers::new(room, openings)
+    }
+
+    #[test]
+    fn west_to_east_clamps_to_unit() {
+        let h = helpers();
+        assert!((h.west_to_east(&bulb_at(0.0, 0.5)) - 0.0).abs() < 1e-6);
+        assert!((h.west_to_east(&bulb_at(0.5, 0.5)) - 0.5).abs() < 1e-6);
+        assert!((h.west_to_east(&bulb_at(1.0, 0.5)) - 1.0).abs() < 1e-6);
+        assert!((h.west_to_east(&bulb_at(-0.2, 0.5)) - 0.0).abs() < 1e-6);
+        assert!((h.west_to_east(&bulb_at(1.5, 0.5)) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn directional_offset_west_leads_west_bulb() {
+        let h = helpers();
+        // West-biased: bulb at the west wall (x=0) advances earliest → +0.5.
+        assert!((h.directional_offset(&bulb_at(0.0, 0.5), Direction::West) - 0.5).abs() < 1e-6);
+        // East wall bulb (x=1) → -0.5.
+        assert!((h.directional_offset(&bulb_at(1.0, 0.5), Direction::West) + 0.5).abs() < 1e-6);
+        // Centre bulb → 0.
+        assert!((h.directional_offset(&bulb_at(0.5, 0.5), Direction::West)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn directional_offset_east_inverts_west() {
+        let h = helpers();
+        let bulb = bulb_at(0.2, 0.5);
+        let west = h.directional_offset(&bulb, Direction::West);
+        let east = h.directional_offset(&bulb, Direction::East);
+        assert!((west + east).abs() < 1e-6);
+    }
+
+    #[test]
+    fn directional_offset_north_south_use_y() {
+        let h = helpers();
+        assert!((h.directional_offset(&bulb_at(0.5, 0.0), Direction::North) - 0.5).abs() < 1e-6);
+        assert!((h.directional_offset(&bulb_at(0.5, 1.0), Direction::North) + 0.5).abs() < 1e-6);
+        assert!((h.directional_offset(&bulb_at(0.5, 0.0), Direction::South) + 0.5).abs() < 1e-6);
+        assert!((h.directional_offset(&bulb_at(0.5, 1.0), Direction::South) - 0.5).abs() < 1e-6);
     }
 }
