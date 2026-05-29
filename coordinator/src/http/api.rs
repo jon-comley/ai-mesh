@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::state::{DashboardState, RoomInfo, SceneInfo};
+use crate::effects::registry::EffectRegistry;
 use crate::registry::{DeviceSnapshot, Opening, Registry};
 
 fn gen_request_id() -> String {
@@ -1257,6 +1258,135 @@ pub async fn delete_opening(
         return StatusCode::NOT_FOUND.into_response();
     }
     reg.delete_opening(&opening_id);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ── Effects (F-Effects-2.2) ──────────────────────────────────────────────────
+
+/// GET /api/effects — list every registered effect's metadata.
+/// Cacheable: called once on dashboard load.
+pub async fn list_effects(
+    Extension(effects): Extension<Arc<EffectRegistry>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(effects.list_metadata().to_vec()).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SetEffectBody {
+    pub effect_id: String,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+}
+
+/// POST /api/rooms/{id}/effect — set the active effect for the room.
+/// Validates `effect_id` against the registry and `params` against the
+/// effect's JSON Schema. 204 on success.
+pub async fn set_room_effect(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Extension(effects): Extension<Arc<EffectRegistry>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<SetEffectBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    // Look up the effect's metadata so we can validate params and fall back to
+    // defaults if none were supplied.
+    let metadata = match effects
+        .list_metadata()
+        .iter()
+        .find(|m| m.id == body.effect_id)
+        .cloned()
+    {
+        Some(m) => m,
+        None => return (StatusCode::BAD_REQUEST, "unknown effect_id").into_response(),
+    };
+
+    // If the caller omits `params` entirely we substitute the effect's
+    // default_params. TODO(F-Effects-2.4 / Sunset): for partial param objects
+    // (e.g. {"duration_secs":600} when default is {"duration_secs":1800,
+    // "peak_warmth":0.7,"start_at":"now"}) merge defaults into the missing
+    // fields so the runner doesn't have to handle Option unwrap on every tick.
+    // Not needed yet — Solar's default is {} so there are no defaults to merge.
+    let params = body
+        .params
+        .unwrap_or_else(|| metadata.default_params.clone());
+
+    // Use the pre-compiled validator from the registry — compiled once at
+    // startup, reused across requests. `None` here is impossible (we already
+    // matched the metadata above) but we degrade gracefully if some future
+    // code path registers without compiling.
+    if let Some(schema) = effects.compiled_schema(&body.effect_id)
+        && let Err(errors) = schema.validate(&params)
+    {
+        let msg = errors.map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+        return (StatusCode::BAD_REQUEST, format!("invalid params: {msg}")).into_response();
+    }
+
+    persist_active_effect(&registry, &state, &room_id, &body.effect_id, &params)
+}
+
+fn persist_active_effect(
+    registry: &Arc<Mutex<Registry>>,
+    state: &Arc<DashboardState>,
+    room_id: &str,
+    effect_id: &str,
+    params: &serde_json::Value,
+) -> axum::response::Response {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let params_json = params.to_string();
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        if let Err(e) = reg.set_active_effect(room_id, effect_id, &params_json, None, now_ms) {
+            tracing::warn!(error = %e, "set_active_effect failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    state.push_effect_update(
+        room_id.to_string(),
+        Some(effect_id.to_string()),
+        params.clone(),
+    );
+    state.solar_sweep_notify.notify_one();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// DELETE /api/rooms/{id}/effect — clear the active effect.
+pub async fn clear_room_effect(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        if let Err(e) = reg.disable_active_effect(&room_id) {
+            tracing::warn!(error = %e, "disable_active_effect failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    state.push_effect_update(room_id.clone(), None, serde_json::json!({}));
+    state.solar_sweep_notify.notify_one();
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -3056,5 +3186,196 @@ mod tests {
             status == StatusCode::BAD_REQUEST || status == StatusCode::UNPROCESSABLE_ENTITY,
             "expected 400 or 422, got {status}"
         );
+    }
+
+    // ── effects (F-Effects-2.2) ─────────────────────────────────────────────
+
+    fn effects_router(
+        state: Arc<DashboardState>,
+        registry: Arc<Mutex<Registry>>,
+        effects: Arc<EffectRegistry>,
+    ) -> Router {
+        Router::new()
+            .route("/api/effects", get(list_effects))
+            .route(
+                "/api/rooms/{id}/effect",
+                post(set_room_effect).delete(clear_room_effect),
+            )
+            .layer(axum::Extension(registry))
+            .layer(axum::Extension(effects))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn list_effects_returns_solar_metadata() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let effects = Arc::new(EffectRegistry::default());
+        let (status, body) = send_with_body(
+            effects_router(state, registry, effects),
+            "GET",
+            "/api/effects?token=",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("\"id\":\"solar\""),
+            "missing solar entry: {body}"
+        );
+        assert!(body.contains("TimeOfDay"), "missing category: {body}");
+    }
+
+    #[tokio::test]
+    async fn list_effects_requires_token() {
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let registry = make_registry();
+        let effects = Arc::new(EffectRegistry::default());
+        let status = send(
+            effects_router(state, registry, effects),
+            "GET",
+            "/api/effects?token=nope",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn set_room_effect_unknown_effect_returns_400() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+        let status = send(
+            effects_router(state, registry, effects),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"does-not-exist"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn set_room_effect_missing_room_returns_404() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let effects = Arc::new(EffectRegistry::default());
+        let status = send(
+            effects_router(state, registry, effects),
+            "POST",
+            "/api/rooms/no-such-room/effect?token=",
+            r#"{"effect_id":"solar"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn set_room_effect_valid_returns_204_and_persists() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+        let status = send(
+            effects_router(Arc::clone(&state), Arc::clone(&registry), effects),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"solar"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let active = registry.lock().unwrap().get_active_effect(&room_id);
+        assert_eq!(active.unwrap().effect_id, "solar");
+    }
+
+    #[tokio::test]
+    async fn set_room_effect_omits_params_uses_default() {
+        // Solar has no tunable params; body without `params` should still 204.
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+        let status = send(
+            effects_router(Arc::clone(&state), Arc::clone(&registry), effects),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"solar"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let active = registry
+            .lock()
+            .unwrap()
+            .get_active_effect(&room_id)
+            .unwrap();
+        // Stored params should be the effect's default (an empty object for Solar).
+        assert_eq!(active.params_json, "{}");
+    }
+
+    #[tokio::test]
+    async fn clear_room_effect_returns_204_and_disables() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+        // Activate first.
+        let _ = send(
+            effects_router(
+                Arc::clone(&state),
+                Arc::clone(&registry),
+                Arc::clone(&effects),
+            ),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"solar"}"#,
+        )
+        .await;
+        // Clear.
+        let status = send(
+            effects_router(Arc::clone(&state), Arc::clone(&registry), effects),
+            "DELETE",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_active_effect(&room_id)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_room_effect_broadcasts_effect_update() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+        let mut rx = state.tx.subscribe();
+        let status = send(
+            effects_router(Arc::clone(&state), Arc::clone(&registry), effects),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"solar"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        match rx.try_recv() {
+            Ok(crate::http::state::DashboardEvent::EffectUpdate {
+                room_id: rid,
+                effect_id,
+                ..
+            }) => {
+                assert_eq!(rid, room_id);
+                assert_eq!(effect_id, Some("solar".into()));
+            }
+            Ok(_) => panic!("expected EffectUpdate, got a different event"),
+            Err(e) => panic!("recv failed: {e:?}"),
+        }
     }
 }

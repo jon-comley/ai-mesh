@@ -112,6 +112,24 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Push current per-room active effect so the effect badge UX renders
+    // immediately on connect instead of waiting for the next runner tick.
+    for info in state.get_effect_snapshot() {
+        let evt = DashboardEvent::EffectUpdate {
+            room_id: info.room_id,
+            effect_id: info.effect_id,
+            params: info.params,
+        };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot EffectUpdate: {e}"),
+        }
+    }
+
     loop {
         tokio::select! {
             event = rx.recv() => match event {

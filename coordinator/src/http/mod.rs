@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
+use crate::effects::registry::EffectRegistry;
 use crate::registry::Registry;
 use state::DashboardState;
 
@@ -27,7 +28,11 @@ const LAYOUT_JS: &str = include_str!("static/layout.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
-pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
+pub fn router(
+    dashboard: Arc<DashboardState>,
+    registry: Arc<Mutex<Registry>>,
+    effects: Arc<EffectRegistry>,
+) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/", get(|| async { Html(INDEX_HTML) }))
@@ -182,6 +187,11 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
             patch(api::update_opening).delete(api::delete_opening),
         )
         .route("/api/rooms/{id}/solar", post(api::set_room_solar))
+        .route("/api/effects", get(api::list_effects))
+        .route(
+            "/api/rooms/{id}/effect",
+            post(api::set_room_effect).delete(api::clear_room_effect),
+        )
         .route(
             "/api/rooms/{id}/orientation",
             patch(api::set_room_orientation),
@@ -198,16 +208,22 @@ pub fn router(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) ->
         .route("/api/scenes/{id}/recall", post(api::recall_scene))
         .route("/api/scenes/{id}", delete(api::delete_scene))
         .layer(axum::Extension(registry))
+        .layer(axum::Extension(effects))
         .with_state(dashboard)
 }
 
-pub async fn start(port: u16, dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) {
+pub async fn start(
+    port: u16,
+    dashboard: Arc<DashboardState>,
+    registry: Arc<Mutex<Registry>>,
+    effects: Arc<EffectRegistry>,
+) {
     let addr = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("failed to bind dashboard HTTP server to {addr}: {e}"));
     info!("Dashboard available at http://localhost:{port}");
-    if let Err(e) = axum::serve(listener, router(dashboard, registry)).await {
+    if let Err(e) = axum::serve(listener, router(dashboard, registry, effects)).await {
         error!("Dashboard HTTP server error: {e}");
     }
 }
@@ -225,7 +241,8 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
         let registry = Arc::new(std::sync::Mutex::new(crate::registry::Registry::new()));
-        let resp = router(dashboard, registry)
+        let effects = Arc::new(EffectRegistry::default());
+        let resp = router(dashboard, registry, effects)
             .oneshot(
                 Request::builder()
                     .uri(uri)

@@ -45,6 +45,20 @@ pub enum DashboardEvent {
         azimuth: f64,
         elevation: f64,
     },
+    EffectUpdate {
+        room_id: String,
+        effect_id: Option<String>,
+        params: serde_json::Value,
+    },
+}
+
+/// Snapshot of the currently-active effect (if any) for one room. Pushed to a
+/// new WS client on connect alongside the other panel snapshots.
+#[derive(Clone, Debug, Serialize)]
+pub struct RoomEffectInfo {
+    pub room_id: String,
+    pub effect_id: Option<String>,
+    pub params: serde_json::Value,
 }
 
 #[derive(Clone, Serialize)]
@@ -159,6 +173,9 @@ pub struct DashboardState {
     group_snapshot: Mutex<HashMap<String, String>>,
     room_snapshot: Mutex<Vec<RoomInfo>>,
     scene_snapshot: Mutex<Vec<SceneInfo>>,
+    /// Per-room currently-active effect (if any). Mirrors `room_effects` rows
+    /// where `enabled = 1`. Pushed to new WS clients on connect.
+    effect_snapshot: Mutex<HashMap<String, RoomEffectInfo>>,
     /// State of lights before they entered Solar mode — used to restore state on disable.
     last_manual_states: Mutex<HashMap<String, LightStateReport>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
@@ -190,6 +207,7 @@ impl DashboardState {
             group_snapshot: Mutex::new(HashMap::new()),
             room_snapshot: Mutex::new(Vec::new()),
             scene_snapshot: Mutex::new(Vec::new()),
+            effect_snapshot: Mutex::new(HashMap::new()),
             last_manual_states: Mutex::new(HashMap::new()),
             connections,
             solar_sweep_notify: Arc::new(Notify::new()),
@@ -435,6 +453,49 @@ impl DashboardState {
     /// Return a point-in-time copy of the scenes snapshot for warm-starting new WS clients.
     pub fn get_scene_snapshot(&self) -> Vec<SceneInfo> {
         self.scene_snapshot.lock().unwrap().clone()
+    }
+
+    /// Update the per-room effect snapshot and broadcast `EffectUpdate`.
+    /// Pass `effect_id = None` to clear the room's active effect.
+    pub fn push_effect_update(
+        &self,
+        room_id: String,
+        effect_id: Option<String>,
+        params: serde_json::Value,
+    ) {
+        {
+            let mut snap = self.effect_snapshot.lock().unwrap();
+            if effect_id.is_none() {
+                snap.remove(&room_id);
+            } else {
+                snap.insert(
+                    room_id.clone(),
+                    RoomEffectInfo {
+                        room_id: room_id.clone(),
+                        effect_id: effect_id.clone(),
+                        params: params.clone(),
+                    },
+                );
+            }
+        }
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::EffectUpdate {
+                room_id,
+                effect_id,
+                params,
+            });
+        }
+    }
+
+    /// Snapshot of every room with an active effect — used by `ws.rs` to
+    /// hydrate a new dashboard client.
+    pub fn get_effect_snapshot(&self) -> Vec<RoomEffectInfo> {
+        self.effect_snapshot
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Broadcast the current solar position to all connected clients.
