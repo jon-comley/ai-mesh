@@ -10,10 +10,13 @@ use std::collections::HashMap;
 use shared::messages::LightAction;
 
 pub mod blend;
+pub mod breathing;
+pub mod candlelight;
 pub mod les;
 pub mod registry;
 pub mod runner;
 pub mod solar;
+pub mod sunrise;
 pub mod sunset;
 
 // ── Categorisation + cadence ──────────────────────────────────────────────────
