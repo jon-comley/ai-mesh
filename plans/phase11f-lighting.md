@@ -42,6 +42,8 @@ The MQTT path through Z2M has ~100ms round-trip latency — acceptable for manua
 ### Solar / Sunset Engine
 Coordinator background task uses device location (lat/lon) + the `sunrise` or `spa` Rust crate to compute exact sunrise/sunset times and solar elevation angle throughout the day. Drives a smooth colour-temperature + brightness curve that tracks the real sky. Configurable per-group; presence-weighted when F7 switches are available.
 
+*Status (2026-05-29):* Solar shipped in **F-Spatial** (full 3D dot-product weighting, room orientation, opening transmission). Sunset is formally planned in **F-Effects-2** as a curated effect alongside Sunrise, Candlelight, Aurora, and Breathing — see `plans/phase11f-effects-2.md`. Presence-weighting still awaits F7.
+
 ### Hue Entertainment Fast Path
 Philips' Entertainment API sends colour commands over UDP at ~50 Hz, bypassing MQTT entirely. A future `capability_effects` crate would open a UDP stream to the Zigbee coordinator (SLZB-06, if it exposes such an interface) or a Hue Bridge (if one is added) for music sync, game sync, and reactive effects that feel instantaneous. Prerequisite: verify whether SLZB-06 + Z2M supports a lower-latency path at all before investing in the crate.
 
