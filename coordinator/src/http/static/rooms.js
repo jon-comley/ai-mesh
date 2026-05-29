@@ -948,13 +948,17 @@ function wireDeviceDrag(card, deviceId, roomId) {
     dragSrc = { deviceId, fromRoomId: roomId };
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', deviceId);
-    requestAnimationFrame(() => card.classList.add('dragging'));
+    // Defer DOM mutations that could reflow the source card. Chrome aborts the
+    // drag immediately (fires dragend with dropEffect=none before any dragover)
+    // if the source element shifts during dragstart — the unassigned strip
+    // sits above the room list, so revealing it pushes the dragged card down.
+    requestAnimationFrame(() => {
+      card.classList.add('dragging');
+      document.querySelector(`[data-room-id="${CSS.escape(roomId)}"]`)?.classList.add('drag-leaving');
+      const strip = document.getElementById('unassigned-strip');
+      if (strip) strip.style.display = '';
+    });
     startPulse(deviceId);
-    // Mark source room card as "losing" a device
-    document.querySelector(`[data-room-id="${CSS.escape(roomId)}"]`)?.classList.add('drag-leaving');
-    // Reveal the unassigned strip so there's a visible drop target
-    const strip = document.getElementById('unassigned-strip');
-    if (strip) strip.style.display = '';
   });
   card.addEventListener('dragend', () => {
     card.classList.remove('dragging');
@@ -1117,11 +1121,16 @@ function renderChip(deviceId, fromRoomId, showRemove) {
     dragSrc = { deviceId, fromRoomId };
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', deviceId);
-    requestAnimationFrame(() => chip.classList.add('dragging'));
+    // Defer DOM mutations that could reflow the source chip — see the matching
+    // comment in wireDeviceDrag(). Today the strip is always already visible
+    // when this code runs, but the same shape would break if call sites change.
+    requestAnimationFrame(() => {
+      chip.classList.add('dragging');
+      document.querySelector(`[data-room-id="${CSS.escape(fromRoomId)}"]`)?.classList.add('drag-leaving');
+      const strip = document.getElementById('unassigned-strip');
+      if (strip) strip.style.display = '';
+    });
     startPulse(deviceId);
-    document.querySelector(`[data-room-id="${CSS.escape(fromRoomId)}"]`)?.classList.add('drag-leaving');
-    const strip = document.getElementById('unassigned-strip');
-    if (strip) strip.style.display = '';
   });
   chip.addEventListener('dragend', () => {
     chip.classList.remove('dragging');

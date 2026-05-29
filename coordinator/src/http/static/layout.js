@@ -28,6 +28,7 @@ let redoStack = [];
 let showLabels = true;
 let activePopover = null;       // currently open popover element
 let dragType = null;            // 'bulb' | 'opening' — set on dragstart
+const bulbDragStarters = {};    // deviceId → fn(e) — called when drag begins externally
 
 function setCanvasDragClass(on) {
   const svg = document.getElementById('layout-canvas');
@@ -41,6 +42,28 @@ function setCanvasDragClass(on) {
 // Global safety net: clear dragType if a drag is cancelled or ends outside the canvas
 window.addEventListener('dragend', () => { dragType = null; });
 window.addEventListener('drop', () => { dragType = null; });
+
+// Popover dismiss — capture phase fires before any other handler, including the
+// popover's own stopPropagation. If the touch lands inside the popover but a
+// draggable bulb is underneath, we dismiss and directly start the bulb's drag
+// engine via bulbDragStarters (avoids synthetic PointerEvent dispatch, which
+// can trigger a pointercancel when the popover element is removed from the DOM
+// while holding implicit touch capture).
+document.addEventListener('pointerdown', e => {
+  if (!e.isTrusted || !activePopover) return;
+  if (!activePopover.contains(e.target)) {
+    dismissPopover();
+    return;
+  }
+  // Touch landed ON the popover — look for a bulb g element underneath it.
+  const under = document.elementsFromPoint(e.clientX, e.clientY);
+  const bulbG = under.find(el => el.tagName === 'g' && el.dataset?.deviceId);
+  if (!bulbG) return;
+  const starter = bulbDragStarters[bulbG.dataset.deviceId];
+  if (!starter) return;
+  dismissPopover();
+  starter(e);
+}, { capture: true });
 
 // ── Three.js state ────────────────────────────────────────────────────────────
 let THREE = null;
@@ -1846,6 +1869,15 @@ function makeBulbDraggable(g, deviceId) {
   let capturedPointerId = null;
   let startNx, startNy, startBulbX, startBulbY;
 
+  // The layout SVG is embedded inside a room card that has draggable="true".
+  // When the user starts a pointer drag on a bulb, the browser fires dragstart
+  // on the draggable room card ancestor, which triggers pointercancel and kills
+  // our drag. Block dragstart for the duration of the pointer drag.
+  function onPreventDragStart(e) {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
   function resetCrosshairRing() {
     const xRing = document.querySelector('#lc-crosshair-marker circle');
     if (xRing) {
@@ -1859,6 +1891,11 @@ function makeBulbDraggable(g, deviceId) {
     document.removeEventListener('pointermove', onDocMove);
     document.removeEventListener('pointerup',   onDocUp);
     document.removeEventListener('pointercancel', onDocCancel);
+    document.removeEventListener('dragstart', onPreventDragStart, true);
+    if (capturedPointerId !== null) {
+      const svg = document.getElementById('layout-canvas');
+      try { svg?.releasePointerCapture(capturedPointerId); } catch (_) {}
+    }
     dragging = false;
     capturedPointerId = null;
     g.style.cursor = 'grab';
@@ -1944,7 +1981,7 @@ function makeBulbDraggable(g, deviceId) {
       if (tapTarget && entry && tapTarget === entry.labelEl) {
         if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(false);
         startInlineRename(deviceId, entry);
-      } else {
+      } else if (tapTarget !== 'from-dismiss') {
         openPopover(deviceId, g);
       }
       return;
@@ -2014,17 +2051,14 @@ function makeBulbDraggable(g, deviceId) {
     hideLightsDropzone();
   }
 
-  g.addEventListener('pointerdown', e => {
-    if (e.button !== 0 && e.pointerType === 'mouse') return;
-    e.stopPropagation();
-    e.preventDefault();
-    dismissPopover();
-    tapTarget = e.target;
-
+  function beginDrag(e) {
     const svg = document.getElementById('layout-canvas');
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
     const entry = placedBulbs[deviceId];
     if (!entry) return;
+
+    try { svg.setPointerCapture(e.pointerId); } catch (_) {}
+    document.addEventListener('dragstart', onPreventDragStart, true);
 
     dragging = true;
     moved = false;
@@ -2040,7 +2074,23 @@ function makeBulbDraggable(g, deviceId) {
     document.addEventListener('pointercancel', onDocCancel);
 
     if (typeof window.__roomsStartPulse === 'function') window.__roomsStartPulse(deviceId);
+  }
+
+  g.addEventListener('pointerdown', e => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    e.stopPropagation();
+    e.preventDefault();
+    dismissPopover();
+    tapTarget = e.target;
+    beginDrag(e);
   });
+
+  // Called by the document capture handler when a drag starts from underneath
+  // an open popover. tapTarget='from-dismiss' suppresses popover-reopen on tap.
+  bulbDragStarters[deviceId] = e => {
+    tapTarget = 'from-dismiss';
+    beginDrag(e);
+  };
 }
 
 function updateBulbIcon(entry, state) {
