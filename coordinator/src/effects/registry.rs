@@ -1,0 +1,177 @@
+//! Registry of all known effects.
+//!
+//! Effects register at coordinator startup via `EffectRegistry::default()`
+//! (which calls `register_builtins`). The runner looks effects up by id when
+//! a room activates one.
+
+use std::collections::HashMap;
+
+use super::solar::SolarEffect;
+use super::{Effect, EffectCategory};
+
+/// Lightweight metadata for the discovery API (`GET /api/effects`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EffectMetadata {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub description: &'static str,
+    pub category: EffectCategory,
+    pub default_params: serde_json::Value,
+    pub params_schema: serde_json::Value,
+}
+
+/// A factory for constructing fresh `Effect` instances. Each room gets its own
+/// instance so per-room state (RNG seeds, accumulators) doesn't bleed across
+/// rooms.
+pub type EffectFactory = Box<dyn Fn() -> Box<dyn Effect> + Send + Sync>;
+
+pub struct EffectRegistry {
+    factories: HashMap<&'static str, EffectFactory>,
+    metadata: Vec<EffectMetadata>,
+}
+
+impl EffectRegistry {
+    pub fn new() -> Self {
+        Self {
+            factories: HashMap::new(),
+            metadata: Vec::new(),
+        }
+    }
+
+    /// Register an effect by passing a factory closure. Called once at startup.
+    pub fn register<F>(&mut self, factory: F)
+    where
+        F: Fn() -> Box<dyn Effect> + Send + Sync + 'static,
+    {
+        // Pull metadata from a temporary instance — cheap, only happens at startup.
+        let probe = factory();
+        let meta = EffectMetadata {
+            id: probe.id(),
+            display_name: probe.display_name(),
+            description: probe.description(),
+            category: probe.category(),
+            default_params: probe.default_params(),
+            params_schema: probe.params_schema(),
+        };
+        let id = probe.id();
+        assert!(
+            !self.factories.contains_key(id),
+            "duplicate effect id registered: {id:?}"
+        );
+        self.factories.insert(id, Box::new(factory));
+        self.metadata.push(meta);
+    }
+
+    /// Construct a fresh instance of the effect with the given id.
+    pub fn instantiate(&self, id: &str) -> Option<Box<dyn Effect>> {
+        self.factories.get(id).map(|f| f())
+    }
+
+    /// Snapshot of all registered effects' metadata. Used by the dashboard.
+    pub fn list_metadata(&self) -> &[EffectMetadata] {
+        &self.metadata
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.factories.contains_key(id)
+    }
+}
+
+impl Default for EffectRegistry {
+    fn default() -> Self {
+        let mut reg = Self::new();
+        register_builtins(&mut reg);
+        reg
+    }
+}
+
+/// Register every effect that ships in the binary.
+pub fn register_builtins(reg: &mut EffectRegistry) {
+    reg.register(|| Box::new(SolarEffect::new()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtins_includes_solar() {
+        let reg = EffectRegistry::default();
+        assert!(reg.contains("solar"));
+        assert!(reg.instantiate("solar").is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate effect id registered")]
+    fn duplicate_registration_panics() {
+        let mut reg = EffectRegistry::default();
+        reg.register(|| Box::new(crate::effects::solar::SolarEffect::new()));
+    }
+
+    #[test]
+    fn unknown_effect_returns_none() {
+        let reg = EffectRegistry::default();
+        assert!(!reg.contains("does-not-exist"));
+        assert!(reg.instantiate("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn list_metadata_returns_one_entry_per_effect() {
+        let reg = EffectRegistry::default();
+        let meta = reg.list_metadata();
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].id, "solar");
+        assert_eq!(meta[0].category, EffectCategory::TimeOfDay);
+    }
+
+    #[test]
+    fn instantiate_runs_factory_each_call() {
+        // Proves the factory pattern actually runs each call by counting via an
+        // observed side effect rather than pointer identity (SolarEffect today
+        // is a ZST so Box allocation reuses the same dangling address).
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        struct CountedEffect;
+        impl Effect for CountedEffect {
+            fn id(&self) -> &'static str {
+                "counted"
+            }
+            fn display_name(&self) -> &'static str {
+                "Counted"
+            }
+            fn description(&self) -> &'static str {
+                "test"
+            }
+            fn category(&self) -> EffectCategory {
+                EffectCategory::Ambient
+            }
+            fn cadence(&self) -> crate::effects::EffectCadence {
+                crate::effects::EffectCadence::OnePerMinute
+            }
+            fn params_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            fn default_params(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            fn tick(
+                &mut self,
+                _: &crate::effects::EffectCtx,
+            ) -> Vec<crate::effects::EffectCommand> {
+                vec![]
+            }
+        }
+
+        let mut reg = EffectRegistry::new();
+        reg.register(|| {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Box::new(CountedEffect)
+        });
+        // `register` calls the closure once to probe metadata.
+        let baseline = CALLS.load(Ordering::SeqCst);
+        let _a = reg.instantiate("counted").unwrap();
+        let _b = reg.instantiate("counted").unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst) - baseline, 2);
+    }
+}

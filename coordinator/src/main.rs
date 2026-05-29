@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use coordinator::coordinator::Coordinator;
+use coordinator::effects::registry::EffectRegistry;
+use coordinator::effects::runner::EffectRunner;
 
 #[tokio::main]
 async fn main() {
@@ -13,9 +17,9 @@ async fn main() {
 
     let _mdns = coordinator::mdns::advertise(9000);
 
-    let spatial =
-        coordinator::spatial::SpatialEngine::new(dashboard.clone(), coord.registry.clone());
-    tokio::spawn(spatial.run());
+    let effects = Arc::new(EffectRegistry::default());
+    let runner = EffectRunner::new(coord.registry.clone(), dashboard.clone(), effects);
+    tokio::spawn(runner.run());
 
     let http_port: u16 = std::env::var("MESH_HTTP_PORT")
         .ok()
