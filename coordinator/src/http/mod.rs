@@ -158,11 +158,6 @@ pub fn router(
         .route("/api/models/unload", post(api::unload_model))
         .route("/api/lights/names", get(api::get_device_names))
         .route("/api/lights/{device}/command", post(api::light_command))
-        .route("/api/lights/{device}/solar", patch(api::set_device_solar))
-        .route(
-            "/api/lights/{device}/restore-solar",
-            post(api::restore_device_solar),
-        )
         .route("/api/lights/{device}/name", patch(api::rename_device))
         .route(
             "/api/lights/{device}/position",
@@ -186,7 +181,6 @@ pub fn router(
             "/api/rooms/{id}/openings/{oid}",
             patch(api::update_opening).delete(api::delete_opening),
         )
-        .route("/api/rooms/{id}/solar", post(api::set_room_solar))
         .route("/api/effects", get(api::list_effects))
         .route(
             "/api/rooms/{id}/effect",

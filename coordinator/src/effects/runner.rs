@@ -304,13 +304,9 @@ impl EffectRunner {
     }
 
     /// Pull everything the EffectCtx needs from the registry + dashboard.
-    /// Returns (room context, openings, bulbs) where `bulbs` is the list the
-    /// effect can act on.
-    ///
-    /// For Solar specifically, the per-device `solar_enabled` opt-in (legacy
-    /// UX) is respected here so behaviour matches the old `SpatialEngine` —
-    /// this is a compatibility shim and should disappear when the per-device
-    /// "participates in active effect" UX is unified across effects.
+    /// Returns (room context, openings, bulbs) where `bulbs` is every bulb
+    /// assigned to the room — effects operate on the full set and decide for
+    /// themselves whether to emit a command for each.
     fn build_ctx_inputs(
         &self,
         room_id: &str,
@@ -327,17 +323,6 @@ impl EffectRunner {
             let positions = reg.get_all_light_positions();
             let device_ids = room.device_ids.clone();
             (room, openings, positions, device_ids)
-        };
-
-        let effect_id_for_room = {
-            let reg = self.registry.lock().unwrap();
-            reg.get_active_effect(room_id).map(|r| r.effect_id)
-        };
-        let solar_filter_active = effect_id_for_room.as_deref() == Some("solar");
-        let solar_enabled_devices = if solar_filter_active {
-            Some(self.dashboard.get_solar_enabled_devices())
-        } else {
-            None
         };
 
         let room_ctx = RoomContext {
@@ -359,11 +344,6 @@ impl EffectRunner {
         let light_snapshot = self.dashboard.get_light_snapshot();
         let mut bulbs: Vec<BulbInRoom> = Vec::new();
         for device_id in &room_device_ids {
-            if let Some(allowed) = &solar_enabled_devices
-                && !allowed.iter().any(|d| d == device_id)
-            {
-                continue;
-            }
             let pos = positions.get(device_id);
             let (x, y, z, fixture_str) = pos
                 .map(|p| (p.x, p.y, p.z, p.fixture_type.clone()))
@@ -487,7 +467,7 @@ fn should_dispatch(les: &Option<LastEmittedState>, action: &LightAction) -> bool
                 _ => true,
             }
         }
-        // On/Off/Toggle/SolarMode — always pass.
+        // On/Off/Toggle — always pass.
         _ => true,
     }
 }
@@ -509,7 +489,6 @@ fn apply_action_to_les(prev: LastEmittedState, action: &LightAction) -> LastEmit
         LightAction::ColorXY { x, y } | LightAction::ColorXYTransition { x, y, .. } => {
             next.color = ColorState::Xy { x: *x, y: *y };
         }
-        LightAction::SolarMode(_) => {}
     }
     next
 }

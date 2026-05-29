@@ -173,7 +173,7 @@ export async function openLayout(room) {
   wireCompass();
   wirePhoneCompass();
 
-  if (room.solar_enabled) {
+  if (isSolarActiveHere()) {
     wireSunCalib();
     wireScrubber();
     wireModelSelect();
@@ -225,6 +225,12 @@ export function freezeIconUpdates(ms = 3000) {
   iconFreezeTimer = setTimeout(() => { iconUpdatesFrozen = false; }, ms);
 }
 
+// Per-room map of currently-active effect id (mirrors roomEffectsMap in rooms.js).
+// Fed by `notifyEffectActive(roomId, effectId)` so the layout panel can decide
+// whether to render solar-specific overlays without reading the legacy
+// room.solar_enabled column.
+const activeEffectByRoom = new Map();
+
 // Called by rooms.js when a RoomsUpdate WS event arrives — updates the active room object.
 export function notifyRoomUpdate(room) {
   if (layoutRoom && layoutRoom.id === room.id) {
@@ -233,6 +239,17 @@ export function notifyRoomUpdate(room) {
     renderCrosshair(room);
     renderWallDims(room);
   }
+}
+
+// Called by rooms.js when an EffectUpdate WS event arrives. `effectId === null`
+// clears the room's active effect.
+export function notifyEffectActive(roomId, effectId) {
+  if (effectId == null) activeEffectByRoom.delete(roomId);
+  else activeEffectByRoom.set(roomId, effectId);
+}
+
+function isSolarActiveHere() {
+  return layoutRoom != null && activeEffectByRoom.get(layoutRoom.id) === 'solar';
 }
 
 // Called by rooms.js when a SolarUpdate WS event arrives — redraws cones + arc.
@@ -756,9 +773,9 @@ function wireScrubber() {
   });
 }
 
-// Send the simulated solar brightness + colour temperature to all solar-enabled
-// devices in the currently open room. Called on scrubber mouse-release only —
-// not on every drag tick — to avoid flooding the Zigbee bus.
+// Send the simulated solar brightness + colour temperature to all bulbs in the
+// currently open room. Called on scrubber mouse-release only — not on every
+// drag tick — to avoid flooding the Zigbee bus.
 // Optional onlyDeviceIds: if provided, only these IDs are processed.
 async function sendSimSolarCommands(elevation, onlyDeviceIds = null) {
   const room = layoutRoom;
@@ -766,8 +783,6 @@ async function sendSimSolarCommands(elevation, onlyDeviceIds = null) {
   const { bri, ct } = calculateSolarState(elevation);
   const t = tok();
 
-  // Send to all placed bulbs in the room. The is_solar:true flag on each request
-  // tells the backend not to disable solar tracking for these commands.
   const targetIds = (onlyDeviceIds || room.device_ids).filter(id => placedBulbs[id]);
 
   for (const deviceId of targetIds) {
@@ -775,7 +790,7 @@ async function sendSimSolarCommands(elevation, onlyDeviceIds = null) {
     // This ensures bulbs respond even if they were in an idle or off state.
     const url = `/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`;
     const post = (action, val, trans) => {
-      const body = { action, is_solar: true };
+      const body = { action };
       if (val !== undefined) body.value = val;
       if (trans !== undefined) body.transition_secs = trans;
       fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {});
@@ -1833,24 +1848,6 @@ function drawFixtureIcon(g, cx, cy, z, fixtureType, dev) {
     els.push(t4);
   }
 
-  // Solar tracking indicator (lit/dim sun icon on the bulb)
-  if (layoutRoom?.solar_enabled) {
-    const deviceId = g.dataset.deviceId;
-    const sun = svgEl('text', {
-      x: cx + 22, y: cy - 22,
-      'font-size': 24,
-      'text-anchor': 'middle', 'dominant-baseline': 'central',
-      cursor: 'pointer',
-      fill: dev?.solar_enabled ? 'var(--amber)' : 'rgba(255,255,255,0.2)',
-      class: 'lc-bulb-solar-indicator'
-    });
-    sun.textContent = '☀';
-    sun.addEventListener('click', e => {
-      e.stopPropagation();
-      restoreDeviceSolar(deviceId);
-    });
-    els.push(sun);
-  }
 
   // Insert before any text/label children
   const firstLabel = [...g.children].find(c => c.tagName === 'text' && c.getAttribute('fill') !== 'var(--amber)');
@@ -2118,10 +2115,6 @@ function updateBulbIcon(entry, state) {
     el.setAttribute('opacity', on ? 0.5 : 0.2);
   });
 
-  // Solar indicator always tracks real device state, never preview state
-  entry.el.querySelectorAll('.lc-bulb-solar-indicator').forEach(el => {
-    el.setAttribute('fill', dev?.solar_enabled ? 'var(--amber)' : 'rgba(255,255,255,0.2)');
-  });
 }
 
 // ── Popover helpers ───────────────────────────────────────────────────────────
@@ -2537,30 +2530,6 @@ async function postPosition(deviceId, x, y, z, fixtureType) {
     });
   } catch (err) {
     console.warn('layout: postPosition failed', err);
-  }
-}
-
-async function restoreDeviceSolar(deviceId) {
-  const dev = devicesRef.get(deviceId);
-  if (!dev || dev.solar_enabled) return;
-
-  // Optimistic update — use updateBulbIcon so drag handles and z-order are preserved
-  devicesRef.set(deviceId, { ...dev, solar_enabled: true });
-  const entry = placedBulbs[deviceId];
-  if (entry) updateBulbIcon(entry, null);
-
-  // If scrubbing, push this bulb straight to current simulated state
-  if (!scrubberLive) sendSimSolarCommands(lastSolar.elevation, [deviceId]);
-
-  try {
-    const res = await fetch(`/api/lights/${encodeURIComponent(deviceId)}/restore-solar?token=${encodeURIComponent(tok())}`, {
-      method: 'POST'
-    });
-    if (!res.ok) throw new Error(`${res.status}`);
-  } catch (e) {
-    console.warn('restore-solar failed', e);
-    devicesRef.set(deviceId, { ...dev, solar_enabled: false });
-    if (entry) updateBulbIcon(entry, null);
   }
 }
 

@@ -79,7 +79,6 @@ pub struct RoomRecord {
     pub orientation_degrees: f32,
     pub has_window: bool,
     pub window_facing: Option<f32>,
-    pub solar_enabled: bool,
     pub width_m: f64,
     pub depth_m: f64,
     pub height_m: f64,
@@ -95,8 +94,6 @@ pub struct DeviceSnapshot {
     pub brightness: Option<u8>,
     pub color_xy: Option<(f32, f32)>,
     pub color_temp: Option<u16>,
-    #[serde(default)]
-    pub solar_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -219,8 +216,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS light_states (
             device_id  TEXT PRIMARY KEY,
             node_id    TEXT NOT NULL,
-            state_json TEXT NOT NULL,
-            solar_enabled INTEGER NOT NULL DEFAULT 0
+            state_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS light_positions (
             device_id TEXT PRIMARY KEY,
@@ -281,12 +277,6 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !columns.contains(&"window_facing".to_string()) {
         conn.execute("ALTER TABLE rooms ADD COLUMN window_facing REAL", [])?;
     }
-    if !columns.contains(&"solar_enabled".to_string()) {
-        conn.execute(
-            "ALTER TABLE rooms ADD COLUMN solar_enabled INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-    }
     if !columns.contains(&"width_m".to_string()) {
         conn.execute(
             "ALTER TABLE rooms ADD COLUMN width_m REAL NOT NULL DEFAULT 3.0",
@@ -314,19 +304,6 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !columns.contains(&"origin_y".to_string()) {
         conn.execute(
             "ALTER TABLE rooms ADD COLUMN origin_y REAL NOT NULL DEFAULT 0.5",
-            [],
-        )?;
-    }
-
-    // Migration: Add new columns to light_states if they don't exist
-    let columns: Vec<String> = conn
-        .prepare("PRAGMA table_info(light_states)")?
-        .query_map([], |row| row.get(1))?
-        .collect::<rusqlite::Result<_>>()?;
-
-    if !columns.contains(&"solar_enabled".to_string()) {
-        conn.execute(
-            "ALTER TABLE light_states ADD COLUMN solar_enabled INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -369,21 +346,6 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             )",
         )?;
     }
-
-    // Migration: rooms.solar_enabled = 1 → room_effects row for 'solar'.
-    // Runs AFTER the ALTER TABLE that adds rooms.solar_enabled, otherwise the
-    // SELECT references a non-existent column on a brand-new DB. Idempotent —
-    // INSERT OR IGNORE preserves any params/snapshot already saved.
-    //
-    // `strftime('%s','now') * 1000` is UTC milliseconds since the Unix epoch
-    // — matches `runner.rs::now_ms()` which uses `SystemTime::duration_since(UNIX_EPOCH)`.
-    conn.execute(
-        "INSERT OR IGNORE INTO room_effects (room_id, effect_id, enabled, params_json, started_at)
-         SELECT id, 'solar', 1, '{}', strftime('%s','now') * 1000
-         FROM rooms
-         WHERE solar_enabled = 1",
-        [],
-    )?;
 
     // Legacy migration: convert has_window/window_facing rows to openings rows (idempotent).
     let legacy: Vec<(String, f32)> = {
@@ -874,7 +836,7 @@ impl Registry {
 
     pub fn list_rooms(&self) -> Vec<RoomRecord> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, name, position, orientation_degrees, has_window, window_facing, solar_enabled, \
+            "SELECT id, name, position, orientation_degrees, has_window, window_facing, \
              width_m, depth_m, height_m, origin_x, origin_y FROM rooms ORDER BY position, name",
         ) {
             Ok(s) => s,
@@ -891,7 +853,6 @@ impl Registry {
             f32,
             bool,
             Option<f32>,
-            bool,
             f64,
             f64,
             f64,
@@ -906,12 +867,11 @@ impl Registry {
                     row.get(3)?,
                     row.get::<_, i32>(4)? != 0,
                     row.get(5)?,
-                    row.get::<_, i32>(6)? != 0,
-                    row.get::<_, f64>(7).unwrap_or(3.0),
-                    row.get::<_, f64>(8).unwrap_or(6.0),
-                    row.get::<_, f64>(9).unwrap_or(2.5),
+                    row.get::<_, f64>(6).unwrap_or(3.0),
+                    row.get::<_, f64>(7).unwrap_or(6.0),
+                    row.get::<_, f64>(8).unwrap_or(2.5),
+                    row.get::<_, f64>(9).unwrap_or(0.5),
                     row.get::<_, f64>(10).unwrap_or(0.5),
-                    row.get::<_, f64>(11).unwrap_or(0.5),
                 ))
             })
             .map(|r| r.collect::<rusqlite::Result<_>>().unwrap_or_default())
@@ -925,7 +885,6 @@ impl Registry {
                     orientation_degrees,
                     has_window,
                     window_facing,
-                    solar_enabled,
                     width_m,
                     depth_m,
                     height_m,
@@ -941,7 +900,6 @@ impl Registry {
                         orientation_degrees,
                         has_window,
                         window_facing,
-                        solar_enabled,
                         width_m,
                         depth_m,
                         height_m,
@@ -969,36 +927,12 @@ impl Registry {
             orientation_degrees: 0.0,
             has_window: false,
             window_facing: None,
-            solar_enabled: false,
             width_m: 3.0,
             depth_m: 6.0,
             height_m: 2.5,
             origin_x: 0.5,
             origin_y: 0.5,
         }
-    }
-
-    /// Set the room-level solar effect flag and persist to SQLite.
-    pub fn set_room_solar(&mut self, room_id: &str, enabled: bool) {
-        if let Err(e) = self.conn.execute(
-            "UPDATE rooms SET solar_enabled = ?1 WHERE id = ?2",
-            params![enabled as i64, room_id],
-        ) {
-            warn!(error = %e, "set_room_solar failed");
-        }
-    }
-
-    /// Returns the solar_enabled flag of the room that owns this device, or None if unassigned.
-    pub fn get_room_for_device_solar(&self, device_id: &str) -> Option<bool> {
-        self.conn
-            .query_row(
-                "SELECT r.solar_enabled FROM rooms r \
-                 JOIN room_devices rd ON r.id = rd.room_id \
-                 WHERE rd.device_id = ?1",
-                params![device_id],
-                |row| Ok(row.get::<_, i32>(0)? != 0),
-            )
-            .ok()
     }
 
     /// Set the room compass orientation and persist to SQLite.
@@ -1280,8 +1214,8 @@ impl Registry {
             }
         };
         if let Err(e) = self.conn.execute(
-            "INSERT OR REPLACE INTO light_states (device_id, node_id, state_json, solar_enabled) VALUES (?1, ?2, ?3, ?4)",
-            params![report.device_id, report.node_id, state_json, if report.solar_enabled { 1 } else { 0 }],
+            "INSERT OR REPLACE INTO light_states (device_id, node_id, state_json) VALUES (?1, ?2, ?3)",
+            params![report.device_id, report.node_id, state_json],
         ) {
             warn!(error = %e, "save_light_state: db write failed");
         }
@@ -1289,32 +1223,20 @@ impl Registry {
 
     /// Return all persisted device light states — used to warm-start the dashboard on boot.
     pub fn load_light_states(&self) -> Vec<LightStateReport> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT state_json, solar_enabled FROM light_states")
-        {
+        let mut stmt = match self.conn.prepare("SELECT state_json FROM light_states") {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "load_light_states: prepare failed");
                 return vec![];
             }
         };
-        stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i32>(1).unwrap_or(0) != 0,
-            ))
-        })
-        .map(|rows| {
-            rows.filter_map(|r| r.ok())
-                .filter_map(|(json, solar_enabled)| {
-                    let mut report = serde_json::from_str::<LightStateReport>(&json).ok()?;
-                    report.solar_enabled = solar_enabled;
-                    Some(report)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map(|rows| {
+                rows.filter_map(|r| r.ok())
+                    .filter_map(|json| serde_json::from_str::<LightStateReport>(&json).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     // ── Light positions ──────────────────────────────────────────────────────
@@ -1590,14 +1512,6 @@ impl Registry {
                  started_at    = excluded.started_at",
             params![room_id, effect_id, params_json, snapshot_json, started_at_ms],
         )?;
-        // Mirror solar to the legacy column for one release so a roll-back keeps
-        // working. Other effects clear it so `rooms.solar_enabled` reflects
-        // "is solar the active effect" precisely.
-        let is_solar = effect_id == "solar";
-        tx.execute(
-            "UPDATE rooms SET solar_enabled = ?1 WHERE id = ?2",
-            params![is_solar as i64, room_id],
-        )?;
         tx.commit()
     }
 
@@ -1616,10 +1530,6 @@ impl Registry {
             .flatten();
         tx.execute(
             "UPDATE room_effects SET enabled = 0 WHERE room_id = ?1 AND enabled = 1",
-            params![room_id],
-        )?;
-        tx.execute(
-            "UPDATE rooms SET solar_enabled = 0 WHERE id = ?1",
             params![room_id],
         )?;
         tx.commit()?;
@@ -2267,7 +2177,6 @@ mod tests {
             brightness: Some(200),
             color_xy: None,
             color_temp: Some(370),
-            solar_enabled: false,
         }
     }
 
@@ -2374,7 +2283,6 @@ mod tests {
             brightness: Some(200),
             color_xy: Some((0.3, 0.4)),
             color_temp: None,
-            solar_enabled: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: DeviceSnapshot = serde_json::from_str(&json).unwrap();
@@ -2419,7 +2327,6 @@ mod tests {
             brightness: Some(200),
             color_xy: Some((0.3, 0.4)),
             color_temp: None,
-            solar_enabled: false,
         }
     }
 
@@ -2476,16 +2383,6 @@ mod tests {
         assert_eq!(states[0].device_id, "living_room_bulb");
         assert!(states[0].on);
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn save_light_state_persists_solar_enabled_flag() {
-        let mut reg = Registry::new();
-        let mut report = make_light_state("bulb1", "pi1", true);
-        report.solar_enabled = true;
-        reg.save_light_state(&report);
-        let loaded = reg.load_light_states();
-        assert!(loaded[0].solar_enabled);
     }
 
     // ── Light positions ───────────────────────────────────────────────────────
@@ -2756,34 +2653,6 @@ mod tests {
         assert!((reg.list_rooms()[0].orientation_degrees - 40.0).abs() < 1e-2);
     }
 
-    #[test]
-    fn set_room_solar_persists_flag() {
-        let mut reg = Registry::new();
-        let room = reg.create_room("Lounge");
-        assert!(!reg.list_rooms()[0].solar_enabled);
-        reg.set_room_solar(&room.id, true);
-        assert!(reg.list_rooms()[0].solar_enabled);
-        reg.set_room_solar(&room.id, false);
-        assert!(!reg.list_rooms()[0].solar_enabled);
-    }
-
-    #[test]
-    fn get_room_for_device_solar_returns_room_flag() {
-        let mut reg = Registry::new();
-        let room = reg.create_room("Office");
-        reg.add_device_to_room(&room.id, "bulb-a");
-        // default is false
-        assert_eq!(reg.get_room_for_device_solar("bulb-a"), Some(false));
-        reg.set_room_solar(&room.id, true);
-        assert_eq!(reg.get_room_for_device_solar("bulb-a"), Some(true));
-    }
-
-    #[test]
-    fn get_room_for_device_solar_returns_none_for_unassigned() {
-        let reg = Registry::new();
-        assert_eq!(reg.get_room_for_device_solar("unassigned-bulb"), None);
-    }
-
     // ── room_effects ─────────────────────────────────────────────────────────
 
     #[test]
@@ -2920,48 +2789,5 @@ mod tests {
         reg.update_effect_internal_state(&room.id, "aurora", Some("{\"seed\":42}"));
         let active = reg.get_active_effect(&room.id).unwrap();
         assert_eq!(active.internal_state_json.as_deref(), Some("{\"seed\":42}"));
-    }
-
-    #[test]
-    fn set_active_effect_mirrors_solar_to_legacy_column() {
-        let mut reg = Registry::new();
-        let room = reg.create_room("Lounge");
-        reg.set_active_effect(&room.id, "solar", "{}", None, 1_000)
-            .unwrap();
-        assert!(reg.list_rooms()[0].solar_enabled);
-        reg.set_active_effect(&room.id, "sunset", "{}", None, 2_000)
-            .unwrap();
-        // Switching to a non-solar effect clears the legacy mirror.
-        assert!(!reg.list_rooms()[0].solar_enabled);
-        reg.disable_active_effect(&room.id).unwrap();
-        assert!(!reg.list_rooms()[0].solar_enabled);
-    }
-
-    #[test]
-    fn migration_creates_solar_row_for_rooms_with_solar_enabled() {
-        // Simulate a pre-F-Effects-2 DB on disk: rooms with solar_enabled=1 and
-        // no room_effects rows.
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap();
-        {
-            let mut reg = Registry::open(path).unwrap();
-            let r1 = reg.create_room("A");
-            let r2 = reg.create_room("B");
-            let _r3 = reg.create_room("C");
-            reg.set_room_solar(&r1.id, true);
-            reg.set_room_solar(&r2.id, true);
-            // r3 stays solar_enabled = 0
-            // Wipe room_effects to simulate first start after upgrade.
-            reg.conn.execute("DELETE FROM room_effects", []).unwrap();
-        }
-        // Re-open — the migration in init_schema should backfill solar rows for
-        // r1 + r2 only.
-        let reg = Registry::open(path).unwrap();
-        let active = reg.list_active_effects();
-        assert_eq!(active.len(), 2);
-        for row in &active {
-            assert_eq!(row.effect_id, "solar");
-            assert_eq!(row.params_json, "{}");
-        }
     }
 }

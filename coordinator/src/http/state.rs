@@ -70,7 +70,6 @@ pub struct RoomInfo {
     pub orientation_degrees: f32,
     pub has_window: bool,
     pub window_facing: Option<f32>,
-    pub solar_enabled: bool,
     pub width_m: f64,
     pub depth_m: f64,
     pub height_m: f64,
@@ -88,7 +87,6 @@ impl From<RoomRecord> for RoomInfo {
             orientation_degrees: r.orientation_degrees,
             has_window: r.has_window,
             window_facing: r.window_facing,
-            solar_enabled: r.solar_enabled,
             width_m: r.width_m,
             depth_m: r.depth_m,
             height_m: r.height_m,
@@ -176,11 +174,11 @@ pub struct DashboardState {
     /// Per-room currently-active effect (if any). Mirrors `room_effects` rows
     /// where `enabled = 1`. Pushed to new WS clients on connect.
     effect_snapshot: Mutex<HashMap<String, RoomEffectInfo>>,
-    /// State of lights before they entered Solar mode — used to restore state on disable.
-    last_manual_states: Mutex<HashMap<String, LightStateReport>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
-    /// Poked when solar is enabled on a room — wakes the SpatialEngine for an immediate sweep.
+    /// Wakes the EffectRunner for an immediate tick — used by activation /
+    /// deactivation paths and any UX that needs effect output to reflect a
+    /// state change without waiting for the next scheduled tick.
     pub solar_sweep_notify: Arc<Notify>,
     /// Location used by the JS solar calculator (served via GET /api/solar/config).
     pub lat: f64,
@@ -208,7 +206,6 @@ impl DashboardState {
             room_snapshot: Mutex::new(Vec::new()),
             scene_snapshot: Mutex::new(Vec::new()),
             effect_snapshot: Mutex::new(HashMap::new()),
-            last_manual_states: Mutex::new(HashMap::new()),
             connections,
             solar_sweep_notify: Arc::new(Notify::new()),
             lat,
@@ -262,35 +259,10 @@ impl DashboardState {
     }
 
     /// Store the latest state for one device and broadcast a LightingUpdate with all devices + groups.
-    pub fn push_lighting_update(&self, mut report: LightStateReport) {
+    pub fn push_lighting_update(&self, report: LightStateReport) {
         let devices = {
             let mut snap = self.light_snapshot.lock().unwrap();
-            // Preserve solar_enabled flag if it was already true in our snapshot.
-            // Reports from agents usually have it as false because they don't track it.
-            if let Some(true) = snap
-                .get(&report.device_id)
-                .map(|e| e.solar_enabled && !report.solar_enabled)
-            {
-                report.solar_enabled = true;
-            }
             snap.insert(report.device_id.clone(), report);
-            snap.values().cloned().collect::<Vec<_>>()
-        };
-        if self.tx.receiver_count() > 0 {
-            let groups = self.get_group_snapshot();
-            let _ = self
-                .tx
-                .send(DashboardEvent::LightingUpdate { devices, groups });
-        }
-    }
-
-    /// Set the solar_enabled flag for a device directly in the snapshot and broadcast the update.
-    pub fn set_solar_enabled(&self, device_id: &str, enabled: bool) {
-        let devices = {
-            let mut snap = self.light_snapshot.lock().unwrap();
-            if let Some(report) = snap.get_mut(device_id) {
-                report.solar_enabled = enabled;
-            }
             snap.values().cloned().collect::<Vec<_>>()
         };
         if self.tx.receiver_count() > 0 {
@@ -328,7 +300,6 @@ impl DashboardState {
             LightAction::ColorTempTransition { value, .. } => entry.color_temp = Some(*value),
             LightAction::ColorXY { x, y } => entry.color_xy = Some((*x, *y)),
             LightAction::ColorXYTransition { x, y, .. } => entry.color_xy = Some((*x, *y)),
-            LightAction::SolarMode(_) => {} // handled via set_solar_enabled
         }
     }
 
@@ -382,40 +353,6 @@ impl DashboardState {
     /// Return the node_id responsible for a given group — used to route group commands.
     pub fn get_node_for_group(&self, name: &str) -> Option<String> {
         self.group_snapshot.lock().unwrap().get(name).cloned()
-    }
-
-    pub fn save_manual_state(&self, device_id: &str) {
-        let snap = self.light_snapshot.lock().unwrap();
-        if let Some(report) = snap.get(device_id) {
-            self.last_manual_states
-                .lock()
-                .unwrap()
-                .insert(device_id.to_owned(), report.clone());
-        } else {
-            tracing::warn!(
-                device_id,
-                "solar enable: no snapshot to save — restore on disable will be skipped"
-            );
-        }
-    }
-
-    pub fn get_manual_state(&self, device_id: &str) -> Option<LightStateReport> {
-        self.last_manual_states
-            .lock()
-            .unwrap()
-            .get(device_id)
-            .cloned()
-    }
-
-    /// Return all device IDs that have solar mode enabled.
-    pub fn get_solar_enabled_devices(&self) -> Vec<String> {
-        self.light_snapshot
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|r| r.solar_enabled)
-            .map(|r| r.device_id.clone())
-            .collect()
     }
 
     /// Store and broadcast the current rooms state.
@@ -1117,7 +1054,6 @@ mod tests {
             brightness: Some(200),
             color_xy: None,
             color_temp: Some(370),
-            solar_enabled: false,
         }
     }
 
@@ -1201,7 +1137,6 @@ mod tests {
                 brightness: Some(200),
                 color_xy: Some((0.3, 0.3)),
                 color_temp: Some(370),
-                solar_enabled: false,
             }],
             groups: vec!["all".into()],
         };
@@ -1311,7 +1246,6 @@ mod tests {
             orientation_degrees: 0.0,
             has_window: false,
             window_facing: None,
-            solar_enabled: false,
             width_m: 3.0,
             depth_m: 6.0,
             height_m: 2.5,
@@ -1384,7 +1318,6 @@ mod tests {
                 orientation_degrees: 0.0,
                 has_window: false,
                 window_facing: None,
-                solar_enabled: false,
                 width_m: 3.0,
                 depth_m: 6.0,
                 height_m: 2.5,
@@ -1521,37 +1454,5 @@ mod tests {
             !json.contains("\"room_id\""),
             "None room_id should be absent: {json}"
         );
-    }
-
-    #[test]
-    fn test_manual_state_preservation() {
-        let state = DashboardState::new(
-            Arc::new(vec![]),
-            Arc::new(std::sync::Mutex::new(HashMap::new())),
-        );
-        let report = LightStateReport {
-            node_id: "n1".into(),
-            device_id: "bulb1".into(),
-            on: true,
-            brightness: Some(100),
-            color_xy: Some((0.5, 0.5)),
-            color_temp: Some(300),
-            solar_enabled: false,
-        };
-        state.push_lighting_update(report.clone());
-
-        state.save_manual_state("bulb1");
-
-        // Change state (simulate solar)
-        state.push_lighting_update(LightStateReport {
-            device_id: "bulb1".into(),
-            brightness: Some(255),
-            solar_enabled: true,
-            ..report.clone()
-        });
-
-        let saved = state.get_manual_state("bulb1").unwrap();
-        assert_eq!(saved.brightness, Some(100));
-        assert_eq!(saved.color_xy, Some((0.5, 0.5)));
     }
 }

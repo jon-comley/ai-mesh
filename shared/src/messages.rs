@@ -140,7 +140,6 @@ pub enum LightAction {
         y: f32,
         transition_secs: f32,
     },
-    SolarMode(bool),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -158,8 +157,6 @@ pub struct LightStateReport {
     pub brightness: Option<u8>,
     pub color_xy: Option<(f32, f32)>,
     pub color_temp: Option<u16>,
-    #[serde(default)]
-    pub solar_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -721,7 +718,6 @@ mod tests {
             brightness: Some(200),
             color_xy: Some((0.3127, 0.3290)),
             color_temp: None,
-            solar_enabled: false,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
