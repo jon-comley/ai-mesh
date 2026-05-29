@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS room_effects (
     internal_state_json  TEXT,                                -- nullable per-effect runtime state
     started_at           INTEGER NOT NULL,                    -- ms epoch — for elapsed-time effects
     PRIMARY KEY (room_id, effect_id),
-    FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
+    FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+    CHECK (enabled IN (0, 1))
 );
 
 -- DB-level guarantee that at most one effect is enabled per room.
@@ -553,6 +554,17 @@ OKLCH interpolation matches what commercial lighting engines (Hue, LIFX, Nanolea
 
 **Mismatched-mode case.** If LES has `Ct(370)` and the new effect emits `ColorXY { 0.4, 0.5 }`, both are normalised to xy and blended in OKLCH — the bulb crosses from white-light gamut into colour gamut smoothly. Output command shape matches the new effect (xy in this case), so subsequent ticks continue in the new colour space without further coordination.
 
+### The interpolation layer pays off twice
+
+Cross-fade between effects is the immediate consumer of the BlendPoint + OKLCH layer, but the same machinery is reusable for any case where the runner needs to smoothly transition a room between two known light states:
+
+- **Time scrubbing.** Dragging the layout-view scrubber from "now" to "4 pm" computes the predicted solar state at 4 pm and blends from the current LES into it — no jarring snap.
+- **Effect parameter preview sliders.** Pulling Aurora's `speed` slider in the param editor can preview the new tempo by blending into the next tick's output rather than dropping the visible state and restarting the loop.
+- **"Jump to midpoint" controls.** A 30-minute sunset has a `Jump to t=0.5` button — runner blends from current LES into the predicted t=0.5 state.
+- **Scene recall over a configurable duration.** Scenes today use a 0.8 s hardware transition. With the BlendPoint layer, the runner can drive the transition itself with arbitrary easing curves and the bulb hardware sees only steady-state commands.
+
+These are all out of scope for F-Effects-2 — but knowing the layer is reusable shapes the API: keep `blend(A, B, t)` and the BlendPoint type public to the rest of the coordinator crate, not buried as `pub(super)` inside the effects module.
+
 ### Cadence drift measurement
 
 Each tick records `elapsed_since_last_tick`. The runner maintains an EWMA of actual cadence per room. If actual cadence drifts more than 20% from the effect's declared cadence for 30 consecutive seconds, the runner:
@@ -631,6 +643,8 @@ Response: `204 No Content` on success. Validates `effect_id` is registered and `
 ### Effect palette
 
 Currently a hand-rolled DOM chip strip. Becomes data-driven: render one chip per entry from `GET /api/effects`. Chip text = `display_name`, tooltip = `description`. Chip icon from a static map keyed by `effect_id` (sunset = orange gradient, solar = sun glyph, candlelight = flame, aurora = wave).
+
+**Scaling beyond ~8 effects:** once the palette exceeds ~8 chips the strip becomes visually noisy. The `EffectCategory` enum already partitions effects into Ambient / TimeOfDay / Reactive / Game — when the catalogue crosses that threshold, group chips under category tabs (or a collapsed accordion on mobile). No backend changes needed; the metadata is already on `GET /api/effects`. Tracked here so the F8 catalogue expansion doesn't have to re-discover the design.
 
 ### Param editor (generic)
 
