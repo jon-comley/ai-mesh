@@ -1,10 +1,18 @@
 use shared::{messages::WIRE_VERSION, InferenceRequest, MeshMessage};
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
-pub async fn run(coordinator: &str, model_name: String, prompt: String) {
-    match send_infer(coordinator, model_name, prompt).await {
+const INFER_TIMEOUT_SECS: u64 = 30;
+
+pub async fn run(
+    coordinator: &str,
+    model_name: String,
+    prompt: String,
+    system_prompt: Option<String>,
+) {
+    match send_infer(coordinator, model_name, prompt, system_prompt).await {
         Ok(()) => {}
-        Err(e) => println!("Error: {}", e),
+        Err(e) => eprintln!("Error (coordinator={}): {}", coordinator, e),
     }
 }
 
@@ -13,7 +21,15 @@ async fn send_recv(
     msg: &MeshMessage,
 ) -> Result<MeshMessage, Box<dyn std::error::Error>> {
     let mut stream = crate::connection::connect(coordinator).await?;
-    Ok(crate::connection::send_recv(&mut stream, msg).await?)
+    let fut = crate::connection::send_recv(&mut stream, msg);
+    match timeout(Duration::from_secs(INFER_TIMEOUT_SECS), fut).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(format!(
+            "no response from coordinator '{}' after {INFER_TIMEOUT_SECS}s",
+            coordinator
+        )
+        .into()),
+    }
 }
 
 async fn lookup_hostname(coordinator: &str, node_id: &str) -> Option<String> {
@@ -32,12 +48,13 @@ async fn send_infer(
     coordinator: &str,
     model_name: String,
     prompt: String,
+    system_prompt: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let msg = MeshMessage::RequestModelInference(InferenceRequest {
         request_id: Uuid::new_v4().to_string(),
         node_id: None,
         model_name,
-        system_prompt: None,
+        system_prompt,
         prompt,
         max_tokens: 256,
         temperature: None,
@@ -47,7 +64,7 @@ async fn send_infer(
     match send_recv(coordinator, &msg).await? {
         MeshMessage::ModelInferenceResult(res) => {
             if let Some(err) = res.error {
-                println!("Error: {}", err);
+                eprintln!("Error: {}", err);
             } else {
                 println!("{}", res.output);
                 let hostname = lookup_hostname(coordinator, &res.node_id)
@@ -61,7 +78,7 @@ async fn send_infer(
             Ok(())
         }
         MeshMessage::Error(err) => {
-            println!("Error: {}", err);
+            eprintln!("Error (coordinator={}): {}", coordinator, err);
             Ok(())
         }
         other => Err(format!("Unexpected response: {:?}", other).into()),

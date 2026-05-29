@@ -47,6 +47,9 @@ enum Commands {
     Infer {
         model_name: String,
         prompt: String,
+        /// Optional system prompt passed directly to the model.
+        #[arg(long)]
+        system_prompt: Option<String>,
     },
     /// Natural language intent — the LLM decides whether to answer or call a tool.
     Intent {
@@ -100,9 +103,11 @@ async fn main() {
             model_name,
             size_mb,
         } => commands::load::run(addr, node_id, model_name, size_mb).await,
-        Commands::Infer { model_name, prompt } => {
-            commands::infer::run(addr, model_name, prompt).await
-        }
+        Commands::Infer {
+            model_name,
+            prompt,
+            system_prompt,
+        } => commands::infer::run(addr, model_name, prompt, system_prompt).await,
         Commands::Intent { text, model } => commands::intent::run(addr, text, model).await,
         Commands::Unload {
             node_id,
