@@ -149,8 +149,6 @@ pub struct LightCommandBody {
     y: Option<f32>,
     #[serde(default)]
     transition_secs: Option<f32>,
-    #[serde(default)]
-    is_solar: Option<bool>,
 }
 
 fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
@@ -189,14 +187,12 @@ fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
             },
             _ => None,
         },
-        "solar_mode" => body.value.map(|v| LightAction::SolarMode(v > 0.0)),
         _ => None,
     }
 }
 
 pub async fn light_command(
     Path(device): Path<String>,
-    Extension(registry): Extension<Arc<Mutex<Registry>>>,
     Query(q): Query<TokenQuery>,
     State(state): State<Arc<DashboardState>>,
     Json(body): Json<LightCommandBody>,
@@ -215,62 +211,6 @@ pub async fn light_command(
             .into_response();
     };
 
-    // SolarMode is coordinator-only — update dashboard state and optionally restore
-    // the pre-solar light state, but never forward the command to the node.
-    if let LightAction::SolarMode(enabled) = command {
-        if enabled {
-            state.save_manual_state(&device);
-        } else if let Some(manual) = state.get_manual_state(&device) {
-            let rid = gen_request_id();
-            let target = LightTarget::Device(device.clone());
-            let on_cmd = if manual.on {
-                LightAction::On
-            } else {
-                LightAction::Off
-            };
-            state.send_to_node(
-                &node_id,
-                MeshMessage::LightCommand(LightCommandRequest {
-                    request_id: rid.clone(),
-                    target: target.clone(),
-                    command: on_cmd,
-                }),
-            );
-            if let Some(b) = manual.brightness {
-                state.send_to_node(
-                    &node_id,
-                    MeshMessage::LightCommand(LightCommandRequest {
-                        request_id: rid.clone(),
-                        target: target.clone(),
-                        command: LightAction::Brightness(b),
-                    }),
-                );
-            }
-            if let Some(ct) = manual.color_temp {
-                state.send_to_node(
-                    &node_id,
-                    MeshMessage::LightCommand(LightCommandRequest {
-                        request_id: rid.clone(),
-                        target: target.clone(),
-                        command: LightAction::ColorTemp(ct),
-                    }),
-                );
-            }
-            if let Some((x, y)) = manual.color_xy {
-                state.send_to_node(
-                    &node_id,
-                    MeshMessage::LightCommand(LightCommandRequest {
-                        request_id: rid,
-                        target: target.clone(),
-                        command: LightAction::ColorXY { x, y },
-                    }),
-                );
-            }
-        }
-        state.set_solar_enabled(&device, enabled);
-        return StatusCode::NO_CONTENT.into_response();
-    }
-
     // Optimistically update the snapshot so subsequent broadcasts (triggered by
     // any other device's status report) carry the intended value, not the stale
     // pre-command value that would otherwise snap UI sliders back.
@@ -281,14 +221,6 @@ pub async fn light_command(
         command,
     };
     let sent = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
-    // Manual command in a solar-enabled room suspends solar for this device.
-    // Simulation commands (is_solar: true) bypass this so they don't disable tracking.
-    if body.is_solar != Some(true) {
-        let solar_room = registry.lock().unwrap().get_room_for_device_solar(&device);
-        if let Some(true) = solar_room {
-            state.set_solar_enabled(&device, false);
-        }
-    }
     if sent {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -483,18 +415,16 @@ pub async fn room_command(
     if !state.auth_ok(&q.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let (device_ids, room_solar) = {
+    let device_ids: Vec<String> = {
         let reg = registry.lock().unwrap();
         if !reg.room_exists(&room_id) {
             return StatusCode::NOT_FOUND.into_response();
         }
-        let room = reg.list_rooms().into_iter().find(|r| r.id == room_id);
-        let ids = room
-            .as_ref()
-            .map(|r| r.device_ids.clone())
-            .unwrap_or_default();
-        let solar = room.map(|r| r.solar_enabled).unwrap_or(false);
-        (ids, solar)
+        reg.list_rooms()
+            .into_iter()
+            .find(|r| r.id == room_id)
+            .map(|r| r.device_ids)
+            .unwrap_or_default()
     };
     let Some(command) = build_light_action(&body) else {
         return (
@@ -519,133 +449,11 @@ pub async fn room_command(
             any_unavailable = true;
         }
     }
-    // Manual room command in a solar-enabled room suspends solar for all devices.
-    if room_solar {
-        for device_id in &device_ids {
-            state.set_solar_enabled(device_id, false);
-        }
-    }
     if any_unavailable {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
     } else {
         StatusCode::NO_CONTENT.into_response()
     }
-}
-
-// ── Room solar ────────────────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct SetRoomSolarBody {
-    enabled: bool,
-}
-
-pub async fn set_room_solar(
-    Path(room_id): Path<String>,
-    Extension(registry): Extension<Arc<Mutex<Registry>>>,
-    Query(q): Query<TokenQuery>,
-    State(state): State<Arc<DashboardState>>,
-    Json(body): Json<SetRoomSolarBody>,
-) -> impl IntoResponse {
-    if !state.auth_ok(&q.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let device_ids = {
-        let mut reg = registry.lock().unwrap();
-        if !reg.room_exists(&room_id) {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        // Drive the EffectRunner via room_effects (this also keeps
-        // rooms.solar_enabled in sync via the legacy-column mirror in
-        // set_active_effect). Pre-F-Effects-2 this was just `set_room_solar`;
-        // F-Effects-3 will drop this set_room_solar call entirely.
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        if body.enabled {
-            if let Err(e) = reg.set_active_effect(&room_id, "solar", "{}", None, now_ms) {
-                tracing::warn!(error = %e, "set_active_effect(solar) failed");
-            }
-        } else if let Err(e) = reg.disable_active_effect(&room_id) {
-            tracing::warn!(error = %e, "disable_active_effect failed");
-        }
-        let ids = reg
-            .list_rooms()
-            .into_iter()
-            .find(|r| r.id == room_id)
-            .map(|r| r.device_ids)
-            .unwrap_or_default();
-        // Persist per-device solar_enabled to SQLite for every bulb in the room
-        // so the flag survives coordinator restarts and so subsequent agent
-        // status reports don't reset it (push_lighting_update's preserve-true
-        // logic relies on the in-memory snapshot having solar_enabled=true).
-        // Without this, dragging the Solar effect into a room sets the room
-        // flag but the bulbs revert to non-solar on the next restart.
-        let mut reports = reg.load_light_states();
-        for device_id in &ids {
-            if let Some(report) = reports.iter_mut().find(|r| &r.device_id == device_id) {
-                report.solar_enabled = body.enabled;
-                reg.save_light_state(report);
-            }
-        }
-        ids
-    };
-    for device_id in &device_ids {
-        state.set_solar_enabled(device_id, body.enabled);
-    }
-    state.push_rooms_update(rooms_from_registry(&registry));
-    // Wake the spatial engine for an immediate sweep so bulbs change right away.
-    if body.enabled {
-        state.solar_sweep_notify.notify_one();
-    }
-    StatusCode::NO_CONTENT.into_response()
-}
-
-#[derive(serde::Deserialize)]
-pub struct SetDeviceSolarBody {
-    pub enabled: bool,
-}
-
-pub async fn set_device_solar(
-    Path(device): Path<String>,
-    Extension(registry): Extension<Arc<Mutex<Registry>>>,
-    Query(q): Query<TokenQuery>,
-    State(state): State<Arc<DashboardState>>,
-    Json(body): Json<SetDeviceSolarBody>,
-) -> impl IntoResponse {
-    if !state.auth_ok(&q.token) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    {
-        let mut reg = registry.lock().unwrap();
-        let mut reports = reg.load_light_states();
-        if let Some(report) = reports.iter_mut().find(|r| r.device_id == device) {
-            report.solar_enabled = body.enabled;
-            reg.save_light_state(report);
-        }
-    }
-    state.set_solar_enabled(&device, body.enabled);
-    if body.enabled {
-        state.solar_sweep_notify.notify_one();
-    }
-    StatusCode::NO_CONTENT.into_response()
-}
-
-// Keep the old POST restore-solar route working as an alias
-pub async fn restore_device_solar(
-    Path(device): Path<String>,
-    Extension(registry): Extension<Arc<Mutex<Registry>>>,
-    Query(q): Query<TokenQuery>,
-    State(state): State<Arc<DashboardState>>,
-) -> impl IntoResponse {
-    set_device_solar(
-        Path(device),
-        Extension(registry),
-        Query(q),
-        State(state),
-        Json(SetDeviceSolarBody { enabled: true }),
-    )
-    .await
 }
 
 // ── Solar config ──────────────────────────────────────────────────────────────
@@ -842,7 +650,6 @@ pub async fn save_scene(
                 brightness: s.brightness,
                 color_xy: s.color_xy,
                 color_temp: s.color_temp,
-                solar_enabled: s.solar_enabled,
             })
             .collect()
     } else {
@@ -855,7 +662,6 @@ pub async fn save_scene(
                 brightness: s.brightness,
                 color_xy: s.color_xy,
                 color_temp: s.color_temp,
-                solar_enabled: s.solar_enabled,
             })
             .collect()
     };
@@ -972,7 +778,7 @@ pub async fn recall_scene(
             any_unavailable = true;
         }
 
-        // Update the dashboard snapshot so the SpatialEngine (and UI) sees the mode from the scene.
+        // Update the dashboard snapshot so the UI sees the state from the scene.
         state.push_lighting_update(LightStateReport {
             node_id: node_id.clone(),
             device_id: snap.device_id.clone(),
@@ -980,7 +786,6 @@ pub async fn recall_scene(
             brightness: snap.brightness,
             color_xy: snap.color_xy,
             color_temp: snap.color_temp,
-            solar_enabled: snap.solar_enabled,
         });
     }
     if any_unavailable {
@@ -1713,7 +1518,6 @@ mod tests {
             brightness: Some(200),
             color_xy: None,
             color_temp: Some(370),
-            solar_enabled: false,
         });
     }
 
@@ -1907,7 +1711,6 @@ mod tests {
                 axum::routing::patch(modify_room_devices),
             )
             .route("/api/rooms/{id}/command", post(room_command))
-            .route("/api/rooms/{id}/solar", post(set_room_solar))
             .layer(axum::Extension(registry))
             .with_state(state)
     }
@@ -2518,7 +2321,6 @@ mod tests {
                     brightness: Some(255),
                     color_xy: None,
                     color_temp: Some(370),
-                    solar_enabled: false,
                 }],
             )
             .id
@@ -2554,7 +2356,6 @@ mod tests {
                     brightness: Some(255),
                     color_xy: None,
                     color_temp: Some(370),
-                    solar_enabled: false,
                 }],
             )
             .id;
@@ -2645,7 +2446,6 @@ mod tests {
                 x,
                 y,
                 transition_secs: None,
-                is_solar: None,
             })
         };
         assert!(matches!(mk("on", None, None, None), Some(LightAction::On)));
@@ -2671,111 +2471,6 @@ mod tests {
         ));
         assert!(mk("unknown", None, None, None).is_none());
         assert!(mk("color_xy", None, Some(0.3), None).is_none());
-        assert!(matches!(
-            mk("solar_mode", Some(1.0), None, None),
-            Some(LightAction::SolarMode(true))
-        ));
-        assert!(matches!(
-            mk("solar_mode", Some(0.0), None, None),
-            Some(LightAction::SolarMode(false))
-        ));
-    }
-
-    // ── solar_mode command ────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn solar_mode_enable_saves_state_and_does_not_forward_to_node() {
-        let connections = empty_connections();
-        let (tx, mut rx) = mpsc::channel::<MeshMessage>(8);
-        connections.lock().unwrap().insert("pi1".into(), tx);
-        let state = make_state(vec![], connections);
-        seed_light(&state, "bulb1", "pi1");
-
-        let status = post_light_cmd(
-            state.clone(),
-            "bulb1",
-            "",
-            r#"{"action":"solar_mode","value":1}"#,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-
-        // No message forwarded to the node
-        assert!(
-            rx.try_recv().is_err(),
-            "SolarMode must not be forwarded to node"
-        );
-
-        // solar_enabled flag set in snapshot
-        let snap = state.get_solar_enabled_devices();
-        assert!(snap.contains(&"bulb1".to_string()));
-    }
-
-    #[tokio::test]
-    async fn solar_mode_disable_restores_state_and_clears_flag() {
-        let connections = empty_connections();
-        let (tx, mut rx) = mpsc::channel::<MeshMessage>(8);
-        connections.lock().unwrap().insert("pi1".into(), tx);
-        let state = make_state(vec![], connections);
-
-        // Seed with known brightness + CT state
-        state.push_lighting_update(shared::LightStateReport {
-            node_id: "pi1".into(),
-            device_id: "bulb1".into(),
-            on: true,
-            brightness: Some(150),
-            color_xy: None,
-            color_temp: Some(350),
-            solar_enabled: false,
-        });
-
-        // Enable solar (saves manual state)
-        post_light_cmd(
-            state.clone(),
-            "bulb1",
-            "",
-            r#"{"action":"solar_mode","value":1}"#,
-        )
-        .await;
-
-        // Drain any messages (none expected from enable)
-        while rx.try_recv().is_ok() {}
-
-        // Disable solar — should restore brightness + CT
-        let status = post_light_cmd(
-            state.clone(),
-            "bulb1",
-            "",
-            r#"{"action":"solar_mode","value":0}"#,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-
-        let msgs: Vec<MeshMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-        let actions: Vec<_> = msgs
-            .iter()
-            .filter_map(|m| {
-                if let MeshMessage::LightCommand(r) = m {
-                    Some(&r.command)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(actions.iter().any(|a| matches!(a, LightAction::On)));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, LightAction::Brightness(150)))
-        );
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, LightAction::ColorTemp(350)))
-        );
-
-        // Flag cleared
-        assert!(state.get_solar_enabled_devices().is_empty());
     }
 
     // ── light position endpoints ──────────────────────────────────────────────
@@ -2982,112 +2677,6 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    // ── set_room_solar ────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn set_room_solar_returns_401_for_wrong_token() {
-        let registry = make_registry();
-        let room_id = make_room(&registry, "Lounge");
-        let state = make_state(vec!["secret".into()], empty_connections());
-        let status = send(
-            rooms_router(state, registry),
-            "POST",
-            &format!("/api/rooms/{room_id}/solar?token=wrong"),
-            r#"{"enabled":true}"#,
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn set_room_solar_returns_404_for_unknown_room() {
-        let registry = make_registry();
-        let state = make_state(vec![], empty_connections());
-        let status = send(
-            rooms_router(state, registry),
-            "POST",
-            "/api/rooms/ghost-room/solar?token=",
-            r#"{"enabled":true}"#,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn set_room_solar_persists_and_fans_out() {
-        let registry = make_registry();
-        let room_id = make_room(&registry, "Kitchen");
-        registry
-            .lock()
-            .unwrap()
-            .add_device_to_room(&room_id, "bulb1");
-        let state = make_state(vec![], empty_connections());
-        seed_light(&state, "bulb1", "pi1");
-        let status = send(
-            rooms_router(Arc::clone(&state), Arc::clone(&registry)),
-            "POST",
-            &format!("/api/rooms/{room_id}/solar?token="),
-            r#"{"enabled":true}"#,
-        )
-        .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(registry.lock().unwrap().list_rooms()[0].solar_enabled);
-        // fan-out: bulb1 should now be in the solar-enabled set
-        assert!(
-            state
-                .get_solar_enabled_devices()
-                .contains(&"bulb1".to_string())
-        );
-    }
-
-    // ── restore_device_solar ──────────────────────────────────────────────────
-
-    fn restore_solar_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
-        Router::new()
-            .route(
-                "/api/lights/{device}/restore-solar",
-                post(restore_device_solar),
-            )
-            .layer(axum::Extension(registry))
-            .with_state(state)
-    }
-
-    #[tokio::test]
-    async fn restore_device_solar_returns_401_for_wrong_token() {
-        let registry = make_registry();
-        let state = make_state(vec!["secret".into()], empty_connections());
-        let status = send(
-            restore_solar_router(state, registry),
-            "POST",
-            "/api/lights/bulb1/restore-solar?token=wrong",
-            "",
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn restore_device_solar_sets_solar_enabled() {
-        let registry = make_registry();
-        let state = make_state(vec![], empty_connections());
-        seed_light(&state, "bulb1", "pi1");
-        // simulate manual override: clear solar flag
-        state.set_solar_enabled("bulb1", false);
-        let status = send(
-            restore_solar_router(Arc::clone(&state), registry),
-            "POST",
-            "/api/lights/bulb1/restore-solar?token=",
-            "",
-        )
-        .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(
-            state
-                .get_solar_enabled_devices()
-                .contains(&"bulb1".to_string())
-        );
     }
 
     // ── solar_config ──────────────────────────────────────────────────────────
@@ -3365,17 +2954,21 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
-        match rx.try_recv() {
-            Ok(crate::http::state::DashboardEvent::EffectUpdate {
+        // The handler broadcasts RoomsUpdate (from the legacy mirror) and
+        // EffectUpdate. We don't care about ordering — scan for the EffectUpdate.
+        let mut saw_effect = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let crate::http::state::DashboardEvent::EffectUpdate {
                 room_id: rid,
                 effect_id,
                 ..
-            }) => {
+            } = evt
+            {
                 assert_eq!(rid, room_id);
                 assert_eq!(effect_id, Some("solar".into()));
+                saw_effect = true;
             }
-            Ok(_) => panic!("expected EffectUpdate, got a different event"),
-            Err(e) => panic!("recv failed: {e:?}"),
         }
+        assert!(saw_effect, "EffectUpdate was not broadcast");
     }
 }

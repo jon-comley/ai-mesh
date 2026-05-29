@@ -737,7 +737,8 @@ body {
   transition: opacity 0.15s;
 }
 .effect-chip:active, .effect-chip.dragging { opacity: 0.5; cursor: grabbing; }
-.badge-solar {
+.badge-solar,
+.badge-effect {
   background: color-mix(in srgb, var(--amber) 15%, transparent);
   border: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
   color: var(--amber);
@@ -747,8 +748,9 @@ body {
   margin-right: 6px;
 }
 
-/* Solar badge paused by an active scene */
-.badge-solar.badge-solar-paused {
+/* Effect badge paused by an active scene (currently Solar-only behaviour) */
+.badge-solar.badge-solar-paused,
+.badge-effect.badge-effect-paused {
   background: color-mix(in srgb, var(--amber) 6%, transparent);
   border-color: color-mix(in srgb, var(--amber) 18%, transparent);
   color: color-mix(in srgb, var(--amber) 50%, var(--text-muted));
@@ -756,32 +758,100 @@ body {
   opacity: 0.7;
 }
 
-/* Per-device solar indicator dot in room device cards */
-.solar-dot {
+/* Inline effect parameter editor — opens beneath the room header on click */
+.effect-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 12px 10px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--amber) 6%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--amber) 25%, var(--border));
+  border-radius: 10px;
+  font-size: 12px;
+}
+.effect-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.effect-editor-title {
+  font-weight: 600;
+  color: var(--amber);
+}
+.effect-editor-close {
   background: none;
   border: none;
-  border-radius: 50%;
-  width: 22px;
-  height: 22px;
-  font-size: 13px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  flex-shrink: 0;
-}
-.solar-dot.solar-dot-active {
-  color: var(--amber);
-  cursor: default;
-}
-.solar-dot.solar-dot-dim {
-  color: #555;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
   cursor: pointer;
-  opacity: 0.6;
+  padding: 0 4px;
 }
-.solar-dot.solar-dot-dim:hover {
-  opacity: 1;
+.effect-editor-desc {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.effect-editor-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.effect-editor-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 36px;
+  align-items: center;
+  gap: 8px;
+}
+.effect-editor-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.effect-editor-value {
+  font-size: 11px;
+  color: var(--text);
+  text-align: right;
+}
+.effect-editor-segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.effect-editor-segmented button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.effect-editor-segmented button.selected {
+  background: color-mix(in srgb, var(--amber) 25%, transparent);
   color: var(--amber);
+}
+.effect-editor-apply,
+.effect-editor-disable {
+  align-self: flex-end;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.effect-editor-disable {
+  color: var(--text-muted);
+}
+.effect-editor-disable:hover { color: var(--red); border-color: var(--red); }
+.effect-editor-apply:hover { border-color: var(--amber); color: var(--amber); }
+.effects-palette-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
 }
 
 .room-card {
@@ -2119,8 +2189,7 @@ body {
     justify-content: center;
     padding: 4px 10px;
   }
-  .color-swatch-btn,
-  .solar-dot {
+  .color-swatch-btn {
     width: 32px;
     height: 32px;
   }

@@ -21,11 +21,27 @@ let scenesData = [];
 let deviceNamesMap = new Map();
 let dragSrc = null;       // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;    // room reorder drag: room id being dragged
-let effectDragSrc = null; // effect palette drag: effect name e.g. 'solar'
+let effectDragSrc = null; // effect palette drag: effect_id e.g. 'solar'
 const openPickerIds = new Set();      // device IDs whose colour picker is currently open
 const activeSceneByRoom = new Map();      // roomId → sceneId of last-recalled scene
 const preSceneStateByRoom = new Map();    // roomId → Map<deviceId, snapshot> before last recall
-const solarSuspendedByScene = new Set(); // roomIds where solar badge is paused due to active scene
+
+// ── F-Effects-2: effects catalogue + active-effect map ──────────────────────
+// Catalogue is fetched once on dashboard load from GET /api/effects and never
+// changes at runtime; the active-effect map is driven by EffectUpdate events.
+let effectsCatalog = [];                       // [{ id, display_name, description, category, params_schema, default_params }, ...]
+const effectsById = new Map();                 // id → metadata
+const roomEffectsMap = new Map();              // room_id → { effect_id, params }
+let openEffectEditorRoomId = null;             // id of room whose param editor popover is open
+const EFFECT_ICONS = {                         // static icon per effect_id; falls back to ✦ for unknown
+  solar: '☀',           // ☀
+  sunset: '\u{1F305}',       // 🌅
+  sunrise: '\u{1F304}',      // 🌄
+  candlelight: '\u{1F56F}',  // 🕯
+  aurora: '\u{1F30C}',       // 🌌
+  breathing: '\u{1FAC1}',    // 🫁
+};
+const DEFAULT_EFFECT_ICON = '✨';          // ✨
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
 let _sceneReorderTimer = null;
 
@@ -71,7 +87,6 @@ function updateSceneChipStates(roomId) {
 function clearRoomActiveScene(roomId) {
   if (!activeSceneByRoom.has(roomId)) return;
   activeSceneByRoom.delete(roomId);
-  solarSuspendedByScene.delete(roomId);
   updateSceneChipStates(roomId);
 }
 
@@ -160,6 +175,31 @@ window.__roomsStopPulse = stopPulse;
 
 layout.init(devicesMap);
 fetchDeviceNames();
+fetchEffectsCatalog();
+
+async function fetchEffectsCatalog() {
+  try {
+    const res = await fetch(`/api/effects?token=${encodeURIComponent(tok())}`);
+    if (!res.ok) return;
+    const list = await res.json();
+    effectsCatalog = Array.isArray(list) ? list : [];
+    effectsById.clear();
+    for (const eff of effectsCatalog) effectsById.set(eff.id, eff);
+    render();
+  } catch (_) {}
+}
+
+export function handleEffectUpdate(evt) {
+  const { room_id, effect_id, params } = evt;
+  if (!room_id) return;
+  if (effect_id == null) {
+    roomEffectsMap.delete(room_id);
+  } else {
+    roomEffectsMap.set(room_id, { effect_id, params: params ?? {} });
+  }
+  layout.notifyEffectActive(room_id, effect_id);
+  render();
+}
 
 export function handleRoomsUpdate(evt) {
   roomsData = evt.rooms ?? [];
@@ -204,21 +244,11 @@ export function notifyDevices(devices) {
   render();
 }
 
-let lastKnownSolar = { azimuth: 180, elevation: -90 };
-
 export function notifySolar(azimuth, elevation) {
-  lastKnownSolar = { azimuth, elevation };
+  // Forward to the layout panel (compass + sun-arc display). The dashboard
+  // does not run its own solar calculation any more — the runner pushes
+  // SolarUpdate events on its tick.
   layout.notifySolarUpdate(azimuth, elevation);
-}
-
-// Mirror of calculateSolarState in layout.js — kept in sync manually.
-function solarStateFromElevation(elevation) {
-  if (elevation <= 0) {
-    const t = Math.max(0, Math.min(1, (elevation + 18) / 18));
-    return { bri: Math.round(1 + t * 29), ct: 500 };
-  }
-  const t = Math.min(1, elevation / 90);
-  return { bri: Math.round(30 + t * 225), ct: Math.round(454 - t * 301) };
 }
 
 // ── Main render ──────────────────────────────────────────────────────────────
@@ -311,26 +341,207 @@ function renderEffectsPalette() {
   label.textContent = 'Effects — drag onto a room:';
   palette.appendChild(label);
 
+  if (effectsCatalog.length === 0) {
+    const hint = document.createElement('span');
+    hint.className = 'effects-palette-hint';
+    hint.textContent = 'Loading…';
+    palette.appendChild(hint);
+    return palette;
+  }
+
+  for (const meta of effectsCatalog) {
+    palette.appendChild(buildEffectChip(meta));
+  }
+  return palette;
+}
+
+function buildEffectBadge(room, activeEffect) {
+  const meta = effectsById.get(activeEffect.effect_id);
+  const badge = document.createElement('span');
+  badge.className = 'badge badge-effect';
+  badge.dataset.effect = activeEffect.effect_id;
+  const icon = EFFECT_ICONS[activeEffect.effect_id] || DEFAULT_EFFECT_ICON;
+  const name = meta?.display_name || activeEffect.effect_id;
+  badge.textContent = `${icon} ${name}`;
+  badge.style.cursor = 'pointer';
+  badge.title = `${name} active — click for options`;
+  badge.addEventListener('click', e => {
+    e.stopPropagation();
+    openEffectEditorRoomId = openEffectEditorRoomId === room.id ? null : room.id;
+    render();
+  });
+  // Long-press / right-click → quick disable.
+  badge.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    clearEffect(room.id);
+  });
+  return badge;
+}
+
+function buildEffectEditor(room, activeEffect) {
+  const meta = effectsById.get(activeEffect.effect_id);
+  const wrap = document.createElement('div');
+  wrap.className = 'effect-editor';
+
+  const header = document.createElement('div');
+  header.className = 'effect-editor-header';
+  const title = document.createElement('span');
+  title.className = 'effect-editor-title';
+  const icon = EFFECT_ICONS[activeEffect.effect_id] || DEFAULT_EFFECT_ICON;
+  title.textContent = `${icon} ${meta?.display_name || activeEffect.effect_id}`;
+  header.appendChild(title);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'effect-editor-close';
+  closeBtn.textContent = '×';
+  closeBtn.title = 'Close';
+  closeBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    openEffectEditorRoomId = null;
+    render();
+  });
+  header.appendChild(closeBtn);
+  wrap.appendChild(header);
+
+  if (meta?.description) {
+    const desc = document.createElement('p');
+    desc.className = 'effect-editor-desc';
+    desc.textContent = meta.description;
+    wrap.appendChild(desc);
+  }
+
+  // Params form — empty schema renders nothing here. Full JSON-Schema → form
+  // arrives with F-Effects-2.4 (Sunset) when there's a first non-trivial schema
+  // to drive it. For now we handle the schema subset the plan declared and
+  // skip everything else gracefully so unsupported effects don't 500.
+  const schema = meta?.params_schema;
+  const params = { ...(activeEffect.params || {}) };
+  const propEntries = schemaProperties(schema);
+  if (propEntries.length > 0) {
+    const form = document.createElement('div');
+    form.className = 'effect-editor-form';
+    let dirty = false;
+    for (const [key, spec] of propEntries) {
+      const field = buildSchemaField(key, spec, params, () => { dirty = true; });
+      if (field) form.appendChild(field);
+    }
+    wrap.appendChild(form);
+
+    const apply = document.createElement('button');
+    apply.className = 'effect-editor-apply';
+    apply.textContent = 'Apply';
+    apply.addEventListener('click', e => {
+      e.stopPropagation();
+      if (dirty) activateEffect(room.id, activeEffect.effect_id, params);
+      openEffectEditorRoomId = null;
+      render();
+    });
+    wrap.appendChild(apply);
+  }
+
+  const disable = document.createElement('button');
+  disable.className = 'effect-editor-disable';
+  disable.textContent = 'Disable effect';
+  disable.addEventListener('click', e => {
+    e.stopPropagation();
+    openEffectEditorRoomId = null;
+    clearEffect(room.id);
+  });
+  wrap.appendChild(disable);
+  return wrap;
+}
+
+function schemaProperties(schema) {
+  if (!schema || typeof schema !== 'object') return [];
+  const props = schema.properties;
+  if (!props || typeof props !== 'object') return [];
+  return Object.entries(props);
+}
+
+function buildSchemaField(key, spec, paramsObj, onChange) {
+  if (!spec || typeof spec !== 'object') return null;
+  const row = document.createElement('label');
+  row.className = 'effect-editor-row';
+  const labelEl = document.createElement('span');
+  labelEl.className = 'effect-editor-label';
+  labelEl.textContent = key;
+  row.appendChild(labelEl);
+
+  const current = paramsObj[key] ?? spec.default;
+
+  if (spec.type === 'integer' || spec.type === 'number') {
+    const input = document.createElement('input');
+    input.type = 'range';
+    if (spec.min != null) input.min = spec.min;
+    if (spec.max != null) input.max = spec.max;
+    input.step = spec.type === 'integer' ? 1 : 'any';
+    input.value = current ?? spec.min ?? 0;
+    const valueEl = document.createElement('span');
+    valueEl.className = 'effect-editor-value';
+    valueEl.textContent = input.value;
+    input.addEventListener('input', () => {
+      valueEl.textContent = input.value;
+      paramsObj[key] = spec.type === 'integer' ? parseInt(input.value, 10) : parseFloat(input.value);
+      onChange();
+    });
+    lockSliderToThumb(input);
+    row.appendChild(input);
+    row.appendChild(valueEl);
+    paramsObj[key] = paramsObj[key] ?? (spec.type === 'integer' ? parseInt(input.value, 10) : parseFloat(input.value));
+    return row;
+  }
+  if (spec.type === 'string' && Array.isArray(spec.enum)) {
+    const group = document.createElement('span');
+    group.className = 'effect-editor-segmented';
+    for (const opt of spec.enum) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = opt;
+      if (opt === current) btn.classList.add('selected');
+      btn.addEventListener('click', () => {
+        paramsObj[key] = opt;
+        group.querySelectorAll('button').forEach(b => b.classList.toggle('selected', b === btn));
+        onChange();
+      });
+      group.appendChild(btn);
+    }
+    row.appendChild(group);
+    paramsObj[key] = current ?? spec.enum[0];
+    return row;
+  }
+  if (spec.type === 'boolean') {
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!current;
+    cb.addEventListener('change', () => { paramsObj[key] = cb.checked; onChange(); });
+    row.appendChild(cb);
+    paramsObj[key] = !!current;
+    return row;
+  }
+  // Unsupported field — render nothing rather than 500 on apply.
+  return null;
+}
+
+function buildEffectChip(meta) {
   const chip = document.createElement('div');
   chip.className = 'effect-chip';
   chip.setAttribute('draggable', 'true');
-  chip.dataset.effect = 'solar';
-  chip.innerHTML = '&#9728; Solar';
-  chip.title = 'Drag onto a room to enable solar lighting mode for all its devices';
+  chip.dataset.effect = meta.id;
+  const icon = EFFECT_ICONS[meta.id] || DEFAULT_EFFECT_ICON;
+  chip.textContent = `${icon} ${meta.display_name}`;
+  chip.title = meta.description || `Drag onto a room to activate ${meta.display_name}`;
 
   chip.addEventListener('dragstart', e => {
-    effectDragSrc = 'solar';
+    effectDragSrc = meta.id;
     e.dataTransfer.effectAllowed = 'copy';
-    e.dataTransfer.setData('text/plain', 'effect:solar');
+    e.dataTransfer.setData('text/plain', `effect:${meta.id}`);
     requestAnimationFrame(() => chip.classList.add('dragging'));
   });
   chip.addEventListener('dragend', () => {
     effectDragSrc = null;
     chip.classList.remove('dragging');
   });
-
-  palette.appendChild(chip);
-  return palette;
+  return chip;
 }
 
 // ── New Room button ──────────────────────────────────────────────────────────
@@ -434,7 +645,7 @@ function renderRoomCard(room) {
   const roomDevicesAll = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
   const anyOn = roomDevicesAll.some(d => d.on);
   const hasColour = roomDevicesAll.some(d => d.color_xy != null);
-  const solarActive = room.solar_enabled;
+  const activeEffect = roomEffectsMap.get(room.id) || null;
   const empty = room.device_ids.length === 0;
 
   // Header: two rows — name row on top, controls row below
@@ -512,29 +723,8 @@ function renderRoomCard(room) {
 
   const actions = document.createElement('div');
   actions.className = 'room-actions';
-  if (solarActive) {
-    const solarBadge = document.createElement('span');
-    const scenePaused = solarSuspendedByScene.has(room.id);
-    solarBadge.className = scenePaused ? 'badge badge-solar badge-solar-paused' : 'badge badge-solar';
-    solarBadge.innerHTML = '&#9728; Solar';
-    solarBadge.style.cursor = 'pointer';
-    if (scenePaused) {
-      solarBadge.title = 'Solar paused by scene — click to resume solar control';
-      solarBadge.addEventListener('click', () => {
-        solarSuspendedByScene.delete(room.id);
-        clearRoomActiveScene(room.id);
-        // Kick a solar restore for each device so the coordinator re-applies solar immediately
-        for (const deviceId of room.device_ids) {
-          fetch(`/api/lights/${encodeURIComponent(deviceId)}/restore-solar?token=${encodeURIComponent(tok())}`,
-            { method: 'POST' }).catch(() => {});
-        }
-        render();
-      });
-    } else {
-      solarBadge.title = 'Solar mode active — click to disable';
-      solarBadge.addEventListener('click', () => setSolarMode(room.id, false));
-    }
-    actions.appendChild(solarBadge);
+  if (activeEffect) {
+    actions.appendChild(buildEffectBadge(room, activeEffect));
   }
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'room-action-btn room-action-delete';
@@ -544,6 +734,11 @@ function renderRoomCard(room) {
   ctrlRow.appendChild(actions);
   header.appendChild(ctrlRow);
   card.appendChild(header);
+
+  // Effect param editor popover — visible when the badge for this room is clicked
+  if (activeEffect && openEffectEditorRoomId === room.id) {
+    card.appendChild(buildEffectEditor(room, activeEffect));
+  }
 
   // Room colour picker — outside body so it stays accessible when collapsed
   if (hasColour && roomSwatchBtn) {
@@ -601,7 +796,7 @@ function renderRoomCard(room) {
     for (const deviceId of room.device_ids) {
       const dev = devicesMap.get(deviceId);
       if (dev) {
-        const devCard = buildDeviceCard(dev, room.id, room.solar_enabled);
+        const devCard = buildDeviceCard(dev, room.id);
         devicesEl.appendChild(devCard);
         wireDeviceControls(devCard, dev, room.id);
         wireDeviceDrag(devCard, dev.device_id, room.id);
@@ -638,7 +833,7 @@ function renderRoomCard(room) {
       e.preventDefault();
       const effect = effectDragSrc;
       effectDragSrc = null;
-      if (effect === 'solar') setSolarMode(room.id, true);
+      activateEffect(room.id, effect);
       return;
     }
     if (dragSrc && body.classList.contains('collapsed')) {
@@ -815,15 +1010,15 @@ function wireRoomColourPicker(pickerEl, roomId, swatchBtn) {
 
 // ── Device card inside a room ────────────────────────────────────────────────
 
-function buildDeviceCard(dev, roomId, roomSolarEnabled = false) {
+function buildDeviceCard(dev, roomId) {
   const card = document.createElement('div');
   card.className = 'light-card room-device-card';
   card.dataset.deviceId = dev.device_id;
-  card.innerHTML = deviceCardHtml(dev, roomSolarEnabled);
+  card.innerHTML = deviceCardHtml(dev);
   return card;
 }
 
-function deviceCardHtml(dev, roomSolarEnabled = false) {
+function deviceCardHtml(dev) {
   const badgeClass = dev.on ? 'badge-green' : 'badge-muted';
   const badgeLabel = dev.on ? 'On' : 'Off';
   const displayName = formatDeviceName(dev.device_id);
@@ -833,11 +1028,7 @@ function deviceCardHtml(dev, roomSolarEnabled = false) {
   if (dev.color_xy != null || dev.color_temp != null) {
     let h = 30, s = 80;
     let swatchRgb = `hsl(${h},${s}%,50%)`;
-    if (dev.solar_enabled) {
-      // Circadian: warm amber ~2700 K
-      swatchRgb = 'rgb(255, 195, 120)';
-      h = 30; s = 100;
-    } else if (dev.color_xy != null) {
+    if (dev.color_xy != null) {
       const [x, y] = dev.color_xy;
       const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
       ({ h, s } = rgbToHsl(r, g, b));
@@ -864,30 +1055,24 @@ function deviceCardHtml(dev, roomSolarEnabled = false) {
       </div>`;
   }
 
-  // When solar is driving the bulb, brightness + color temp are owned by the
-  // solar engine — disable the sliders so user drags don't fight the engine.
-  const autoControlled = dev.solar_enabled;
-  const autoTip = autoControlled ? 'Disabled while solar is active — click ☀ to take manual control' : '';
-  const disabledAttr = autoControlled ? 'disabled' : '';
-
   let controls = '';
   if (dev.brightness != null) {
     const pct = Math.round((dev.brightness / 255) * 100);
     controls += `
-      <div class="light-detail-row${autoControlled ? ' light-detail-row-disabled' : ''}">
+      <div class="light-detail-row">
         <span class="light-detail-label">Brightness</span>
         <input class="light-slider" type="range" min="0" max="255" value="${dev.brightness}"
-               data-ctrl="brightness" title="${autoTip || `${pct}%`}" aria-label="Brightness" ${disabledAttr}>
+               data-ctrl="brightness" title="${pct}%" aria-label="Brightness">
         <span class="light-detail-value">${pct}%</span>
       </div>`;
   }
   if (dev.color_temp != null) {
     const kelvin = Math.round(1_000_000 / dev.color_temp);
     controls += `
-      <div class="light-detail-row${autoControlled ? ' light-detail-row-disabled' : ''}">
+      <div class="light-detail-row">
         <span class="light-detail-label">Color temp</span>
         <input class="light-slider" type="range" min="154" max="500" value="${dev.color_temp}"
-               data-ctrl="color_temp" title="${autoTip || `${kelvin} K`}" aria-label="Color temperature" ${disabledAttr}>
+               data-ctrl="color_temp" title="${kelvin} K" aria-label="Color temperature">
         <span class="light-detail-value">${kelvin} K</span>
       </div>`;
   }
@@ -901,10 +1086,6 @@ function deviceCardHtml(dev, roomSolarEnabled = false) {
       </div>
       <div class="light-card-header-right">
         ${swatch}
-        ${roomSolarEnabled ? `<button class="solar-dot ${dev.solar_enabled ? 'solar-dot-active' : 'solar-dot-dim'}"
-          data-ctrl="restore-solar"
-          title="${dev.solar_enabled ? 'Solar on — click to disable' : 'Solar off — click to enable'}"
-          aria-label="${dev.solar_enabled ? 'Disable solar for this device' : 'Enable solar for this device'}">&#9728;</button>` : ''}
         <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(displayName)}">
           <span class="badge ${badgeClass}">${badgeLabel}</span>
         </button>
@@ -981,26 +1162,6 @@ function wireDeviceDrag(card, deviceId, roomId) {
 }
 
 function wireDeviceControls(card, dev, roomId) {
-  card.querySelector('[data-ctrl="restore-solar"]')?.addEventListener('click', async e => {
-    e.stopPropagation();
-    const cur = devicesMap.get(dev.device_id);
-    if (!cur) return;
-    const enabling = !cur.solar_enabled;
-    devicesMap.set(dev.device_id, { ...cur, solar_enabled: enabling });
-    render();
-    try {
-      const res = await fetch(
-        `/api/lights/${encodeURIComponent(dev.device_id)}/solar?token=${encodeURIComponent(tok())}`,
-        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabling }) }
-      );
-      if (!res.ok) throw new Error(`${res.status}`);
-    } catch (err) {
-      devicesMap.set(dev.device_id, { ...cur, solar_enabled: cur.solar_enabled });
-      render();
-      showToast(`Solar toggle error: ${err.message}`, true);
-    }
-  });
-
   card.querySelector('[data-ctrl="toggle"]')?.addEventListener('click', e => {
     e.stopPropagation();
     devicesMap.set(dev.device_id, { ...dev, on: !dev.on });
@@ -1164,7 +1325,7 @@ function wireDropZone(el, roomId) {
     if (effectDragSrc && roomId !== 'unassigned') {
       const effect = effectDragSrc;
       effectDragSrc = null;
-      if (effect === 'solar') setSolarMode(roomId, true);
+      activateEffect(roomId, effect);
       return;
     }
 
@@ -1347,47 +1508,41 @@ async function reorderRooms(ids) {
   } catch (e) { showToast(`Reorder error: ${e.message}`, true); }
 }
 
-async function setSolarMode(roomId, enable) {
+async function activateEffect(roomId, effectId, params = null) {
   const room = roomsData.find(r => r.id === roomId);
   if (!room) return;
-  // Optimistic update
-  const idx = roomsData.indexOf(room);
-  if (idx !== -1) roomsData[idx] = { ...room, solar_enabled: enable };
-  for (const deviceId of room.device_ids) {
-    const dev = devicesMap.get(deviceId);
-    if (dev) devicesMap.set(deviceId, { ...dev, solar_enabled: enable });
-  }
+
+  // Optimistic UI: stamp the active effect into the local map so the badge
+  // appears immediately. The WS EffectUpdate that follows confirms it.
+  roomEffectsMap.set(roomId, { effect_id: effectId, params: params ?? {} });
   render();
 
-  // When enabling solar, immediately transition each device to the current solar
-  // state over 3 s so the change looks intentional rather than abrupt.
-  // `is_solar: true` tells the coordinator this is the solar engine's own
-  // command, NOT a manual override — without it, the server's light_command
-  // handler would interpret these commands as a user override and immediately
-  // clear per-device solar_enabled flags, leaving the room "solar" but the
-  // bulbs untracked.
-  if (enable) {
-    const { bri, ct } = solarStateFromElevation(lastKnownSolar.elevation);
-    const t = tok();
-    for (const deviceId of room.device_ids) {
-      fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'brightness', value: bri, transition_secs: 3.0, is_solar: true }),
-      }).catch(() => {});
-      fetch(`/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(t)}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'color_temp', value: ct, transition_secs: 3.0, is_solar: true }),
-      }).catch(() => {});
+  try {
+    const body = params != null
+      ? { effect_id: effectId, params }
+      : { effect_id: effectId };
+    const res = await fetch(`/api/rooms/${roomId}/effect?token=${encodeURIComponent(tok())}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      showToast(`Effect failed (${res.status}) ${detail}`.trim(), true);
     }
-  }
+  } catch (e) { showToast(`Effect error: ${e.message}`, true); }
+}
+
+async function clearEffect(roomId) {
+  // Optimistic
+  roomEffectsMap.delete(roomId);
+  render();
 
   try {
-    const res = await fetch(`/api/rooms/${roomId}/solar?token=${encodeURIComponent(tok())}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: enable }),
+    const res = await fetch(`/api/rooms/${roomId}/effect?token=${encodeURIComponent(tok())}`, {
+      method: 'DELETE',
     });
-    if (!res.ok) showToast(`Solar mode failed (${res.status})`, true);
-  } catch (e) { showToast(`Solar mode error: ${e.message}`, true); }
+    if (!res.ok) showToast(`Effect disable failed (${res.status})`, true);
+  } catch (e) { showToast(`Effect disable error: ${e.message}`, true); }
 }
 
 async function sendRoomCommand(roomId, body, room) {
@@ -1400,8 +1555,6 @@ async function sendRoomCommand(roomId, body, room) {
         let updated = dev;
         if (body.action === 'on') updated = { ...updated, on: true };
         else if (body.action === 'off') updated = { ...updated, on: false };
-        // Manual room command suspends solar for each device if room has solar
-        if (room.solar_enabled && updated.solar_enabled) updated = { ...updated, solar_enabled: false };
         devicesMap.set(deviceId, updated);
       }
     }
@@ -1422,11 +1575,6 @@ async function sendRoomCommand(roomId, body, room) {
 async function sendDeviceCommand(deviceId, body) {
   const owningRoom = roomsData.find(r => r.device_ids.includes(deviceId));
   if (owningRoom) clearRoomActiveScene(owningRoom.id);
-  // Manual command suspends solar for this device if the room has solar active
-  if (owningRoom?.solar_enabled) {
-    const dev = devicesMap.get(deviceId);
-    if (dev?.solar_enabled) { devicesMap.set(deviceId, { ...dev, solar_enabled: false }); render(); }
-  }
   try {
     const res = await fetch(
       `/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(tok())}`,
@@ -1459,7 +1607,6 @@ async function recallScene(id) {
     const preState = preSceneStateByRoom.get(roomId);
     activeSceneByRoom.delete(roomId);
     preSceneStateByRoom.delete(roomId);
-    solarSuspendedByScene.delete(roomId);
     updateSceneChipStates(roomId);
     if (preState) {
       const room = roomsData.find(r => r.id === roomId);
@@ -1502,9 +1649,6 @@ async function recallScene(id) {
       if (roomId) {
         activeSceneByRoom.set(roomId, id);
         updateSceneChipStates(roomId);
-        // If this room has solar active, mark it as paused by the scene
-        const room = roomsData.find(r => r.id === roomId);
-        if (room?.solar_enabled) { solarSuspendedByScene.add(roomId); render(); }
       }
       if (res.status === 503) showToast('Some devices offline — others recalled', false);
     } else {
