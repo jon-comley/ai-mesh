@@ -9,11 +9,13 @@ use std::sync::Arc;
 
 use jsonschema::JSONSchema;
 
+use super::aurora::AuroraEffect;
 use super::breathing::BreathingEffect;
 use super::candlelight::CandlelightEffect;
 use super::solar::SolarEffect;
 use super::sunrise::SunriseEffect;
 use super::sunset::SunsetEffect;
+use super::telemetry::TelemetryEffect;
 use super::{Effect, EffectCategory};
 
 /// Lightweight metadata for the discovery API (`GET /api/effects`).
@@ -115,6 +117,8 @@ pub fn register_builtins(reg: &mut EffectRegistry) {
     reg.register(|| Box::new(SunriseEffect::new()));
     reg.register(|| Box::new(BreathingEffect::new()));
     reg.register(|| Box::new(CandlelightEffect::new()));
+    reg.register(|| Box::new(AuroraEffect::new()));
+    reg.register(|| Box::new(TelemetryEffect::new()));
 }
 
 #[cfg(test)]
@@ -166,16 +170,23 @@ mod tests {
         let reg = EffectRegistry::default();
         let meta = reg.list_metadata();
         let ids: Vec<&str> = meta.iter().map(|m| m.id).collect();
-        assert!(ids.contains(&"solar"));
-        assert!(ids.contains(&"sunset"));
-        assert!(ids.contains(&"sunrise"));
-        assert!(ids.contains(&"breathing"));
-        assert!(ids.contains(&"candlelight"));
-        // Sunset/Sunrise/Solar are TimeOfDay; Breathing + Candlelight are Ambient.
+        for expected in [
+            "solar",
+            "sunset",
+            "sunrise",
+            "breathing",
+            "candlelight",
+            "aurora",
+            "telemetry",
+        ] {
+            assert!(ids.contains(&expected), "missing effect: {expected}");
+        }
         let by_id = |id: &str| meta.iter().find(|m| m.id == id).unwrap().category;
         assert_eq!(by_id("solar"), EffectCategory::TimeOfDay);
         assert_eq!(by_id("breathing"), EffectCategory::Ambient);
         assert_eq!(by_id("candlelight"), EffectCategory::Ambient);
+        assert_eq!(by_id("aurora"), EffectCategory::Game);
+        assert_eq!(by_id("telemetry"), EffectCategory::Reactive);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use shared::messages::LightAction;
 
+pub mod aurora;
 pub mod blend;
 pub mod breathing;
 pub mod candlelight;
@@ -18,6 +19,7 @@ pub mod runner;
 pub mod solar;
 pub mod sunrise;
 pub mod sunset;
+pub mod telemetry;
 
 // ── Categorisation + cadence ──────────────────────────────────────────────────
 

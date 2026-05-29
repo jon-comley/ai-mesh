@@ -45,6 +45,12 @@ const BRIGHTNESS_DELTA: u8 = 2;
 const CT_DELTA_MIREDS: u16 = 4;
 const XY_DELTA: f32 = 0.005;
 
+// Cadence drift detection — see `update_drift_ewma`.
+const DRIFT_EWMA_ALPHA: f64 = 0.2;
+const DRIFT_THRESHOLD_FRAC: f64 = 0.20;
+const DRIFT_WARN_HOLD_MS: u64 = 30_000;
+const DRIFT_WARN_THROTTLE_MS: u64 = 60_000;
+
 /// One live effect on one room.
 struct ActiveEffectInstance {
     room_id: String,
@@ -54,6 +60,18 @@ struct ActiveEffectInstance {
     next_tick_at_ms: u64,
     persist_cadence: PersistCadence,
     last_persist_ms: Option<u64>,
+    /// Time of the most-recent successful tick — used to compute the
+    /// inter-tick interval that feeds the EWMA.
+    last_tick_at_ms: Option<u64>,
+    /// Exponential moving average of the observed interval, in ms. Compared
+    /// against `effect.cadence().period_ms()` to detect sustained drift.
+    ewma_interval_ms: Option<f64>,
+    /// When the EWMA first crossed the drift threshold. Cleared whenever the
+    /// interval recovers; warning fires once 30 s of sustained drift accrues.
+    drifted_since_ms: Option<u64>,
+    /// Last time we warned about drift on this instance. Used to throttle the
+    /// warn log so a stuck Zigbee bus doesn't spam the journal.
+    last_warned_ms: Option<u64>,
 }
 
 pub struct EffectRunner {
@@ -202,6 +220,10 @@ impl EffectRunner {
                 next_tick_at_ms: now_ms(), // tick immediately
                 persist_cadence,
                 last_persist_ms: row.internal_state_json.as_ref().map(|_| started_at_ms),
+                last_tick_at_ms: None,
+                ewma_interval_ms: None,
+                drifted_since_ms: None,
+                last_warned_ms: None,
             };
             state.instances.insert(row.room_id.clone(), instance);
         }
@@ -286,6 +308,28 @@ impl EffectRunner {
             if internal_state.is_some() {
                 inst.last_persist_ms = Some(now_ms);
             }
+
+            // Cadence drift EWMA — warn if observed inter-tick interval
+            // sustains >20% drift from the effect's declared cadence for 30 s.
+            if let Some(report) = update_drift_state(DriftInputs {
+                now_ms,
+                declared_ms: period,
+                last_tick_at_ms: inst.last_tick_at_ms,
+                ewma_interval_ms: &mut inst.ewma_interval_ms,
+                drifted_since_ms: &mut inst.drifted_since_ms,
+                last_warned_ms: &mut inst.last_warned_ms,
+            }) {
+                warn!(
+                    room_id = %inst.room_id,
+                    effect_id = %effect_id_owned,
+                    declared_ms = report.declared_ms,
+                    observed_ewma_ms = report.observed_ms,
+                    drift_frac = report.drift_frac,
+                    "effect cadence drift sustained for 30 s — Zigbee backpressure or runner overload",
+                );
+            }
+            inst.last_tick_at_ms = Some(now_ms);
+
             (commands, internal_state, persist_cadence, effect_id_owned)
         };
 
@@ -444,6 +488,74 @@ impl EffectRunner {
 }
 
 // ── Dedup gate ──────────────────────────────────────────────────────────────
+
+// ── Cadence drift ────────────────────────────────────────────────────────────
+
+/// Inputs to `update_drift_state`. The mutable fields belong to the
+/// `ActiveEffectInstance` and are written through this struct.
+struct DriftInputs<'a> {
+    now_ms: u64,
+    declared_ms: u64,
+    last_tick_at_ms: Option<u64>,
+    ewma_interval_ms: &'a mut Option<f64>,
+    drifted_since_ms: &'a mut Option<u64>,
+    last_warned_ms: &'a mut Option<u64>,
+}
+
+/// Returned when a drift warning should fire. Caller logs it; this function
+/// keeps no I/O of its own so it can be unit-tested.
+struct DriftReport {
+    declared_ms: u64,
+    observed_ms: f64,
+    drift_frac: f64,
+}
+
+/// Update the EWMA of observed inter-tick intervals and, if drift has been
+/// sustained for `DRIFT_WARN_HOLD_MS` past `DRIFT_THRESHOLD_FRAC`, return a
+/// report the caller should warn about. Returns `None` while drift is absent
+/// or hasn't held long enough, or while we're inside the warn-throttle
+/// window.
+fn update_drift_state(io: DriftInputs<'_>) -> Option<DriftReport> {
+    let DriftInputs {
+        now_ms,
+        declared_ms,
+        last_tick_at_ms,
+        ewma_interval_ms,
+        drifted_since_ms,
+        last_warned_ms,
+    } = io;
+
+    let last = last_tick_at_ms?;
+    let observed = now_ms.saturating_sub(last) as f64;
+    let smoothed = match *ewma_interval_ms {
+        Some(prev) => DRIFT_EWMA_ALPHA * observed + (1.0 - DRIFT_EWMA_ALPHA) * prev,
+        None => observed,
+    };
+    *ewma_interval_ms = Some(smoothed);
+
+    let declared = declared_ms as f64;
+    let drift_frac = (smoothed - declared).abs() / declared.max(1.0);
+    if drift_frac <= DRIFT_THRESHOLD_FRAC {
+        *drifted_since_ms = None;
+        return None;
+    }
+
+    let since = *drifted_since_ms.get_or_insert(now_ms);
+    let held_for = now_ms.saturating_sub(since);
+    let throttled = last_warned_ms
+        .map(|t| now_ms.saturating_sub(t) < DRIFT_WARN_THROTTLE_MS)
+        .unwrap_or(false);
+    if held_for >= DRIFT_WARN_HOLD_MS && !throttled {
+        *last_warned_ms = Some(now_ms);
+        Some(DriftReport {
+            declared_ms,
+            observed_ms: smoothed,
+            drift_frac,
+        })
+    } else {
+        None
+    }
+}
 
 fn should_dispatch(les: &Option<LastEmittedState>, action: &LightAction) -> bool {
     let Some(les) = les else {
@@ -639,6 +751,158 @@ mod tests {
         let next = apply_action_to_les(prev, &LightAction::ColorXY { x: 0.4, y: 0.5 });
         assert!(
             matches!(next.color, ColorState::Xy { x, y } if (x - 0.4).abs() < 1e-6 && (y - 0.5).abs() < 1e-6)
+        );
+    }
+
+    // ── Cadence drift EWMA ─────────────────────────────────────────────────────
+
+    fn drift_at(
+        now_ms: u64,
+        declared_ms: u64,
+        last_tick_at_ms: Option<u64>,
+        ewma: &mut Option<f64>,
+        since: &mut Option<u64>,
+        warned: &mut Option<u64>,
+    ) -> Option<DriftReport> {
+        update_drift_state(DriftInputs {
+            now_ms,
+            declared_ms,
+            last_tick_at_ms,
+            ewma_interval_ms: ewma,
+            drifted_since_ms: since,
+            last_warned_ms: warned,
+        })
+    }
+
+    #[test]
+    fn drift_first_tick_has_no_history() {
+        let mut ewma = None;
+        let mut since = None;
+        let mut warned = None;
+        let report = drift_at(100, 100, None, &mut ewma, &mut since, &mut warned);
+        assert!(report.is_none());
+        assert!(ewma.is_none());
+    }
+
+    #[test]
+    fn drift_on_target_does_not_warn() {
+        // Feed exactly the declared interval for a long stretch — EWMA stays
+        // on declared, drift_frac stays low, no warn.
+        let declared = 100;
+        let mut ewma = None;
+        let mut since = None;
+        let mut warned = None;
+        let mut last = 0u64;
+        for i in 1..=400 {
+            let now = i * declared;
+            let _ = drift_at(
+                now,
+                declared,
+                Some(last),
+                &mut ewma,
+                &mut since,
+                &mut warned,
+            );
+            last = now;
+        }
+        assert!(warned.is_none(), "no warn expected when on cadence");
+        assert!(since.is_none());
+        let ewma_val = ewma.unwrap();
+        assert!(
+            (ewma_val - declared as f64).abs() < 1.0,
+            "EWMA should converge to declared: {ewma_val}"
+        );
+    }
+
+    #[test]
+    fn drift_transient_blip_does_not_warn() {
+        // One slow tick, then everything recovers. drifted_since clears as soon
+        // as the EWMA pulls back inside the band.
+        let declared = 100;
+        let mut ewma = None;
+        let mut since = None;
+        let mut warned = None;
+        // Warm-up.
+        let mut last = 0u64;
+        for i in 1..=50 {
+            let now = i * declared;
+            let _ = drift_at(
+                now,
+                declared,
+                Some(last),
+                &mut ewma,
+                &mut since,
+                &mut warned,
+            );
+            last = now;
+        }
+        // One slow tick (200 ms instead of 100).
+        let slow_now = last + 200;
+        let _ = drift_at(
+            slow_now,
+            declared,
+            Some(last),
+            &mut ewma,
+            &mut since,
+            &mut warned,
+        );
+        last = slow_now;
+        // EWMA may briefly cross the threshold, but as long as subsequent ticks
+        // are on time the EWMA decays back inside it before the 30 s window
+        // accrues.
+        for i in 1..=400 {
+            let now = last + i * declared;
+            let _ = drift_at(
+                now,
+                declared,
+                Some(last + (i - 1) * declared),
+                &mut ewma,
+                &mut since,
+                &mut warned,
+            );
+        }
+        assert!(warned.is_none(), "transient blip should not warn");
+    }
+
+    #[test]
+    fn drift_sustained_30s_fires_warn_once() {
+        // Steady interval 200 ms against declared 100 ms — sustained 100% drift.
+        // First warn should fire at 30 s of drift; subsequent ticks within
+        // throttle window should not re-warn.
+        let declared = 100;
+        let interval = 200;
+        let mut ewma = None;
+        let mut since = None;
+        let mut warned = None;
+        let mut warn_times: Vec<u64> = Vec::new();
+
+        let mut last = 0u64;
+        // 40 s worth of ticks at 200 ms apart = 200 ticks.
+        for i in 1..=200 {
+            let now = i * interval;
+            if let Some(_r) = drift_at(
+                now,
+                declared,
+                Some(last),
+                &mut ewma,
+                &mut since,
+                &mut warned,
+            ) {
+                warn_times.push(now);
+            }
+            last = now;
+        }
+        assert_eq!(
+            warn_times.len(),
+            1,
+            "expected exactly one warn during the throttle window, got {warn_times:?}"
+        );
+        // The warn should fire at roughly 30 s — first opportunity once drift
+        // has held for DRIFT_WARN_HOLD_MS.
+        let first = warn_times[0];
+        assert!(
+            (30_000..=33_000).contains(&first),
+            "first warn should land near 30 s of drift, got {first} ms",
         );
     }
 }
