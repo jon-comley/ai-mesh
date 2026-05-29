@@ -553,7 +553,21 @@ pub async fn set_room_solar(
         if !reg.room_exists(&room_id) {
             return StatusCode::NOT_FOUND.into_response();
         }
-        reg.set_room_solar(&room_id, body.enabled);
+        // Drive the EffectRunner via room_effects (this also keeps
+        // rooms.solar_enabled in sync via the legacy-column mirror in
+        // set_active_effect). Pre-F-Effects-2 this was just `set_room_solar`;
+        // F-Effects-3 will drop this set_room_solar call entirely.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        if body.enabled {
+            if let Err(e) = reg.set_active_effect(&room_id, "solar", "{}", None, now_ms) {
+                tracing::warn!(error = %e, "set_active_effect(solar) failed");
+            }
+        } else if let Err(e) = reg.disable_active_effect(&room_id) {
+            tracing::warn!(error = %e, "disable_active_effect failed");
+        }
         let ids = reg
             .list_rooms()
             .into_iter()

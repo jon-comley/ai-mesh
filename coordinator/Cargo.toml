@@ -23,6 +23,8 @@ getrandom = "0.2"
 axum = { version = "0.8", features = ["ws"] }
 spa = "0.3"
 chrono = "0.4"
+palette = "0.7"
+anyhow = "1"
 
 [dev-dependencies]
 tempfile = "3"

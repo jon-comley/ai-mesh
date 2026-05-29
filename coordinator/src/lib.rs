@@ -1,4 +1,5 @@
 pub mod coordinator;
+pub mod effects;
 pub mod http;
 pub mod intent;
 pub mod mdns;
@@ -6,6 +7,5 @@ pub mod model_lifecycle;
 pub mod registry;
 pub mod scheduler;
 pub mod server;
-pub mod spatial;
 pub mod state;
 pub mod tls;

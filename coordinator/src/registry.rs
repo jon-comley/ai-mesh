@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use shared::messages::LightStateReport;
 use shared::{
     HardwareSpec, ModelAllocationFull, ModelLifecycleState, NodeCapabilities, NodeIdentity,
@@ -131,6 +131,19 @@ impl SceneRecord {
     }
 }
 
+/// One row in `room_effects`. A room has zero or more rows; at most one with
+/// `enabled = 1` (enforced by the partial unique index).
+#[derive(Debug, Clone)]
+pub struct RoomEffectRecord {
+    pub room_id: String,
+    pub effect_id: String,
+    pub enabled: bool,
+    pub params_json: String,
+    pub snapshot_json: Option<String>,
+    pub internal_state_json: Option<String>,
+    pub started_at_ms: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModelAllocation {
     pub model_name: String,
@@ -231,7 +244,20 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS device_names (
             device_id   TEXT PRIMARY KEY,
             custom_name TEXT NOT NULL
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS room_effects (
+            room_id              TEXT    NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            effect_id            TEXT    NOT NULL,
+            enabled              INTEGER NOT NULL DEFAULT 1,
+            params_json          TEXT    NOT NULL DEFAULT '{}',
+            snapshot_json        TEXT,
+            internal_state_json  TEXT,
+            started_at           INTEGER NOT NULL,
+            PRIMARY KEY (room_id, effect_id),
+            CHECK (enabled IN (0, 1))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uid_enabled_room_effect
+            ON room_effects (room_id) WHERE enabled = 1;",
     )?;
 
     // Migration: Add new columns to rooms if they don't exist
@@ -343,6 +369,21 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             )",
         )?;
     }
+
+    // Migration: rooms.solar_enabled = 1 → room_effects row for 'solar'.
+    // Runs AFTER the ALTER TABLE that adds rooms.solar_enabled, otherwise the
+    // SELECT references a non-existent column on a brand-new DB. Idempotent —
+    // INSERT OR IGNORE preserves any params/snapshot already saved.
+    //
+    // `strftime('%s','now') * 1000` is UTC milliseconds since the Unix epoch
+    // — matches `runner.rs::now_ms()` which uses `SystemTime::duration_since(UNIX_EPOCH)`.
+    conn.execute(
+        "INSERT OR IGNORE INTO room_effects (room_id, effect_id, enabled, params_json, started_at)
+         SELECT id, 'solar', 1, '{}', strftime('%s','now') * 1000
+         FROM rooms
+         WHERE solar_enabled = 1",
+        [],
+    )?;
 
     // Legacy migration: convert has_window/window_facing rows to openings rows (idempotent).
     let legacy: Vec<(String, f32)> = {
@@ -1515,6 +1556,142 @@ impl Registry {
             },
         );
     }
+
+    // ── room_effects ─────────────────────────────────────────────────────────
+
+    /// Set the active effect for a room. Disables any previously-enabled
+    /// effect in the same room, then upserts the incoming effect row in the
+    /// same transaction so the partial unique index never sees two enabled
+    /// rows at once.
+    ///
+    /// `snapshot_json` is the pre-effect baseline captured by the runner at
+    /// activation time, OR — for an effect→effect handoff — the previous
+    /// effect's snapshot copied verbatim (preserving the original baseline).
+    pub fn set_active_effect(
+        &mut self,
+        room_id: &str,
+        effect_id: &str,
+        params_json: &str,
+        snapshot_json: Option<&str>,
+        started_at_ms: i64,
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE room_effects SET enabled = 0 WHERE room_id = ?1 AND enabled = 1",
+            params![room_id],
+        )?;
+        tx.execute(
+            "INSERT INTO room_effects (room_id, effect_id, enabled, params_json, snapshot_json, started_at)
+             VALUES (?1, ?2, 1, ?3, ?4, ?5)
+             ON CONFLICT(room_id, effect_id) DO UPDATE SET
+                 enabled       = 1,
+                 params_json   = excluded.params_json,
+                 snapshot_json = COALESCE(excluded.snapshot_json, room_effects.snapshot_json),
+                 started_at    = excluded.started_at",
+            params![room_id, effect_id, params_json, snapshot_json, started_at_ms],
+        )?;
+        // Mirror solar to the legacy column for one release so a roll-back keeps
+        // working. Other effects clear it so `rooms.solar_enabled` reflects
+        // "is solar the active effect" precisely.
+        let is_solar = effect_id == "solar";
+        tx.execute(
+            "UPDATE rooms SET solar_enabled = ?1 WHERE id = ?2",
+            params![is_solar as i64, room_id],
+        )?;
+        tx.commit()
+    }
+
+    /// Disable the currently-enabled effect for a room. Returns the snapshot
+    /// the runner should restore (if any) so it can dispatch the revert
+    /// commands.
+    pub fn disable_active_effect(&mut self, room_id: &str) -> rusqlite::Result<Option<String>> {
+        let tx = self.conn.transaction()?;
+        let snapshot: Option<String> = tx
+            .query_row(
+                "SELECT snapshot_json FROM room_effects WHERE room_id = ?1 AND enabled = 1",
+                params![room_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        tx.execute(
+            "UPDATE room_effects SET enabled = 0 WHERE room_id = ?1 AND enabled = 1",
+            params![room_id],
+        )?;
+        tx.execute(
+            "UPDATE rooms SET solar_enabled = 0 WHERE id = ?1",
+            params![room_id],
+        )?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+
+    /// Currently-enabled effect for a room (if any).
+    pub fn get_active_effect(&self, room_id: &str) -> Option<RoomEffectRecord> {
+        self.conn
+            .query_row(
+                "SELECT room_id, effect_id, enabled, params_json, snapshot_json, internal_state_json, started_at \
+                 FROM room_effects WHERE room_id = ?1 AND enabled = 1",
+                params![room_id],
+                |row| {
+                    let enabled: i64 = row.get(2)?;
+                    Ok(RoomEffectRecord {
+                        room_id: row.get::<_, String>(0)?,
+                        effect_id: row.get::<_, String>(1)?,
+                        enabled: enabled != 0,
+                        params_json: row.get::<_, String>(3)?,
+                        snapshot_json: row.get::<_, Option<String>>(4)?,
+                        internal_state_json: row.get::<_, Option<String>>(5)?,
+                        started_at_ms: row.get::<_, i64>(6)?,
+                    })
+                },
+            )
+            .optional()
+            .unwrap_or(None)
+    }
+
+    /// All enabled effect rows (across all rooms) — used by the runner on
+    /// coordinator start to rehydrate live effects.
+    pub fn list_active_effects(&self) -> Vec<RoomEffectRecord> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT room_id, effect_id, enabled, params_json, snapshot_json, internal_state_json, started_at \
+             FROM room_effects WHERE enabled = 1",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt
+            .query_map([], |row| {
+                let enabled: i64 = row.get(2)?;
+                Ok(RoomEffectRecord {
+                    room_id: row.get::<_, String>(0)?,
+                    effect_id: row.get::<_, String>(1)?,
+                    enabled: enabled != 0,
+                    params_json: row.get::<_, String>(3)?,
+                    snapshot_json: row.get::<_, Option<String>>(4)?,
+                    internal_state_json: row.get::<_, Option<String>>(5)?,
+                    started_at_ms: row.get::<_, i64>(6)?,
+                })
+            })
+            .ok();
+        rows.map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Persist updated internal state for a live effect. Called by the runner
+    /// on the effect's declared cadence.
+    pub fn update_effect_internal_state(
+        &mut self,
+        room_id: &str,
+        effect_id: &str,
+        state_json: Option<&str>,
+    ) {
+        if let Err(e) = self.conn.execute(
+            "UPDATE room_effects SET internal_state_json = ?1 WHERE room_id = ?2 AND effect_id = ?3",
+            params![state_json, room_id, effect_id],
+        ) {
+            warn!(error = %e, room_id, effect_id, "update_effect_internal_state failed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2605,5 +2782,186 @@ mod tests {
     fn get_room_for_device_solar_returns_none_for_unassigned() {
         let reg = Registry::new();
         assert_eq!(reg.get_room_for_device_solar("unassigned-bulb"), None);
+    }
+
+    // ── room_effects ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_active_effect_inserts_row_and_makes_it_active() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        reg.set_active_effect(&room.id, "solar", "{}", None, 1_000)
+            .unwrap();
+        let active = reg.get_active_effect(&room.id).unwrap();
+        assert_eq!(active.effect_id, "solar");
+        assert!(active.enabled);
+        assert_eq!(active.params_json, "{}");
+        assert_eq!(active.started_at_ms, 1_000);
+    }
+
+    #[test]
+    fn set_active_effect_handoff_transfers_snapshot_verbatim() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        let snap = "{\"baseline\":\"on\"}";
+        reg.set_active_effect(&room.id, "solar", "{}", Some(snap), 1_000)
+            .unwrap();
+        // Switching to a new effect WITHOUT passing a snapshot must preserve
+        // the prior row's snapshot (handoff semantics).
+        reg.set_active_effect(&room.id, "sunset", "{\"duration_secs\":1800}", None, 2_000)
+            .unwrap();
+        let active = reg.get_active_effect(&room.id).unwrap();
+        assert_eq!(active.effect_id, "sunset");
+        // sunset row was new — it doesn't have the solar snapshot. This proves
+        // the runner is responsible for handoff snapshot transfer; the DB layer
+        // only preserves whatever the caller passes.
+        assert!(active.snapshot_json.is_none());
+        // And we can read the disabled solar row back to recover its snapshot.
+        let all_rows: Vec<_> = reg
+            .conn
+            .prepare(
+                "SELECT effect_id, enabled, snapshot_json FROM room_effects WHERE room_id = ?1",
+            )
+            .unwrap()
+            .query_map(params![&room.id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(all_rows.len(), 2);
+        let solar_row = all_rows.iter().find(|r| r.0 == "solar").unwrap();
+        assert_eq!(solar_row.1, 0);
+        assert_eq!(solar_row.2.as_deref(), Some(snap));
+    }
+
+    #[test]
+    fn set_active_effect_disables_previous_effect() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        reg.set_active_effect(&room.id, "solar", "{}", None, 1_000)
+            .unwrap();
+        reg.set_active_effect(&room.id, "sunset", "{}", None, 2_000)
+            .unwrap();
+        // Only one enabled row should remain.
+        let count: i64 = reg
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM room_effects WHERE room_id = ?1 AND enabled = 1",
+                params![&room.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(reg.get_active_effect(&room.id).unwrap().effect_id, "sunset");
+    }
+
+    #[test]
+    fn partial_unique_index_rejects_second_enabled_row() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        reg.set_active_effect(&room.id, "solar", "{}", None, 1_000)
+            .unwrap();
+        // Bypass set_active_effect's transactional guard and try to insert a
+        // second enabled row directly. The partial unique index must reject.
+        let err = reg.conn.execute(
+            "INSERT INTO room_effects (room_id, effect_id, enabled, params_json, started_at)
+             VALUES (?1, 'sunset', 1, '{}', 2000)",
+            params![&room.id],
+        );
+        assert!(
+            err.is_err(),
+            "second enabled row must be rejected by partial unique index"
+        );
+    }
+
+    #[test]
+    fn disable_active_effect_returns_snapshot_and_clears_flag() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        let snap = "{\"baseline\":\"on\"}";
+        reg.set_active_effect(&room.id, "solar", "{}", Some(snap), 1_000)
+            .unwrap();
+        let returned = reg.disable_active_effect(&room.id).unwrap();
+        assert_eq!(returned.as_deref(), Some(snap));
+        assert!(reg.get_active_effect(&room.id).is_none());
+    }
+
+    #[test]
+    fn list_active_effects_returns_only_enabled_rows() {
+        let mut reg = Registry::new();
+        let r1 = reg.create_room("A");
+        let r2 = reg.create_room("B");
+        let r3 = reg.create_room("C");
+        reg.set_active_effect(&r1.id, "solar", "{}", None, 1_000)
+            .unwrap();
+        reg.set_active_effect(&r2.id, "sunset", "{}", None, 1_000)
+            .unwrap();
+        reg.set_active_effect(&r3.id, "solar", "{}", None, 1_000)
+            .unwrap();
+        reg.disable_active_effect(&r3.id).unwrap();
+        let active = reg.list_active_effects();
+        assert_eq!(active.len(), 2);
+        let ids: Vec<_> = active.iter().map(|r| r.effect_id.as_str()).collect();
+        assert!(ids.contains(&"solar"));
+        assert!(ids.contains(&"sunset"));
+    }
+
+    #[test]
+    fn update_effect_internal_state_round_trips() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        reg.set_active_effect(&room.id, "aurora", "{}", None, 1_000)
+            .unwrap();
+        reg.update_effect_internal_state(&room.id, "aurora", Some("{\"seed\":42}"));
+        let active = reg.get_active_effect(&room.id).unwrap();
+        assert_eq!(active.internal_state_json.as_deref(), Some("{\"seed\":42}"));
+    }
+
+    #[test]
+    fn set_active_effect_mirrors_solar_to_legacy_column() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        reg.set_active_effect(&room.id, "solar", "{}", None, 1_000)
+            .unwrap();
+        assert!(reg.list_rooms()[0].solar_enabled);
+        reg.set_active_effect(&room.id, "sunset", "{}", None, 2_000)
+            .unwrap();
+        // Switching to a non-solar effect clears the legacy mirror.
+        assert!(!reg.list_rooms()[0].solar_enabled);
+        reg.disable_active_effect(&room.id).unwrap();
+        assert!(!reg.list_rooms()[0].solar_enabled);
+    }
+
+    #[test]
+    fn migration_creates_solar_row_for_rooms_with_solar_enabled() {
+        // Simulate a pre-F-Effects-2 DB on disk: rooms with solar_enabled=1 and
+        // no room_effects rows.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        {
+            let mut reg = Registry::open(path).unwrap();
+            let r1 = reg.create_room("A");
+            let r2 = reg.create_room("B");
+            let _r3 = reg.create_room("C");
+            reg.set_room_solar(&r1.id, true);
+            reg.set_room_solar(&r2.id, true);
+            // r3 stays solar_enabled = 0
+            // Wipe room_effects to simulate first start after upgrade.
+            reg.conn.execute("DELETE FROM room_effects", []).unwrap();
+        }
+        // Re-open — the migration in init_schema should backfill solar rows for
+        // r1 + r2 only.
+        let reg = Registry::open(path).unwrap();
+        let active = reg.list_active_effects();
+        assert_eq!(active.len(), 2);
+        for row in &active {
+            assert_eq!(row.effect_id, "solar");
+            assert_eq!(row.params_json, "{}");
+        }
     }
 }
