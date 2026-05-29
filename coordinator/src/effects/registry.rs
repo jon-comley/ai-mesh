@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use jsonschema::JSONSchema;
 
+use super::breathing::BreathingEffect;
+use super::candlelight::CandlelightEffect;
 use super::solar::SolarEffect;
+use super::sunrise::SunriseEffect;
 use super::sunset::SunsetEffect;
 use super::{Effect, EffectCategory};
 
@@ -109,6 +112,9 @@ impl Default for EffectRegistry {
 pub fn register_builtins(reg: &mut EffectRegistry) {
     reg.register(|| Box::new(SolarEffect::new()));
     reg.register(|| Box::new(SunsetEffect::new()));
+    reg.register(|| Box::new(SunriseEffect::new()));
+    reg.register(|| Box::new(BreathingEffect::new()));
+    reg.register(|| Box::new(CandlelightEffect::new()));
 }
 
 #[cfg(test)]
@@ -136,6 +142,25 @@ mod tests {
         assert!(reg.instantiate("does-not-exist").is_none());
     }
 
+    /// Invariant: every registered effect's `default_params` must validate
+    /// against that effect's own `params_schema`. Catches "added a new effect
+    /// but forgot to keep the schema in sync with the defaults" at test time.
+    #[test]
+    fn every_registered_effect_default_params_validate_against_its_schema() {
+        let reg = EffectRegistry::default();
+        for meta in reg.list_metadata() {
+            let schema = jsonschema::JSONSchema::compile(&meta.params_schema)
+                .unwrap_or_else(|e| panic!("invalid schema for {:?}: {e}", meta.id));
+            assert!(
+                schema.is_valid(&meta.default_params),
+                "effect {:?} default_params don't validate: defaults={}, schema={}",
+                meta.id,
+                meta.default_params,
+                meta.params_schema,
+            );
+        }
+    }
+
     #[test]
     fn list_metadata_returns_one_entry_per_registered_effect() {
         let reg = EffectRegistry::default();
@@ -143,9 +168,14 @@ mod tests {
         let ids: Vec<&str> = meta.iter().map(|m| m.id).collect();
         assert!(ids.contains(&"solar"));
         assert!(ids.contains(&"sunset"));
-        for m in meta {
-            assert_eq!(m.category, EffectCategory::TimeOfDay);
-        }
+        assert!(ids.contains(&"sunrise"));
+        assert!(ids.contains(&"breathing"));
+        assert!(ids.contains(&"candlelight"));
+        // Sunset/Sunrise/Solar are TimeOfDay; Breathing + Candlelight are Ambient.
+        let by_id = |id: &str| meta.iter().find(|m| m.id == id).unwrap().category;
+        assert_eq!(by_id("solar"), EffectCategory::TimeOfDay);
+        assert_eq!(by_id("breathing"), EffectCategory::Ambient);
+        assert_eq!(by_id("candlelight"), EffectCategory::Ambient);
     }
 
     #[test]
