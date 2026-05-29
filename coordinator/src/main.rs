@@ -18,7 +18,7 @@ async fn main() {
     let _mdns = coordinator::mdns::advertise(9000);
 
     let effects = Arc::new(EffectRegistry::default());
-    let runner = EffectRunner::new(coord.registry.clone(), dashboard.clone(), effects);
+    let runner = EffectRunner::new(coord.registry.clone(), dashboard.clone(), effects.clone());
     tokio::spawn(runner.run());
 
     let http_port: u16 = std::env::var("MESH_HTTP_PORT")
@@ -29,6 +29,7 @@ async fn main() {
         http_port,
         dashboard,
         coord.registry.clone(),
+        effects,
     ));
 
     println!("Coordinator is running. Press Ctrl+C to stop.");

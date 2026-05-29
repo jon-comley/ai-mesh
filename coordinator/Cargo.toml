@@ -25,6 +25,7 @@ spa = "0.3"
 chrono = "0.4"
 palette = "0.7"
 anyhow = "1"
+jsonschema = { version = "0.18", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

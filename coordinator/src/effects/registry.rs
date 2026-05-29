@@ -5,6 +5,9 @@
 //! a room activates one.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use jsonschema::JSONSchema;
 
 use super::solar::SolarEffect;
 use super::{Effect, EffectCategory};
@@ -28,6 +31,10 @@ pub type EffectFactory = Box<dyn Fn() -> Box<dyn Effect> + Send + Sync>;
 pub struct EffectRegistry {
     factories: HashMap<&'static str, EffectFactory>,
     metadata: Vec<EffectMetadata>,
+    /// Compiled JSON Schemas keyed by effect_id. Populated at `register()` time
+    /// so the activation endpoint reuses a single validator across requests
+    /// instead of recompiling on every POST.
+    compiled_schemas: HashMap<&'static str, Arc<JSONSchema>>,
 }
 
 impl EffectRegistry {
@@ -35,6 +42,7 @@ impl EffectRegistry {
         Self {
             factories: HashMap::new(),
             metadata: Vec::new(),
+            compiled_schemas: HashMap::new(),
         }
     }
 
@@ -58,8 +66,13 @@ impl EffectRegistry {
             !self.factories.contains_key(id),
             "duplicate effect id registered: {id:?}"
         );
+        // Compile the JSON Schema once. A bad schema is an effect-author bug
+        // and must surface at startup, not on the first user POST.
+        let compiled = JSONSchema::compile(&meta.params_schema)
+            .unwrap_or_else(|e| panic!("invalid params_schema for effect {id:?}: {e}"));
         self.factories.insert(id, Box::new(factory));
         self.metadata.push(meta);
+        self.compiled_schemas.insert(id, Arc::new(compiled));
     }
 
     /// Construct a fresh instance of the effect with the given id.
@@ -74,6 +87,12 @@ impl EffectRegistry {
 
     pub fn contains(&self, id: &str) -> bool {
         self.factories.contains_key(id)
+    }
+
+    /// The pre-compiled validator for this effect. `None` if the effect isn't
+    /// registered.
+    pub fn compiled_schema(&self, id: &str) -> Option<Arc<JSONSchema>> {
+        self.compiled_schemas.get(id).cloned()
     }
 }
 
