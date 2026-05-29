@@ -1115,15 +1115,11 @@ pub async fn set_room_effect(
         None => return (StatusCode::BAD_REQUEST, "unknown effect_id").into_response(),
     };
 
-    // If the caller omits `params` entirely we substitute the effect's
-    // default_params. TODO(F-Effects-2.4 / Sunset): for partial param objects
-    // (e.g. {"duration_secs":600} when default is {"duration_secs":1800,
-    // "peak_warmth":0.7,"start_at":"now"}) merge defaults into the missing
-    // fields so the runner doesn't have to handle Option unwrap on every tick.
-    // Not needed yet — Solar's default is {} so there are no defaults to merge.
-    let params = body
-        .params
-        .unwrap_or_else(|| metadata.default_params.clone());
+    // Merge any caller-supplied params on top of the effect's defaults so the
+    // stored row is always fully filled. A partial body like
+    // {"duration_secs":600} for Sunset keeps the default peak_warmth +
+    // start_at without forcing the effect tick to handle missing keys.
+    let params = merge_with_defaults(body.params, &metadata.default_params);
 
     // Use the pre-compiled validator from the registry — compiled once at
     // startup, reused across requests. `None` here is impossible (we already
@@ -1137,6 +1133,31 @@ pub async fn set_room_effect(
     }
 
     persist_active_effect(&registry, &state, &room_id, &body.effect_id, &params)
+}
+
+/// Returns a JSON object: the effect's `defaults`, shallow-overlaid with
+/// whatever the caller supplied in `body`. When `body` is `None` the defaults
+/// are returned as-is. When either side isn't a JSON object the caller's value
+/// wins outright (passthrough; the schema validator will reject anything
+/// that's not the right shape).
+fn merge_with_defaults(
+    body: Option<serde_json::Value>,
+    defaults: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(body_val) = body else {
+        return defaults.clone();
+    };
+    let (Some(body_obj), Some(default_obj)) = (body_val.as_object(), defaults.as_object()) else {
+        return body_val;
+    };
+    let mut merged = serde_json::Map::new();
+    for (k, v) in default_obj {
+        merged.insert(k.clone(), v.clone());
+    }
+    for (k, v) in body_obj {
+        merged.insert(k.clone(), v.clone());
+    }
+    serde_json::Value::Object(merged)
 }
 
 fn persist_active_effect(
@@ -2901,6 +2922,54 @@ mod tests {
             .unwrap();
         // Stored params should be the effect's default (an empty object for Solar).
         assert_eq!(active.params_json, "{}");
+    }
+
+    #[tokio::test]
+    async fn set_room_effect_partial_params_merge_defaults() {
+        // Sunset has three defaulted params. A body that supplies only one
+        // should land in the DB with all three (the body's value plus the
+        // effect's defaults for the rest).
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+        let status = send(
+            effects_router(Arc::clone(&state), Arc::clone(&registry), effects),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"sunset","params":{"duration_secs":600}}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let stored: serde_json::Value = serde_json::from_str(
+            &registry
+                .lock()
+                .unwrap()
+                .get_active_effect(&room_id)
+                .unwrap()
+                .params_json,
+        )
+        .unwrap();
+        assert_eq!(stored["duration_secs"], 600);
+        assert_eq!(stored["peak_warmth"], 0.7); // default kept
+        assert_eq!(stored["start_at"], "now"); // default kept
+    }
+
+    #[test]
+    fn merge_with_defaults_overlays_partial_body_on_defaults() {
+        let defaults = serde_json::json!({"a": 1, "b": 2, "c": 3});
+        let body = Some(serde_json::json!({"b": 99}));
+        let merged = merge_with_defaults(body, &defaults);
+        assert_eq!(merged["a"], 1);
+        assert_eq!(merged["b"], 99);
+        assert_eq!(merged["c"], 3);
+    }
+
+    #[test]
+    fn merge_with_defaults_none_body_returns_defaults() {
+        let defaults = serde_json::json!({"a": 1});
+        let merged = merge_with_defaults(None, &defaults);
+        assert_eq!(merged, defaults);
     }
 
     #[tokio::test]

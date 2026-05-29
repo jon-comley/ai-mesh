@@ -10,6 +10,7 @@ use std::sync::Arc;
 use jsonschema::JSONSchema;
 
 use super::solar::SolarEffect;
+use super::sunset::SunsetEffect;
 use super::{Effect, EffectCategory};
 
 /// Lightweight metadata for the discovery API (`GET /api/effects`).
@@ -107,6 +108,7 @@ impl Default for EffectRegistry {
 /// Register every effect that ships in the binary.
 pub fn register_builtins(reg: &mut EffectRegistry) {
     reg.register(|| Box::new(SolarEffect::new()));
+    reg.register(|| Box::new(SunsetEffect::new()));
 }
 
 #[cfg(test)]
@@ -135,12 +137,15 @@ mod tests {
     }
 
     #[test]
-    fn list_metadata_returns_one_entry_per_effect() {
+    fn list_metadata_returns_one_entry_per_registered_effect() {
         let reg = EffectRegistry::default();
         let meta = reg.list_metadata();
-        assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].id, "solar");
-        assert_eq!(meta[0].category, EffectCategory::TimeOfDay);
+        let ids: Vec<&str> = meta.iter().map(|m| m.id).collect();
+        assert!(ids.contains(&"solar"));
+        assert!(ids.contains(&"sunset"));
+        for m in meta {
+            assert_eq!(m.category, EffectCategory::TimeOfDay);
+        }
     }
 
     #[test]
