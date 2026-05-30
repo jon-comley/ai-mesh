@@ -668,6 +668,7 @@ async fn process_message(
             );
             if let Some(dash) = dashboard {
                 dash.push_group_update(&report.node_id, report.groups.clone());
+                dash.push_device_discovery(&report.node_id, report.devices.clone(), true);
             }
             registry.lock().unwrap().update_light_devices(
                 &report.node_id,

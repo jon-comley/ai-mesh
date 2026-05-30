@@ -18,9 +18,27 @@ pub struct CoordinatorConfig {
 }
 
 fn warm_start_lighting(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
-    let reports = registry.lock().unwrap().load_light_states();
+    let reg = registry.lock().unwrap();
+    let reports = reg.load_light_states();
     for report in reports {
         dashboard.push_lighting_update(report);
+    }
+
+    // Also warm-start placeholders for discovered devices that haven't reported state yet.
+    // Suppress internal broadcasts (emit=false) during the loop to prevent massive JSON
+    // thundering, then fire a single final update.
+    let mut any_new = false;
+    for (node_id, (devices, _)) in reg.get_all_light_devices() {
+        dashboard.push_device_discovery(node_id, devices.clone(), false);
+        any_new = true;
+    }
+
+    if any_new {
+        let devices = dashboard.get_light_snapshot();
+        let groups = dashboard.get_group_snapshot();
+        let _ = dashboard
+            .tx
+            .send(crate::http::state::DashboardEvent::LightingUpdate { devices, groups });
     }
 }
 

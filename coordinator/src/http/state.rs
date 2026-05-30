@@ -273,6 +273,40 @@ impl DashboardState {
         }
     }
 
+    /// Add placeholder entries for discovered devices that haven't yet reported state.
+    /// Broadcasts a LightingUpdate if any new placeholders were added and `emit` is true.
+    pub fn push_device_discovery(&self, node_id: &str, devices: Vec<String>, emit: bool) {
+        let mut updated = false;
+        {
+            let mut snap = self.light_snapshot.lock().unwrap();
+            for id in devices {
+                if !snap.contains_key(&id) {
+                    snap.insert(
+                        id.clone(),
+                        LightStateReport {
+                            node_id: node_id.to_owned(),
+                            device_id: id,
+                            on: false, // Default to off as a fallback visibility state
+                            // Placeholder values for UI sliders - not used for commands.
+                            // 254 = 100% brightness, 370 = 2700K (neutral warm white).
+                            brightness: Some(254),
+                            color_xy: None,
+                            color_temp: Some(370),
+                        },
+                    );
+                    updated = true;
+                }
+            }
+        }
+        if emit && updated && self.tx.receiver_count() > 0 {
+            let devices = self.get_light_snapshot();
+            let groups = self.get_group_snapshot();
+            let _ = self
+                .tx
+                .send(DashboardEvent::LightingUpdate { devices, groups });
+        }
+    }
+
     /// Apply an outbound command's intended effect to the in-memory light snapshot.
     ///
     /// Subsequent broadcasts (triggered by any device's later LightState report)
@@ -930,6 +964,47 @@ mod tests {
         assert_eq!(samp[0].cpu_pct, 10.0, "oldest first");
         assert_eq!(samp[1].cpu_pct, 20.0);
         assert_eq!(samp[2].cpu_pct, 30.0, "newest last");
+    }
+
+    // ── push_device_discovery ────────────────────────────────────────────────
+
+    #[test]
+    fn push_device_discovery_adds_placeholders() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_device_discovery("n1", vec!["new_bulb".into()], true);
+        let snap = state.get_light_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].device_id, "new_bulb");
+        assert_eq!(snap[0].node_id, "n1");
+        assert!(!snap[0].on);
+    }
+
+    #[test]
+    fn push_device_discovery_skips_existing_devices() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        // Add a real report first
+        state.push_lighting_update(LightStateReport {
+            node_id: "n1".into(),
+            device_id: "known_bulb".into(),
+            on: true,
+            brightness: Some(100),
+            color_xy: None,
+            color_temp: None,
+        });
+        // Discover it again
+        state.push_device_discovery("n1", vec!["known_bulb".into()], true);
+        let snap = state.get_light_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert!(
+            snap[0].on,
+            "Real state should not be overwritten by placeholder"
+        );
     }
 
     // ── push_model_update / get_model_snapshot ───────────────────────────────
