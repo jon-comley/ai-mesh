@@ -2427,6 +2427,7 @@ mod tests {
             brightness: Some(200),
             color_xy: Some((0.3, 0.4)),
             color_temp: None,
+            online: true,
         }
     }
 

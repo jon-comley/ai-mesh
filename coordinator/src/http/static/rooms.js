@@ -289,11 +289,20 @@ function patchDeviceCards() {
     // not yet be populated (e.g. right after coordinator restart).
     const underEffect = card.classList.contains('device-under-effect');
 
-    // Always update on/off badge.
+    // Sync offline / online state.
+    const isOffline = dev.online === false;
+    card.classList.toggle('device-offline', isOffline);
+
+    // Always update on/off badge (clears any stale "Offline" text).
     const badge = card.querySelector('.light-toggle-btn .badge');
     if (badge) {
-      badge.className = `badge ${dev.on ? 'badge-green' : 'badge-muted'}`;
-      badge.textContent = dev.on ? 'On' : 'Off';
+      if (isOffline) {
+        badge.className = 'badge badge-offline';
+        badge.textContent = 'Offline';
+      } else {
+        badge.className = `badge ${dev.on ? 'badge-green' : 'badge-muted'}`;
+        badge.textContent = dev.on ? 'On' : 'Off';
+      }
     }
 
     // Always update colour swatch.
@@ -1171,13 +1180,18 @@ function wireRoomColourPicker(pickerEl, roomId, swatchBtn) {
 
 function buildDeviceCard(dev, roomId) {
   const card = document.createElement('div');
-  card.className = 'light-card room-device-card';
+  const offline = dev.online === false;
+  card.className = 'light-card room-device-card' + (offline ? ' device-offline' : '');
   card.dataset.deviceId = dev.device_id;
 
   const eff = roomEffectsMap.get(roomId);
   const underEffect = eff && !eff.overrides.has(dev.device_id);
   card.innerHTML = deviceCardHtml(dev);
   if (underEffect) card.classList.add('device-under-effect');
+  if (offline) {
+    const badge = card.querySelector('.badge');
+    if (badge) { badge.className = 'badge badge-offline'; badge.textContent = 'Offline'; }
+  }
 
   // Per-bulb effect indicator: shown when a room effect is active.
   if (eff) {

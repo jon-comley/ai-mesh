@@ -157,6 +157,14 @@ pub struct LightStateReport {
     pub brightness: Option<u8>,
     pub color_xy: Option<(f32, f32)>,
     pub color_temp: Option<u16>,
+    /// `false` when the Zigbee device has gone offline (power-cycled or out of range).
+    /// Defaults to `true` so existing serialised messages without this field are treated as online.
+    #[serde(default = "default_true")]
+    pub online: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -718,6 +726,7 @@ mod tests {
             brightness: Some(200),
             color_xy: Some((0.3127, 0.3290)),
             color_temp: None,
+            online: true,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
