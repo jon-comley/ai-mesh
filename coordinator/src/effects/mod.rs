@@ -16,6 +16,7 @@ pub mod candlelight;
 pub mod les;
 pub mod registry;
 pub mod runner;
+pub mod snake;
 pub mod solar;
 pub mod sunrise;
 pub mod sunset;
@@ -257,8 +258,45 @@ pub trait Effect: Send + Sync {
         PreEffectSnapshot { bulbs }
     }
 
-    fn on_handoff(&mut self, _ctx: &EffectCtx) -> Vec<EffectCommand> {
-        vec![]
+    /// Called instead of `tick()` on the very first frame after activation.
+    /// Default: run `tick()` and promote every light action to a 1.5 s transition
+    /// so the room fades smoothly into the new effect even if the previous
+    /// effect's Zigbee backlog has not yet cleared.  Effects may override for a
+    /// custom entry state.
+    fn on_handoff(&mut self, ctx: &EffectCtx) -> Vec<EffectCommand> {
+        self.tick(ctx)
+            .into_iter()
+            .map(|cmd| {
+                let action = match cmd.action {
+                    LightAction::Brightness(v)
+                    | LightAction::BrightnessTransition { value: v, .. } => {
+                        LightAction::BrightnessTransition {
+                            value: v,
+                            transition_secs: 1.5,
+                        }
+                    }
+                    LightAction::ColorTemp(v)
+                    | LightAction::ColorTempTransition { value: v, .. } => {
+                        LightAction::ColorTempTransition {
+                            value: v,
+                            transition_secs: 1.5,
+                        }
+                    }
+                    LightAction::ColorXY { x, y } | LightAction::ColorXYTransition { x, y, .. } => {
+                        LightAction::ColorXYTransition {
+                            x,
+                            y,
+                            transition_secs: 1.5,
+                        }
+                    }
+                    other => other,
+                };
+                EffectCommand {
+                    device_id: cmd.device_id,
+                    action,
+                }
+            })
+            .collect()
     }
 
     fn on_disable(&mut self, _ctx: &EffectCtx, snap: &PreEffectSnapshot) -> Vec<EffectCommand> {

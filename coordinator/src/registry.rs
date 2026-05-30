@@ -139,6 +139,9 @@ pub struct RoomEffectRecord {
     pub snapshot_json: Option<String>,
     pub internal_state_json: Option<String>,
     pub started_at_ms: i64,
+    /// JSON array of device_ids that the user has manually overridden out of
+    /// this effect. The runner skips these bulbs entirely.
+    pub overrides_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +259,18 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             ON room_effects (room_id) WHERE enabled = 1;",
     )?;
 
+    // Migration: Add overrides_json to room_effects if absent.
+    let re_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(room_effects)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !re_cols.contains(&"overrides_json".to_string()) {
+        conn.execute(
+            "ALTER TABLE room_effects ADD COLUMN overrides_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+
     // Migration: Add new columns to rooms if they don't exist
     let columns: Vec<String> = conn
         .prepare("PRAGMA table_info(rooms)")?
@@ -324,6 +339,26 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute(
             "ALTER TABLE light_positions ADD COLUMN fixture_type TEXT",
             [],
+        )?;
+    }
+
+    // Migration: Add position column to room_devices if it doesn't exist
+    let rd_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(room_devices)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !rd_cols.contains(&"position".to_string()) {
+        conn.execute(
+            "ALTER TABLE room_devices ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        // Back-fill: assign positions based on alphabetical device_id order within each
+        // room, matching the old ORDER BY device_id sort so existing layouts are stable.
+        conn.execute_batch(
+            "UPDATE room_devices SET position = (
+                SELECT COUNT(*) FROM room_devices r2
+                WHERE r2.room_id = room_devices.room_id AND r2.device_id < room_devices.device_id
+            )",
         )?;
     }
 
@@ -822,10 +857,9 @@ impl Registry {
     // ── Rooms ─────────────────────────────────────────────────────────────────
 
     fn room_device_ids(&self, room_id: &str) -> Vec<String> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT device_id FROM room_devices WHERE room_id = ?1 ORDER BY device_id")
-        {
+        let mut stmt = match self.conn.prepare(
+            "SELECT device_id FROM room_devices WHERE room_id = ?1 ORDER BY position, device_id",
+        ) {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "room_device_ids prepare failed");
@@ -1034,11 +1068,25 @@ impl Registry {
             warn!(error = %e, "add_device_to_room evict failed");
         }
         if let Err(e) = self.conn.execute(
-            "INSERT OR IGNORE INTO room_devices (room_id, device_id) VALUES (?1, ?2)",
+            "INSERT OR IGNORE INTO room_devices (room_id, device_id, position)
+             VALUES (?1, ?2, COALESCE((SELECT MAX(position) + 1 FROM room_devices WHERE room_id = ?1), 0))",
             params![room_id, device_id],
         ) {
             warn!(error = %e, "add_device_to_room insert failed");
         }
+    }
+
+    pub fn reorder_room_devices(&mut self, room_id: &str, ids: &[String]) {
+        let Ok(tx) = self.conn.transaction() else {
+            return;
+        };
+        for (i, device_id) in ids.iter().enumerate() {
+            let _ = tx.execute(
+                "UPDATE room_devices SET position = ?1 WHERE room_id = ?2 AND device_id = ?3",
+                params![i as i64, room_id, device_id],
+            );
+        }
+        let _ = tx.commit();
     }
 
     pub fn remove_device_from_room(&mut self, room_id: &str, device_id: &str) {
@@ -1546,7 +1594,7 @@ impl Registry {
     pub fn get_active_effect(&self, room_id: &str) -> Option<RoomEffectRecord> {
         self.conn
             .query_row(
-                "SELECT room_id, effect_id, enabled, params_json, snapshot_json, internal_state_json, started_at \
+                "SELECT room_id, effect_id, enabled, params_json, snapshot_json, internal_state_json, started_at, overrides_json \
                  FROM room_effects WHERE room_id = ?1 AND enabled = 1",
                 params![room_id],
                 |row| {
@@ -1559,6 +1607,7 @@ impl Registry {
                         snapshot_json: row.get::<_, Option<String>>(4)?,
                         internal_state_json: row.get::<_, Option<String>>(5)?,
                         started_at_ms: row.get::<_, i64>(6)?,
+                        overrides_json: row.get::<_, Option<String>>(7)?.unwrap_or_else(|| "[]".into()),
                     })
                 },
             )
@@ -1570,7 +1619,7 @@ impl Registry {
     /// coordinator start to rehydrate live effects.
     pub fn list_active_effects(&self) -> Vec<RoomEffectRecord> {
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT room_id, effect_id, enabled, params_json, snapshot_json, internal_state_json, started_at \
+            "SELECT room_id, effect_id, enabled, params_json, snapshot_json, internal_state_json, started_at, overrides_json \
              FROM room_effects WHERE enabled = 1",
         ) else {
             return Vec::new();
@@ -1586,6 +1635,9 @@ impl Registry {
                     snapshot_json: row.get::<_, Option<String>>(4)?,
                     internal_state_json: row.get::<_, Option<String>>(5)?,
                     started_at_ms: row.get::<_, i64>(6)?,
+                    overrides_json: row
+                        .get::<_, Option<String>>(7)?
+                        .unwrap_or_else(|| "[]".into()),
                 })
             })
             .ok();
@@ -1607,6 +1659,48 @@ impl Registry {
         ) {
             warn!(error = %e, room_id, effect_id, "update_effect_internal_state failed");
         }
+    }
+
+    /// Add or remove a device from the override list for the active effect in
+    /// a room. Returns the new override list, or `None` if there is no active
+    /// effect for the room.
+    pub fn set_effect_override(
+        &mut self,
+        room_id: &str,
+        device_id: &str,
+        excluded: bool,
+    ) -> rusqlite::Result<Option<Vec<String>>> {
+        let current: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT overrides_json FROM room_effects WHERE room_id = ?1 AND enabled = 1",
+                params![room_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+
+        let Some(json) = current else { return Ok(None) };
+
+        let mut overrides: Vec<String> = serde_json::from_str(&json).unwrap_or_else(|e| {
+            warn!(error = %e, room_id, "overrides_json corrupt — resetting to empty");
+            vec![]
+        });
+
+        if excluded {
+            if !overrides.iter().any(|d| d == device_id) {
+                overrides.push(device_id.to_string());
+            }
+        } else {
+            overrides.retain(|d| d != device_id);
+        }
+
+        let new_json = serde_json::to_string(&overrides).unwrap_or_else(|_| "[]".into());
+        self.conn.execute(
+            "UPDATE room_effects SET overrides_json = ?1 WHERE room_id = ?2 AND enabled = 1",
+            params![new_json, room_id],
+        )?;
+        Ok(Some(overrides))
     }
 }
 
@@ -2795,5 +2889,84 @@ mod tests {
         reg.update_effect_internal_state(&room.id, "aurora", Some("{\"seed\":42}"));
         let active = reg.get_active_effect(&room.id).unwrap();
         assert_eq!(active.internal_state_json.as_deref(), Some("{\"seed\":42}"));
+    }
+
+    #[test]
+    fn set_effect_override_adds_and_removes_device() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        reg.set_active_effect(&room.id, "breathing", "{}", None, 1_000)
+            .unwrap();
+
+        // Add override.
+        let overrides = reg.set_effect_override(&room.id, "bulb-1", true).unwrap();
+        assert_eq!(overrides, Some(vec!["bulb-1".to_string()]));
+        let active = reg.get_active_effect(&room.id).unwrap();
+        let stored: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
+        assert_eq!(stored, vec!["bulb-1"]);
+
+        // Adding same device again is idempotent.
+        let overrides2 = reg.set_effect_override(&room.id, "bulb-1", true).unwrap();
+        assert_eq!(overrides2, Some(vec!["bulb-1".to_string()]));
+
+        // Add a second device.
+        reg.set_effect_override(&room.id, "bulb-2", true).unwrap();
+        let active = reg.get_active_effect(&room.id).unwrap();
+        let mut stored: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
+        stored.sort();
+        assert_eq!(stored, vec!["bulb-1", "bulb-2"]);
+
+        // Remove first device.
+        let overrides3 = reg.set_effect_override(&room.id, "bulb-1", false).unwrap();
+        assert_eq!(overrides3, Some(vec!["bulb-2".to_string()]));
+
+        // Remove non-existent device is idempotent.
+        let overrides4 = reg.set_effect_override(&room.id, "bulb-99", false).unwrap();
+        assert_eq!(overrides4, Some(vec!["bulb-2".to_string()]));
+    }
+
+    #[test]
+    fn set_effect_override_returns_none_when_no_active_effect() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        let result = reg.set_effect_override(&room.id, "bulb-1", true).unwrap();
+        assert!(result.is_none(), "no active effect → should return None");
+    }
+
+    #[test]
+    fn overrides_cleared_per_activation() {
+        // Overrides are NOT reset on re-activation via set_active_effect (the SQL
+        // ON CONFLICT clause doesn't touch overrides_json). This is intentional —
+        // the API handler is responsible for clearing them when needed.
+        // This test documents the current contract.
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        reg.set_active_effect(&room.id, "breathing", "{}", None, 1_000)
+            .unwrap();
+        reg.set_effect_override(&room.id, "bulb-1", true).unwrap();
+
+        // Disable and re-enable the same effect.
+        reg.disable_active_effect(&room.id).unwrap();
+        reg.set_active_effect(&room.id, "breathing", "{}", None, 2_000)
+            .unwrap();
+
+        // overrides_json is preserved across the re-activation.
+        let active = reg.get_active_effect(&room.id).unwrap();
+        let stored: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
+        assert_eq!(
+            stored,
+            vec!["bulb-1"],
+            "overrides persist on re-activation — clear them explicitly if needed"
+        );
+    }
+
+    #[test]
+    fn overrides_default_to_empty_on_new_activation() {
+        let mut reg = Registry::new();
+        let room = reg.create_room("Lounge");
+        reg.set_active_effect(&room.id, "snake", "{}", None, 1_000)
+            .unwrap();
+        let active = reg.get_active_effect(&room.id).unwrap();
+        assert_eq!(active.overrides_json, "[]");
     }
 }

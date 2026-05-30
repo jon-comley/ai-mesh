@@ -15,6 +15,8 @@
 //! - `intensity` — 0.0–1.0 jitter amplitude (default 0.6). 0 = no flicker;
 //!   1 = the bulb may swing ~50 brightness units around the base.
 //! - `brightness` — base brightness (10–254, default 80).
+//! - `colour_temp` — colour temperature in mireds (153–500, default 500 ≈ 2000 K
+//!   candle amber). Lower values shift toward cooler white.
 
 use shared::messages::LightAction;
 
@@ -74,6 +76,13 @@ impl Effect for CandlelightEffect {
                     "default": 80,
                     "minimum": 10,
                     "maximum": 254
+                },
+                "colour_temp": {
+                    "type": "integer",
+                    "default": 500,
+                    "minimum": 153,
+                    "maximum": 500,
+                    "description": "153 = cool white 6500 K, 500 = candle amber 2000 K"
                 }
             }
         })
@@ -82,7 +91,8 @@ impl Effect for CandlelightEffect {
     fn default_params(&self) -> serde_json::Value {
         serde_json::json!({
             "intensity": 0.6,
-            "brightness": 80
+            "brightness": 80,
+            "colour_temp": 500
         })
     }
 
@@ -127,9 +137,13 @@ impl Effect for CandlelightEffect {
         let period_ms = self.cadence().period_ms().max(1);
         let step = elapsed_ms / period_ms;
 
-        // Warm amber ~2000 K; same colour for every bulb so the flicker reads
-        // as candle-shaped rather than disco-shaped.
-        let warm = mireds_to_xy(500);
+        let ct = ctx
+            .params
+            .get("colour_temp")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(500)
+            .clamp(153, 500) as u16;
+        let warm = mireds_to_xy(ct);
 
         // Maximum jitter swing in brightness units when intensity = 1.0. ±25
         // gives a perceptible flicker without making the bulb feel broken.
@@ -147,13 +161,17 @@ impl Effect for CandlelightEffect {
 
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::Brightness(brightness),
+                action: LightAction::BrightnessTransition {
+                    value: brightness,
+                    transition_secs: 0.15,
+                },
             });
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::ColorXY {
+                action: LightAction::ColorXYTransition {
                     x: warm.x,
                     y: warm.y,
+                    transition_secs: 0.15,
                 },
             });
         }
@@ -330,7 +348,7 @@ mod tests {
             .iter()
             .step_by(2)
             .filter_map(|c| match c.action {
-                LightAction::Brightness(b) => Some(b),
+                LightAction::BrightnessTransition { value: b, .. } => Some(b),
                 _ => None,
             })
             .collect();
@@ -352,7 +370,10 @@ mod tests {
             .unwrap();
         let ctx = make_ctx(&room, &bulbs, &openings, &params, 10_000, 0);
         for cmd in e.tick(&ctx).iter().step_by(2) {
-            assert!(matches!(cmd.action, LightAction::Brightness(80)));
+            assert!(matches!(
+                cmd.action,
+                LightAction::BrightnessTransition { value: 80, .. }
+            ));
         }
     }
 

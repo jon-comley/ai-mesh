@@ -172,6 +172,10 @@ pub fn router(
         .route("/api/rooms/{id}", delete(api::delete_room))
         .route("/api/rooms/{id}/name", patch(api::rename_room))
         .route("/api/rooms/{id}/devices", patch(api::modify_room_devices))
+        .route(
+            "/api/rooms/{id}/devices/reorder",
+            post(api::reorder_room_devices),
+        )
         .route("/api/rooms/{id}/positions", get(api::get_room_positions))
         .route(
             "/api/rooms/{id}/openings",
@@ -185,6 +189,10 @@ pub fn router(
         .route(
             "/api/rooms/{id}/effect",
             post(api::set_room_effect).delete(api::clear_room_effect),
+        )
+        .route(
+            "/api/rooms/{id}/effect/override",
+            patch(api::patch_effect_override),
         )
         .route(
             "/api/rooms/{id}/orientation",
@@ -213,9 +221,13 @@ pub async fn start(
     effects: Arc<EffectRegistry>,
 ) {
     let addr = format!("0.0.0.0:{port}");
-    let listener = TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("failed to bind dashboard HTTP server to {addr}: {e}"));
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("failed to bind dashboard HTTP server to {addr}: {e}");
+            return;
+        }
+    };
     info!("Dashboard available at http://localhost:{port}");
     if let Err(e) = axum::serve(listener, router(dashboard, registry, effects)).await {
         error!("Dashboard HTTP server error: {e}");

@@ -19,9 +19,12 @@ let roomsData = [];
 let devicesMap = new Map();
 let scenesData = [];
 let deviceNamesMap = new Map();
-let dragSrc = null;       // chip drag: { deviceId, fromRoomId }
-let roomDragId = null;    // room reorder drag: room id being dragged
-let effectDragSrc = null; // effect palette drag: effect_id e.g. 'solar'
+let dragSrc = null;             // chip drag: { deviceId, fromRoomId }
+let roomDragId = null;          // room reorder drag: room id being dragged
+let effectDragSrc = null;       // effect palette drag: effect_id e.g. 'solar'
+let effectRemoveRoomId = null;  // effect badge drag: room id whose effect is being dragged off
+let effectDragIsPermanent = false; // true when dragging a ghost (paused) badge → permanent delete
+const lastEffectByRoom = new Map(); // roomId → { effect_id, params } — paused/remembered state
 const openPickerIds = new Set();      // device IDs whose colour picker is currently open
 const activeSceneByRoom = new Map();      // roomId → sceneId of last-recalled scene
 const preSceneStateByRoom = new Map();    // roomId → Map<deviceId, snapshot> before last recall
@@ -40,6 +43,7 @@ const EFFECT_ICONS = {                         // static icon per effect_id; fal
   candlelight: '\u{1F56F}',  // 🕯
   aurora: '\u{1F30C}',       // 🌌
   breathing: '\u{1FAC1}',    // 🫁
+  snake: '\u{1F40D}',        // 🐍
 };
 const DEFAULT_EFFECT_ICON = '✨';          // ✨
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
@@ -116,6 +120,27 @@ document.addEventListener('click', e => {
   }
 });
 
+// ── Effect badge drag-to-remove ───────────────────────────────────────────────
+// Dragging an active-effect badge off the room card removes the effect.
+// The document-level handlers accept the drag everywhere so the user can drop
+// on any empty area. Pressing Escape fires dragend without drop, cancelling.
+document.addEventListener('dragover', e => {
+  if (!effectRemoveRoomId) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+});
+document.addEventListener('drop', e => {
+  if (!effectRemoveRoomId) return;
+  e.preventDefault();
+  const roomId = effectRemoveRoomId;
+  const permanent = effectDragIsPermanent;
+  effectRemoveRoomId = null;
+  effectDragIsPermanent = false;
+  openEffectEditorRoomId = null;
+  if (permanent) removeEffect(roomId);
+  else clearEffect(roomId); // pause — remembers config
+});
+
 // ── Bulb-identify pulse (triggered on drag-grab) ─────────────────────────────
 // Pulses the grabbed bulb full→dim so you know which physical unit you're holding.
 // Restores original state on release.
@@ -190,14 +215,21 @@ async function fetchEffectsCatalog() {
 }
 
 export function handleEffectUpdate(evt) {
-  const { room_id, effect_id, params } = evt;
+  const { room_id, effect_id, params, overrides } = evt;
   if (!room_id) return;
   if (effect_id == null) {
     roomEffectsMap.delete(room_id);
+    // Don't touch lastEffectByRoom — clearEffect already stored it, and we
+    // want the ghost badge to remain until the user explicitly removes it.
   } else {
-    roomEffectsMap.set(room_id, { effect_id, params: params ?? {} });
+    roomEffectsMap.set(room_id, {
+      effect_id,
+      params: params ?? {},
+      overrides: new Set(Array.isArray(overrides) ? overrides : []),
+    });
+    lastEffectByRoom.delete(room_id); // effect is live — no longer paused
   }
-  layout.notifyEffectActive(room_id, effect_id);
+  layout.notifyEffectActive(room_id, effect_id, params ?? {});
   render();
 }
 
@@ -241,7 +273,57 @@ export function notifyDevices(devices) {
   }
   // Skip full re-render while a slider is being dragged to prevent mid-drag jumps
   if (document.querySelector('.slider-active')) return;
-  render();
+  patchDeviceCards();
+}
+
+// Lightweight patch: update on/off badge and colour swatch without touching
+// sliders. For devices under an active effect, sliders stay frozen at their
+// last rendered position — the effect owns them.
+function patchDeviceCards() {
+  for (const [deviceId, dev] of devicesMap) {
+    const card = document.querySelector(`.room-device-card[data-device-id="${CSS.escape(deviceId)}"]`);
+    if (!card) continue;
+
+    // The card has 'device-under-effect' when last rendered under an active
+    // effect. Use the DOM class as the source of truth — roomEffectsMap may
+    // not yet be populated (e.g. right after coordinator restart).
+    const underEffect = card.classList.contains('device-under-effect');
+
+    // Always update on/off badge.
+    const badge = card.querySelector('.light-toggle-btn .badge');
+    if (badge) {
+      badge.className = `badge ${dev.on ? 'badge-green' : 'badge-muted'}`;
+      badge.textContent = dev.on ? 'On' : 'Off';
+    }
+
+    // Always update colour swatch.
+    if (dev.color_xy) {
+      const [x, y] = dev.color_xy;
+      const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
+      const swatchBtn = card.querySelector('[data-ctrl="colour-toggle"]');
+      if (swatchBtn) swatchBtn.style.background = `rgb(${r},${g},${b})`;
+    }
+
+    // Only update sliders when the device is NOT under an active effect.
+    if (!underEffect) {
+      const bri = card.querySelector('[data-ctrl="brightness"]');
+      if (bri && !bri.classList.contains('slider-active') && document.activeElement !== bri) {
+        bri.value = dev.brightness ?? 200;
+        const pct = Math.round(((dev.brightness ?? 200) / 255) * 100);
+        bri.title = `${pct}%`;
+        const label = bri.parentElement?.querySelector('.light-detail-value');
+        if (label) label.textContent = `${pct}%`;
+      }
+      const ct = card.querySelector('[data-ctrl="color_temp"]');
+      if (ct && !ct.classList.contains('slider-active') && document.activeElement !== ct) {
+        ct.value = dev.color_temp ?? 300;
+        const kelvin = Math.round(1_000_000 / (dev.color_temp ?? 300));
+        ct.title = `${kelvin} K`;
+        const label = ct.parentElement?.querySelector('.light-detail-value');
+        if (label) label.textContent = `${kelvin} K`;
+      }
+    }
+  }
 }
 
 export function notifySolar(azimuth, elevation) {
@@ -360,20 +442,60 @@ function buildEffectBadge(room, activeEffect) {
   const badge = document.createElement('span');
   badge.className = 'badge badge-effect';
   badge.dataset.effect = activeEffect.effect_id;
+  badge.setAttribute('draggable', 'true');
   const icon = EFFECT_ICONS[activeEffect.effect_id] || DEFAULT_EFFECT_ICON;
   const name = meta?.display_name || activeEffect.effect_id;
   badge.textContent = `${icon} ${name}`;
-  badge.style.cursor = 'pointer';
-  badge.title = `${name} active — click for options`;
+  badge.style.cursor = 'grab';
+  badge.title = `${name} active — click for options, drag off to remove`;
   badge.addEventListener('click', e => {
     e.stopPropagation();
     openEffectEditorRoomId = openEffectEditorRoomId === room.id ? null : room.id;
     render();
   });
-  // Long-press / right-click → quick disable.
-  badge.addEventListener('contextmenu', e => {
-    e.preventDefault();
-    clearEffect(room.id);
+  badge.addEventListener('dragstart', e => {
+    e.stopPropagation();
+    effectRemoveRoomId = room.id;
+    effectDragIsPermanent = false; // drag active badge = pause
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', `effect-remove:${room.id}`);
+    requestAnimationFrame(() => badge.classList.add('dragging'));
+  });
+  badge.addEventListener('dragend', () => {
+    effectRemoveRoomId = null;
+    effectDragIsPermanent = false;
+    badge.classList.remove('dragging');
+  });
+  return badge;
+}
+
+function buildEffectGhostBadge(room, last) {
+  const meta = effectsById.get(last.effect_id);
+  const badge = document.createElement('span');
+  badge.className = 'badge badge-effect badge-effect-paused';
+  badge.setAttribute('draggable', 'true');
+  const icon = EFFECT_ICONS[last.effect_id] || DEFAULT_EFFECT_ICON;
+  const name = meta?.display_name || last.effect_id;
+  badge.textContent = `${icon} ${name}`;
+  badge.style.cursor = 'pointer';
+  badge.title = `${name} paused — click to resume, drag off to remove`;
+  badge.addEventListener('click', e => {
+    e.stopPropagation();
+    activateEffect(room.id, last.effect_id, last.params);
+    openEffectEditorRoomId = room.id;
+  });
+  badge.addEventListener('dragstart', e => {
+    e.stopPropagation();
+    effectRemoveRoomId = room.id;
+    effectDragIsPermanent = true; // drag ghost badge = permanent remove
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', `effect-remove:${room.id}`);
+    requestAnimationFrame(() => badge.classList.add('dragging'));
+  });
+  badge.addEventListener('dragend', () => {
+    effectRemoveRoomId = null;
+    effectDragIsPermanent = false;
+    badge.classList.remove('dragging');
   });
   return badge;
 }
@@ -427,6 +549,22 @@ function buildEffectEditor(room, activeEffect) {
     }
     wrap.appendChild(form);
 
+    const btnRow = document.createElement('div');
+    btnRow.className = 'effect-editor-btn-row';
+
+    const defaultsBtn = document.createElement('button');
+    defaultsBtn.className = 'effect-editor-defaults';
+    defaultsBtn.textContent = 'Defaults';
+    defaultsBtn.title = 'Reset all params to their default values';
+    defaultsBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      const defaults = meta?.default_params ?? {};
+      const entry = roomEffectsMap.get(room.id);
+      if (entry) entry.params = { ...defaults };
+      render();
+    });
+    btnRow.appendChild(defaultsBtn);
+
     const apply = document.createElement('button');
     apply.className = 'effect-editor-apply';
     apply.textContent = 'Apply';
@@ -436,18 +574,19 @@ function buildEffectEditor(room, activeEffect) {
       openEffectEditorRoomId = null;
       render();
     });
-    wrap.appendChild(apply);
+    btnRow.appendChild(apply);
+    wrap.appendChild(btnRow);
   }
 
-  const disable = document.createElement('button');
-  disable.className = 'effect-editor-disable';
-  disable.textContent = 'Disable effect';
-  disable.addEventListener('click', e => {
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'effect-editor-disable';
+  removeBtn.textContent = 'Remove effect';
+  removeBtn.title = 'Permanently remove this effect from the room';
+  removeBtn.addEventListener('click', e => {
     e.stopPropagation();
-    openEffectEditorRoomId = null;
-    clearEffect(room.id);
+    removeEffect(room.id);
   });
-  wrap.appendChild(disable);
+  wrap.appendChild(removeBtn);
   return wrap;
 }
 
@@ -456,6 +595,12 @@ function schemaProperties(schema) {
   const props = schema.properties;
   if (!props || typeof props !== 'object') return [];
   return Object.entries(props);
+}
+
+function formatSliderValue(v, type) {
+  if (type === 'integer') return String(Math.round(v));
+  const n = parseFloat(v);
+  return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.?0+$/, '');
 }
 
 function buildSchemaField(key, spec, paramsObj, onChange) {
@@ -472,19 +617,25 @@ function buildSchemaField(key, spec, paramsObj, onChange) {
   if (spec.type === 'integer' || spec.type === 'number') {
     const input = document.createElement('input');
     input.type = 'range';
-    if (spec.min != null) input.min = spec.min;
-    if (spec.max != null) input.max = spec.max;
-    input.step = spec.type === 'integer' ? 1 : 'any';
-    input.value = current ?? spec.min ?? 0;
+    // JSON Schema uses `minimum`/`maximum`; tolerate legacy `min`/`max` too.
+    const lo = spec.minimum ?? spec.min;
+    const hi = spec.maximum ?? spec.max;
+    if (lo != null) input.min = lo;
+    if (hi != null) input.max = hi;
+    input.step = spec.type === 'integer' ? 1 : 0.01;
+    input.value = current ?? spec.default ?? lo ?? 0;
     const valueEl = document.createElement('span');
     valueEl.className = 'effect-editor-value';
-    valueEl.textContent = input.value;
+    valueEl.textContent = formatSliderValue(input.value, spec.type);
     input.addEventListener('input', () => {
-      valueEl.textContent = input.value;
-      paramsObj[key] = spec.type === 'integer' ? parseInt(input.value, 10) : parseFloat(input.value);
+      const v = spec.type === 'integer' ? parseInt(input.value, 10) : parseFloat(input.value);
+      valueEl.textContent = formatSliderValue(v, spec.type);
+      paramsObj[key] = v;
       onChange();
     });
-    lockSliderToThumb(input);
+    // No lockSliderToThumb here — the effect editor is a focused popup where
+    // click-anywhere-on-track is expected, unlike device card sliders on a
+    // draggable card.
     row.appendChild(input);
     row.appendChild(valueEl);
     paramsObj[key] = paramsObj[key] ?? (spec.type === 'integer' ? parseInt(input.value, 10) : parseFloat(input.value));
@@ -718,13 +869,20 @@ function renderRoomCard(room) {
   layoutBtn.className = 'room-action-btn room-layout-btn';
   layoutBtn.title = 'Open floor plan';
   layoutBtn.textContent = '⊞';
-  layoutBtn.addEventListener('click', e => { e.stopPropagation(); layout.openLayout(room); });
+  layoutBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    const eff = roomEffectsMap.get(room.id);
+    if (eff) layout.notifyEffectActive(room.id, eff.effect_id, eff.params ?? {});
+    layout.openLayout(room);
+  });
   ctrlRow.appendChild(layoutBtn);
 
   const actions = document.createElement('div');
   actions.className = 'room-actions';
   if (activeEffect) {
     actions.appendChild(buildEffectBadge(room, activeEffect));
+  } else if (lastEffectByRoom.has(room.id)) {
+    actions.appendChild(buildEffectGhostBadge(room, lastEffectByRoom.get(room.id)));
   }
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'room-action-btn room-action-delete';
@@ -807,6 +965,7 @@ function renderRoomCard(room) {
   }
   body.appendChild(devicesEl);
   wireDropZone(body, room.id);
+  wireDeviceReorder(devicesEl, room.id);
 
   // Scenes section (full list with save button)
   body.appendChild(buildScenesSection(room.id));
@@ -1014,7 +1173,28 @@ function buildDeviceCard(dev, roomId) {
   const card = document.createElement('div');
   card.className = 'light-card room-device-card';
   card.dataset.deviceId = dev.device_id;
+
+  const eff = roomEffectsMap.get(roomId);
+  const underEffect = eff && !eff.overrides.has(dev.device_id);
   card.innerHTML = deviceCardHtml(dev);
+  if (underEffect) card.classList.add('device-under-effect');
+
+  // Per-bulb effect indicator: shown when a room effect is active.
+  if (eff) {
+    const overridden = eff.overrides.has(dev.device_id);
+    const icon = EFFECT_ICONS[eff.effect_id] || DEFAULT_EFFECT_ICON;
+    const btn = document.createElement('button');
+    btn.className = 'device-effect-btn' + (overridden ? ' device-effect-overridden' : '');
+    btn.title = overridden ? 'Excluded from effect — click to re-include' : 'In effect';
+    btn.textContent = icon;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (overridden) includeInEffect(roomId, dev.device_id);
+      else excludeFromEffect(roomId, dev.device_id);
+    });
+    card.querySelector('.light-card-header-right')?.prepend(btn);
+  }
+
   return card;
 }
 
@@ -1162,8 +1342,37 @@ function wireDeviceDrag(card, deviceId, roomId) {
 }
 
 function wireDeviceControls(card, dev, roomId) {
+  // Targeted exclusion on first manual control — avoids a full render() mid-
+  // interaction (which would destroy the slider element the user is touching).
+  // We keep device-under-effect on the card so patchDeviceCards continues to
+  // freeze the slider until the server-side runner stops ticking the device
+  // (~one rehydrate cycle, < 200 ms). The WS EffectUpdate that arrives after
+  // the PATCH triggers render() which fully settles the card.
+  const maybeExclude = () => {
+    const eff = roomEffectsMap.get(roomId);
+    if (!eff || eff.overrides.has(dev.device_id)) return;
+    eff.overrides.add(dev.device_id);
+    // Grey the effect button in-place — no render().
+    const btn = card.querySelector('.device-effect-btn');
+    if (btn) {
+      btn.classList.add('device-effect-overridden');
+      btn.title = 'Excluded from effect — click to re-include';
+    }
+    // Fire PATCH; the WS EffectUpdate callback will call render() on success.
+    fetch(
+      `/api/rooms/${encodeURIComponent(roomId)}/effect/override?token=${encodeURIComponent(tok())}`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: dev.device_id, excluded: true }) },
+    ).catch(e => {
+      eff.overrides.delete(dev.device_id);
+      if (btn) { btn.classList.remove('device-effect-overridden'); btn.title = 'In effect'; }
+      showToast(`Override error: ${e.message}`, true);
+    });
+  };
+
   card.querySelector('[data-ctrl="toggle"]')?.addEventListener('click', e => {
     e.stopPropagation();
+    maybeExclude();
     devicesMap.set(dev.device_id, { ...dev, on: !dev.on });
     render();
     sendDeviceCommand(dev.device_id, { action: 'toggle' });
@@ -1190,6 +1399,7 @@ function wireDeviceControls(card, dev, roomId) {
     });
     bri.addEventListener('change', () => {
       bri.classList.remove('slider-active');
+      maybeExclude();
       const val = parseInt(bri.value, 10);
       const cur = devicesMap.get(dev.device_id) ?? dev;
       devicesMap.set(dev.device_id, { ...cur, brightness: val });
@@ -1210,6 +1420,7 @@ function wireDeviceControls(card, dev, roomId) {
     });
     ct.addEventListener('change', () => {
       ct.classList.remove('slider-active');
+      maybeExclude();
       const val = parseInt(ct.value, 10);
       const cur = devicesMap.get(dev.device_id) ?? dev;
       devicesMap.set(dev.device_id, { ...cur, color_temp: val });
@@ -1242,6 +1453,7 @@ function wireDeviceControls(card, dev, roomId) {
 
   function sendColour() {
     if (!hue || !sat) return;
+    maybeExclude();
     const { x, y } = hslToXy(parseInt(hue.value), parseInt(sat.value));
     devicesMap.set(dev.device_id, { ...dev, color_xy: [x, y] });
     sendDeviceCommand(dev.device_id, { action: 'color_xy', x, y });
@@ -1250,6 +1462,57 @@ function wireDeviceControls(card, dev, roomId) {
   if (hue) { lockSliderToThumb(hue); hue.addEventListener('input', syncColourUI); hue.addEventListener('change', sendColour); }
   if (sat) { lockSliderToThumb(sat); sat.addEventListener('input', syncColourUI); sat.addEventListener('change', sendColour); }
   if (hue || sat) syncColourUI();
+
+  // ── CT / Colour mode toggle ───────────────────────────────────────────────
+  // Show a [Temp | Colour] toggle when the device supports both. Defaults to
+  // Temp (colour-temperature) mode; preference is persisted per device.
+  const ctRow     = card.querySelector('[data-ctrl="color_temp"]')?.closest('.light-detail-row');
+  const pickerEl  = card.querySelector('[data-ctrl="colour-picker"]');
+  const swatchBtn = card.querySelector('[data-ctrl="colour-toggle"]');
+  if (ctRow && pickerEl) {
+    const modeKey = `mesh-mode-${dev.device_id}`;
+    let mode = localStorage.getItem(modeKey) ?? 'temp';
+
+    const toggle = document.createElement('div');
+    toggle.className = 'light-mode-toggle';
+
+    const mkModeBtn = (label, m) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'light-mode-btn';
+      btn.textContent = label;
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        mode = m;
+        localStorage.setItem(modeKey, mode);
+        applyMode();
+      });
+      return btn;
+    };
+    const tempBtn   = mkModeBtn('Temp',   'temp');
+    const colourBtn = mkModeBtn('Colour', 'colour');
+    toggle.appendChild(tempBtn);
+    toggle.appendChild(colourBtn);
+
+    const applyMode = () => {
+      const isTemp = mode === 'temp';
+      tempBtn.classList.toggle('active',   isTemp);
+      colourBtn.classList.toggle('active', !isTemp);
+      ctRow.style.display = isTemp ? '' : 'none';
+      if (swatchBtn) swatchBtn.style.display = isTemp ? 'none' : '';
+      if (isTemp) {
+        pickerEl.classList.remove('open');
+        openPickerIds.delete(dev.device_id);
+      } else {
+        pickerEl.classList.add('open');
+        openPickerIds.add(dev.device_id);
+      }
+    };
+    applyMode(); // apply stored preference immediately
+
+    const detailsEl = card.querySelector('.light-card-details');
+    if (detailsEl) detailsEl.insertBefore(toggle, ctRow);
+  }
 }
 
 // ── Chip (unassigned strip only) ─────────────────────────────────────────────
@@ -1303,6 +1566,47 @@ function renderChip(deviceId, fromRoomId, showRemove) {
   });
 
   return chip;
+}
+
+// ── Device reorder within a room ─────────────────────────────────────────────
+// Drag any device card vertically to change its display order.  Same-room drops
+// are ignored by wireDropZone (fromRoomId === roomId guard), so this handler
+// owns them instead.
+
+function wireDeviceReorder(devicesEl, roomId) {
+  let reordering = false;
+
+  // Capture phase fires before wireDeviceDrag's stopPropagation on dragstart.
+  devicesEl.addEventListener('dragstart', e => {
+    if (e.target.closest('.room-device-card[data-device-id]')) reordering = true;
+  }, { capture: true });
+
+  devicesEl.addEventListener('dragover', e => {
+    if (!reordering) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const dragging = devicesEl.querySelector('.room-device-card.dragging');
+    if (!dragging) return;
+    const others = [...devicesEl.querySelectorAll('.room-device-card:not(.dragging)')];
+    const after = others.reduce((closest, child) => {
+      const box = child.getBoundingClientRect();
+      const offset = e.clientY - box.top - box.height / 2;
+      if (offset < 0 && offset > closest.offset) return { offset, element: child };
+      return closest;
+    }, { offset: Number.NEGATIVE_INFINITY }).element;
+    if (after == null) devicesEl.appendChild(dragging);
+    else devicesEl.insertBefore(dragging, after);
+  });
+
+  // Bubble phase: fires after wireDeviceDrag's dragend clears dragSrc,
+  // so we use our own `reordering` flag.
+  devicesEl.addEventListener('dragend', () => {
+    if (!reordering) return;
+    reordering = false;
+    const ids = [...devicesEl.querySelectorAll('.room-device-card[data-device-id]')]
+      .map(c => c.dataset.deviceId).filter(Boolean);
+    if (ids.length > 0) reorderRoomDevices(roomId, ids);
+  });
 }
 
 // ── Drop zones (chip → room assignment) ──────────────────────────────────────
@@ -1498,6 +1802,16 @@ async function reorderScenes(ids) {
   } catch (e) { showToast(`Scene reorder error: ${e.message}`, true); }
 }
 
+async function reorderRoomDevices(roomId, ids) {
+  try {
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/devices/reorder?token=${encodeURIComponent(tok())}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) showToast(`Device reorder failed (${res.status})`, true);
+  } catch (e) { showToast(`Device reorder error: ${e.message}`, true); }
+}
+
 async function reorderRooms(ids) {
   try {
     const res = await fetch(`/api/rooms/reorder?token=${encodeURIComponent(tok())}`, {
@@ -1508,13 +1822,41 @@ async function reorderRooms(ids) {
   } catch (e) { showToast(`Reorder error: ${e.message}`, true); }
 }
 
+// ── Per-bulb effect overrides ─────────────────────────────────────────────────
+
+async function setEffectOverride(roomId, deviceId, excluded) {
+  const eff = roomEffectsMap.get(roomId);
+  if (!eff) return;
+  // Optimistic update.
+  if (excluded) eff.overrides.add(deviceId); else eff.overrides.delete(deviceId);
+  render();
+  try {
+    const res = await fetch(
+      `/api/rooms/${encodeURIComponent(roomId)}/effect/override?token=${encodeURIComponent(tok())}`,
+      { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: deviceId, excluded }) },
+    );
+    if (!res.ok) throw new Error(`${res.status}`);
+  } catch (e) {
+    // Roll back the optimistic change.
+    if (excluded) eff.overrides.delete(deviceId); else eff.overrides.add(deviceId);
+    render();
+    showToast(`Override error: ${e.message}`, true);
+  }
+}
+
+function excludeFromEffect(roomId, deviceId) { return setEffectOverride(roomId, deviceId, true);  }
+function includeInEffect(roomId, deviceId)  { return setEffectOverride(roomId, deviceId, false); }
+
 async function activateEffect(roomId, effectId, params = null) {
   const room = roomsData.find(r => r.id === roomId);
   if (!room) return;
 
+  lastEffectByRoom.delete(roomId); // resuming or fresh activation — clear paused state
+
   // Optimistic UI: stamp the active effect into the local map so the badge
   // appears immediately. The WS EffectUpdate that follows confirms it.
-  roomEffectsMap.set(roomId, { effect_id: effectId, params: params ?? {} });
+  roomEffectsMap.set(roomId, { effect_id: effectId, params: params ?? {}, overrides: new Set() });
   render();
 
   try {
@@ -1533,7 +1875,10 @@ async function activateEffect(roomId, effectId, params = null) {
 }
 
 async function clearEffect(roomId) {
-  // Optimistic
+  // Remember the current effect so it can be resumed via the ghost badge.
+  const eff = roomEffectsMap.get(roomId);
+  if (eff) lastEffectByRoom.set(roomId, { effect_id: eff.effect_id, params: { ...eff.params } });
+
   roomEffectsMap.delete(roomId);
   render();
 
@@ -1543,6 +1888,19 @@ async function clearEffect(roomId) {
     });
     if (!res.ok) showToast(`Effect disable failed (${res.status})`, true);
   } catch (e) { showToast(`Effect disable error: ${e.message}`, true); }
+}
+
+async function removeEffect(roomId) {
+  lastEffectByRoom.delete(roomId);
+  roomEffectsMap.delete(roomId);
+  openEffectEditorRoomId = null;
+  render();
+  try {
+    const res = await fetch(`/api/rooms/${roomId}/effect?token=${encodeURIComponent(tok())}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) showToast(`Effect remove failed (${res.status})`, true);
+  } catch (e) { showToast(`Effect remove error: ${e.message}`, true); }
 }
 
 async function sendRoomCommand(roomId, body, room) {
@@ -1602,8 +1960,10 @@ async function recallScene(id) {
   const scene = scenesData.find(s => s.id === id);
   const roomId = scene?.room_id;
 
-  // Toggle: clicking the active scene reverts to pre-scene state
+  // Toggle: clicking the active scene reverts to pre-scene state.
   if (roomId && activeSceneByRoom.get(roomId) === id) {
+    // Cancel any effect that may have been re-enabled since the scene was recalled.
+    if (roomEffectsMap.has(roomId)) await clearEffect(roomId);
     const preState = preSceneStateByRoom.get(roomId);
     activeSceneByRoom.delete(roomId);
     preSceneStateByRoom.delete(roomId);
@@ -1614,7 +1974,6 @@ async function recallScene(id) {
         const snap = preState.get(deviceId);
         if (!snap) continue;
         if (!snap.on) { sendDeviceCommand(deviceId, { action: 'off' }); continue; }
-        // brightness transition implicitly turns the bulb on — no separate 'on' needed
         if (snap.brightness != null)
           sendDeviceCommand(deviceId, { action: 'brightness', value: snap.brightness, transition_secs: 0.8 });
         else
@@ -1628,7 +1987,8 @@ async function recallScene(id) {
     return;
   }
 
-  // Snapshot current device state before recalling
+  // Snapshot BEFORE cancelling the effect so we capture the true pre-effect
+  // light state, not the effect's last output which is still in devicesMap.
   if (roomId) {
     const room = roomsData.find(r => r.id === roomId);
     const snap = new Map();
@@ -1637,6 +1997,13 @@ async function recallScene(id) {
       if (dev) snap.set(deviceId, { on: dev.on, brightness: dev.brightness ?? null, color_xy: dev.color_xy ?? null, color_temp: dev.color_temp ?? null });
     }
     preSceneStateByRoom.set(roomId, snap);
+  }
+
+  // Cancel any running effect — do this after the snapshot so the snapshot
+  // reflects actual light state, not a post-cancel transition.
+  if (roomId && roomEffectsMap.has(roomId)) {
+    openEffectEditorRoomId = null; // close stale editor so stale params can't be re-applied
+    await clearEffect(roomId);
   }
 
   try {
