@@ -18,6 +18,11 @@ pub enum ZigbeeEvent {
     DeviceListUpdated(Vec<String>),
     /// Fires once after `bridge/groups` is parsed — full list of group friendly names.
     GroupListUpdated(Vec<String>),
+    /// Fires when `zigbee2mqtt/<device>/availability` changes.
+    DeviceAvailability {
+        device_id: String,
+        online: bool,
+    },
     ConnectionLost,
     ConnectionRestored,
 }
@@ -155,8 +160,31 @@ impl ZigbeeClient {
                                     }
                                 }
                             }
+                        } else if topic.ends_with("/availability") {
+                            // Parse `zigbee2mqtt/<device>/availability`.
+                            // Z2M publishes either `"online"`/`"offline"` (plain string) or
+                            // `{"state":"online"}` / `{"state":"offline"}` (JSON object).
+                            let device_id = topic
+                                .strip_prefix("zigbee2mqtt/")
+                                .and_then(|s| s.strip_suffix("/availability"))
+                                .unwrap_or("")
+                                .to_owned();
+                            if !device_id.is_empty() && device_id != "bridge" {
+                                let raw = std::str::from_utf8(p.payload.as_ref()).unwrap_or("");
+                                let online = if raw.trim() == "online" {
+                                    true
+                                } else if raw.trim() == "offline" {
+                                    false
+                                } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw)
+                                {
+                                    v.get("state").and_then(|s| s.as_str()) == Some("online")
+                                } else {
+                                    continue;
+                                };
+                                let _ = tx_loop
+                                    .send(ZigbeeEvent::DeviceAvailability { device_id, online });
+                            }
                         }
-                        // availability messages are received but not yet forwarded
                     }
                     Err(e) => {
                         warn!("zigbee: event loop error: {e}");
@@ -268,6 +296,7 @@ fn parse_state_report(topic: &str, payload: &[u8], node_id: &str) -> Option<Ligh
         brightness,
         color_xy,
         color_temp,
+        online: true,
     })
 }
 

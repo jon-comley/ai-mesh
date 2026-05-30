@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use capability_core::{Capability, ToolSchema};
 use capability_zigbee::{ZigbeeClient, ZigbeeError, ZigbeeEvent};
-use shared::{LightDeviceListReport, MeshMessage, SceneLoadedReport};
+use shared::{
+    LightAction, LightDeviceListReport, LightStateReport, LightTarget, MeshMessage,
+    SceneLoadedReport,
+};
 use tokio::sync::{OnceCell, mpsc::Sender};
 use tracing::{info, warn};
 
@@ -89,12 +92,60 @@ impl Capability for LightingCapability {
             let kd = Arc::clone(&known_devices);
             let kg = Arc::clone(&known_groups);
             let ctx = Arc::clone(&self.coordinator_tx);
+            // Clone the client Arc so the background task can send commands
+            // directly (e.g. warm-white restore on device power-on) without
+            // going back through the coordinator round-trip.
+            let client_bg = Arc::clone(&client);
 
             tokio::spawn(async move {
                 loop {
                     match events.recv().await {
                         Ok(ZigbeeEvent::StateChanged(report)) => {
                             let _ = Self::send_via_ctx(&ctx, MeshMessage::LightState(report)).await;
+                        }
+                        Ok(ZigbeeEvent::DeviceAvailability { device_id, online }) => {
+                            if online {
+                                // Bulb just powered on — restore to warm white (2700 K).
+                                // Any active room effect will override this within its next tick.
+                                let target = LightTarget::Device(device_id.clone());
+                                let _ = client_bg.send_command(&target, &LightAction::On).await;
+                                let _ = client_bg
+                                    .send_command(
+                                        &target,
+                                        &LightAction::ColorTempTransition {
+                                            value: 370,
+                                            transition_secs: 1.0,
+                                        },
+                                    )
+                                    .await;
+                                let _ = client_bg
+                                    .send_command(
+                                        &target,
+                                        &LightAction::BrightnessTransition {
+                                            value: 200,
+                                            transition_secs: 1.0,
+                                        },
+                                    )
+                                    .await;
+                            }
+                            if !online {
+                                // Notify the coordinator so the dashboard card shows the
+                                // offline state. We only send for offline — when the device
+                                // comes back online the warm-white commands trigger a real
+                                // state report via the normal Zigbee → MQTT → state path,
+                                // which overwrites this record without any null-field clobbering.
+                                let report = LightStateReport {
+                                    node_id: node_id.clone(),
+                                    device_id,
+                                    on: false,
+                                    online: false,
+                                    brightness: None,
+                                    color_xy: None,
+                                    color_temp: None,
+                                };
+                                let _ =
+                                    Self::send_via_ctx(&ctx, MeshMessage::LightState(report)).await;
+                            }
                         }
                         Ok(ZigbeeEvent::DeviceListUpdated(names)) => {
                             info!(

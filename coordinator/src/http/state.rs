@@ -261,10 +261,28 @@ impl DashboardState {
     }
 
     /// Store the latest state for one device and broadcast a LightingUpdate with all devices + groups.
+    ///
+    /// Availability-only reports (online=false, all payload fields null) only flip the `online`
+    /// flag on the existing record to avoid clobbering brightness/colour with nulls.
     pub fn push_lighting_update(&self, report: LightStateReport) {
         let devices = {
             let mut snap = self.light_snapshot.lock().unwrap();
-            snap.insert(report.device_id.clone(), report);
+            let availability_only = !report.online
+                && report.brightness.is_none()
+                && report.color_xy.is_none()
+                && report.color_temp.is_none();
+            if availability_only {
+                if let Some(existing) = snap.get_mut(&report.device_id) {
+                    // Only flip `online`; leave `on`, brightness, and colour
+                    // untouched so the card retains its last known state while
+                    // the device is unreachable.
+                    existing.online = false;
+                } else {
+                    snap.insert(report.device_id.clone(), report);
+                }
+            } else {
+                snap.insert(report.device_id.clone(), report);
+            }
             snap.values().cloned().collect::<Vec<_>>()
         };
         if self.tx.receiver_count() > 0 {
@@ -288,12 +306,11 @@ impl DashboardState {
                         LightStateReport {
                             node_id: node_id.to_owned(),
                             device_id: id,
-                            on: false, // Default to off as a fallback visibility state
-                            // Placeholder values for UI sliders - not used for commands.
-                            // 254 = 100% brightness, 370 = 2700K (neutral warm white).
+                            on: false,
                             brightness: Some(254),
                             color_xy: None,
                             color_temp: Some(370),
+                            online: true,
                         },
                     );
                     updated = true;
@@ -1001,6 +1018,7 @@ mod tests {
             brightness: Some(100),
             color_xy: None,
             color_temp: None,
+            online: true,
         });
         // Discover it again
         state.push_device_discovery("n1", vec!["known_bulb".into()], true);
@@ -1134,6 +1152,7 @@ mod tests {
             brightness: Some(200),
             color_xy: None,
             color_temp: Some(370),
+            online: true,
         }
     }
 
@@ -1217,6 +1236,7 @@ mod tests {
                 brightness: Some(200),
                 color_xy: Some((0.3, 0.3)),
                 color_temp: Some(370),
+                online: true,
             }],
             groups: vec!["all".into()],
         };

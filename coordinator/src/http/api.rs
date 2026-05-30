@@ -812,6 +812,7 @@ pub async fn recall_scene(
             brightness: snap.brightness,
             color_xy: snap.color_xy,
             color_temp: snap.color_temp,
+            online: true,
         });
     }
     if any_unavailable {
@@ -1613,6 +1614,7 @@ mod tests {
             brightness: Some(200),
             color_xy: None,
             color_temp: Some(370),
+            online: true,
         });
     }
 
