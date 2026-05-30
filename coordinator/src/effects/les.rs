@@ -69,6 +69,15 @@ impl RoomLes {
         self.rooms.remove(room_id);
     }
 
+    /// Drop the LES entry for one device in one room.  Used to force the dedup
+    /// gate open after the device's colour mode diverged from what the runner
+    /// last commanded (e.g. warm-white restore after a mains power cycle).
+    pub fn clear_device(&mut self, room_id: &str, device_id: &str) {
+        if let Some(room_les) = self.rooms.get_mut(room_id) {
+            room_les.remove(device_id);
+        }
+    }
+
     pub fn devices(&self, room_id: &str) -> Option<&DeviceLes> {
         self.rooms.get(room_id)
     }

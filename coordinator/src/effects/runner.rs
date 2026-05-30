@@ -461,6 +461,55 @@ impl EffectRunner {
         commands: Vec<super::EffectCommand>,
     ) {
         let mut state = self.state.lock().unwrap();
+
+        // Stale LES detection: the warm-white restore after a mains power cycle
+        // runs via the lighting capability and bypasses the runner, so the LES
+        // records the pre-power-cycle colour state while the bulb is now at
+        // warm white (CT 370).  This would cause the dedup gate to drop the
+        // effect's next commands indefinitely.  We detect three divergence cases:
+        //
+        //   1. LES = XY,  actual = CT  — XY effects (aurora, candlelight, …)
+        //   2. LES = CT(X), actual = CT(Y) where |X−Y| > threshold — CT effects
+        //      (solar, sunrise, sunset) restored to warm-white CT
+        //   3. LES = CT,  actual = XY — less common, handled symmetrically
+        //
+        // Clearing the entry forces the dedup gate open for the next tick so
+        // the effect can reclaim the bulb.
+        for bulb in bulbs {
+            if let Some(les) = state.les.get(room_id, &bulb.device_id).copied() {
+                let stale = match les.color {
+                    ColorState::Xy { .. } => {
+                        // XY effect, but bulb is now in CT mode.
+                        bulb.current.color_temp.is_some() && bulb.current.color_xy.is_none()
+                    }
+                    ColorState::Ct(les_ct) => {
+                        match (bulb.current.color_temp, bulb.current.color_xy) {
+                            // CT effect, bulb CT diverged (warm-white changed it).
+                            (Some(actual_ct), None) => {
+                                (les_ct as i32 - actual_ct as i32).unsigned_abs()
+                                    > CT_DELTA_MIREDS as u32
+                            }
+                            // CT effect, but bulb switched to XY.
+                            (_, Some(_)) => true,
+                            _ => false,
+                        }
+                    }
+                    ColorState::None => false,
+                };
+                if stale {
+                    debug!(
+                        device = %bulb.device_id,
+                        room   = %room_id,
+                        les_color = ?les.color,
+                        actual_ct = ?bulb.current.color_temp,
+                        actual_xy = ?bulb.current.color_xy,
+                        "stale LES vs actual device state — clearing to unblock effect"
+                    );
+                    state.les.clear_device(room_id, &bulb.device_id);
+                }
+            }
+        }
+
         for cmd in commands {
             let les_entry = state.les.get(room_id, &cmd.device_id).copied();
             if !should_dispatch(&les_entry, &cmd.action) {
