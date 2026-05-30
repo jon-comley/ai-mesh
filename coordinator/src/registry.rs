@@ -773,6 +773,12 @@ impl Registry {
         (devices.into_iter().collect(), groups.into_iter().collect())
     }
 
+    pub fn get_all_light_devices(
+        &self,
+    ) -> impl Iterator<Item = (&String, &(Vec<String>, Vec<String>))> {
+        self.light_devices.iter()
+    }
+
     pub fn get_node_full(&self, id: &str) -> Option<NodeRecordFull> {
         let now = SystemTime::now();
         let rec = self.nodes.get(id)?;
