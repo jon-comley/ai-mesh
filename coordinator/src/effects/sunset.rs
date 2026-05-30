@@ -78,6 +78,13 @@ impl Effect for SunsetEffect {
                     "type": "string",
                     "default": "now",
                     "enum": ["now", "real-sunset"]
+                },
+                "min_brightness": {
+                    "type": "integer",
+                    "default": 1,
+                    "minimum": 1,
+                    "maximum": 254,
+                    "description": "Floor brightness at the indigo tail of the curve"
                 }
             }
         })
@@ -87,7 +94,8 @@ impl Effect for SunsetEffect {
         serde_json::json!({
             "duration_secs": 1800,
             "peak_warmth": 0.7,
-            "start_at": "now"
+            "start_at": "now",
+            "min_brightness": 1
         })
     }
 
@@ -120,26 +128,35 @@ impl Effect for SunsetEffect {
         let elapsed_ms = ctx.now_ms.saturating_sub(ctx.started_at_ms);
         let t_global = (elapsed_ms as f32 / duration_ms as f32).clamp(0.0, 1.0);
 
+        let min_bri = ctx
+            .params
+            .get("min_brightness")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1)
+            .clamp(1, 254) as u8;
+
         let mut out = Vec::with_capacity(ctx.bulbs.len() * 2);
         for bulb in ctx.bulbs {
             let offset = ctx.spatial.directional_offset(bulb, Direction::West);
             let t_bulb = (t_global + offset).clamp(0.0, 1.0);
             let (brightness_factor, color) = sample_palette(t_bulb, bulb.fixture_type, peak_warmth);
-
-            // Brightness is clamped to 1 minimum so the bulb stays addressable
-            // even at the indigo tail of the curve. A "fully off" effect would
-            // confuse the dedup gate on the next tick.
-            let brightness = ((brightness_factor * 255.0).round() as u8).max(1);
+            let brightness = ((brightness_factor * 255.0).round() as u8)
+                .max(1)
+                .max(min_bri);
 
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::Brightness(brightness),
+                action: LightAction::BrightnessTransition {
+                    value: brightness,
+                    transition_secs: 0.8,
+                },
             });
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::ColorXY {
+                action: LightAction::ColorXYTransition {
                     x: color.x,
                     y: color.y,
+                    transition_secs: 0.8,
                 },
             });
         }
@@ -324,7 +341,7 @@ mod tests {
         let out = e.tick(&ctx);
         assert_eq!(out.len(), 2);
         match out[0].action {
-            LightAction::Brightness(b) => {
+            LightAction::BrightnessTransition { value: b, .. } => {
                 assert!(b > 200, "expected near-full brightness at t=0, got {b}");
             }
             _ => panic!("expected Brightness first"),
@@ -343,7 +360,7 @@ mod tests {
         let mut e = SunsetEffect::new();
         let out = e.tick(&ctx);
         match out[0].action {
-            LightAction::Brightness(b) => {
+            LightAction::BrightnessTransition { value: b, .. } => {
                 assert!(b < 30, "expected very low brightness at t=1, got {b}");
             }
             _ => panic!("expected Brightness first"),
@@ -366,11 +383,11 @@ mod tests {
 
         // First two commands are for the west bulb, next two for the east.
         let west_brightness = match out[0].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
         let east_brightness = match out[2].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
         assert!(
@@ -396,11 +413,11 @@ mod tests {
         let mut e = SunsetEffect::new();
         let out = e.tick(&ctx);
         let lamp_bri = match out[0].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
         let ceiling_bri = match out[2].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
         assert!(
@@ -457,11 +474,11 @@ mod tests {
         let out = e.tick(&ctx);
 
         let lamp_xy = match out[1].action {
-            LightAction::ColorXY { x, y } => (x, y),
+            LightAction::ColorXYTransition { x, y, .. } => (x, y),
             _ => panic!("expected ColorXY second"),
         };
         let ceiling_xy = match out[3].action {
-            LightAction::ColorXY { x, y } => (x, y),
+            LightAction::ColorXYTransition { x, y, .. } => (x, y),
             _ => panic!("expected ColorXY second"),
         };
         // Lamp xy should be in the warm-amber zone (x > 0.5 and y > 0.35);
@@ -493,7 +510,7 @@ mod tests {
             serde_json::json!({ "duration_secs": 1800, "peak_warmth": 1.0, "start_at": "now" });
         let ctx_full = make_ctx(&room, &bulbs, &openings, &params_full, 0, 0, solar);
         let bri_full = match SunsetEffect::new().tick(&ctx_full)[0].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
 
@@ -501,7 +518,7 @@ mod tests {
             serde_json::json!({ "duration_secs": 1800, "peak_warmth": 0.3, "start_at": "now" });
         let ctx_dim = make_ctx(&room, &bulbs, &openings, &params_dim, 0, 0, solar);
         let bri_dim = match SunsetEffect::new().tick(&ctx_dim)[0].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
 

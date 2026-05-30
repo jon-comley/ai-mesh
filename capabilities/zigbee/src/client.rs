@@ -32,12 +32,17 @@ impl ZigbeeClient {
     /// Connect to a Mosquitto broker, subscribe to the three Z2M topics, and
     /// spawn the rumqttc event loop poll task. The poll task must be spawned
     /// before any publish calls — without it, publishes hang silently.
-    pub async fn connect(host: &str, port: u16, node_id: String) -> Result<Self, ZigbeeError> {
+    pub async fn connect(
+        host: &str,
+        port: u16,
+        node_id: String,
+    ) -> Result<(Self, broadcast::Receiver<ZigbeeEvent>), ZigbeeError> {
         let mut opts = MqttOptions::new(format!("ai-mesh-{node_id}"), host, port);
         opts.set_keep_alive(Duration::from_secs(30));
+        opts.set_max_packet_size(usize::MAX, 256 * 1024);
 
         let (mqtt_client, mut eventloop) = AsyncClient::new(opts, 64);
-        let (tx, _) = broadcast::channel::<ZigbeeEvent>(256);
+        let (tx, rx) = broadcast::channel::<ZigbeeEvent>(256);
         let registry = Arc::new(DeviceRegistry::new());
 
         let tx_loop = tx.clone();
@@ -163,11 +168,12 @@ impl ZigbeeClient {
             }
         });
 
-        Ok(Self {
+        let client = Self {
             mqtt: mqtt_client,
             registry,
             events: tx,
-        })
+        };
+        Ok((client, rx))
     }
 
     pub async fn send_command(
@@ -191,6 +197,14 @@ impl ZigbeeClient {
     /// own independent receiver — safe to call on every coordinator reconnect.
     pub fn subscribe(&self) -> broadcast::Receiver<ZigbeeEvent> {
         self.events.subscribe()
+    }
+
+    pub fn devices(&self) -> Vec<String> {
+        self.registry
+            .all()
+            .into_iter()
+            .map(|d| d.friendly_name)
+            .collect()
     }
 }
 

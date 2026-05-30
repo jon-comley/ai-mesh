@@ -94,6 +94,8 @@ let compassPrevAngle = 0;       // pointer angle at previous pointermove frame (
 let scrubberLive = true;        // false while time scrubber is in preview mode
 let scrubberRafPending = false;
 let scrubberThrottleTimer = null;
+let scrubberPlayTimer = null;   // non-null while auto-play is running
+let scrubberPlayCmdTimer = null; // throttles Zigbee commands during playback
 let phoneOrientActive = false;
 let phoneHeadingSamples = [];
 let meshLat = 51.5074;          // populated from GET /api/solar/config on first open
@@ -191,6 +193,7 @@ export async function openLayout(room) {
 
 export function closeLayout() {
   document.removeEventListener('keydown', onKeyDown);
+  stopScrubberPlay();
   dismissPopover();
   teardownThree();
 
@@ -225,11 +228,10 @@ export function freezeIconUpdates(ms = 3000) {
   iconFreezeTimer = setTimeout(() => { iconUpdatesFrozen = false; }, ms);
 }
 
-// Per-room map of currently-active effect id (mirrors roomEffectsMap in rooms.js).
-// Fed by `notifyEffectActive(roomId, effectId)` so the layout panel can decide
-// whether to render solar-specific overlays without reading the legacy
-// room.solar_enabled column.
-const activeEffectByRoom = new Map();
+// Per-room map of currently-active effect: { effectId, params }.
+// Fed by notifyEffectActive so the layout panel can reflect effect params
+// (e.g. solar min/max brightness) in the scrubber preview without importing rooms.js.
+const activeEffectByRoom = new Map(); // roomId → { effectId, params }
 
 // Called by rooms.js when a RoomsUpdate WS event arrives — updates the active room object.
 export function notifyRoomUpdate(room) {
@@ -243,13 +245,20 @@ export function notifyRoomUpdate(room) {
 
 // Called by rooms.js when an EffectUpdate WS event arrives. `effectId === null`
 // clears the room's active effect.
-export function notifyEffectActive(roomId, effectId) {
+export function notifyEffectActive(roomId, effectId, params = {}) {
   if (effectId == null) activeEffectByRoom.delete(roomId);
-  else activeEffectByRoom.set(roomId, effectId);
+  else activeEffectByRoom.set(roomId, { effectId, params });
 }
 
 function isSolarActiveHere() {
-  return layoutRoom != null && activeEffectByRoom.get(layoutRoom.id) === 'solar';
+  return layoutRoom != null && activeEffectByRoom.get(layoutRoom.id)?.effectId === 'solar';
+}
+
+function getSolarParams() {
+  if (!layoutRoom) return {};
+  const entry = activeEffectByRoom.get(layoutRoom.id);
+  if (!entry || entry.effectId !== 'solar') return {};
+  return entry.params ?? {};
 }
 
 // Called by rooms.js when a SolarUpdate WS event arrives — redraws cones + arc.
@@ -670,18 +679,31 @@ function redrawSolarOverlay(azimuth, elevation) {
 
 // ── Phase D: client-side solar state (matches Rust calculate_solar_state) ────
 
-function calculateSolarState(elevation) {
+function calculateSolarState(elevation, params = {}) {
+  const minBri    = params.min_brightness ?? 1;
+  const maxBri    = Math.max(minBri, params.max_brightness ?? 254);
+  const ctWarmth  = Math.max(0, Math.min(1, params.ct_warmth ?? 1.0));
+
+  let bri, ct;
   if (elevation <= 0) {
     const t = Math.max(0, Math.min(1, (elevation + 18) / 18));
-    return { bri: Math.round(1 + t * 29), ct: 500 };
+    bri = Math.round(1 + t * 29);
+    ct  = 500;
+  } else {
+    const t = Math.min(1, elevation / 90);
+    bri = Math.round(30 + t * 225);
+    ct  = Math.round(454 - t * 301);
   }
-  const t = Math.min(1, elevation / 90);
-  return { bri: Math.round(30 + t * 225), ct: Math.round(454 - t * 301) };
+
+  bri = Math.max(minBri, Math.min(maxBri, bri));
+  ct  = Math.round(153 + ctWarmth * (ct - 153));
+
+  return { bri, ct };
 }
 
 function previewSolarState(azimuth, elevation) {
   lastSolar = { azimuth, elevation };  // keep in sync so model-change redraws use correct position
-  const { bri, ct } = calculateSolarState(elevation);
+  const { bri, ct } = calculateSolarState(elevation, getSolarParams());
   for (const [id, entry] of Object.entries(placedBulbs)) {
     const state = { on: true, brightness: bri, color_temp: ct, color_xy: null };
     updateBulbIcon(entry, state);
@@ -706,10 +728,18 @@ function wireModelSelect() {
 
 // ── Phase D: Time scrubber ────────────────────────────────────────────────────
 
+function stopScrubberPlay() {
+  if (scrubberPlayTimer) { clearInterval(scrubberPlayTimer); scrubberPlayTimer = null; }
+  if (scrubberPlayCmdTimer) { clearTimeout(scrubberPlayCmdTimer); scrubberPlayCmdTimer = null; }
+  const playBtn = document.getElementById('lc-scrubber-play');
+  if (playBtn) playBtn.textContent = '▶';
+}
+
 function wireScrubber() {
   const scrubber = document.getElementById('lc-scrubber');
   const liveBtn  = document.getElementById('lc-scrubber-live');
   const timeEl   = document.getElementById('lc-scrubber-time');
+  const playBtn  = document.getElementById('lc-scrubber-play');
   if (!scrubber || !liveBtn || !timeEl) return;
 
   lockSliderToThumb(scrubber);
@@ -748,6 +778,7 @@ function wireScrubber() {
   });
 
   liveBtn.addEventListener('click', () => {
+    stopScrubberPlay();
     if (scrubberThrottleTimer) {
       clearTimeout(scrubberThrottleTimer);
       scrubberThrottleTimer = null;
@@ -771,6 +802,40 @@ function wireScrubber() {
     }
     sendSimSolarCommands(lastSolar.elevation);
   });
+
+  if (playBtn) {
+    playBtn.addEventListener('click', () => {
+      if (scrubberPlayTimer) {
+        // Pause
+        stopScrubberPlay();
+        return;
+      }
+      // Start playing — enter sim mode if not already
+      scrubberLive = false;
+      setScrubberSimMode(true);
+      playBtn.textContent = '⏸';
+
+      // Advance 5 simulated minutes every 150 ms ≈ full day in ~72 s
+      scrubberPlayTimer = setInterval(() => {
+        const mins = (parseInt(scrubber.value) + 5) % 1440;
+        scrubber.value = mins;
+        const base = new Date(); base.setHours(0, mins, 0, 0);
+        const { azimuth, elevation } = solarPosition(base.getTime());
+        const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+        const mm = String(mins % 60).padStart(2, '0');
+        timeEl.textContent = `${hh}:${mm}`;
+        previewSolarState(azimuth, elevation);
+
+        // Send Zigbee commands at most once per second to avoid flooding the bus
+        if (!scrubberPlayCmdTimer) {
+          scrubberPlayCmdTimer = setTimeout(() => {
+            scrubberPlayCmdTimer = null;
+            if (scrubberPlayTimer) sendSimSolarCommands(lastSolar.elevation);
+          }, 1000);
+        }
+      }, 150);
+    });
+  }
 }
 
 // Send the simulated solar brightness + colour temperature to all bulbs in the
@@ -780,7 +845,7 @@ function wireScrubber() {
 async function sendSimSolarCommands(elevation, onlyDeviceIds = null) {
   const room = layoutRoom;
   if (!room || !room.device_ids) return;
-  const { bri, ct } = calculateSolarState(elevation);
+  const { bri, ct } = calculateSolarState(elevation, getSolarParams());
   const t = tok();
 
   const targetIds = (onlyDeviceIds || room.device_ids).filter(id => placedBulbs[id]);
@@ -971,15 +1036,65 @@ function buildLayoutView(room) {
   header.appendChild(controls);
   view.appendChild(header);
 
-  // Body: sidebar + canvas
+  // Body: sidebar + resize handle + canvas
   const body = document.createElement('div');
   body.className = 'layout-body';
 
-  body.appendChild(buildSidebar(room));
+  const sidebar = buildSidebar(room);
+  body.appendChild(sidebar);
+  body.appendChild(buildSidebarResizeHandle(sidebar));
   body.appendChild(buildCanvas());
 
   view.appendChild(body);
   return view;
+}
+
+const SIDEBAR_WIDTH_KEY = 'mesh-layout-sidebar-width';
+const SIDEBAR_MIN_PX = 80;
+const SIDEBAR_MAX_PX = 320;
+
+function buildSidebarResizeHandle(sidebar) {
+  const handle = document.createElement('div');
+  handle.className = 'layout-sidebar-resize';
+
+  // Restore saved width.
+  const saved = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
+  if (saved >= SIDEBAR_MIN_PX && saved <= SIDEBAR_MAX_PX) {
+    sidebar.style.width = saved + 'px';
+  }
+
+  let dragging = false;
+  let startX = 0;
+  let startW = 0;
+
+  handle.addEventListener('pointerdown', e => {
+    if (sidebar.classList.contains('collapsed')) return;
+    dragging = true;
+    startX = e.clientX;
+    startW = sidebar.getBoundingClientRect().width;
+    handle.setPointerCapture(e.pointerId);
+    document.body.style.cursor = 'col-resize';
+    e.preventDefault();
+  });
+
+  handle.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const w = Math.min(SIDEBAR_MAX_PX, Math.max(SIDEBAR_MIN_PX, startW + (e.clientX - startX)));
+    sidebar.style.width = w + 'px';
+  });
+
+  const stopDrag = e => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = '';
+    handle.releasePointerCapture(e.pointerId);
+    const w = sidebar.getBoundingClientRect().width;
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, Math.round(w));
+  };
+  handle.addEventListener('pointerup', stopDrag);
+  handle.addEventListener('pointercancel', stopDrag);
+
+  return handle;
 }
 
 function makeCollapsibleSection(titleText, storageKey, defaultCollapsed = false) {
@@ -1244,6 +1359,82 @@ function rebuildPlacedPanel() {
     row.appendChild(coordsRow);
     body.appendChild(row);
   }
+
+  // ── Openings (doors & windows) ──────────────────────────────────────────────
+  const openingEntries = Object.entries(placedOpenings);
+  if (openingEntries.length > 0) {
+    const divider = document.createElement('div');
+    divider.className = 'layout-placed-divider';
+    divider.textContent = 'Doors & Windows';
+    body.appendChild(divider);
+
+    for (const [id, o] of openingEntries) {
+      const wallLen = (o.wall_edge === 'N' || o.wall_edge === 'S') ? W : D;
+      const icon = o.opening_type === 'window' ? '⬜' : '▯';
+      const label = `${icon} ${o.opening_type === 'window' ? 'Window' : 'Door'} — ${o.wall_edge} wall`;
+
+      const row = document.createElement('div');
+      row.className = 'layout-placed-entry';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'layout-placed-name';
+      nameEl.textContent = label;
+      row.appendChild(nameEl);
+
+      const coordsRow = document.createElement('div');
+      coordsRow.className = 'layout-placed-coords';
+
+      // pos = centre position along wall in metres
+      const posField = document.createElement('label');
+      posField.className = 'layout-placed-coord-field';
+      posField.textContent = 'pos ';
+      const posInp = document.createElement('input');
+      posInp.type = 'number';
+      posInp.min = '0'; posInp.step = '0.01';
+      posInp.max = String(wallLen);
+      posInp.value = (o.x_norm * wallLen).toFixed(2);
+      posInp.dataset.openingPos = id;
+      posInp.addEventListener('change', () => {
+        const v = parseFloat(posInp.value);
+        if (!isFinite(v)) return;
+        const half = o.width_norm / 2;
+        o.x_norm = Math.min(1 - half - 0.02, Math.max(half + 0.02, v / wallLen));
+        posInp.value = (o.x_norm * wallLen).toFixed(2);
+        updateOpeningRectAttrs(id);
+        patchOpening(id, { x_norm: o.x_norm });
+      });
+      posField.appendChild(posInp);
+      coordsRow.appendChild(posField);
+
+      // width in metres
+      const widField = document.createElement('label');
+      widField.className = 'layout-placed-coord-field';
+      widField.textContent = 'w ';
+      const widInp = document.createElement('input');
+      widInp.type = 'number';
+      widInp.min = '0.05'; widInp.step = '0.01';
+      widInp.max = String(wallLen);
+      widInp.value = (o.width_norm * wallLen).toFixed(2);
+      widInp.dataset.openingWid = id;
+      widInp.addEventListener('change', () => {
+        const v = parseFloat(widInp.value);
+        if (!isFinite(v)) return;
+        o.width_norm = Math.min(0.96, Math.max(0.05, v / wallLen));
+        // Keep centre within bounds after width change
+        const half = o.width_norm / 2;
+        o.x_norm = Math.min(1 - half - 0.02, Math.max(half + 0.02, o.x_norm));
+        widInp.value = (o.width_norm * wallLen).toFixed(2);
+        posInp.value = (o.x_norm * wallLen).toFixed(2);
+        updateOpeningRectAttrs(id);
+        patchOpening(id, { x_norm: o.x_norm, width_norm: o.width_norm });
+      });
+      widField.appendChild(widInp);
+      coordsRow.appendChild(widField);
+
+      row.appendChild(coordsRow);
+      body.appendChild(row);
+    }
+  }
 }
 
 // ── Wall dimension labels ─────────────────────────────────────────────────────
@@ -1405,6 +1596,7 @@ function buildCanvas() {
   scrubBar.id = 'lc-scrubber-bar';
   const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
   scrubBar.innerHTML = `
+    <button id="lc-scrubber-play" title="Play through the day">▶</button>
     <span id="lc-scrubber-time">Now</span>
     <input type="range" id="lc-scrubber" min="0" max="1440" step="5" value="${nowMins}">
     <button id="lc-scrubber-live" title="Return to live">↺ Live</button>
@@ -2845,6 +3037,7 @@ function renderOpening(o) {
   placedOpenings[o.id] = { ...o, el: g };
   updateOpeningCone(o.id);
   syncOpeningToThree(o);
+  rebuildPlacedPanel();
 }
 
 function updateOpeningRectAttrs(openingId) {
@@ -2870,6 +3063,16 @@ function updateOpeningRectAttrs(openingId) {
   }
   updateOpeningCone(openingId);
   if (threeIs3D) syncOpeningToThree(placedOpenings[openingId]);
+
+  // Keep the sidebar inputs in sync without a full panel rebuild.
+  if (!layoutRoom) return;
+  const W = layoutRoom.width_m || 3;
+  const D = layoutRoom.depth_m || 6;
+  const wallLen = (o.wall_edge === 'N' || o.wall_edge === 'S') ? W : D;
+  const posInp = document.querySelector(`[data-opening-pos="${CSS.escape(openingId)}"]`);
+  if (posInp) posInp.value = (o.x_norm * wallLen).toFixed(2);
+  const widInp = document.querySelector(`[data-opening-wid="${CSS.escape(openingId)}"]`);
+  if (widInp) widInp.value = (o.width_norm * wallLen).toFixed(2);
 }
 
 // ── Light model system ────────────────────────────────────────────────────────
@@ -3470,6 +3673,7 @@ async function removeOpening(id) {
   if (cone) cone.remove();
   removeOpeningFromThree(id);
   delete placedOpenings[id];
+  rebuildPlacedPanel();
 }
 
 // ── Openings — server I/O ─────────────────────────────────────────────────────
@@ -3639,29 +3843,6 @@ async function initThree(room) {
   const vPts = [new THREE.Vector3(cxW, 0.003, -D/2), new THREE.Vector3(cxW, 0.003, D/2)];
   threeRoomGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(hPts), chMat));
   threeRoomGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(vPts), chMat.clone()));
-
-  // Wall cardinal labels (N/S/E/W sprites)
-  const cardinals = [
-    { txt: 'N', x: 0,    z: -D/2 - 0.2 },
-    { txt: 'S', x: 0,    z:  D/2 + 0.2 },
-    { txt: 'E', x:  W/2 + 0.2, z: 0 },
-    { txt: 'W', x: -W/2 - 0.2, z: 0 },
-  ];
-  for (const { txt, x, z } of cardinals) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 64; canvas.height = 64;
-    const ctx2d = canvas.getContext('2d');
-    ctx2d.fillStyle = '#88aacc';
-    ctx2d.font = 'bold 48px sans-serif';
-    ctx2d.textAlign = 'center';
-    ctx2d.textBaseline = 'middle';
-    ctx2d.fillText(txt, 32, 32);
-    const tex = new THREE.CanvasTexture(canvas);
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0.7 }));
-    sp.position.set(x, H * 0.5, z);
-    sp.scale.set(0.4, 0.4, 1);
-    threeRoomGroup.add(sp);
-  }
 
   // Camera
   const aspect = (container.clientWidth || 600) / (container.clientHeight || 600);
@@ -3880,6 +4061,10 @@ function toggle3D(btn) {
         threePerspCamera.aspect = w / h;
         threePerspCamera.updateProjectionMatrix();
       }
+    }
+    // Re-sync openings that may have moved while in 2D view
+    for (const o of Object.values(placedOpenings)) {
+      syncOpeningToThree(o);
     }
   } else {
     if (svg) svg.style.display = '';

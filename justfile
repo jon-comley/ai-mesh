@@ -732,15 +732,16 @@ rotate-token:
         pkill -f "target/(debug|release)/coordinator" || true
         sleep 0.3
         rm -f /tmp/mesh-coordinator.log
+        cargo build -q -p coordinator
         if [ -n "$next" ]; then
             MDNS_ADVERTISE_IP={{coordinator_ip}} \
                 MESH_AUTH_TOKEN="$primary" \
                 MESH_AUTH_TOKEN_NEXT="$next" \
-                cargo run -q -p coordinator >> /tmp/mesh-coordinator.log 2>&1 &
+                ./target/debug/coordinator >> /tmp/mesh-coordinator.log 2>&1 &
         else
             MDNS_ADVERTISE_IP={{coordinator_ip}} \
                 MESH_AUTH_TOKEN="$primary" \
-                cargo run -q -p coordinator >> /tmp/mesh-coordinator.log 2>&1 &
+                ./target/debug/coordinator >> /tmp/mesh-coordinator.log 2>&1 &
         fi
         for i in $(seq 1 60); do
             sleep 1
@@ -1169,8 +1170,10 @@ start-cluster: update-portproxy
     pkill -f "target/(debug|release)/agent" || true
     sleep 0.3
 
+    echo ">>> Building coordinator..."
+    cargo build -q -p coordinator
     echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
-    MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
+    MDNS_ADVERTISE_IP={{coordinator_ip}} ./target/debug/coordinator > /tmp/mesh-coordinator.log 2>&1 &
 
     echo ">>> Waiting for coordinator to accept connections..."
     for i in $(seq 1 60); do
@@ -1182,7 +1185,8 @@ start-cluster: update-portproxy
         [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
     done
 
-    cargo run -q -p cli -- reset-registry > /dev/null || true
+    cargo build -q -p cli
+    ./target/debug/cli reset-registry > /dev/null || true
 
     # Push TLS fingerprint + auth token to all compute nodes before starting their agents.
     STATE="$HOME/.config/ai-mesh/coordinator.state"
@@ -1287,8 +1291,10 @@ restart-coordinator: update-portproxy
         export MESH_AUTH_TOKEN="${MESH_AUTH_TOKEN:-}"
     fi
 
+    echo ">>> Building coordinator..."
+    cargo build -q -p coordinator
     echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
-    MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator > /tmp/mesh-coordinator.log 2>&1 &
+    MDNS_ADVERTISE_IP={{coordinator_ip}} ./target/debug/coordinator > /tmp/mesh-coordinator.log 2>&1 &
 
     echo ">>> Waiting for coordinator to accept connections..."
     for i in $(seq 1 60); do
@@ -1300,7 +1306,8 @@ restart-coordinator: update-portproxy
         [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
     done
 
-    cargo run -q -p cli -- reset-registry > /dev/null || true
+    cargo build -q -p cli
+    ./target/debug/cli reset-registry > /dev/null || true
 
     # Read fingerprint (and token if set) from the coordinator state file.
     if [ ! -f "$STATE" ]; then

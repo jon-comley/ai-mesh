@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 pub struct LightingCapability {
     zigbee: Arc<OnceCell<Arc<ZigbeeClient>>>,
+    coordinator_tx: Arc<Mutex<Option<Sender<MeshMessage>>>>,
     node_id: String,
 }
 
@@ -16,6 +17,7 @@ impl LightingCapability {
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             zigbee: Arc::new(OnceCell::new()),
+            coordinator_tx: Arc::new(Mutex::new(None)),
             node_id: node_id.into(),
         }
     }
@@ -35,6 +37,9 @@ impl Capability for LightingCapability {
     }
 
     async fn start(&self, tx: Sender<MeshMessage>) -> Result<(), String> {
+        // Update the active coordinator sender for the background task.
+        *self.coordinator_tx.lock().unwrap() = Some(tx);
+
         let Ok(host) = std::env::var("MQTT_HOST") else {
             info!("lighting: MQTT_HOST not set — running as stub");
             return Ok(());
@@ -45,57 +50,95 @@ impl Capability for LightingCapability {
             .unwrap_or(1883);
         let node_id = self.node_id.clone();
 
-        let client = ZigbeeClient::connect(&host, port, node_id.clone())
-            .await
-            .map_err(|e: ZigbeeError| format!("zigbee connect: {e}"))?;
-        let client = Arc::new(client);
-
-        let mut events = client.subscribe();
-        let known_devices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
-        let known_groups: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
-        let kd = Arc::clone(&known_devices);
-        let kg = Arc::clone(&known_groups);
-        tokio::spawn(async move {
-            loop {
-                match events.recv().await {
-                    Ok(ZigbeeEvent::StateChanged(report)) => {
-                        let _ = tx.send(MeshMessage::LightState(report)).await;
-                    }
-                    Ok(ZigbeeEvent::DeviceListUpdated(names)) => {
-                        *kd.lock().unwrap() = names.clone();
-                        let report = LightDeviceListReport {
-                            node_id: node_id.clone(),
-                            devices: names,
-                            groups: kg.lock().unwrap().clone(),
-                        };
-                        let _ = tx.send(MeshMessage::LightDeviceList(report)).await;
-                    }
-                    Ok(ZigbeeEvent::GroupListUpdated(names)) => {
-                        *kg.lock().unwrap() = names.clone();
-                        let report = LightDeviceListReport {
-                            node_id: node_id.clone(),
-                            devices: kd.lock().unwrap().clone(),
-                            groups: names,
-                        };
-                        let _ = tx.send(MeshMessage::LightDeviceList(report)).await;
-                    }
-                    Ok(ZigbeeEvent::ConnectionLost) => {
-                        warn!("zigbee: connection lost");
-                    }
-                    Ok(ZigbeeEvent::ConnectionRestored) => {
-                        info!("zigbee: connection restored");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("zigbee: event receiver lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
+        // If already initialized, push the current device list to the new connection.
+        if let Some(client) = self.zigbee.get() {
+            let devices = client.devices();
+            if !devices.is_empty() {
+                let report = LightDeviceListReport {
+                    node_id: node_id.clone(),
+                    devices,
+                    groups: vec![], // Groups will be updated by the next MQTT event
+                };
+                let _ = self
+                    .send_to_coordinator(MeshMessage::LightDeviceList(report))
+                    .await;
             }
-        });
+        }
 
-        self.zigbee
-            .set(client)
-            .map_err(|_| String::from("zigbee already initialized"))?;
+        // Initialize Zigbee client if not already done.
+        if self.zigbee.get().is_none() {
+            let (client, mut events) = ZigbeeClient::connect(&host, port, node_id.clone())
+                .await
+                .map_err(|e: ZigbeeError| format!("zigbee connect: {e}"))?;
+            let client = Arc::new(client);
+
+            let initial_devices = client.devices();
+            if !initial_devices.is_empty() {
+                let report = LightDeviceListReport {
+                    node_id: node_id.clone(),
+                    devices: initial_devices,
+                    groups: vec![],
+                };
+                let _ = self
+                    .send_to_coordinator(MeshMessage::LightDeviceList(report))
+                    .await;
+            }
+
+            let known_devices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+            let known_groups: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+            let kd = Arc::clone(&known_devices);
+            let kg = Arc::clone(&known_groups);
+            let ctx = Arc::clone(&self.coordinator_tx);
+
+            tokio::spawn(async move {
+                loop {
+                    match events.recv().await {
+                        Ok(ZigbeeEvent::StateChanged(report)) => {
+                            let _ = Self::send_via_ctx(&ctx, MeshMessage::LightState(report)).await;
+                        }
+                        Ok(ZigbeeEvent::DeviceListUpdated(names)) => {
+                            info!(
+                                count = names.len(),
+                                "lighting: sending updated device list to coordinator"
+                            );
+                            *kd.lock().unwrap() = names.clone();
+                            let report = LightDeviceListReport {
+                                node_id: node_id.clone(),
+                                devices: names,
+                                groups: kg.lock().unwrap().clone(),
+                            };
+                            let _ = Self::send_via_ctx(&ctx, MeshMessage::LightDeviceList(report))
+                                .await;
+                        }
+                        Ok(ZigbeeEvent::GroupListUpdated(names)) => {
+                            *kg.lock().unwrap() = names.clone();
+                            let report = LightDeviceListReport {
+                                node_id: node_id.clone(),
+                                devices: kd.lock().unwrap().clone(),
+                                groups: names,
+                            };
+                            let _ = Self::send_via_ctx(&ctx, MeshMessage::LightDeviceList(report))
+                                .await;
+                        }
+                        Ok(ZigbeeEvent::ConnectionLost) => {
+                            warn!("zigbee: connection lost");
+                        }
+                        Ok(ZigbeeEvent::ConnectionRestored) => {
+                            info!("zigbee: connection restored");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("zigbee: event receiver lagged by {n} messages");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
+            self.zigbee
+                .set(client)
+                .map_err(|_| "race during zigbee init")?;
+        }
+
         info!("lighting: MQTT connected to {host}:{port}");
         Ok(())
     }
@@ -122,9 +165,7 @@ impl Capability for LightingCapability {
                     success: false,
                     error: Some("scenes not yet implemented".into()),
                 };
-                if tx.send(MeshMessage::SceneLoaded(report)).await.is_err() {
-                    warn!("lighting: failed to send SceneLoaded — channel closed");
-                }
+                let _ = tx.send(MeshMessage::SceneLoaded(report)).await;
             }
             _ => {}
         }
@@ -176,6 +217,19 @@ impl Capability for LightingCapability {
                 }),
             },
         ]
+    }
+}
+
+impl LightingCapability {
+    async fn send_to_coordinator(&self, msg: MeshMessage) {
+        Self::send_via_ctx(&self.coordinator_tx, msg).await;
+    }
+
+    async fn send_via_ctx(ctx: &Arc<Mutex<Option<Sender<MeshMessage>>>>, msg: MeshMessage) {
+        let tx = ctx.lock().unwrap().clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(msg).await;
+        }
     }
 }
 

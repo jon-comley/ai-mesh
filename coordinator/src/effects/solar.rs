@@ -1,9 +1,16 @@
-//! Solar — the first `Effect` impl, driven by the `EffectRunner`.
+//! Solar — tracks the sun's elevation to drive brightness and colour temperature.
 //!
-//! Math ported from the original `SpatialEngine` task: `calculate_solar_state`
-//! mapping elevation → (brightness, mireds), per-bulb exposure (3D dot product
-//! with the sun direction when z is set; legacy 2D path otherwise), and
-//! window-aware intensity scaling.
+//! Params
+//! ------
+//! - `min_brightness` (1–254, default 1)  — floor brightness at all times.
+//!   Set to 80–120 for home use so evening/night stays at a useful level.
+//!   Leave at 1 for office use where lights should follow the sun all the way down.
+//! - `max_brightness` (1–254, default 254) — peak brightness cap at solar noon.
+//!   Useful in bedrooms or any space where full power is too harsh.
+//! - `ct_warmth` (0.0–1.0, default 1.0) — scales the warm-shift at low sun.
+//!   1.0 = current behaviour (500 mireds / 2000 K candle-amber at night).
+//!   0.4 = warm white (~3400 K) at night — comfortable for office evening use.
+//!   0.0 = colour temperature never shifts (always at the daytime cool end).
 
 use shared::messages::LightAction;
 
@@ -33,7 +40,7 @@ impl Effect for SolarEffect {
     }
 
     fn description(&self) -> &'static str {
-        "Tracks the sun's position; warmer + dimmer at low elevations, cooler + brighter near noon."
+        "Tracks the sun: brighter + cooler at noon, dimmer + warmer at sunset. Tune min/max brightness and warmth to suit home or office."
     }
 
     fn category(&self) -> EffectCategory {
@@ -45,15 +52,63 @@ impl Effect for SolarEffect {
     }
 
     fn params_schema(&self) -> serde_json::Value {
-        // Solar has no tunable params — schema is the empty object.
-        serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": false })
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "min_brightness": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 254,
+                    "default": 1,
+                    "description": "Floor brightness (1 = follow sun all the way down; 100 = stays usable at night)"
+                },
+                "max_brightness": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 254,
+                    "default": 254,
+                    "description": "Peak brightness cap at solar noon"
+                },
+                "ct_warmth": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "default": 1.0,
+                    "description": "How warm the colour shifts at low sun (1.0 = amber candlelight, 0.4 = warm white, 0.0 = always cool)"
+                }
+            }
+        })
     }
 
     fn default_params(&self) -> serde_json::Value {
-        serde_json::json!({})
+        serde_json::json!({
+            "min_brightness": 1,
+            "max_brightness": 254,
+            "ct_warmth": 1.0
+        })
     }
 
     fn tick(&mut self, ctx: &EffectCtx) -> Vec<EffectCommand> {
+        let min_bri = ctx
+            .params
+            .get("min_brightness")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1)
+            .clamp(1, 254) as u8;
+        let max_bri = ctx
+            .params
+            .get("max_brightness")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(254)
+            .clamp(1, 254) as u8;
+        let ct_warmth = ctx
+            .params
+            .get("ct_warmth")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0) as f32;
+
         let mut out = Vec::with_capacity(ctx.bulbs.len() * 2);
 
         let azimuth = ctx.solar.azimuth_degrees;
@@ -64,25 +119,42 @@ impl Effect for SolarEffect {
         // Base brightness + CT from elevation alone.
         let (base_bri, base_ct) = calculate_solar_state(elevation);
 
+        // Apply ct_warmth: interpolate CT between the cool end (153 mireds) and
+        // the raw elevation-driven value. At 1.0 nothing changes; at 0.0 the
+        // colour temperature never shifts from cool white.
+        let effective_ct = (153.0 + ct_warmth * (base_ct as f32 - 153.0))
+            .round()
+            .clamp(153.0, 500.0) as u16;
+
         // Openings → intensity scale (room contribution from sun-facing windows).
         let intensity_scale =
             openings_intensity_scale(ctx.openings, effective_azimuth, elevation, room_orientation);
+
+        // Ensure max_bri >= min_bri so the clamp is never inverted.
+        let max_bri = max_bri.max(min_bri);
 
         for bulb in ctx.bulbs {
             let fixture_sensitivity = fixture_sensitivity(bulb.fixture_type);
             let exposure = bulb_exposure(bulb, effective_azimuth, elevation);
 
-            let final_bri = ((base_bri as f32 + (exposure * fixture_sensitivity * 20.0))
+            let raw_bri = ((base_bri as f32 + (exposure * fixture_sensitivity * 20.0))
                 * intensity_scale)
-                .clamp(1.0, 255.0) as u8;
+                .clamp(1.0, 254.0) as u8;
+            let final_bri = raw_bri.clamp(min_bri, max_bri);
 
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::Brightness(final_bri),
+                action: LightAction::BrightnessTransition {
+                    value: final_bri,
+                    transition_secs: 30.0,
+                },
             });
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::ColorTemp(base_ct),
+                action: LightAction::ColorTempTransition {
+                    value: effective_ct,
+                    transition_secs: 30.0,
+                },
             });
         }
         out
@@ -296,9 +368,139 @@ mod tests {
         let mut effect = SolarEffect::new();
         let out = effect.tick(&ctx);
         assert_eq!(out.len(), 2);
-        assert!(matches!(out[0].action, LightAction::Brightness(_)));
-        assert!(matches!(out[1].action, LightAction::ColorTemp(_)));
+        assert!(matches!(
+            out[0].action,
+            LightAction::BrightnessTransition { .. }
+        ));
+        assert!(matches!(
+            out[1].action,
+            LightAction::ColorTempTransition { .. }
+        ));
         assert_eq!(out[0].device_id, "b1");
+    }
+
+    #[test]
+    fn schema_validates_default_params() {
+        let e = SolarEffect::new();
+        let schema = jsonschema::JSONSchema::compile(&e.params_schema()).unwrap();
+        assert!(schema.is_valid(&e.default_params()));
+    }
+
+    #[test]
+    fn min_brightness_lifts_nighttime_floor() {
+        let (room, bulbs, openings, solar) = ctx_with(
+            vec![bulb("b1", 0.5, 0.5, 0.0, FixtureType::CeilingSpot)],
+            vec![],
+            -10.0, // well below horizon — raw brightness would be ~12
+            180.0,
+        );
+        let params = serde_json::json!({ "min_brightness": 100 });
+        let ctx = EffectCtx {
+            room: &room,
+            bulbs: &bulbs,
+            openings: &openings,
+            solar,
+            now_ms: 0,
+            started_at_ms: 0,
+            params: &params,
+            spatial: SpatialHelpers::new(&room, &openings),
+        };
+        let mut effect = SolarEffect::new();
+        let out = effect.tick(&ctx);
+        if let LightAction::BrightnessTransition { value: b, .. } = out[0].action {
+            assert!(
+                b >= 100,
+                "expected min_brightness=100 to floor at 100, got {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_brightness_caps_noon() {
+        let (room, bulbs, openings, solar) = ctx_with(
+            vec![bulb("b1", 0.5, 0.5, 0.0, FixtureType::CeilingSpot)],
+            vec![],
+            89.0, // near zenith — raw brightness ~254
+            180.0,
+        );
+        let params = serde_json::json!({ "max_brightness": 150 });
+        let ctx = EffectCtx {
+            room: &room,
+            bulbs: &bulbs,
+            openings: &openings,
+            solar,
+            now_ms: 0,
+            started_at_ms: 0,
+            params: &params,
+            spatial: SpatialHelpers::new(&room, &openings),
+        };
+        let mut effect = SolarEffect::new();
+        let out = effect.tick(&ctx);
+        if let LightAction::BrightnessTransition { value: b, .. } = out[0].action {
+            assert!(
+                b <= 150,
+                "expected max_brightness=150 to cap at 150, got {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn ct_warmth_zero_keeps_cool_white() {
+        let (room, bulbs, openings, solar) = ctx_with(
+            vec![bulb("b1", 0.5, 0.5, 0.0, FixtureType::CeilingSpot)],
+            vec![],
+            -5.0, // below horizon — raw CT would be 500 (very warm)
+            180.0,
+        );
+        let params = serde_json::json!({ "ct_warmth": 0.0 });
+        let ctx = EffectCtx {
+            room: &room,
+            bulbs: &bulbs,
+            openings: &openings,
+            solar,
+            now_ms: 0,
+            started_at_ms: 0,
+            params: &params,
+            spatial: SpatialHelpers::new(&room, &openings),
+        };
+        let mut effect = SolarEffect::new();
+        let out = effect.tick(&ctx);
+        if let LightAction::ColorTempTransition { value: ct, .. } = out[1].action {
+            assert_eq!(
+                ct, 153,
+                "ct_warmth=0.0 should keep CT at 153 mireds (cool white)"
+            );
+        }
+    }
+
+    #[test]
+    fn ct_warmth_partial_interpolates() {
+        let (room, bulbs, openings, solar) = ctx_with(
+            vec![bulb("b1", 0.5, 0.5, 0.0, FixtureType::CeilingSpot)],
+            vec![],
+            0.0, // at horizon — raw CT = 500
+            180.0,
+        );
+        let params = serde_json::json!({ "ct_warmth": 0.5 });
+        let ctx = EffectCtx {
+            room: &room,
+            bulbs: &bulbs,
+            openings: &openings,
+            solar,
+            now_ms: 0,
+            started_at_ms: 0,
+            params: &params,
+            spatial: SpatialHelpers::new(&room, &openings),
+        };
+        let mut effect = SolarEffect::new();
+        let out = effect.tick(&ctx);
+        // expected: 153 + 0.5*(500-153) = 153 + 173.5 = 326 (rounded)
+        if let LightAction::ColorTempTransition { value: ct, .. } = out[1].action {
+            assert!(
+                (ct as i32 - 327).abs() <= 1,
+                "expected ~327 mireds at ct_warmth=0.5, got {ct}"
+            );
+        }
     }
 
     #[test]
@@ -325,7 +527,7 @@ mod tests {
         };
         let mut effect = SolarEffect::new();
         for cmd in effect.tick(&ctx) {
-            if let LightAction::Brightness(b) = cmd.action {
+            if let LightAction::BrightnessTransition { value: b, .. } = cmd.action {
                 assert!(b >= 1, "brightness {b} below clamp");
             }
         }

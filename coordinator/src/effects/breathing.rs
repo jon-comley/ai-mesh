@@ -18,11 +18,13 @@ use shared::messages::LightAction;
 use super::blend::mireds_to_xy;
 use super::{Effect, EffectCadence, EffectCategory, EffectCommand, EffectCtx};
 
-pub struct BreathingEffect;
+pub struct BreathingEffect {
+    last_color: Option<(f32, f32)>,
+}
 
 impl BreathingEffect {
     pub fn new() -> Self {
-        Self
+        Self { last_color: None }
     }
 }
 
@@ -76,11 +78,12 @@ impl Effect for BreathingEffect {
                     "minimum": 1,
                     "maximum": 254
                 },
-                "colour_xy": {
-                    "type": "array",
-                    "items": { "type": "number" },
-                    "minItems": 2,
-                    "maxItems": 2
+                "colour_temp": {
+                    "type": "integer",
+                    "default": 500,
+                    "minimum": 153,
+                    "maximum": 500,
+                    "description": "Colour temperature in mireds (153 = cool white 6500 K, 500 = warm amber 2000 K)"
                 }
             }
         })
@@ -90,7 +93,8 @@ impl Effect for BreathingEffect {
         serde_json::json!({
             "period_secs": 8,
             "min_brightness": 30,
-            "max_brightness": 200
+            "max_brightness": 200,
+            "colour_temp": 500
         })
     }
 
@@ -122,20 +126,13 @@ impl Effect for BreathingEffect {
             (max_bri, min_bri)
         };
 
-        let color = ctx
+        let ct = ctx
             .params
-            .get("colour_xy")
-            .and_then(|v| {
-                let arr = v.as_array()?;
-                if arr.len() != 2 {
-                    return None;
-                }
-                Some(super::blend::ColorXy::new(
-                    arr[0].as_f64()? as f32,
-                    arr[1].as_f64()? as f32,
-                ))
-            })
-            .unwrap_or_else(|| mireds_to_xy(500)); // ~2000 K warm amber
+            .get("colour_temp")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(500)
+            .clamp(153, 500) as u16;
+        let color = mireds_to_xy(ct);
 
         let elapsed_ms = ctx.now_ms.saturating_sub(ctx.started_at_ms);
         let phase = (elapsed_ms as f32 / 1000.0) / period_secs * 2.0 * PI;
@@ -143,19 +140,34 @@ impl Effect for BreathingEffect {
         let sine_01 = (phase.sin() * 0.5) + 0.5;
         let brightness = (lo + (hi - lo) * sine_01).round().clamp(1.0, 254.0) as u8;
 
-        let mut out = Vec::with_capacity(ctx.bulbs.len() * 2);
+        // Transition slightly longer than the tick interval (200 ms) so the bulb
+        // is always interpolating when the next target arrives — no visible steps.
+        const TRANSITION_SECS: f32 = 0.3;
+
+        let color_changed = self.last_color != Some((color.x, color.y));
+        if color_changed {
+            self.last_color = Some((color.x, color.y));
+        }
+
+        let mut out = Vec::with_capacity(ctx.bulbs.len() * if color_changed { 2 } else { 1 });
         for bulb in ctx.bulbs {
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::Brightness(brightness),
-            });
-            out.push(EffectCommand {
-                device_id: bulb.device_id.clone(),
-                action: LightAction::ColorXY {
-                    x: color.x,
-                    y: color.y,
+                action: LightAction::BrightnessTransition {
+                    value: brightness,
+                    transition_secs: TRANSITION_SECS,
                 },
             });
+            if color_changed {
+                out.push(EffectCommand {
+                    device_id: bulb.device_id.clone(),
+                    action: LightAction::ColorXYTransition {
+                        x: color.x,
+                        y: color.y,
+                        transition_secs: TRANSITION_SECS,
+                    },
+                });
+            }
         }
         out
     }
@@ -246,7 +258,7 @@ mod tests {
             let now_ms = tick * 200; // 5 Hz cadence
             let ctx = make_ctx(&room, &bulbs, &openings, &params, now_ms, 0);
             let out = e.tick(&ctx);
-            if let LightAction::Brightness(b) = out[0].action {
+            if let LightAction::BrightnessTransition { value: b, .. } = out[0].action {
                 samples.push(b);
             }
         }
@@ -265,26 +277,34 @@ mod tests {
     }
 
     #[test]
-    fn colour_xy_param_overrides_default_warm_amber() {
+    fn colour_temp_cool_gives_different_xy_than_default() {
         let bulbs = vec![bulb("b")];
         let room = lounge();
         let openings = Vec::new();
-        let params = serde_json::json!({
-            "period_secs": 8,
-            "min_brightness": 50,
-            "max_brightness": 200,
-            "colour_xy": [0.3, 0.4]
-        });
-        let ctx = make_ctx(&room, &bulbs, &openings, &params, 0, 0);
+        let params_cool = serde_json::json!({ "colour_temp": 153 });
+        let params_warm = serde_json::json!({ "colour_temp": 500 });
+        let ctx_cool = make_ctx(&room, &bulbs, &openings, &params_cool, 0, 0);
+        let ctx_warm = make_ctx(&room, &bulbs, &openings, &params_warm, 0, 0);
         let mut e = BreathingEffect::new();
-        let out = e.tick(&ctx);
-        match out[1].action {
-            LightAction::ColorXY { x, y } => {
-                assert!((x - 0.3).abs() < 1e-4);
-                assert!((y - 0.4).abs() < 1e-4);
-            }
-            _ => panic!("expected ColorXY second"),
-        }
+        // Tick warm first so colour_changed fires on both.
+        let out_warm = e.tick(&ctx_warm);
+        e.last_color = None; // force colour re-emit
+        let out_cool = e.tick(&ctx_cool);
+        let (xw, yw) = match out_warm[1].action {
+            LightAction::ColorXYTransition { x, y, .. } => (x, y),
+            _ => panic!("expected ColorXYTransition"),
+        };
+        let (xc, yc) = match out_cool[1].action {
+            LightAction::ColorXYTransition { x, y, .. } => (x, y),
+            _ => panic!("expected ColorXYTransition"),
+        };
+        // Warm should be warmer (higher x) than cool.
+        assert!(xw > xc, "warm x={xw} should be > cool x={xc}");
+        // Warm amber: x > 0.5.
+        assert!(xw > 0.5, "warm amber x should be > 0.5, got {xw}");
+        // Cool white: x < 0.35.
+        assert!(xc < 0.35, "cool white x should be < 0.35, got {xc}");
+        let _ = (yw, yc);
     }
 
     #[test]
@@ -297,12 +317,11 @@ mod tests {
         let mut e = BreathingEffect::new();
         let out = e.tick(&ctx);
         match out[1].action {
-            LightAction::ColorXY { x, y } => {
-                // 2000 K → warm amber, x > 0.5, y > 0.4.
+            LightAction::ColorXYTransition { x, y, .. } => {
                 assert!(x > 0.5, "expected warm amber x > 0.5, got {x}");
                 assert!(y > 0.4, "expected warm amber y > 0.4, got {y}");
             }
-            _ => panic!("expected ColorXY second"),
+            _ => panic!("expected ColorXYTransition second"),
         }
     }
 
@@ -322,7 +341,7 @@ mod tests {
         for tick in 0..21 {
             let now_ms = tick * 200;
             let ctx = make_ctx(&room, &bulbs, &openings, &params, now_ms, 0);
-            if let LightAction::Brightness(b) = e.tick(&ctx)[0].action {
+            if let LightAction::BrightnessTransition { value: b, .. } = e.tick(&ctx)[0].action {
                 samples.push(b);
             }
         }

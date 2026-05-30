@@ -17,8 +17,12 @@
 //! commands so the actual MQTT load is ≪ 10 Hz per bulb.
 //!
 //! Params:
-//! - `speed` — temporal_phase advance per second (0.05–2.0, default 0.3).
+//! - `speed`        — phase advance per second (0.05–2.0, default 0.3).
 //! - `spatial_freq` — wave count across the room (0.5–5.0, default 1.5).
+//! - `brightness`   — bulb brightness level (10–254, default 200).
+//! - `palette` — colour scheme: "aurora" (green/cyan/purple), "sunset"
+//!   (red/orange/amber), "ocean" (blue/teal/cyan), "fire"
+//!   (red/orange/yellow). Default "aurora".
 
 use shared::messages::LightAction;
 
@@ -106,6 +110,17 @@ impl Effect for AuroraEffect {
                     "default": 1.5,
                     "minimum": 0.5,
                     "maximum": 5.0
+                },
+                "brightness": {
+                    "type": "integer",
+                    "default": 200,
+                    "minimum": 10,
+                    "maximum": 254
+                },
+                "palette": {
+                    "type": "string",
+                    "default": "aurora",
+                    "enum": ["aurora", "sunset", "ocean", "fire"]
                 }
             }
         })
@@ -114,7 +129,9 @@ impl Effect for AuroraEffect {
     fn default_params(&self) -> serde_json::Value {
         serde_json::json!({
             "speed": 0.3,
-            "spatial_freq": 1.5
+            "spatial_freq": 1.5,
+            "brightness": 200,
+            "palette": "aurora"
         })
     }
 
@@ -146,6 +163,18 @@ impl Effect for AuroraEffect {
             .and_then(|v| v.as_f64())
             .unwrap_or(1.5)
             .clamp(0.5, 5.0) as f32;
+        let brightness = ctx
+            .params
+            .get("brightness")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(200)
+            .clamp(10, 254) as u8;
+        let palette = ctx
+            .params
+            .get("palette")
+            .and_then(|v| v.as_str())
+            .unwrap_or("aurora");
+        let palette_keys = select_palette(palette);
 
         let elapsed_s = ctx.now_ms.saturating_sub(ctx.started_at_ms) as f32 / 1000.0;
         let temporal_phase = seed + elapsed_s * speed;
@@ -153,24 +182,29 @@ impl Effect for AuroraEffect {
         let theta = WAVE_ANGLE_DEGREES.to_radians();
         let (cos_t, sin_t) = (theta.cos(), theta.sin());
 
+        // Transition slightly longer than the 100 ms tick so the bulb is always
+        // interpolating when the next target arrives — eliminates colour jitter.
+        const TRANSITION_SECS: f32 = 0.15;
+
         let mut out = Vec::with_capacity(ctx.bulbs.len() * 2);
         for bulb in ctx.bulbs {
             let projection = bulb.x * cos_t + bulb.y * sin_t;
             let t = (projection * spatial_freq + temporal_phase).rem_euclid(1.0);
-            let color = sample_palette(t);
+            let color = sample_palette_keys(palette_keys, t);
 
-            // Aurora always emits a fairly bright wash so the colour reads —
-            // brightness is fixed so the user perceives the colour cycle, not
-            // a brightness flicker.
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::Brightness(200),
+                action: LightAction::BrightnessTransition {
+                    value: brightness,
+                    transition_secs: TRANSITION_SECS,
+                },
             });
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::ColorXY {
+                action: LightAction::ColorXYTransition {
                     x: color.x,
                     y: color.y,
+                    transition_secs: TRANSITION_SECS,
                 },
             });
         }
@@ -178,28 +212,53 @@ impl Effect for AuroraEffect {
     }
 }
 
-/// 4-keyframe Aurora palette that wraps: green → cyan → purple → green.
-/// `t` is taken mod 1.0; the final keyframe at t=1.0 closes the loop.
-const PALETTE: &[(f32, ColorXy)] = &[
-    (0.00, ColorXy::new(0.250, 0.650)), // saturated green
-    (0.33, ColorXy::new(0.200, 0.300)), // cyan
-    (0.66, ColorXy::new(0.300, 0.100)), // purple
-    (1.00, ColorXy::new(0.250, 0.650)), // green again (loop closure)
+const PALETTE_AURORA: &[(f32, ColorXy)] = &[
+    (0.00, ColorXy::new(0.250, 0.650)),
+    (0.33, ColorXy::new(0.200, 0.300)),
+    (0.66, ColorXy::new(0.300, 0.100)),
+    (1.00, ColorXy::new(0.250, 0.650)),
+];
+const PALETTE_SUNSET: &[(f32, ColorXy)] = &[
+    (0.00, ColorXy::new(0.600, 0.350)),
+    (0.33, ColorXy::new(0.580, 0.390)),
+    (0.66, ColorXy::new(0.520, 0.420)),
+    (1.00, ColorXy::new(0.600, 0.350)),
+];
+const PALETTE_OCEAN: &[(f32, ColorXy)] = &[
+    (0.00, ColorXy::new(0.155, 0.080)),
+    (0.33, ColorXy::new(0.185, 0.200)),
+    (0.66, ColorXy::new(0.200, 0.290)),
+    (1.00, ColorXy::new(0.155, 0.080)),
+];
+const PALETTE_FIRE: &[(f32, ColorXy)] = &[
+    (0.00, ColorXy::new(0.640, 0.330)),
+    (0.33, ColorXy::new(0.600, 0.380)),
+    (0.66, ColorXy::new(0.550, 0.430)),
+    (1.00, ColorXy::new(0.640, 0.330)),
 ];
 
-fn sample_palette(t: f32) -> ColorXy {
+fn select_palette(name: &str) -> &'static [(f32, ColorXy)] {
+    match name {
+        "sunset" => PALETTE_SUNSET,
+        "ocean" => PALETTE_OCEAN,
+        "fire" => PALETTE_FIRE,
+        _ => PALETTE_AURORA,
+    }
+}
+
+fn sample_palette_keys(keys: &[(f32, ColorXy)], t: f32) -> ColorXy {
     let t = t.rem_euclid(1.0);
     let mut lo = 0;
-    for (i, kf) in PALETTE.iter().enumerate() {
+    for (i, kf) in keys.iter().enumerate() {
         if kf.0 >= t {
             lo = i.saturating_sub(1);
             break;
         }
         lo = i;
     }
-    let hi = (lo + 1).min(PALETTE.len() - 1);
-    let (t0, c0) = PALETTE[lo];
-    let (t1, c1) = PALETTE[hi];
+    let hi = (lo + 1).min(keys.len() - 1);
+    let (t0, c0) = keys[lo];
+    let (t1, c1) = keys[hi];
     let local_t = if (t1 - t0).abs() > f32::EPSILON {
         (t - t0) / (t1 - t0)
     } else {
@@ -332,11 +391,11 @@ mod tests {
         let ctx = make_ctx(&room, &bulbs, &openings, &params, 3_600_000, 0);
         let out = e.tick(&ctx);
         // Look at the ColorXY emission (every other command).
-        if let LightAction::ColorXY { x, y } = out[1].action {
+        if let LightAction::ColorXYTransition { x, y, .. } = out[1].action {
             assert!((0.0..=1.0).contains(&x), "x out of range: {x}");
             assert!((0.0..=1.0).contains(&y), "y out of range: {y}");
         } else {
-            panic!("expected ColorXY second emission");
+            panic!("expected ColorXYTransition second emission");
         }
     }
 
@@ -355,11 +414,11 @@ mod tests {
         let out = e.tick(&ctx);
 
         let xy_near = match out[1].action {
-            LightAction::ColorXY { x, y } => (x, y),
+            LightAction::ColorXYTransition { x, y, .. } => (x, y),
             _ => panic!(),
         };
         let xy_far = match out[3].action {
-            LightAction::ColorXY { x, y } => (x, y),
+            LightAction::ColorXYTransition { x, y, .. } => (x, y),
             _ => panic!(),
         };
         // They should not collapse to the same point.
@@ -371,18 +430,37 @@ mod tests {
     }
 
     #[test]
-    fn palette_samples_stay_in_cyan_green_purple_band() {
-        // Random spot checks across t — the OKLCH path should never wander
-        // into orange/red.
+    fn aurora_palette_samples_stay_in_cyan_green_purple_band() {
         for raw in 0..10 {
             let t = raw as f32 / 10.0;
-            let c = sample_palette(t);
+            let c = sample_palette_keys(PALETTE_AURORA, t);
             assert!((0.0..=1.0).contains(&c.x));
             assert!((0.0..=1.0).contains(&c.y));
-            // Aurora keyframes all have x < 0.35 — no warm tints.
+            assert!(c.x < 0.40, "aurora sample drifted warm at t={t}: x={}", c.x);
+        }
+    }
+
+    #[test]
+    fn sunset_palette_samples_are_warm() {
+        for raw in 0..10 {
+            let t = raw as f32 / 10.0;
+            let c = sample_palette_keys(PALETTE_SUNSET, t);
             assert!(
-                c.x < 0.40,
-                "palette sample at t={t} drifted warm: x={}",
+                c.x > 0.40,
+                "sunset sample should be warm at t={t}: x={}",
+                c.x
+            );
+        }
+    }
+
+    #[test]
+    fn ocean_palette_samples_are_cool() {
+        for raw in 0..10 {
+            let t = raw as f32 / 10.0;
+            let c = sample_palette_keys(PALETTE_OCEAN, t);
+            assert!(
+                c.x < 0.25,
+                "ocean sample should be cool at t={t}: x={}",
                 c.x
             );
         }

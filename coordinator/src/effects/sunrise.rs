@@ -77,6 +77,13 @@ impl Effect for SunriseEffect {
                     "type": "string",
                     "default": "now",
                     "enum": ["now", "real-sunrise"]
+                },
+                "min_brightness": {
+                    "type": "integer",
+                    "default": 1,
+                    "minimum": 1,
+                    "maximum": 254,
+                    "description": "Floor brightness — prevents the curve from going completely dark at the indigo opening"
                 }
             }
         })
@@ -86,7 +93,8 @@ impl Effect for SunriseEffect {
         serde_json::json!({
             "duration_secs": 1800,
             "peak_warmth": 0.7,
-            "start_at": "now"
+            "start_at": "now",
+            "min_brightness": 1
         })
     }
 
@@ -119,25 +127,35 @@ impl Effect for SunriseEffect {
         let elapsed_ms = ctx.now_ms.saturating_sub(ctx.started_at_ms);
         let t_global = (elapsed_ms as f32 / duration_ms as f32).clamp(0.0, 1.0);
 
+        let min_bri = ctx
+            .params
+            .get("min_brightness")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1)
+            .clamp(1, 254) as u8;
+
         let mut out = Vec::with_capacity(ctx.bulbs.len() * 2);
         for bulb in ctx.bulbs {
             let offset = ctx.spatial.directional_offset(bulb, Direction::East);
             let t_bulb = (t_global + offset).clamp(0.0, 1.0);
             let (brightness_factor, color) = lerp_palette_at(t_bulb);
-
-            // Brightness ≥1 so bulbs stay addressable through the dark
-            // opening of the curve.
-            let brightness = ((brightness_factor * peak_warmth * 255.0).round() as u8).max(1);
+            let brightness = ((brightness_factor * peak_warmth * 255.0).round() as u8)
+                .max(1)
+                .max(min_bri);
 
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::Brightness(brightness),
+                action: LightAction::BrightnessTransition {
+                    value: brightness,
+                    transition_secs: 0.8,
+                },
             });
             out.push(EffectCommand {
                 device_id: bulb.device_id.clone(),
-                action: LightAction::ColorXY {
+                action: LightAction::ColorXYTransition {
                     x: color.x,
                     y: color.y,
+                    transition_secs: 0.8,
                 },
             });
         }
@@ -264,7 +282,7 @@ mod tests {
         let mut e = SunriseEffect::new();
         let out = e.tick(&ctx);
         let bri = match out[0].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
         assert!(
@@ -288,7 +306,7 @@ mod tests {
         let mut e = SunriseEffect::new();
         let out = e.tick(&ctx);
         let bri = match out[0].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
         assert!(
@@ -316,11 +334,11 @@ mod tests {
         let out = e.tick(&ctx);
 
         let east_bri = match out[0].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
         let west_bri = match out[2].action {
-            LightAction::Brightness(b) => b,
+            LightAction::BrightnessTransition { value: b, .. } => b,
             _ => panic!(),
         };
         assert!(

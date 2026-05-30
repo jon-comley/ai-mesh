@@ -119,6 +119,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
             room_id: info.room_id,
             effect_id: info.effect_id,
             params: info.params,
+            overrides: info.overrides,
         };
         match serde_json::to_string(&evt) {
             Ok(json) => {

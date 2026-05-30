@@ -56,10 +56,16 @@ struct ActiveEffectInstance {
     room_id: String,
     effect: Box<dyn Effect>,
     params: serde_json::Value,
+    /// Device IDs the user has manually overridden out of this effect.
+    overrides: std::collections::HashSet<String>,
     started_at_ms: u64,
     next_tick_at_ms: u64,
     persist_cadence: PersistCadence,
     last_persist_ms: Option<u64>,
+    /// True until the first tick — the runner calls `on_handoff` instead of
+    /// `tick` for that frame so the effect can issue slow transition commands
+    /// that survive any queued backlog from the previous effect.
+    handoff_pending: bool,
     /// Time of the most-recent successful tick — used to compute the
     /// inter-tick interval that feeds the EWMA.
     last_tick_at_ms: Option<u64>,
@@ -131,6 +137,9 @@ impl EffectRunner {
 
         // Initial rehydration of any effect rows from the DB.
         self.rehydrate_from_db();
+        // Populate the dashboard's effect snapshot so new WS clients get
+        // the correct effect state immediately on connect, even after restart.
+        self.push_all_effect_updates();
 
         loop {
             // Compute solar once per loop iteration and push to dashboard. This
@@ -152,8 +161,9 @@ impl EffectRunner {
             tokio::select! {
                 _ = sleep_until(deadline) => {}
                 _ = self.notify.notified() => {
-                    // Could be activate/disable from the HTTP layer — rehydrate
-                    // and tick everything that's now due immediately.
+                    // Could be activate/disable/override from the HTTP layer.
+                    // API handlers already pushed targeted EffectUpdate events;
+                    // we only need to rehydrate the runner's own instance map.
                     self.rehydrate_from_db();
                 }
             }
@@ -173,20 +183,20 @@ impl EffectRunner {
 
         let mut state = self.state.lock().unwrap();
 
-        // Drop instances whose room no longer has an active effect.
+        // Collect rooms being dropped BEFORE retain removes them, so we can
+        // clear their LES (previously the loop ran after retain and found nothing).
+        let dropping: Vec<String> = state
+            .instances
+            .keys()
+            .filter(|k| !live_keys.contains(*k))
+            .cloned()
+            .collect();
+        for room_id in &dropping {
+            state.les.clear_room(room_id);
+        }
         state
             .instances
             .retain(|room_id, _| live_keys.contains(room_id));
-        for room_id in state
-            .instances
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .filter(|k| !live_keys.contains(k))
-        {
-            state.les.clear_room(&room_id);
-        }
 
         // Add any rows that don't yet have an in-memory instance, or that
         // changed effect_id (effect swap).
@@ -196,8 +206,19 @@ impl EffectRunner {
                 None => true,
             };
             if !needs_construct {
+                // Refresh mutable fields that can change without an effect swap:
+                // overrides (per-bulb exclusions) and params (editor changes).
+                if let Some(inst) = state.instances.get_mut(&row.room_id) {
+                    inst.overrides = serde_json::from_str(&row.overrides_json).unwrap_or_default();
+                    inst.params =
+                        serde_json::from_str(&row.params_json).unwrap_or(serde_json::json!({}));
+                }
                 continue;
             }
+            // Clear stale LES so the dedup gate doesn't suppress the new
+            // effect's first commands based on the old effect's last state.
+            state.les.clear_room(&row.room_id);
+
             let Some(mut effect) = self.effects.instantiate(&row.effect_id) else {
                 warn!(effect_id = %row.effect_id, room_id = %row.room_id, "unknown effect_id in room_effects — skipping");
                 continue;
@@ -210,16 +231,20 @@ impl EffectRunner {
             }
             let params: serde_json::Value =
                 serde_json::from_str(&row.params_json).unwrap_or(serde_json::json!({}));
+            let overrides: std::collections::HashSet<String> =
+                serde_json::from_str(&row.overrides_json).unwrap_or_default();
             let persist_cadence = effect.persist_cadence();
             let started_at_ms = row.started_at_ms.max(0) as u64;
             let instance = ActiveEffectInstance {
                 room_id: row.room_id.clone(),
                 effect,
                 params,
+                overrides,
                 started_at_ms,
                 next_tick_at_ms: now_ms(), // tick immediately
                 persist_cadence,
                 last_persist_ms: row.internal_state_json.as_ref().map(|_| started_at_ms),
+                handoff_pending: true,
                 last_tick_at_ms: None,
                 ewma_interval_ms: None,
                 drifted_since_ms: None,
@@ -273,9 +298,19 @@ impl EffectRunner {
             let Some(inst) = state.instances.get_mut(room_id) else {
                 return Err("instance gone".into());
             };
+            // Filter out bulbs the user has manually overridden.
+            let active_bulbs: Vec<BulbInRoom> = if inst.overrides.is_empty() {
+                bulbs.clone()
+            } else {
+                bulbs
+                    .iter()
+                    .filter(|b| !inst.overrides.contains(&b.device_id))
+                    .cloned()
+                    .collect()
+            };
             let ctx = EffectCtx {
                 room: &room_ctx,
-                bulbs: &bulbs,
+                bulbs: &active_bulbs,
                 openings: &openings,
                 solar: *solar,
                 now_ms,
@@ -283,7 +318,12 @@ impl EffectRunner {
                 params: &inst.params,
                 spatial: SpatialHelpers::new(&room_ctx, &openings),
             };
-            let commands = inst.effect.tick(&ctx);
+            let commands = if inst.handoff_pending {
+                inst.handoff_pending = false;
+                inst.effect.on_handoff(&ctx)
+            } else {
+                inst.effect.tick(&ctx)
+            };
             let internal_state = match inst.persist_cadence {
                 PersistCadence::OnEnableOnly if inst.last_persist_ms.is_none() => {
                     inst.effect.serialize_internal_state()
@@ -466,6 +506,21 @@ impl EffectRunner {
             });
             let next = apply_action_to_les(baseline, &cmd.action);
             state.les.record(room_id, &cmd.device_id, next);
+        }
+    }
+
+    /// Push `EffectUpdate` events for every currently-active instance so the
+    /// dashboard snapshot stays in sync (used on startup and after notify).
+    fn push_all_effect_updates(&self) {
+        let state = self.state.lock().unwrap();
+        for inst in state.instances.values() {
+            let overrides: Vec<String> = inst.overrides.iter().cloned().collect();
+            self.dashboard.push_effect_update(
+                inst.room_id.clone(),
+                Some(inst.effect.id().to_string()),
+                inst.params.clone(),
+                overrides,
+            );
         }
     }
 

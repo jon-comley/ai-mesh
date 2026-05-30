@@ -12,6 +12,7 @@ use jsonschema::JSONSchema;
 use super::aurora::AuroraEffect;
 use super::breathing::BreathingEffect;
 use super::candlelight::CandlelightEffect;
+use super::snake::SnakeEffect;
 use super::solar::SolarEffect;
 use super::sunrise::SunriseEffect;
 use super::sunset::SunsetEffect;
@@ -118,6 +119,7 @@ pub fn register_builtins(reg: &mut EffectRegistry) {
     reg.register(|| Box::new(BreathingEffect::new()));
     reg.register(|| Box::new(CandlelightEffect::new()));
     reg.register(|| Box::new(AuroraEffect::new()));
+    reg.register(|| Box::new(SnakeEffect::new()));
     reg.register(|| Box::new(TelemetryEffect::new()));
 }
 
@@ -177,6 +179,7 @@ mod tests {
             "breathing",
             "candlelight",
             "aurora",
+            "snake",
             "telemetry",
         ] {
             assert!(ids.contains(&expected), "missing effect: {expected}");
@@ -186,6 +189,7 @@ mod tests {
         assert_eq!(by_id("breathing"), EffectCategory::Ambient);
         assert_eq!(by_id("candlelight"), EffectCategory::Ambient);
         assert_eq!(by_id("aurora"), EffectCategory::Game);
+        assert_eq!(by_id("snake"), EffectCategory::Game);
         assert_eq!(by_id("telemetry"), EffectCategory::Reactive);
     }
 

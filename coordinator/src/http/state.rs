@@ -49,6 +49,7 @@ pub enum DashboardEvent {
         room_id: String,
         effect_id: Option<String>,
         params: serde_json::Value,
+        overrides: Vec<String>,
     },
 }
 
@@ -59,6 +60,7 @@ pub struct RoomEffectInfo {
     pub room_id: String,
     pub effect_id: Option<String>,
     pub params: serde_json::Value,
+    pub overrides: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -433,6 +435,7 @@ impl DashboardState {
         room_id: String,
         effect_id: Option<String>,
         params: serde_json::Value,
+        overrides: Vec<String>,
     ) {
         {
             let mut snap = self.effect_snapshot.lock().unwrap();
@@ -445,6 +448,7 @@ impl DashboardState {
                         room_id: room_id.clone(),
                         effect_id: effect_id.clone(),
                         params: params.clone(),
+                        overrides: overrides.clone(),
                     },
                 );
             }
@@ -454,6 +458,7 @@ impl DashboardState {
                 room_id,
                 effect_id,
                 params,
+                overrides,
             });
         }
     }

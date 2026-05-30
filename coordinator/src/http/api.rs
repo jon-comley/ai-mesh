@@ -405,6 +405,32 @@ pub async fn modify_room_devices(
     StatusCode::NO_CONTENT.into_response()
 }
 
+#[derive(Deserialize)]
+pub struct ReorderRoomDevicesBody {
+    ids: Vec<String>,
+}
+
+pub async fn reorder_room_devices(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<ReorderRoomDevicesBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        reg.reorder_room_devices(&room_id, &body.ids);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
 pub async fn room_command(
     Path(room_id): Path<String>,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
@@ -1186,7 +1212,55 @@ fn persist_active_effect(
         room_id.to_string(),
         Some(effect_id.to_string()),
         params.clone(),
+        vec![],
     );
+    state.solar_sweep_notify.notify_one();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// PATCH /api/rooms/{id}/effect/override — add or remove a device from the
+/// per-effect override list. Excluded devices are skipped by the runner.
+pub(crate) async fn patch_effect_override(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let device_id = match body.get("device_id").and_then(|v| v.as_str()) {
+        Some(d) => d.to_string(),
+        None => return (StatusCode::BAD_REQUEST, "missing device_id").into_response(),
+    };
+    let excluded = body
+        .get("excluded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // Single lock: set the override and read back params atomically so there
+    // is no TOCTOU window where the effect could be cleared between the two.
+    let (new_overrides, effect_id, params) = {
+        let mut reg = registry.lock().unwrap();
+        let overrides = match reg.set_effect_override(&room_id, &device_id, excluded) {
+            Ok(Some(list)) => list,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(e) => {
+                tracing::warn!(error = %e, "set_effect_override failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        match reg.get_active_effect(&room_id) {
+            Some(r) => {
+                let p = serde_json::from_str(&r.params_json).unwrap_or(serde_json::json!({}));
+                (overrides, r.effect_id, p)
+            }
+            None => return StatusCode::NOT_FOUND.into_response(),
+        }
+    };
+
+    state.push_effect_update(room_id, Some(effect_id), params, new_overrides);
     state.solar_sweep_notify.notify_one();
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1211,7 +1285,7 @@ pub async fn clear_room_effect(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
-    state.push_effect_update(room_id.clone(), None, serde_json::json!({}));
+    state.push_effect_update(room_id.clone(), None, serde_json::json!({}), vec![]);
     state.solar_sweep_notify.notify_one();
     StatusCode::NO_CONTENT.into_response()
 }
@@ -1223,7 +1297,7 @@ mod tests {
     use axum::Router;
     use axum::body::to_bytes;
     use axum::http::Request;
-    use axum::routing::{get, post};
+    use axum::routing::{get, patch, post};
     use std::collections::HashMap;
     use std::sync::Mutex;
     use tokio::sync::mpsc;
@@ -2811,6 +2885,10 @@ mod tests {
                 "/api/rooms/{id}/effect",
                 post(set_room_effect).delete(clear_room_effect),
             )
+            .route(
+                "/api/rooms/{id}/effect/override",
+                patch(patch_effect_override),
+            )
             .layer(axum::Extension(registry))
             .layer(axum::Extension(effects))
             .with_state(state)
@@ -2902,7 +2980,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_room_effect_omits_params_uses_default() {
-        // Solar has no tunable params; body without `params` should still 204.
+        // Body without `params` should 204 and store the effect's default params.
         let state = make_state(vec![], empty_connections());
         let registry = make_registry();
         let room_id = make_room(&registry, "Lounge");
@@ -2920,8 +2998,11 @@ mod tests {
             .unwrap()
             .get_active_effect(&room_id)
             .unwrap();
-        // Stored params should be the effect's default (an empty object for Solar).
-        assert_eq!(active.params_json, "{}");
+        // Stored params should be Solar's defaults merged in.
+        let stored: serde_json::Value = serde_json::from_str(&active.params_json).unwrap();
+        assert_eq!(stored["min_brightness"], 1);
+        assert_eq!(stored["max_brightness"], 254);
+        assert!((stored["ct_warmth"].as_f64().unwrap() - 1.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
@@ -3039,5 +3120,162 @@ mod tests {
             }
         }
         assert!(saw_effect, "EffectUpdate was not broadcast");
+    }
+
+    #[tokio::test]
+    async fn patch_effect_override_excludes_device() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+
+        // Activate an effect first.
+        send(
+            effects_router(
+                Arc::clone(&state),
+                Arc::clone(&registry),
+                Arc::clone(&effects),
+            ),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"breathing"}"#,
+        )
+        .await;
+
+        // Exclude a device.
+        let status = send(
+            effects_router(
+                Arc::clone(&state),
+                Arc::clone(&registry),
+                Arc::clone(&effects),
+            ),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/effect/override?token="),
+            r#"{"device_id":"bulb-1","excluded":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let active = registry
+            .lock()
+            .unwrap()
+            .get_active_effect(&room_id)
+            .unwrap();
+        let stored: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
+        assert_eq!(stored, vec!["bulb-1"]);
+    }
+
+    #[tokio::test]
+    async fn patch_effect_override_broadcasts_effect_update_with_overrides() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+
+        send(
+            effects_router(
+                Arc::clone(&state),
+                Arc::clone(&registry),
+                Arc::clone(&effects),
+            ),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"breathing"}"#,
+        )
+        .await;
+
+        let mut rx = state.tx.subscribe();
+        send(
+            effects_router(
+                Arc::clone(&state),
+                Arc::clone(&registry),
+                Arc::clone(&effects),
+            ),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/effect/override?token="),
+            r#"{"device_id":"bulb-1","excluded":true}"#,
+        )
+        .await;
+
+        let mut saw_overrides = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let crate::http::state::DashboardEvent::EffectUpdate { overrides, .. } = evt {
+                assert!(overrides.contains(&"bulb-1".to_string()));
+                saw_overrides = true;
+            }
+        }
+        assert!(
+            saw_overrides,
+            "EffectUpdate with overrides was not broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_effect_override_without_active_effect_returns_404() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+
+        let status = send(
+            effects_router(Arc::clone(&state), Arc::clone(&registry), effects),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/effect/override?token="),
+            r#"{"device_id":"bulb-1","excluded":true}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn patch_effect_override_include_removes_from_list() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Lounge");
+        let effects = Arc::new(EffectRegistry::default());
+
+        send(
+            effects_router(
+                Arc::clone(&state),
+                Arc::clone(&registry),
+                Arc::clone(&effects),
+            ),
+            "POST",
+            &format!("/api/rooms/{room_id}/effect?token="),
+            r#"{"effect_id":"breathing"}"#,
+        )
+        .await;
+        // Exclude.
+        send(
+            effects_router(
+                Arc::clone(&state),
+                Arc::clone(&registry),
+                Arc::clone(&effects),
+            ),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/effect/override?token="),
+            r#"{"device_id":"bulb-1","excluded":true}"#,
+        )
+        .await;
+        // Re-include.
+        let status = send(
+            effects_router(
+                Arc::clone(&state),
+                Arc::clone(&registry),
+                Arc::clone(&effects),
+            ),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/effect/override?token="),
+            r#"{"device_id":"bulb-1","excluded":false}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let active = registry
+            .lock()
+            .unwrap()
+            .get_active_effect(&room_id)
+            .unwrap();
+        let stored: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
+        assert!(stored.is_empty(), "bulb-1 should be re-included");
     }
 }
