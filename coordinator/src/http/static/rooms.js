@@ -143,6 +143,57 @@ document.addEventListener('drop', e => {
   else clearEffect(roomId); // pause — remembers config
 });
 
+// ── Auto-scroll during drag ───────────────────────────────────────────────────
+// Scrolls the lighting panel (or body on desktop) when the pointer is near the
+// top or bottom edge of the viewport while any drag is active.
+{
+  const EDGE = 80;       // px from edge to start scrolling
+  const MAX_SPEED = 16;  // px per frame at the very edge
+  let scrollRaf = null;
+  let scrollEl = null;   // cached per drag session
+
+  const resolveScrollEl = () => {
+    const panel = document.getElementById('panel-lighting');
+    if (panel && getComputedStyle(panel).overflowY !== 'visible') return panel;
+    return document.scrollingElement || document.documentElement;
+  };
+
+  const stopScroll = () => {
+    if (scrollRaf) { cancelAnimationFrame(scrollRaf); scrollRaf = null; }
+    scrollEl = null;
+  };
+
+  document.addEventListener('dragover', e => {
+    const y = e.clientY;
+    const h = window.innerHeight;
+    let speed = 0;
+    if (y < EDGE)          speed = -MAX_SPEED * (1 - y / EDGE);
+    else if (y > h - EDGE) speed =  MAX_SPEED * (1 - (h - y) / EDGE);
+
+    if (speed === 0) { stopScroll(); return; }
+
+    // Cache scroll target once per drag; re-resolve only when not yet set
+    if (!scrollEl) scrollEl = resolveScrollEl();
+
+    if (!scrollRaf) {
+      const tick = () => {
+        // Re-check validity each frame — layout may change mid-drag
+        if (!scrollEl || !document.contains(scrollEl)) { stopScroll(); return; }
+        scrollEl.scrollBy(0, speed);
+        scrollRaf = requestAnimationFrame(tick);
+      };
+      scrollRaf = requestAnimationFrame(tick);
+    }
+  }, { passive: true });
+
+  document.addEventListener('dragend',  stopScroll);
+  document.addEventListener('drop',     stopScroll);
+  document.addEventListener('dragleave', e => {
+    // Viewport exit: clientY outside window bounds is more reliable than relatedTarget === null
+    if (e.clientY <= 0 || e.clientY >= window.innerHeight) stopScroll();
+  });
+}
+
 // ── Bulb-identify pulse (triggered on drag-grab) ─────────────────────────────
 // Pulses the grabbed bulb full→dim so you know which physical unit you're holding.
 // Restores original state on release.
@@ -940,6 +991,37 @@ function renderUnassigned(deviceIds) {
   strip.appendChild(chips);
   wireDropZone(strip, 'unassigned');
 
+  // Room drag: show warning drop zone
+  strip.addEventListener('dragover', e => {
+    if (!roomDragId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    strip.classList.add('room-delete-drop-active');
+  });
+  strip.addEventListener('dragleave', e => {
+    // relatedTarget is unreliable in HTML5 DnD; use bounding-box instead
+    const rect = strip.getBoundingClientRect();
+    const inside = e.clientX >= rect.left && e.clientX <= rect.right
+                && e.clientY >= rect.top  && e.clientY <= rect.bottom;
+    if (!inside) strip.classList.remove('room-delete-drop-active');
+  });
+  strip.addEventListener('drop', async e => {
+    if (!roomDragId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    strip.classList.remove('room-delete-drop-active');
+    const id = roomDragId;
+    roomDragId = null;
+    const room = roomsData.find(r => r.id === id);
+    const name = room?.name || 'this room';
+    const count = room?.device_ids?.length ?? 0;
+    const msg = count > 0
+      ? `Delete "${name}"? This will unassign ${count} bulb${count !== 1 ? 's' : ''} and remove the floor plan.`
+      : `Delete "${name}"? The floor plan will also be removed.`;
+    if (!confirm(msg)) { requestAnimationFrame(saveRoomOrder); return; }
+    await deleteRoom(id);
+  });
+
   // Hide when all devices are assigned; shown as a drop target during device drags
   if (devicesMap.size > 0 && deviceIds.length === 0) strip.style.display = 'none';
 
@@ -968,15 +1050,33 @@ function renderRoomCard(room) {
     roomDragId = room.id;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', `room:${room.id}`);
-    // Use a clean ghost showing just the room name instead of a full card screenshot
+    // Ghost: a compact card showing just the room header (name + bulb count)
     const ghost = document.createElement('div');
     ghost.className = 'room-drag-ghost';
-    ghost.textContent = room.name || 'Room';
+    const ghostName = document.createElement('span');
+    ghostName.className = 'room-drag-ghost-name';
+    ghostName.textContent = room.name || 'Room';
+    const ghostCount = document.createElement('span');
+    ghostCount.className = 'room-drag-ghost-count';
+    ghostCount.textContent = room.device_ids.length
+      ? `${room.device_ids.length} bulb${room.device_ids.length !== 1 ? 's' : ''}`
+      : 'empty';
+    ghost.appendChild(ghostName);
+    ghost.appendChild(ghostCount);
+    // Position off-screen but in normal flow so offsetWidth is computed correctly
+    ghost.style.cssText = 'position:fixed;left:-9999px;top:0;';
     document.body.appendChild(ghost);
-    e.dataTransfer.setDragImage(ghost, 0, 0);
+    e.dataTransfer.setDragImage(ghost, ghost.offsetWidth / 2, ghost.offsetHeight / 2);
     requestAnimationFrame(() => {
       card.classList.add('dragging');
       ghost.remove();
+      const strip = document.getElementById('unassigned-strip');
+      if (strip) {
+        strip.style.display = '';
+        strip.classList.add('room-drag-active');
+        const lbl = strip.querySelector('.room-unassigned-label');
+        if (lbl) lbl.textContent = '⚠ Drop to delete room + unassign bulbs';
+      }
     });
   });
   card.addEventListener('dragend', () => {
@@ -984,6 +1084,13 @@ function renderRoomCard(room) {
     const wasReordering = roomDragId !== null;
     roomDragId = null;
     card.setAttribute('draggable', 'true');
+    const strip = document.getElementById('unassigned-strip');
+    if (strip) {
+      strip.classList.remove('room-drag-active', 'room-delete-drop-active');
+      const lbl = strip.querySelector('.room-unassigned-label');
+      if (lbl) lbl.textContent = 'Unassigned';
+      if (strip.querySelectorAll('.room-chip').length === 0) strip.style.display = 'none';
+    }
     if (wasReordering) saveRoomOrder();
   });
 
@@ -1596,7 +1703,7 @@ function wireDeviceDrag(card, deviceId, roomId) {
     document.querySelectorAll('.drag-leaving').forEach(el => el.classList.remove('drag-leaving'));
     // Re-hide the unassigned strip if nothing was dropped into it
     const strip = document.getElementById('unassigned-strip');
-    if (strip && !strip.querySelector('.room-chip')) strip.style.display = 'none';
+    if (strip && strip.querySelectorAll('.room-chip').length === 0) strip.style.display = 'none';
   });
   // Allow effect chips (e.g. solar) to be dropped onto device cards; the drop
   // event bubbles up to the room body's wireDropZone handler which applies the effect.
@@ -1803,7 +1910,7 @@ function renderChip(deviceId, fromRoomId, showRemove) {
     stopPulse();
     document.querySelectorAll('.drag-leaving').forEach(el => el.classList.remove('drag-leaving'));
     const strip = document.getElementById('unassigned-strip');
-    if (strip && !strip.querySelector('.room-chip')) strip.style.display = 'none';
+    if (strip && strip.querySelectorAll('.room-chip').length === 0) strip.style.display = 'none';
   });
 
   return chip;

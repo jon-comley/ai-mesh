@@ -748,6 +748,22 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   margin-bottom: 8px;
+  transition: color 0.15s;
+}
+
+/* Room drag over unassigned strip — warning state */
+.room-unassigned.room-drag-active {
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 6%, var(--surface));
+  transition: border-color 0.15s, background 0.15s;
+}
+.room-unassigned.room-drag-active .room-unassigned-label {
+  color: var(--red);
+}
+.room-unassigned.room-delete-drop-active {
+  border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 14%, var(--surface));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--red) 30%, transparent);
 }
 
 .effects-palette {
@@ -1172,19 +1188,30 @@ body {
   transition: opacity 0.15s, border-color 0.15s;
 }
 
-/* Clean drag ghost — just the room name pill */
+/* Drag ghost — compact room card (header only) */
 .room-drag-ghost {
   position: fixed;
   top: -200px;
-  background: var(--surface-2);
+  background: var(--surface);
   border: 1px solid var(--accent);
-  border-radius: 8px;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 6px 14px;
-  white-space: nowrap;
+  border-radius: 12px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 160px;
   pointer-events: none;
+  user-select: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.room-drag-ghost-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.room-drag-ghost-count {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 /* Color temperature toggle button */
