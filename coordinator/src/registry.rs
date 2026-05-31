@@ -1050,6 +1050,32 @@ impl Registry {
         }
     }
 
+    pub fn delete_device(&mut self, device_id: &str) {
+        // Remove from room assignments
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM room_devices WHERE device_id = ?1",
+            params![device_id],
+        ) {
+            warn!(error = %e, "delete_device: remove from rooms failed");
+        }
+        // Remove light state
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM light_states WHERE device_id = ?1",
+            params![device_id],
+        ) {
+            warn!(error = %e, "delete_device: remove light_states failed");
+        }
+        // Remove light position
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM light_positions WHERE device_id = ?1",
+            params![device_id],
+        ) {
+            warn!(error = %e, "delete_device: remove light_positions failed");
+        }
+        // Update in-memory cache
+        self.light_positions.remove(device_id);
+    }
+
     pub fn rename_room(&mut self, id: &str, name: &str) {
         if let Err(e) = self.conn.execute(
             "UPDATE rooms SET name = ?1 WHERE id = ?2",

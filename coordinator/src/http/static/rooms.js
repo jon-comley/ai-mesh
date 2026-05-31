@@ -1612,6 +1612,19 @@ function renderChip(deviceId, fromRoomId, showRemove) {
   label.textContent = formatDeviceName(deviceId);
   chip.appendChild(label);
 
+  // Add delete button for unassigned devices
+  if (fromRoomId === 'unassigned') {
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'room-chip-delete';
+    deleteBtn.textContent = '✕';
+    deleteBtn.title = 'Delete device';
+    deleteBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      deleteDevice(deviceId);
+    });
+    chip.appendChild(deleteBtn);
+  }
+
   chip.addEventListener('pointerdown', e => {
     if (e.target !== chip && e.target.closest('button')) chip.setAttribute('draggable', 'false');
   });
@@ -1823,6 +1836,15 @@ async function removeDeviceFromRoom(roomId, deviceId) {
     });
     if (!res.ok) showToast(`Remove device failed (${res.status})`, true);
   } catch (e) { showToast(`Remove device error: ${e.message}`, true); }
+}
+
+async function deleteDevice(deviceId) {
+  try {
+    const res = await fetch(`/api/lights/${encodeURIComponent(deviceId)}?token=${encodeURIComponent(tok())}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) showToast(`Delete device failed (${res.status})`, true);
+  } catch (e) { showToast(`Delete device error: ${e.message}`, true); }
 }
 
 // ── Scene bar drag-to-reorder ─────────────────────────────────────────────────
