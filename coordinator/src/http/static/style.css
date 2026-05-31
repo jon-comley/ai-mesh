@@ -933,6 +933,25 @@ body {
   gap: 8px;
 }
 
+.room-controls-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.room-controls-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.room-effects-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .room-collapse-btn {
   background: none;
   border: none;
@@ -2000,18 +2019,6 @@ body {
   grid-column: 1 / -1;
 }
 
-/* ── Header quick controls (on/off + swatch, always visible) ─────────────────── */
-.room-header-quick {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  width: 100%;
-}
-
-.room-header-quick .light-slider {
-  margin: 6px 0;
-}
 
 /* ── Quick scenes bar (always visible, horizontal scroll) ────────────────────── */
 .room-quick-scenes {
