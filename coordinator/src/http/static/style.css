@@ -1008,11 +1008,31 @@ body {
   opacity: 1;
 }
 
-/* Track stays invisible — only the thumb dot is shown. Sized to an easy
-   touch target and matched to the JS hit-detection width (THUMB_W = 18). */
+/* Track is invisible at rest and only appears while dragging, so the resting
+   state is a clean dot. Track height 6px; thumb 18px centred on it. */
+.room-slider-input::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: transparent;
+}
+.room-slider-input::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: transparent;
+}
+.room-slider.dragging .room-slider-input::-webkit-slider-runnable-track {
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.room-slider.dragging .room-slider-input::-moz-range-track {
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
 .room-slider-input::-webkit-slider-thumb {
   width: 18px;
   height: 18px;
+  margin-top: -6px; /* (track 6px − thumb 18px) / 2 — centre the thumb on track */
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 .room-slider-input::-moz-range-thumb {
