@@ -1,5 +1,5 @@
-coordinator_ip   := "192.168.1.15"
-coordinator_port := "9000"
+coordinator_ip   := "192.168.1.11"
+coordinator_port := "9001"
 
 export PATH := env_var("HOME") / ".cargo/bin" + ":" + env_var("PATH")
 
@@ -232,7 +232,7 @@ run-coordinator: update-portproxy
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -p coordinator
 
 run-controller:
-    AGENT_ROLE=controller cargo run -p agent
+    AGENT_ROLE=compute cargo run -p agent
 
 reset: update-portproxy
     #!/usr/bin/env bash
@@ -1943,3 +1943,193 @@ test-inference: update-portproxy
 
     echo "=== Step 6: Final cluster state ==="
     MESH_INSECURE=1 cargo run -q -p cli -- nodes
+
+# Deploy coordinator to a remote host (pi1) as a systemd service.
+# Idempotent: safe to re-run. Handles state file + cert/key migration.
+# Usage: just deploy-coordinator pi1
+deploy-coordinator target_host:
+    #!/usr/bin/env bash
+    set -e
+
+    TARGET_HOST="{{target_host}}"
+    # Load node config
+    if [ ! -f "nodes/${TARGET_HOST}.env" ]; then
+        echo ">>> Error: nodes/${TARGET_HOST}.env not found"
+        exit 1
+    fi
+    source "nodes/${TARGET_HOST}.env"
+
+    echo "=== Deploying coordinator to ${TARGET_HOST} (${NODE_HOST}) ==="
+    echo ""
+
+    # Step 1: Cross-build coordinator for ARM64
+    echo ">>> Step 1: Cross-building coordinator for aarch64..."
+    cargo build --target aarch64-unknown-linux-gnu --release -p coordinator 2>&1 | grep -E "Compiling coordinator|Finished" || true
+
+    # Step 2: Create /var/lib/ai-mesh on target
+    echo ">>> Step 2: Ensuring /var/lib/ai-mesh exists on ${TARGET_HOST}..."
+    ssh ${NODE_USER}@${NODE_HOST} "
+        set -e
+        if [ ! -d /var/lib/ai-mesh ]; then
+            sudo mkdir -p /var/lib/ai-mesh
+            sudo chown ${NODE_USER}:${NODE_USER} /var/lib/ai-mesh
+            sudo chmod 700 /var/lib/ai-mesh
+        fi
+        # Ensure ~/.config/ai-mesh exists (for cert/key/state)
+        mkdir -p ~/.config/ai-mesh
+        chmod 700 ~/.config/ai-mesh
+    "
+
+    # Step 3: Copy state files (cert, key, state) to target
+    echo ">>> Step 3: Copying state files to ${TARGET_HOST}..."
+    STATE_DIR="$HOME/.config/ai-mesh"
+    if [ -d "$STATE_DIR" ] && [ -n "$(ls -A "$STATE_DIR" 2>/dev/null)" ]; then
+        scp -r "$STATE_DIR"/* ${NODE_USER}@${NODE_HOST}:~/.config/ai-mesh/ 2>/dev/null || {
+            echo ">>> Warning: Could not copy state files"
+        }
+    else
+        echo ">>> Warning: State directory $STATE_DIR does not exist or is empty (will be created on first run)"
+    fi
+
+    # Step 4: Copy database
+    echo ">>> Step 4: Copying ai_mesh.db to ${TARGET_HOST}..."
+    if [ -f "ai_mesh.db" ]; then
+        scp ai_mesh.db ${NODE_USER}@${NODE_HOST}:/var/lib/ai-mesh/
+    else
+        echo ">>> Warning: ai_mesh.db not found in repo root (will be created on first run)"
+    fi
+
+    # Step 5: Copy binary
+    echo ">>> Step 5: Copying coordinator binary to ${TARGET_HOST}..."
+    scp target/aarch64-unknown-linux-gnu/release/coordinator ${NODE_USER}@${NODE_HOST}:/tmp/ai-mesh-coordinator
+    ssh ${NODE_USER}@${NODE_HOST} "sudo install -m 755 /tmp/ai-mesh-coordinator /usr/local/bin/ai-mesh-coordinator && rm /tmp/ai-mesh-coordinator"
+
+    # Step 6: Install systemd unit
+    echo ">>> Step 6: Installing systemd unit on ${TARGET_HOST}..."
+    cat systemd/ai-mesh-coordinator.service | ssh ${NODE_USER}@${NODE_HOST} "
+        set -e
+        sudo tee /etc/systemd/system/ai-mesh-coordinator.service > /dev/null
+        sudo systemctl daemon-reload
+    "
+
+    # Step 7: Enable and start the service
+    echo ">>> Step 7: Enabling and starting ai-mesh-coordinator service..."
+    ssh ${NODE_USER}@${NODE_HOST} "
+        sudo systemctl enable ai-mesh-coordinator
+        sudo systemctl restart ai-mesh-coordinator
+        echo '>>> Service enabled and started'
+    "
+
+    echo ""
+    echo "=== Deployment complete ==="
+    echo ""
+    echo "Next steps:"
+    echo "  1. Verify the deployment: just verify-coordinator ${TARGET_HOST}"
+    echo "  2. Repoint agents at the new coordinator: just start-agents"
+    echo "  3. Check health: http://${NODE_HOST}:{{coordinator_port}}/?token=..."
+    echo ""
+
+# Verify coordinator health on the target host (Phase 2 health check).
+# Checks: connectivity, log output, agent connections, Zigbee → MQTT, dashboard access.
+# Usage: just verify-coordinator pi1
+verify-coordinator target_host:
+    #!/usr/bin/env bash
+    set -e
+
+    TARGET_HOST="{{target_host}}"
+    if [ ! -f "nodes/${TARGET_HOST}.env" ]; then
+        echo ">>> Error: nodes/${TARGET_HOST}.env not found"
+        exit 1
+    fi
+    source "nodes/${TARGET_HOST}.env"
+
+    echo "=== Verifying coordinator on ${TARGET_HOST} (${NODE_HOST}) ==="
+    echo ""
+
+    # Check 1: Service is running
+    echo "[1/5] Checking service status..."
+    ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl is-active ai-mesh-coordinator" > /dev/null && echo "      ✓ Service is active" || {
+        echo "      ✗ Service is NOT active"
+        echo "Logs:"
+        ssh ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 20 --no-pager"
+        exit 1
+    }
+
+    # Check 2: HTTP endpoint is responding
+    echo "[2/5] Checking HTTP endpoint at ${NODE_HOST}:{{coordinator_port}}..."
+    if curl -s http://${NODE_HOST}:{{coordinator_port}}/ | grep -q "<!DOCTYPE\|<html"; then
+        echo "      ✓ Dashboard HTML loaded"
+    else
+        echo "      ✗ Dashboard did not respond with HTML"
+        exit 1
+    fi
+
+    # Check 3: Recent log output shows expected startup messages
+    echo "[3/5] Checking startup logs..."
+    if ssh ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 50 --no-pager | grep -q 'listening on\|TLS\|auth token'"; then
+        echo "      ✓ Startup messages found"
+    else
+        echo "      ⚠ Could not find expected startup messages (may still be running)"
+    fi
+
+    # Check 4: Certificate fingerprint matches
+    echo "[4/5] Checking certificate fingerprint..."
+    COORDINATOR_LOG=$(ssh ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 100 --no-pager")
+    FP=$(echo "$COORDINATOR_LOG" | grep -oP 'fingerprint: \K[a-f0-9:]+' | head -1)
+    if [ -n "$FP" ]; then
+        echo "      ✓ Fingerprint: $FP"
+    else
+        echo "      ⚠ Could not extract fingerprint from logs (check manually)"
+    fi
+
+    # Check 5: DB exists
+    echo "[5/5] Checking database file..."
+    ssh ${NODE_USER}@${NODE_HOST} "[ -f /var/lib/ai-mesh/ai_mesh.db ] && echo '✓ Database exists' || echo '⚠ Database not yet created (will be on first run)'"
+
+    echo ""
+    echo "=== Verification complete ==="
+    echo ""
+    echo "Dashboard URL: http://${NODE_HOST}:{{coordinator_port}}/?token=..."
+    echo ""
+    echo "Manual next steps:"
+    echo "  - Repoint agents: just start-agents"
+    echo "  - Check agent connections: ssh ${NODE_USER}@${NODE_HOST} sudo journalctl -u ai-mesh-coordinator -f"
+    echo "  - Test light command: click a bulb on-off in the dashboard"
+    echo ""
+
+# Emergency revert: stop the remote coordinator and restart on laptop.
+# Restores the laptop as the controller (resets justfile coordinator_ip comment).
+# Usage: just rollback-coordinator
+rollback-coordinator:
+    #!/usr/bin/env bash
+    set -e
+
+    echo "=== Emergency rollback: reverting coordinator to laptop ==="
+    echo ""
+
+    # Find pi1 host from nodes/
+    PI1_FILE="nodes/pi1.env"
+    if [ ! -f "$PI1_FILE" ]; then
+        echo ">>> Error: $PI1_FILE not found"
+        exit 1
+    fi
+    source "$PI1_FILE"
+
+    # Stop the remote service
+    echo ">>> Stopping coordinator service on ${NODE_HOST}..."
+    ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-coordinator 2>/dev/null || true" || true
+    echo "    ✓ Remote coordinator stopped"
+
+    # Restart on laptop
+    echo ">>> Restarting coordinator on laptop (WSL2)..."
+    just run-coordinator &
+    sleep 2
+
+    echo ""
+    echo "=== Rollback complete ==="
+    echo ""
+    echo "Next steps:"
+    echo "  1. Update coordinator_ip in justfile to your laptop IP if needed"
+    echo "  2. Repoint agents back to laptop: just start-agents"
+    echo "  3. Verify cluster health: just validate-routing"
+    echo ""

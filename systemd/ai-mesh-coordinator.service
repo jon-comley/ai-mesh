@@ -1,0 +1,39 @@
+[Unit]
+Description=ai-mesh Coordinator (lighting + cluster management)
+Documentation=https://github.com/grazfather/ai-mesh
+Requires=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=jonno
+Group=jonno
+
+WorkingDirectory=/var/lib/ai-mesh
+ExecStart=/usr/local/bin/ai-mesh-coordinator
+Restart=on-failure
+RestartSec=3s
+
+# Environment
+Environment="RUST_LOG=info"
+# MDNS_ADVERTISE_IP should be set to pi1's LAN IP (192.168.1.11) or overridden via /etc/systemd/system/ai-mesh-coordinator.service.d/override.conf
+Environment="MDNS_ADVERTISE_IP=192.168.1.11"
+Environment="MESH_HTTP_PORT=9001"
+
+# Read coordinator.state on startup to reuse the existing token and cert/key pinning.
+# State file is at ~/.config/ai-mesh/coordinator.state (the ~ resolves to User's home).
+EnvironmentFile=-%h/.config/ai-mesh/coordinator.state
+
+# Security
+ProtectSystem=full
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Sandboxing is light; we read /var/lib/ai-mesh and the user's ~/.config/ai-mesh.
+# Not enabling ProtectHome=true yet — blocks reads from ~/.config/ai-mesh (deferred to future hardening).
+
+# Resource limits
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target
