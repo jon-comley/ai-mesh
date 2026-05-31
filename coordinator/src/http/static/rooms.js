@@ -465,8 +465,8 @@ function buildEffectBadge(room, activeEffect) {
   const icon = EFFECT_ICONS[activeEffect.effect_id] || DEFAULT_EFFECT_ICON;
   const name = meta?.display_name || activeEffect.effect_id;
   badge.textContent = `${icon} ${name}`;
-  badge.style.cursor = 'grab';
-  badge.title = `${name} active — click for options, drag off to remove`;
+  badge.style.cursor = 'pointer';
+  badge.title = `${name} active — click for options`;
   badge.addEventListener('click', e => {
     e.stopPropagation();
     openEffectEditorRoomId = openEffectEditorRoomId === room.id ? null : room.id;
