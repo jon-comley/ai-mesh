@@ -448,6 +448,24 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 
 ---
 
+#### 2026-05-31 — Type B hang (kernel hang, new symptom) — under investigation
+
+- **Incident:** 2026-05-31 ~12:10 UTC. Light on, no screen/GPU output. SSH works (TCP connection ESTABLISHED to coordinator), but agent process unresponsive. Tasklist shows agent.exe with 0:00:00 CPU time and 16 MB memory (vs. expected GBs for running inference). HTTP health check times out. Required hard power button reset.
+- **Difference from Type A:** Type A was system BSOD (0x00000133 DPC_WATCHDOG). Type B is process hung in kernel but system stays up.
+- **Signature:** Agent never fully initialized (only 16 MB memory, no models loaded). Process stuck in kernel I/O wait or preempted at a non-cancellable point. Likely GPU driver hang during Vulkan initialization or model load.
+- **Probable root cause:** GPU driver issue during inference startup. Type A was fTPM (now fixed); Type B appears to be GPU-related and driver-version dependent.
+- **Current driver at time of hang:** `32.0.31007.5012` (May 12, 2026) — pre-26.5.2. Adrenalin 26.5.2 upgrade was attempted but did not persist.
+- **Remediation in progress:**
+  1. Re-upgrading to AMD Adrenalin 26.5.2 (should include Ryzen 8000 iGPU fixes)
+  2. Re-upgrading chipset drivers to 8.05.04.516 (latest May 2026)
+  3. WoL (Wake on LAN) disabled in initial provisioning script to rule out network-triggered half-sleep states
+- **Diagnostics if it happens again:**
+  - Collect Windows minidump from System event log (Event ID 1001 or 41)
+  - Check GPU driver version after reboot
+  - Monitor logs for timing pattern (always after N minutes? during specific operations?)
+
+---
+
 #### Verification checklist after any reboot, driver change, or CMOS reset
 
 ```bash
