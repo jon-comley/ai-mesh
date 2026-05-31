@@ -151,8 +151,16 @@ body {
 .badge-red     { background: color-mix(in srgb, var(--red)   20%, transparent); color: var(--red); }
 .badge-muted   { background: var(--surface-2); color: var(--text-muted); }
 .badge-offline { background: var(--surface-2); color: var(--text-muted); font-style: italic; }
-.device-offline { opacity: 0.55; pointer-events: none; }
+.device-offline { opacity: 0.55; }
+/* Re-enable drag and delete on offline cards */
 .device-offline .room-remove-btn { pointer-events: auto; opacity: 1; }
+/* Disable only the light-controlling inputs and buttons */
+.device-offline button:not(.room-remove-btn),
+.device-offline input[type="range"],
+.device-offline input[type="checkbox"] {
+  pointer-events: none;
+  cursor: not-allowed;
+}
 
 /* ── Node cards ────────────────────────────────────────────────────────────── */
 .node-card {
