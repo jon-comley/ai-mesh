@@ -554,11 +554,21 @@ body {
   -webkit-appearance: none;
   appearance: none;
   height: 6px;
-  background: var(--surface-2);
+  background: transparent;
   border-radius: 3px;
   outline: none;
   cursor: pointer;
   padding: 4px 0;
+}
+
+.light-slider::-webkit-slider-runnable-track {
+  background: transparent;
+  border: none;
+}
+
+.light-slider::-moz-range-track {
+  background: transparent;
+  border: none;
 }
 
 .light-slider::-webkit-slider-thumb {
@@ -938,6 +948,23 @@ body {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.room-slider-container {
+  position: relative;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.room-slider-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 4px;
+  min-height: 16px;
 }
 
 .room-effects-row {
