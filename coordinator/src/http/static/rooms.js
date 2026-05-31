@@ -929,16 +929,10 @@ function renderRoomCard(room) {
     briSlider.className = 'light-slider room-brightness-slider';
     briSlider.title = 'Room brightness';
     lockSliderToThumb(briSlider);
-    let briTimer = null;
-    briSlider.addEventListener('input', async e => {
-      const val = parseInt(briSlider.value);
-      if (activeEffect) await clearEffect(room.id);
-      clearTimeout(briTimer);
-      briTimer = setTimeout(() =>
-        sendRoomCommand(room.id, { action: 'brightness', value: val }, room), 80);
-    });
+    briSlider.addEventListener('pointerdown', () => briSlider.classList.add('slider-active'));
+    briSlider.addEventListener('pointercancel', () => briSlider.classList.remove('slider-active'));
     briSlider.addEventListener('change', async e => {
-      clearTimeout(briTimer);
+      briSlider.classList.remove('slider-active');
       if (activeEffect) await clearEffect(room.id);
       sendRoomCommand(room.id, { action: 'brightness', value: parseInt(briSlider.value) }, room);
     });
@@ -957,16 +951,10 @@ function renderRoomCard(room) {
     ctSlider.className = 'light-slider room-ct-slider';
     ctSlider.title = 'Room color temperature';
     lockSliderToThumb(ctSlider);
-    let ctTimer = null;
-    ctSlider.addEventListener('input', async e => {
-      const val = parseInt(ctSlider.value);
-      if (activeEffect) await clearEffect(room.id);
-      clearTimeout(ctTimer);
-      ctTimer = setTimeout(() =>
-        sendRoomCommand(room.id, { action: 'color_temp', value: val }, room), 80);
-    });
+    ctSlider.addEventListener('pointerdown', () => ctSlider.classList.add('slider-active'));
+    ctSlider.addEventListener('pointercancel', () => ctSlider.classList.remove('slider-active'));
     ctSlider.addEventListener('change', async e => {
-      clearTimeout(ctTimer);
+      ctSlider.classList.remove('slider-active');
       if (activeEffect) await clearEffect(room.id);
       sendRoomCommand(room.id, { action: 'color_temp', value: parseInt(ctSlider.value) }, room);
     });
