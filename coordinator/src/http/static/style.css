@@ -1172,6 +1172,37 @@ body {
   transition: opacity 0.15s, border-color 0.15s;
 }
 
+/* Clean drag ghost — just the room name pill */
+.room-drag-ghost {
+  position: fixed;
+  top: -200px;
+  background: var(--surface-2);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Color temperature toggle button */
+.color-temp-toggle-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-muted);
+  padding: 0 2px;
+  line-height: 1;
+  transition: color 0.15s;
+}
+.color-temp-toggle-btn:hover,
+.color-temp-toggle-btn.active {
+  color: var(--accent);
+}
+
 .room-controls {
   display: flex;
   align-items: center;

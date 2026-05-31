@@ -968,7 +968,16 @@ function renderRoomCard(room) {
     roomDragId = room.id;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', `room:${room.id}`);
-    requestAnimationFrame(() => card.classList.add('dragging'));
+    // Use a clean ghost showing just the room name instead of a full card screenshot
+    const ghost = document.createElement('div');
+    ghost.className = 'room-drag-ghost';
+    ghost.textContent = room.name || 'Room';
+    document.body.appendChild(ghost);
+    e.dataTransfer.setDragImage(ghost, 0, 0);
+    requestAnimationFrame(() => {
+      card.classList.add('dragging');
+      ghost.remove();
+    });
   });
   card.addEventListener('dragend', () => {
     card.classList.remove('dragging');
@@ -1501,7 +1510,7 @@ function deviceCardHtml(dev) {
   if (dev.color_temp != null) {
     const kelvin = Math.round(1_000_000 / dev.color_temp);
     controls += `
-      <div class="light-detail-row">
+      <div class="light-detail-row light-ct-row" data-ctrl="ct-row">
         <span class="light-detail-label">Color temp</span>
         <input class="light-slider" type="range" min="154" max="500" value="${dev.color_temp}"
                data-ctrl="color_temp" title="${kelvin} K" aria-label="Color temperature">
@@ -1510,6 +1519,10 @@ function deviceCardHtml(dev) {
   }
   controls += colourPicker;
 
+  const ctToggle = dev.color_temp != null
+    ? `<button class="color-temp-toggle-btn" data-ctrl="ct-toggle" title="Color temperature">⊹</button>`
+    : '';
+
   return `
     <div class="light-card-header">
       <div class="light-name-group">
@@ -1517,6 +1530,7 @@ function deviceCardHtml(dev) {
         <span class="light-node-badge">${esc(dev.node_id)}</span>
       </div>
       <div class="light-card-header-right">
+        ${ctToggle}
         ${swatch}
         <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(displayName)}">
           <span class="badge ${badgeClass}">${badgeLabel}</span>
@@ -1701,55 +1715,31 @@ function wireDeviceControls(card, dev, roomId) {
   if (sat) { lockSliderToThumb(sat); sat.addEventListener('input', syncColourUI); sat.addEventListener('change', sendColour); }
   if (hue || sat) syncColourUI();
 
-  // ── CT / Colour mode toggle ───────────────────────────────────────────────
-  // Show a [Temp | Colour] toggle when the device supports both. Defaults to
-  // Temp (colour-temperature) mode; preference is persisted per device.
-  const ctRow     = card.querySelector('[data-ctrl="color_temp"]')?.closest('.light-detail-row');
+  // ── CT and colour picker — click to reveal, click away to hide ───────────
+  const ctRow     = card.querySelector('[data-ctrl="ct-row"]');
+  const ctToggle  = card.querySelector('[data-ctrl="ct-toggle"]');
   const pickerEl  = card.querySelector('[data-ctrl="colour-picker"]');
   const swatchBtn = card.querySelector('[data-ctrl="colour-toggle"]');
-  if (ctRow && pickerEl) {
-    const modeKey = `mesh-mode-${dev.device_id}`;
-    let mode = localStorage.getItem(modeKey) ?? 'temp';
 
-    const toggle = document.createElement('div');
-    toggle.className = 'light-mode-toggle';
+  // CT row hidden by default; revealed when ⊹ button is clicked
+  if (ctRow) ctRow.style.display = 'none';
+  if (ctToggle && ctRow) {
+    ctToggle.addEventListener('click', e => {
+      e.stopPropagation();
+      const open = ctRow.style.display !== 'none';
+      ctRow.style.display = open ? 'none' : '';
+      ctToggle.classList.toggle('active', !open);
+    });
+  }
 
-    const mkModeBtn = (label, m) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'light-mode-btn';
-      btn.textContent = label;
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        mode = m;
-        localStorage.setItem(modeKey, mode);
-        applyMode();
-      });
-      return btn;
-    };
-    const tempBtn   = mkModeBtn('Temp',   'temp');
-    const colourBtn = mkModeBtn('Colour', 'colour');
-    toggle.appendChild(tempBtn);
-    toggle.appendChild(colourBtn);
-
-    const applyMode = () => {
-      const isTemp = mode === 'temp';
-      tempBtn.classList.toggle('active',   isTemp);
-      colourBtn.classList.toggle('active', !isTemp);
-      ctRow.style.display = isTemp ? '' : 'none';
-      if (swatchBtn) swatchBtn.style.display = isTemp ? 'none' : '';
-      if (isTemp) {
-        pickerEl.classList.remove('open');
-        openPickerIds.delete(dev.device_id);
-      } else {
-        pickerEl.classList.add('open');
-        openPickerIds.add(dev.device_id);
-      }
-    };
-    applyMode(); // apply stored preference immediately
-
-    const detailsEl = card.querySelector('.light-card-details');
-    if (detailsEl) detailsEl.insertBefore(toggle, ctRow);
+  // Colour picker toggle (existing behaviour — click swatch to open, click away to close)
+  if (swatchBtn && pickerEl) {
+    swatchBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      const isOpen = pickerEl.classList.toggle('open');
+      if (isOpen) openPickerIds.add(dev.device_id);
+      else openPickerIds.delete(dev.device_id);
+    });
   }
 }
 
