@@ -218,9 +218,16 @@ export function handleEffectUpdate(evt) {
   const { room_id, effect_id, params, overrides } = evt;
   if (!room_id) return;
   if (effect_id == null) {
+    const existing = roomEffectsMap.get(room_id);
     roomEffectsMap.delete(room_id);
-    // Don't touch lastEffectByRoom — clearEffect already stored it, and we
-    // want the ghost badge to remain until the user explicitly removes it.
+    // Server-initiated clear (e.g. device offline): store paused state if not
+    // already stored by a user-triggered clearEffect call.
+    if (existing && !lastEffectByRoom.has(room_id)) {
+      lastEffectByRoom.set(room_id, {
+        effect_id: existing.effect_id,
+        params: { ...existing.params },
+      });
+    }
   } else {
     roomEffectsMap.set(room_id, {
       effect_id,

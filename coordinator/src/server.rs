@@ -653,9 +653,39 @@ async fn process_message(
                 on = %report.on,
                 "light state report received"
             );
+            let device_id = report.device_id.clone();
+            let went_offline = !report.online;
             registry.lock().unwrap().save_light_state(&report);
             if let Some(dash) = dashboard {
                 dash.push_lighting_update(report.clone());
+
+                if went_offline {
+                    // Get room + check for active effect in a single lock acquisition.
+                    let (maybe_room, has_effect) = {
+                        let reg = registry.lock().unwrap();
+                        let room_id = reg.get_room_for_device(&device_id);
+                        let has = room_id
+                            .as_deref()
+                            .and_then(|rid| reg.get_active_effect(rid))
+                            .is_some();
+                        (room_id, has)
+                    };
+                    if has_effect && let Some(room_id) = maybe_room {
+                        info!(
+                            room_id = %room_id,
+                            device_id = %device_id,
+                            "device offline — auto-pausing effect"
+                        );
+                        let _ = registry.lock().unwrap().disable_active_effect(&room_id);
+                        dash.push_effect_update(
+                            room_id.clone(),
+                            None,
+                            serde_json::json!({}),
+                            vec![],
+                        );
+                        dash.solar_sweep_notify.notify_one();
+                    }
+                }
             }
             None
         }
