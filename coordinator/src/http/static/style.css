@@ -940,12 +940,6 @@ body {
   flex-wrap: wrap;
 }
 
-.room-controls-sliders {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
 .room-effects-row {
   display: flex;
   align-items: center;

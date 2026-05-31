@@ -912,59 +912,8 @@ function renderRoomCard(room) {
   topRow.appendChild(layoutBtn);
   ctrlRow.appendChild(topRow);
 
-  // Middle rows: brightness and color temp sliders
-  const sliderRow = document.createElement('div');
-  sliderRow.className = 'room-controls-sliders';
-  // Move sliders from quickCtrl to sliderRow
-  if (!empty) {
-    const briDevices = roomDevicesAll.filter(d => d.brightness != null);
-    const avgBri = briDevices.length > 0
-      ? Math.round(briDevices.reduce((sum, d) => sum + (d.brightness ?? 0), 0) / briDevices.length)
-      : 200;
-    const briSlider = document.createElement('input');
-    briSlider.type = 'range';
-    briSlider.min = '1';
-    briSlider.max = '254';
-    briSlider.value = avgBri;
-    briSlider.className = 'light-slider room-brightness-slider';
-    briSlider.title = 'Room brightness';
-    lockSliderToThumb(briSlider);
-    briSlider.addEventListener('pointerdown', () => briSlider.classList.add('slider-active'));
-    briSlider.addEventListener('pointercancel', () => briSlider.classList.remove('slider-active'));
-    briSlider.addEventListener('change', async e => {
-      briSlider.classList.remove('slider-active');
-      if (activeEffect) await clearEffect(room.id);
-      sendRoomCommand(room.id, { action: 'brightness', value: parseInt(briSlider.value) }, room);
-    });
-    sliderRow.appendChild(briSlider);
-  }
-  if (!empty && hasColour) {
-    const ctDevices = roomDevicesAll.filter(d => d.color_temp != null);
-    const avgCT = ctDevices.length > 0
-      ? Math.round(ctDevices.reduce((sum, d) => sum + (d.color_temp ?? 0), 0) / ctDevices.length)
-      : 370;
-    const ctSlider = document.createElement('input');
-    ctSlider.type = 'range';
-    ctSlider.min = '154';
-    ctSlider.max = '500';
-    ctSlider.value = avgCT;
-    ctSlider.className = 'light-slider room-ct-slider';
-    ctSlider.title = 'Room color temperature';
-    lockSliderToThumb(ctSlider);
-    ctSlider.addEventListener('pointerdown', () => ctSlider.classList.add('slider-active'));
-    ctSlider.addEventListener('pointercancel', () => ctSlider.classList.remove('slider-active'));
-    ctSlider.addEventListener('change', async e => {
-      ctSlider.classList.remove('slider-active');
-      if (activeEffect) await clearEffect(room.id);
-      sendRoomCommand(room.id, { action: 'color_temp', value: parseInt(ctSlider.value) }, room);
-    });
-    sliderRow.appendChild(ctSlider);
-  }
-  ctrlRow.appendChild(sliderRow);
-
   // Hide room controls when effect editor is open (so effect params take priority)
   if (activeEffect && openEffectEditorRoomId === room.id) {
-    sliderRow.style.display = 'none';
     topRow.style.display = 'none';
   }
 
