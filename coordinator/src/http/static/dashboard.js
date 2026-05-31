@@ -68,6 +68,7 @@ const handlers = {
   ScenesUpdate: evt => rooms.handleScenesUpdate(evt),
   SolarUpdate: evt => rooms.notifySolar(evt.azimuth, evt.elevation),
   EffectUpdate: evt => rooms.handleEffectUpdate(evt),
+  ZigbeeStatus: evt => rooms.handleZigbeeStatus(evt.online),
 };
 
 function dispatch(evt) {

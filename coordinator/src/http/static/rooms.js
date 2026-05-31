@@ -344,6 +344,13 @@ function patchDeviceCards() {
   }
 }
 
+let zigbeeOnline = true;
+
+export function handleZigbeeStatus(online) {
+  zigbeeOnline = online;
+  render();
+}
+
 export function notifySolar(azimuth, elevation) {
   // Forward to the layout panel (compass + sun-arc display). The dashboard
   // does not run its own solar calculation any more — the runner pushes
@@ -363,13 +370,20 @@ function render() {
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
 
   container.innerHTML = '';
+  if (!zigbeeOnline) {
+    const banner = document.createElement('div');
+    banner.id = 'zigbee-banner';
+    banner.className = 'zigbee-offline-banner';
+    banner.textContent = '⚠ Zigbee bridge offline — lights unavailable';
+    container.appendChild(banner);
+  }
   if (roomsData.length > 0) container.appendChild(renderGlobalControls());
   container.appendChild(renderEffectsPalette());
   container.appendChild(renderNewRoomBtn());
   container.appendChild(renderUnassigned(unassigned));
 
   const roomList = document.createElement('div');
-  roomList.className = 'room-list rooms-layout-root';
+  roomList.className = 'room-list rooms-layout-root' + (zigbeeOnline ? '' : ' zigbee-offline');
 
   const sorted = [...roomsData].sort((a, b) => a.position - b.position);
   for (const room of sorted) {

@@ -268,6 +268,9 @@ pub enum MeshMessage {
     AuthToken(String),
     // Phase 11C — coordinator pushes a new heartbeat interval to a specific node
     SetHeartbeatInterval { secs: u64 },
+    // Zigbee bridge up/down — emitted by the lighting capability when MQTT
+    // connection to zigbee2mqtt is lost or restored
+    ZigbeeStatus { online: bool },
 }
 
 /// Structured admin messages for coordinator control.
