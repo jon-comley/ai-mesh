@@ -939,19 +939,18 @@ function renderRoomCard(room) {
     briSlider.className = 'light-slider room-brightness-slider';
     briSlider.title = 'Room brightness';
 
-    // Prevent track clicks from being actioned on slider
     briSlider.addEventListener('pointerdown', e => {
       const rect = briSlider.getBoundingClientRect();
       const ratio = (briSlider.value - briSlider.min) / (briSlider.max - briSlider.min);
       const thumbX = rect.left + ratio * rect.width;
-      const thumbHitZone = 20;
-      // If click is not near thumb, prevent default and let event propagate
-      if (Math.abs(e.clientX - thumbX) > thumbHitZone) {
+      // If not near thumb, block slider but let card drag through
+      if (Math.abs(e.clientX - thumbX) > 20) {
         e.preventDefault();
         e.stopPropagation();
         return;
       }
-      // Thumb grabbed - show value
+      // Thumb grabbed — mark active so WS updates don't re-render mid-drag
+      briSlider.classList.add('slider-active');
       valueDisplay.style.display = 'block';
     }, { capture: true });
 
@@ -961,12 +960,14 @@ function renderRoomCard(room) {
     });
 
     briSlider.addEventListener('change', async () => {
+      briSlider.classList.remove('slider-active');
       valueDisplay.style.display = 'none';
       if (activeEffect) await clearEffect(room.id);
       sendRoomCommand(room.id, { action: 'brightness', value: parseInt(briSlider.value) }, room);
     });
 
     briSlider.addEventListener('pointercancel', () => {
+      briSlider.classList.remove('slider-active');
       valueDisplay.style.display = 'none';
     });
 
