@@ -466,6 +466,22 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 
 ---
 
+#### 2026-05-31 — Type B hang during AMD driver install — resolved with clean reinstall
+
+- **Incident:** During AMD driver install (~12:45 UTC), system became unresponsive (black screen, no GPU output). SSH remained responsive. No crash event in System log (rules out Type A/DPC_WATCHDOG). Driver version check showed install did not complete — still showed `32.0.31007.5012` (May 12, pre-26.5.2).
+- **Symptom signature:** GPU/display frozen, but kernel still responsive. No BugCheck event. Matches Type B hang pattern (GPU driver hang during initialization).
+- **Root cause hypothesis:** AMD driver installer triggered GPU initialization that hung or was incompatible with the pre-26.5.2 state. Multiple outdated AMD apps (old Radeon Settings + new Adrenalin) may have conflicted.
+- **Remediation applied:**
+  1. Identified duplicate AMD apps installed (old Radeon Settings + new Adrenalin) — uninstalled legacy Radeon Settings
+  2. Ran AMD Clean Utility to completely remove all driver files and registry entries
+  3. Downloaded fresh AMD Adrenalin 26.5.2 driver + chipset 8.05.04.516
+  4. Performed clean reinstall of both driver and chipset
+  5. Rebooted after install completed
+- **Outcome:** Install completed without hanging. Driver version pending verification post-reboot (may be cached until system refresh). No new crash events in log.
+- **Lesson:** Duplicate AMD driver applications can cause conflicts. Always use Clean Utility before major driver reinstalls, not just the standard uninstall.
+
+---
+
 #### Verification checklist after any reboot, driver change, or CMOS reset
 
 ```bash
