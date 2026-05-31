@@ -357,7 +357,7 @@ function render() {
   const container = document.getElementById('lighting-list');
   if (!container || dragSrc || roomDragId) return;
   if (container.querySelector('.layout-view')) return; // layout open — don't wipe
-  if (container.querySelector('.slider-active')) return; // slider being dragged — don't wipe it out from under the user
+  if (container.querySelector('.room-slider-input.slider-active')) return; // room slider thumb being dragged — don't wipe it out
 
   const assigned = new Set(roomsData.flatMap(r => r.device_ids));
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
