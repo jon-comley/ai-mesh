@@ -1043,6 +1043,25 @@ function renderRoomCard(room) {
     }));
   }
 
+  // Room color temp slider (only if room has colour-temp capable devices)
+  if (!empty && hasColour) {
+    const ctDevices = roomDevicesAll.filter(d => d.color_temp != null);
+    const avgCT = ctDevices.length > 0
+      ? Math.round(ctDevices.reduce((sum, d) => sum + (d.color_temp ?? 0), 0) / ctDevices.length)
+      : 370;
+    ctrlRow.appendChild(buildRoomSlider({
+      label: 'Color temp',
+      min: 154,
+      max: 500,
+      value: avgCT,
+      format: v => Math.round(1e6 / v) + 'K',
+      onCommit: async v => {
+        if (activeEffect) await clearEffect(room.id);
+        sendRoomCommand(room.id, { action: 'color_temp', value: v }, room);
+      },
+    }));
+  }
+
   // Hide room controls when effect editor is open (so effect params take priority)
   if (activeEffect && openEffectEditorRoomId === room.id) {
     topRow.style.display = 'none';
