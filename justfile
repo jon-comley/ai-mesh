@@ -258,7 +258,7 @@ set-heartbeat node secs:
     #!/usr/bin/env bash
     STATE="$HOME/.config/ai-mesh/coordinator.state"
     if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN MESH_HTTP_PORT; fi
-    cargo run -q -p cli -- --coordinator "127.0.0.1:{{coordinator_port}}" \
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
         set-heartbeat {{node}} {{secs}}
 
 # ── Local sanity (coordinator + controller only) ──────────────────────────────
@@ -1170,23 +1170,39 @@ start-cluster: update-portproxy
     pkill -f "target/(debug|release)/agent" || true
     sleep 0.3
 
-    echo ">>> Building coordinator..."
-    cargo build -q -p coordinator
-    echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
-    MDNS_ADVERTISE_IP={{coordinator_ip}} ./target/debug/coordinator > /tmp/mesh-coordinator.log 2>&1 &
+    # Check if coordinator runs remotely (on pi1) or locally (on this machine)
+    if [[ "{{coordinator_ip}}" == "127.0.0.1" || "{{coordinator_ip}}" == "localhost" ]]; then
+        # Local coordinator mode
+        echo ">>> Building coordinator..."
+        cargo build -q -p coordinator
+        echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
+        MDNS_ADVERTISE_IP={{coordinator_ip}} ./target/debug/coordinator > /tmp/mesh-coordinator.log 2>&1 &
 
-    echo ">>> Waiting for coordinator to accept connections..."
-    for i in $(seq 1 60); do
-        sleep 1
-        if grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null; then
+        echo ">>> Waiting for coordinator to accept connections..."
+        for i in $(seq 1 60); do
+            sleep 1
+            if grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null; then
+                echo ">>> Coordinator ready."
+                break
+            fi
+            [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
+        done
+
+        cargo build -q -p cli
+        ./target/debug/cli reset-registry > /dev/null || true
+    else
+        # Remote coordinator mode (running on pi1 as systemd service)
+        echo ">>> Coordinator is running remotely on {{coordinator_ip}}"
+        echo ">>> Verifying connectivity to {{coordinator_ip}}:9000..."
+        if timeout 5 bash -c "echo > /dev/tcp/{{coordinator_ip}}/9000" 2>/dev/null; then
             echo ">>> Coordinator ready."
-            break
+        else
+            echo ">>> ERROR: Could not reach coordinator at {{coordinator_ip}}:9000"
+            echo ">>>        Is it running? Check: ssh jonno@{{coordinator_ip}} systemctl status ai-mesh-coordinator"
+            exit 1
         fi
-        [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
-    done
-
-    cargo build -q -p cli
-    ./target/debug/cli reset-registry > /dev/null || true
+        cargo build -q -p cli
+    fi
 
     # Push TLS fingerprint + auth token to all compute nodes before starting their agents.
     STATE="$HOME/.config/ai-mesh/coordinator.state"
@@ -1291,23 +1307,39 @@ restart-coordinator: update-portproxy
         export MESH_AUTH_TOKEN="${MESH_AUTH_TOKEN:-}"
     fi
 
-    echo ">>> Building coordinator..."
-    cargo build -q -p coordinator
-    echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
-    MDNS_ADVERTISE_IP={{coordinator_ip}} ./target/debug/coordinator > /tmp/mesh-coordinator.log 2>&1 &
+    # Check if coordinator runs remotely (on pi1) or locally (on this machine)
+    if [[ "{{coordinator_ip}}" == "127.0.0.1" || "{{coordinator_ip}}" == "localhost" ]]; then
+        # Local coordinator mode
+        echo ">>> Building coordinator..."
+        cargo build -q -p coordinator
+        echo ">>> Starting coordinator (log: /tmp/mesh-coordinator.log)..."
+        MDNS_ADVERTISE_IP={{coordinator_ip}} ./target/debug/coordinator > /tmp/mesh-coordinator.log 2>&1 &
 
-    echo ">>> Waiting for coordinator to accept connections..."
-    for i in $(seq 1 60); do
-        sleep 1
-        if grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null; then
+        echo ">>> Waiting for coordinator to accept connections..."
+        for i in $(seq 1 60); do
+            sleep 1
+            if grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null; then
+                echo ">>> Coordinator ready."
+                break
+            fi
+            [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
+        done
+
+        cargo build -q -p cli
+        ./target/debug/cli reset-registry > /dev/null || true
+    else
+        # Remote coordinator mode (running on pi1 as systemd service)
+        echo ">>> Coordinator is running remotely on {{coordinator_ip}}"
+        echo ">>> Verifying connectivity to {{coordinator_ip}}:9000..."
+        if timeout 5 bash -c "echo > /dev/tcp/{{coordinator_ip}}/9000" 2>/dev/null; then
             echo ">>> Coordinator ready."
-            break
+        else
+            echo ">>> ERROR: Could not reach coordinator at {{coordinator_ip}}:9000"
+            echo ">>>        Is it running? Check: ssh jonno@{{coordinator_ip}} systemctl status ai-mesh-coordinator"
+            exit 1
         fi
-        [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
-    done
-
-    cargo build -q -p cli
-    ./target/debug/cli reset-registry > /dev/null || true
+        cargo build -q -p cli
+    fi
 
     # Read fingerprint (and token if set) from the coordinator state file.
     if [ ! -f "$STATE" ]; then
