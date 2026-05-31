@@ -357,6 +357,7 @@ function render() {
   const container = document.getElementById('lighting-list');
   if (!container || dragSrc || roomDragId) return;
   if (container.querySelector('.layout-view')) return; // layout open — don't wipe
+  if (container.querySelector('.slider-active')) return; // slider being dragged — don't wipe it out from under the user
 
   const assigned = new Set(roomsData.flatMap(r => r.device_ids));
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
@@ -428,6 +429,85 @@ function renderGlobalControls() {
   bar.appendChild(allOnBtn);
   bar.appendChild(allOffBtn);
   return bar;
+}
+
+// ── Room slider ───────────────────────────────────────────────────────────────
+// A single-interaction slider: value changes ONLY by grabbing the thumb and
+// dragging. Clicking the track does nothing (event propagates to the card so
+// e.g. drag-to-reorder still works). A value bubble floats above the thumb
+// while dragging. While active, the slider carries `.slider-active` so render()
+// won't wipe it out mid-drag.
+//
+// opts: { label, min, max, value, format(v)->string, onCommit(v)->void }
+function buildRoomSlider(opts) {
+  const { label, min, max, value, format, onCommit } = opts;
+
+  const container = document.createElement('div');
+  container.className = 'room-slider';
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'room-slider-label';
+  labelEl.textContent = label;
+  container.appendChild(labelEl);
+
+  const track = document.createElement('div');
+  track.className = 'room-slider-track';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'room-slider-bubble';
+  bubble.textContent = format(value);
+
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = String(min);
+  slider.max = String(max);
+  slider.value = String(value);
+  slider.className = 'light-slider room-slider-input';
+  slider.title = label;
+
+  // Position the bubble horizontally above the thumb, accounting for the fact
+  // that the thumb centre only travels over [thumbW/2, width - thumbW/2].
+  const THUMB_W = 18;
+  const positionBubble = () => {
+    const ratio = (slider.value - min) / (max - min);
+    const w = slider.getBoundingClientRect().width;
+    const centre = THUMB_W / 2 + ratio * (w - THUMB_W);
+    bubble.style.left = `${centre}px`;
+    bubble.textContent = format(parseInt(slider.value, 10));
+  };
+
+  // Only a grab ON the thumb counts. A track click is swallowed AND allowed to
+  // propagate to the card (no stopPropagation) so card-level gestures still fire.
+  slider.addEventListener('pointerdown', e => {
+    const rect = slider.getBoundingClientRect();
+    const ratio = (slider.value - min) / (max - min);
+    const thumbCentre = rect.left + THUMB_W / 2 + ratio * (rect.width - THUMB_W);
+    const hitRadius = e.pointerType === 'touch' ? 26 : 16;
+    if (Math.abs(e.clientX - thumbCentre) > hitRadius) {
+      e.preventDefault();   // cancel the native track-jump
+      return;               // let it bubble to the card
+    }
+    slider.classList.add('slider-active');
+    container.classList.add('dragging');
+    positionBubble();
+  }, { capture: true });
+
+  slider.addEventListener('input', positionBubble);
+
+  const finish = () => {
+    slider.classList.remove('slider-active');
+    container.classList.remove('dragging');
+  };
+  slider.addEventListener('change', async () => {
+    finish();
+    await onCommit(parseInt(slider.value, 10));
+  });
+  slider.addEventListener('pointercancel', finish);
+
+  track.appendChild(bubble);
+  track.appendChild(slider);
+  container.appendChild(track);
+  return container;
 }
 
 // ── Effects palette ──────────────────────────────────────────────────────────
@@ -912,69 +992,23 @@ function renderRoomCard(room) {
   topRow.appendChild(layoutBtn);
   ctrlRow.appendChild(topRow);
 
-  // Room brightness slider with value display
+  // Room brightness slider
   if (!empty) {
     const briDevices = roomDevicesAll.filter(d => d.brightness != null);
     const avgBri = briDevices.length > 0
       ? Math.round(briDevices.reduce((sum, d) => sum + (d.brightness ?? 0), 0) / briDevices.length)
       : 200;
-
-    const sliderContainer = document.createElement('div');
-    sliderContainer.className = 'room-slider-container';
-
-    const label = document.createElement('span');
-    label.className = 'room-slider-label';
-    label.textContent = 'Brightness';
-
-    const valueDisplay = document.createElement('div');
-    valueDisplay.className = 'room-slider-value';
-    valueDisplay.textContent = Math.round((avgBri / 254) * 100) + '%';
-    valueDisplay.style.display = 'none';
-
-    const briSlider = document.createElement('input');
-    briSlider.type = 'range';
-    briSlider.min = '1';
-    briSlider.max = '254';
-    briSlider.value = avgBri;
-    briSlider.className = 'light-slider room-brightness-slider';
-    briSlider.title = 'Room brightness';
-
-    briSlider.addEventListener('pointerdown', e => {
-      const rect = briSlider.getBoundingClientRect();
-      const ratio = (briSlider.value - briSlider.min) / (briSlider.max - briSlider.min);
-      const thumbX = rect.left + ratio * rect.width;
-      // If not near thumb, block slider but let card drag through
-      if (Math.abs(e.clientX - thumbX) > 20) {
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-      // Thumb grabbed — mark active so WS updates don't re-render mid-drag
-      briSlider.classList.add('slider-active');
-      valueDisplay.style.display = 'block';
-    }, { capture: true });
-
-    briSlider.addEventListener('input', () => {
-      const percent = Math.round((parseInt(briSlider.value) / 254) * 100);
-      valueDisplay.textContent = percent + '%';
-    });
-
-    briSlider.addEventListener('change', async () => {
-      briSlider.classList.remove('slider-active');
-      valueDisplay.style.display = 'none';
-      if (activeEffect) await clearEffect(room.id);
-      sendRoomCommand(room.id, { action: 'brightness', value: parseInt(briSlider.value) }, room);
-    });
-
-    briSlider.addEventListener('pointercancel', () => {
-      briSlider.classList.remove('slider-active');
-      valueDisplay.style.display = 'none';
-    });
-
-    sliderContainer.appendChild(label);
-    sliderContainer.appendChild(valueDisplay);
-    sliderContainer.appendChild(briSlider);
-    ctrlRow.appendChild(sliderContainer);
+    ctrlRow.appendChild(buildRoomSlider({
+      label: 'Brightness',
+      min: 1,
+      max: 254,
+      value: avgBri,
+      format: v => Math.round((v / 254) * 100) + '%',
+      onCommit: async v => {
+        if (activeEffect) await clearEffect(room.id);
+        sendRoomCommand(room.id, { action: 'brightness', value: v }, room);
+      },
+    }));
   }
 
   // Hide room controls when effect editor is open (so effect params take priority)

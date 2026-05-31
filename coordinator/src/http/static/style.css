@@ -950,14 +950,12 @@ body {
   flex-wrap: wrap;
 }
 
-.room-slider-container {
-  position: relative;
+.room-slider {
   width: 100%;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  margin: 8px 0;
-  gap: 4px;
+  gap: 6px;
+  margin: 10px 0 4px;
 }
 
 .room-slider-label {
@@ -966,11 +964,57 @@ body {
   font-weight: 500;
 }
 
-.room-slider-value {
-  font-size: 12px;
+/* Relative wrapper so the value bubble can float above the thumb. Extra top
+   padding reserves space for the bubble so it never clips the card above. */
+.room-slider-track {
+  position: relative;
+  width: 100%;
+  padding-top: 22px;
+}
+
+.room-slider-input {
+  width: 100%;
+  display: block;
+  margin: 0;
+}
+
+/* Value bubble — hidden until the thumb is grabbed (.dragging on container) */
+.room-slider-bubble {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  padding: 1px 7px;
+  border-radius: 8px;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--accent);
-  min-height: 16px;
+  color: var(--bg, #0d1117);
+  background: var(--accent);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.room-slider.dragging .room-slider-bubble {
+  opacity: 1;
+}
+
+/* Track stays invisible — only the thumb dot is shown. Sized to an easy
+   touch target and matched to the JS hit-detection width (THUMB_W = 18). */
+.room-slider-input::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.room-slider-input::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.room-slider.dragging .room-slider-input::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+.room-slider.dragging .room-slider-input::-moz-range-thumb {
+  transform: scale(1.15);
 }
 
 .room-effects-row {
