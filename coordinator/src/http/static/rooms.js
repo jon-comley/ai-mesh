@@ -433,10 +433,11 @@ function renderGlobalControls() {
 function renderEffectsPalette() {
   const palette = document.createElement('div');
   palette.className = 'effects-palette';
+  palette.title = 'Drag into room';
 
   const label = document.createElement('span');
   label.className = 'effects-palette-label';
-  label.textContent = 'Effects — drag onto a room:';
+  label.textContent = 'Effects';
   palette.appendChild(label);
 
   if (effectsCatalog.length === 0) {
@@ -849,10 +850,7 @@ function renderRoomCard(room) {
   const ctrlRow = document.createElement('div');
   ctrlRow.className = 'room-header-controls-row';
 
-  // Quick on/off + colour swatch in header (always visible when collapsed)
-  const quickCtrl = document.createElement('div');
-  quickCtrl.className = 'room-header-quick';
-
+  // Quick on/off in header
   const onBtn  = document.createElement('button');
   const offBtn = document.createElement('button');
   const setRoomOnOff = (isOn) => {
@@ -880,10 +878,42 @@ function renderRoomCard(room) {
     sendRoomCommand(room.id, { action: 'off' }, room);
   });
   setRoomOnOff(anyOn);
-  quickCtrl.appendChild(onBtn);
-  quickCtrl.appendChild(offBtn);
 
-  // Room brightness slider (always visible)
+  // Color swatch
+  let roomSwatchBtn = null;
+  if (hasColour) {
+    const { h, s } = getRoomColourHsl(roomDevicesAll);
+    roomSwatchBtn = document.createElement('button');
+    roomSwatchBtn.className = 'color-swatch-btn room-colour-swatch';
+    roomSwatchBtn.style.background = `hsl(${h},${s}%,50%)`;
+    roomSwatchBtn.title = 'Set room colour';
+    roomSwatchBtn.setAttribute('data-ctrl', 'room-colour-toggle');
+  }
+  // Top row: on/off, color swatch, layout button
+  const topRow = document.createElement('div');
+  topRow.className = 'room-controls-top';
+  topRow.appendChild(onBtn);
+  topRow.appendChild(offBtn);
+  if (roomSwatchBtn) {
+    topRow.appendChild(roomSwatchBtn);
+  }
+  const layoutBtn = document.createElement('button');
+  layoutBtn.className = 'room-action-btn room-layout-btn';
+  layoutBtn.title = 'Open floor plan';
+  layoutBtn.textContent = '⊞';
+  layoutBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    const eff = roomEffectsMap.get(room.id);
+    if (eff) layout.notifyEffectActive(room.id, eff.effect_id, eff.params ?? {});
+    layout.openLayout(room);
+  });
+  topRow.appendChild(layoutBtn);
+  ctrlRow.appendChild(topRow);
+
+  // Middle rows: brightness and color temp sliders
+  const sliderRow = document.createElement('div');
+  sliderRow.className = 'room-controls-sliders';
+  // Move sliders from quickCtrl to sliderRow
   if (!empty) {
     const briDevices = roomDevicesAll.filter(d => d.brightness != null);
     const avgBri = briDevices.length > 0
@@ -901,10 +931,8 @@ function renderRoomCard(room) {
       if (activeEffect) await clearEffect(room.id);
       sendRoomCommand(room.id, { action: 'brightness', value: parseInt(briSlider.value) }, room);
     });
-    quickCtrl.appendChild(briSlider);
+    sliderRow.appendChild(briSlider);
   }
-
-  // Room color temp slider (only if room has colour devices, always visible)
   if (!empty && hasColour) {
     const ctDevices = roomDevicesAll.filter(d => d.color_temp != null);
     const avgCT = ctDevices.length > 0
@@ -922,51 +950,31 @@ function renderRoomCard(room) {
       if (activeEffect) await clearEffect(room.id);
       sendRoomCommand(room.id, { action: 'color_temp', value: parseInt(ctSlider.value) }, room);
     });
-    quickCtrl.appendChild(ctSlider);
+    sliderRow.appendChild(ctSlider);
   }
-
-  let roomSwatchBtn = null;
-  if (hasColour) {
-    const { h, s } = getRoomColourHsl(roomDevicesAll);
-    roomSwatchBtn = document.createElement('button');
-    roomSwatchBtn.className = 'color-swatch-btn room-colour-swatch';
-    roomSwatchBtn.style.background = `hsl(${h},${s}%,50%)`;
-    roomSwatchBtn.title = 'Set room colour';
-    roomSwatchBtn.setAttribute('data-ctrl', 'room-colour-toggle');
-    quickCtrl.appendChild(roomSwatchBtn);
-  }
-  ctrlRow.appendChild(quickCtrl);
+  ctrlRow.appendChild(sliderRow);
 
   // Hide room controls when effect editor is open (so effect params take priority)
   if (activeEffect && openEffectEditorRoomId === room.id) {
-    quickCtrl.style.display = 'none';
+    sliderRow.style.display = 'none';
+    topRow.style.display = 'none';
   }
 
-  const layoutBtn = document.createElement('button');
-  layoutBtn.className = 'room-action-btn room-layout-btn';
-  layoutBtn.title = 'Open floor plan';
-  layoutBtn.textContent = '⊞';
-  layoutBtn.addEventListener('click', e => {
-    e.stopPropagation();
-    const eff = roomEffectsMap.get(room.id);
-    if (eff) layout.notifyEffectActive(room.id, eff.effect_id, eff.params ?? {});
-    layout.openLayout(room);
-  });
-  ctrlRow.appendChild(layoutBtn);
-
-  const actions = document.createElement('div');
-  actions.className = 'room-actions';
+  // Bottom row: effect badge (and delete room button removed - unclear purpose)
+  const effectsRow = document.createElement('div');
+  effectsRow.className = 'room-effects-row';
   if (activeEffect) {
-    actions.appendChild(buildEffectBadge(room, activeEffect));
+    effectsRow.appendChild(buildEffectBadge(room, activeEffect));
   } else if (lastEffectByRoom.has(room.id)) {
-    actions.appendChild(buildEffectGhostBadge(room, lastEffectByRoom.get(room.id)));
+    effectsRow.appendChild(buildEffectGhostBadge(room, lastEffectByRoom.get(room.id)));
   }
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'room-action-btn room-action-delete';
   deleteBtn.textContent = 'delete';
+  deleteBtn.title = 'Delete room';
   deleteBtn.addEventListener('click', () => deleteRoom(room.id));
-  actions.appendChild(deleteBtn);
-  ctrlRow.appendChild(actions);
+  effectsRow.appendChild(deleteBtn);
+  ctrlRow.appendChild(effectsRow);
   header.appendChild(ctrlRow);
   card.appendChild(header);
 
