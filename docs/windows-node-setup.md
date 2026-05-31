@@ -444,20 +444,15 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 - **Fix applied (2026-05-28 ~20:00):** fTPM **disabled in BIOS** (AMI BIOS → Advanced → AMD PBS → fTPM Switch → Disabled). Machine stable immediately after.
 - **What is lost by disabling fTPM:** Nothing relevant to this use case. BitLocker not enabled, no Windows Hello, no MDM attestation. Machine boots and runs identically.
 
-> **BIOS navigation (AMI v2.22.1293, 2025):**
+> **BIOS navigation (confirmed on AMI v2.22.1293, 2025):**
 > 1. Enter BIOS (spam Delete on boot)
-> 2. Find fTPM — try these in order (exact path varies by BIOS revision):
->    - **Advanced → AMD CBS → fTPM Switch → Disabled**
->    - **Advanced → AMD CBS → CPU Common Options → fTPM Switch → Disabled**
->    - **Advanced → AMD CBS → AGESA PBS → fTPM Switch → Disabled**
->    - **Advanced → Trusted Computing → TPM Device Selection → Disabled**
->    - **Security → Security Device Support → Disabled**
+> 2. **Advanced → Trusted Computing → Security Device Support → Disabled**
+>    - Confirms as disabled when it shows "No Security Device Found"
 > 3. Optional: **Advanced → AMD CBS → CPU Common Options → Global C-state Control → Disabled**
 > 4. F10 → Save & Exit
 >
-> Note: AMD PBS menu may not exist separately — on v2.22.1293 it is nested inside AMD CBS.
-> "Secure Boot" (Boot menu) is a completely separate setting and does NOT fix the crashes.
-> After any CMOS reset, fTPM reverts to Enabled — always re-disable before booting Windows.
+> Note: "Secure Boot" (Boot menu) is a completely separate setting — does NOT fix the crashes.
+> After any CMOS reset, Security Device Support reverts to Enabled — always re-disable before booting Windows.
 
 ---
 
