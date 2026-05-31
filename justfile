@@ -2107,7 +2107,7 @@ verify-coordinator target_host:
     # Check 4: Certificate fingerprint matches
     echo "[4/5] Checking certificate fingerprint..."
     COORDINATOR_LOG=$(ssh ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 100 --no-pager")
-    FP=$(echo "$COORDINATOR_LOG" | grep -oP 'fingerprint: \K[a-f0-9:]+' | head -1)
+    FP=$(echo "$COORDINATOR_LOG" | grep "fingerprint:" | sed 's/.*fingerprint: //' | head -1)
     if [ -n "$FP" ]; then
         echo "      ✓ Fingerprint: $FP"
     else
