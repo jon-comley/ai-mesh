@@ -245,6 +245,7 @@ export function handleEffectUpdate(evt) {
 export function handleRoomsUpdate(evt) {
   roomsData = evt.rooms ?? [];
   if (evt.device_names) notifyDeviceNames(evt.device_names);
+  inferZigbeeStatus();
   
   // Forward orientation/room state to layout canvas if a room is open
   if (evt.rooms && layout.currentLayoutRoomId()) {
@@ -280,6 +281,7 @@ export function notifyDevices(devices) {
     devicesMap.set(dev.device_id, reconciled);
     layout.notifyDeviceUpdate(dev.device_id, reconciled);
   }
+  inferZigbeeStatus();
   // Skip full re-render while a slider is being dragged to prevent mid-drag jumps
   if (document.querySelector('.slider-active')) return;
   patchDeviceCards();
@@ -351,6 +353,21 @@ export function handleZigbeeStatus(online) {
   render();
 }
 
+function inferZigbeeStatus() {
+  // If we have rooms but zero devices have ever arrived, zigbee2mqtt never
+  // connected — treat as offline.
+  if (roomsData.length > 0 && devicesMap.size === 0) {
+    zigbeeOnline = false;
+    return;
+  }
+  // If every known device is offline, the bridge is almost certainly down.
+  if (devicesMap.size > 0 && [...devicesMap.values()].every(d => !d.online)) {
+    zigbeeOnline = false;
+    return;
+  }
+  zigbeeOnline = true;
+}
+
 export function notifySolar(azimuth, elevation) {
   // Forward to the layout panel (compass + sun-arc display). The dashboard
   // does not run its own solar calculation any more — the runner pushes
@@ -365,6 +382,7 @@ function render() {
   if (!container || dragSrc || roomDragId) return;
   if (container.querySelector('.layout-view')) return; // layout open — don't wipe
   if (container.querySelector('.room-slider-input.slider-active')) return; // room slider thumb being dragged — don't wipe it out
+  inferZigbeeStatus();
 
   const assigned = new Set(roomsData.flatMap(r => r.device_ids));
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
