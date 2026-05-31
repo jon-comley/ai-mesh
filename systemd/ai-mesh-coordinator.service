@@ -11,8 +11,8 @@ Group=jonno
 
 WorkingDirectory=/var/lib/ai-mesh
 ExecStart=/usr/local/bin/ai-mesh-coordinator
-Restart=on-failure
-RestartSec=3s
+Restart=always
+RestartSec=5s
 
 # Environment
 Environment="RUST_LOG=info"
