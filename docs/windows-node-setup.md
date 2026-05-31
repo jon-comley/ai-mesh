@@ -490,6 +490,21 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 
 ---
 
+#### 2026-05-31 — Machine triggered Windows self-reinstall; Type B crashes accelerating
+
+- **Incident:** Beelink triggered an automatic Windows reinstall from online recovery. Cause unknown — likely repeated BSODs triggered Windows recovery mode.
+- **Post-reinstall crash pattern:** Crashing within 1-2 minutes of boot (faster than before). Freeze → black screen → "Your device ran into a problem and needs to restart". No minidump captured (crashes too fast). No entries in System Event Log before crash.
+- **BIOS check:** On AMI v2.22.1293, confirmed "Security Device Support" under Advanced → Trusted Computing was already Disabled. Note: this may only hide TPM from Windows — AMD PSP fTPM may still be running at firmware level.
+- **SSH state:** Each reinstall wipes SSH config; must re-enable via `Add-WindowsCapability` each time.
+- **Suspected cause:** AMD driver missing/default after reinstall. User plans to install AMD Adrenalin 26.5.2 + chipset 8.05.04.516 when stable enough to do so. Machine was stable for days before instability resumed — software (driver) regression, not hardware failure.
+- **Not hardware:** RAM/SSD physical issues ruled out by user. Pattern matches driver-triggered crash, not component failure.
+- **Next steps:**
+  1. Get machine stable long enough to install AMD Adrenalin 26.5.2 + chipset 8.05.04.516
+  2. Verify `Security Device Support` is Disabled in BIOS after every reinstall
+  3. Run `install-node-windows.ps1` once SSH is stable to apply all hardening settings
+
+---
+
 #### Verification checklist after any reboot, driver change, or CMOS reset
 
 ```bash
