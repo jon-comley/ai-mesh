@@ -861,13 +861,69 @@ function renderRoomCard(room) {
   };
   onBtn.className = 'light-toggle-btn';
   onBtn.disabled = empty;
-  if (!empty) onBtn.addEventListener('click', e => { e.stopPropagation(); setRoomOnOff(true);  sendRoomCommand(room.id, { action: 'on' }, room); });
+  if (!empty) onBtn.addEventListener('click', async e => {
+    e.stopPropagation();
+    setRoomOnOff(true);
+    // Disable active effect and send power-on with defaults (brightness 200, CT 370)
+    if (activeEffect) await clearEffect(room.id);
+    await sendRoomCommand(room.id, { action: 'brightness', value: 200 }, room);
+    await sendRoomCommand(room.id, { action: 'color_temp', value: 370 }, room);
+    await sendRoomCommand(room.id, { action: 'on' }, room);
+  });
   offBtn.className = 'light-toggle-btn';
   offBtn.disabled = empty;
-  if (!empty) offBtn.addEventListener('click', e => { e.stopPropagation(); setRoomOnOff(false); sendRoomCommand(room.id, { action: 'off' }, room); });
+  if (!empty) offBtn.addEventListener('click', async e => {
+    e.stopPropagation();
+    setRoomOnOff(false);
+    // Disable active effect and send power-off
+    if (activeEffect) await clearEffect(room.id);
+    sendRoomCommand(room.id, { action: 'off' }, room);
+  });
   setRoomOnOff(anyOn);
   quickCtrl.appendChild(onBtn);
   quickCtrl.appendChild(offBtn);
+
+  // Room brightness slider (always visible)
+  if (!empty) {
+    const briDevices = roomDevicesAll.filter(d => d.brightness != null);
+    const avgBri = briDevices.length > 0
+      ? Math.round(briDevices.reduce((sum, d) => sum + (d.brightness ?? 0), 0) / briDevices.length)
+      : 200;
+    const briSlider = document.createElement('input');
+    briSlider.type = 'range';
+    briSlider.min = '1';
+    briSlider.max = '254';
+    briSlider.value = avgBri;
+    briSlider.className = 'light-slider room-brightness-slider';
+    briSlider.title = 'Room brightness';
+    briSlider.addEventListener('pointerdown', e => e.stopPropagation());
+    briSlider.addEventListener('change', async e => {
+      if (activeEffect) await clearEffect(room.id);
+      sendRoomCommand(room.id, { action: 'brightness', value: parseInt(briSlider.value) }, room);
+    });
+    quickCtrl.appendChild(briSlider);
+  }
+
+  // Room color temp slider (only if room has colour devices, always visible)
+  if (!empty && hasColour) {
+    const ctDevices = roomDevicesAll.filter(d => d.color_temp != null);
+    const avgCT = ctDevices.length > 0
+      ? Math.round(ctDevices.reduce((sum, d) => sum + (d.color_temp ?? 0), 0) / ctDevices.length)
+      : 370;
+    const ctSlider = document.createElement('input');
+    ctSlider.type = 'range';
+    ctSlider.min = '154';
+    ctSlider.max = '500';
+    ctSlider.value = avgCT;
+    ctSlider.className = 'light-slider room-ct-slider';
+    ctSlider.title = 'Room color temperature';
+    ctSlider.addEventListener('pointerdown', e => e.stopPropagation());
+    ctSlider.addEventListener('change', async e => {
+      if (activeEffect) await clearEffect(room.id);
+      sendRoomCommand(room.id, { action: 'color_temp', value: parseInt(ctSlider.value) }, room);
+    });
+    quickCtrl.appendChild(ctSlider);
+  }
 
   let roomSwatchBtn = null;
   if (hasColour) {
