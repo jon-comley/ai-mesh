@@ -136,10 +136,12 @@ function Disable-Sleep {
 }
 
 function Harden-Stability {
-    # Registry fixes for the SER8 DPC_WATCHDOG_VIOLATION crash pattern:
+    # Registry fixes for Beelink stability (DPC_WATCHDOG and kernel hangs):
     #   1. Fast Startup — powercfg /h off disables hibernate but not Fast
     #      Startup (hybrid shutdown); can produce a half-suspended state.
     #   2. NIC power management — adapter should stay live across idle periods.
+    #      Also disables WoL (Wake on LAN) to prevent network-triggered wake
+    #      states that may lead to Type B hangs (process stuck, GPU unresponsive).
     #   3. GPU ULPS (Ultra Low Power State) — the AMD Radeon 780M DPC routine
     #      for waking out of ULPS overruns the watchdog timeout, causing
     #      0x00000133 BSODs at idle. Confirmed root cause 2026-05-28.
@@ -171,7 +173,16 @@ function Harden-Stability {
         }
     }
 
-    Write-Host ">>> Stability hardening applied (Fast Startup off, NIC power save off, GPU ULPS off)."
+    # WoL (Wake on LAN) off — prevents network-triggered wake or half-sleep states
+    # that may contribute to Type B hangs (process stuck, GPU unresponsive).
+    Get-NetAdapter | Where-Object { $_.Status -eq "Up" } | ForEach-Object {
+        Set-NetAdapterPowerManagement -Name $_.Name `
+            -WakeOnMagicPacket Disabled `
+            -WakeOnPattern Disabled `
+            -ErrorAction SilentlyContinue
+    }
+
+    Write-Host ">>> Stability hardening applied (Fast Startup off, NIC power save off, GPU ULPS off, WoL off)."
 }
 
 function Ensure-StartupHardeningTask {
