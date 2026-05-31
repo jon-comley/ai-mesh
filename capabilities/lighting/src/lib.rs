@@ -171,13 +171,20 @@ impl Capability for LightingCapability {
                             let _ = Self::send_via_ctx(&ctx, MeshMessage::LightDeviceList(report))
                                 .await;
                         }
+                        Ok(ZigbeeEvent::BridgeState { online }) => {
+                            let _ = Self::send_via_ctx(&ctx, MeshMessage::ZigbeeStatus { online })
+                                .await;
+                        }
                         Ok(ZigbeeEvent::ConnectionLost) => {
-                            warn!("zigbee: connection lost");
-                            let _ = Self::send_via_ctx(&ctx, MeshMessage::ZigbeeStatus { online: false }).await;
+                            warn!("zigbee: MQTT connection lost");
+                            let _ = Self::send_via_ctx(
+                                &ctx,
+                                MeshMessage::ZigbeeStatus { online: false },
+                            )
+                            .await;
                         }
                         Ok(ZigbeeEvent::ConnectionRestored) => {
-                            info!("zigbee: connection restored");
-                            let _ = Self::send_via_ctx(&ctx, MeshMessage::ZigbeeStatus { online: true }).await;
+                            info!("zigbee: MQTT connection restored");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                             warn!("zigbee: event receiver lagged by {n} messages");

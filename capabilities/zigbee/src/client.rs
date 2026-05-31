@@ -23,6 +23,11 @@ pub enum ZigbeeEvent {
         device_id: String,
         online: bool,
     },
+    /// Fires when `zigbee2mqtt/bridge/state` changes — indicates whether the
+    /// zigbee2mqtt process itself is up and connected to the dongle.
+    BridgeState {
+        online: bool,
+    },
     ConnectionLost,
     ConnectionRestored,
 }
@@ -72,6 +77,7 @@ impl ZigbeeClient {
                             "zigbee2mqtt/+/availability",
                             "zigbee2mqtt/bridge/devices",
                             "zigbee2mqtt/bridge/groups",
+                            "zigbee2mqtt/bridge/state",
                         ] {
                             if let Err(e) =
                                 subscribe_client.subscribe(*topic, QoS::AtMostOnce).await
@@ -132,6 +138,24 @@ impl ZigbeeClient {
                             known_groups = groups.iter().cloned().collect();
                             info!(count = groups.len(), "zigbee: groups updated");
                             let _ = tx_loop.send(ZigbeeEvent::GroupListUpdated(groups));
+                        } else if topic == "zigbee2mqtt/bridge/state" {
+                            // z2m publishes {"state":"online"} on connect and its Last Will
+                            // {"state":"offline"} (or plain "offline") when it disconnects.
+                            let raw = std::str::from_utf8(p.payload.as_ref()).unwrap_or("");
+                            let online = if raw.trim() == "online" {
+                                true
+                            } else if raw.trim() == "offline" {
+                                false
+                            } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+                                v.get("state").and_then(|s| s.as_str()) == Some("online")
+                            } else {
+                                continue;
+                            };
+                            info!(
+                                "zigbee: bridge state → {}",
+                                if online { "online" } else { "offline" }
+                            );
+                            let _ = tx_loop.send(ZigbeeEvent::BridgeState { online });
                         } else if topic.ends_with("/state") || topic.matches('/').count() == 1 {
                             // Both the legacy "<device>/state" subtopic and the standard Z2M
                             // base topic "<device>" carry device state. Only warn on failures
