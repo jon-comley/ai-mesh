@@ -549,7 +549,7 @@ body {
 .light-toggle-btn:disabled { cursor: not-allowed; opacity: 0.35; }
 
 .light-slider {
-  flex: 1;
+  flex: 1 100%;
   -webkit-appearance: none;
   appearance: none;
   height: 4px;
@@ -927,7 +927,7 @@ body {
 
 .room-header-controls-row {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
 }
 
@@ -2003,7 +2003,8 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 1;
+  flex-wrap: wrap;
+  width: 100%;
 }
 
 /* ── Quick scenes bar (always visible, horizontal scroll) ────────────────────── */
