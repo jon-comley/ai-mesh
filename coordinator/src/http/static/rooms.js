@@ -8,8 +8,10 @@ function lockSliderToThumb(slider) {
     const rect = slider.getBoundingClientRect();
     const ratio = (slider.value - slider.min) / (slider.max - slider.min);
     const thumbX = rect.left + ratio * rect.width;
-    if (Math.abs(e.clientX - thumbX) > (e.pointerType === 'touch' ? 30 : 16))
+    if (Math.abs(e.clientX - thumbX) > (e.pointerType === 'touch' ? 30 : 16)) {
       e.preventDefault();
+      e.stopPropagation();
+    }
   }, { capture: true });
 }
 
