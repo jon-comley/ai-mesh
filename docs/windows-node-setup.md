@@ -444,7 +444,14 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 - **Fix applied (2026-05-28 ~20:00):** fTPM **disabled in BIOS** (AMI BIOS → Advanced → AMD PBS → fTPM Switch → Disabled). Machine stable immediately after.
 - **What is lost by disabling fTPM:** Nothing relevant to this use case. BitLocker not enabled, no Windows Hello, no MDM attestation. Machine boots and runs identically.
 
-> **If fTPM option is hard to find in BIOS:** AMI BIOS on the SER8 v2.22.1293 — look under **Advanced → AMD PBS → fTPM Switch**. May also appear as "TPM Device Selection" or "Security Device Support".
+> **BIOS navigation (confirmed on AMI v2.22.1293, 2025):**
+> 1. Enter BIOS (spam Delete on boot)
+> 2. **Advanced → AMD PBS → fTPM Switch → Disabled**
+> 3. Optional: **Advanced → AMD CBS → CPU Common Options → Global C-state Control → Disabled**
+> 4. F10 → Save & Exit
+>
+> Note: "Secure Boot" (under Boot menu) is a separate, unrelated setting — disabling that does NOT fix the crashes. fTPM is the one that matters.
+> After any CMOS reset, fTPM reverts to Enabled (BIOS default) — always re-disable before booting Windows.
 
 ---
 
