@@ -771,6 +771,11 @@ body {
   border-radius: 10px;
   margin-right: 6px;
   user-select: none;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
 }
 .badge-effect.dragging { opacity: 0.4; }
 
@@ -912,6 +917,8 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .room-collapse-btn {
@@ -977,6 +984,8 @@ body {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .room-action-btn {
