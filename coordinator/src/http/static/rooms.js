@@ -2081,6 +2081,8 @@ async function sendRoomCommand(roomId, body, room) {
         let updated = dev;
         if (body.action === 'on') updated = { ...updated, on: true };
         else if (body.action === 'off') updated = { ...updated, on: false };
+        else if (body.action === 'brightness') updated = { ...updated, brightness: body.value, on: true };
+        else if (body.action === 'color_temp') updated = { ...updated, color_temp: body.value };
         devicesMap.set(deviceId, updated);
       }
     }
