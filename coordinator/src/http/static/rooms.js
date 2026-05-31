@@ -912,6 +912,65 @@ function renderRoomCard(room) {
   topRow.appendChild(layoutBtn);
   ctrlRow.appendChild(topRow);
 
+  // Room brightness slider with value display
+  if (!empty) {
+    const briDevices = roomDevicesAll.filter(d => d.brightness != null);
+    const avgBri = briDevices.length > 0
+      ? Math.round(briDevices.reduce((sum, d) => sum + (d.brightness ?? 0), 0) / briDevices.length)
+      : 200;
+
+    const sliderContainer = document.createElement('div');
+    sliderContainer.className = 'room-slider-container';
+
+    const valueDisplay = document.createElement('div');
+    valueDisplay.className = 'room-slider-value';
+    valueDisplay.textContent = Math.round((avgBri / 254) * 100) + '%';
+    valueDisplay.style.display = 'none';
+
+    const briSlider = document.createElement('input');
+    briSlider.type = 'range';
+    briSlider.min = '1';
+    briSlider.max = '254';
+    briSlider.value = avgBri;
+    briSlider.className = 'light-slider room-brightness-slider';
+    briSlider.title = 'Room brightness';
+
+    // Prevent track clicks from being actioned on slider
+    briSlider.addEventListener('pointerdown', e => {
+      const rect = briSlider.getBoundingClientRect();
+      const ratio = (briSlider.value - briSlider.min) / (briSlider.max - briSlider.min);
+      const thumbX = rect.left + ratio * rect.width;
+      const thumbHitZone = 20;
+      // If click is not near thumb, prevent default and let event propagate
+      if (Math.abs(e.clientX - thumbX) > thumbHitZone) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      // Thumb grabbed - show value
+      valueDisplay.style.display = 'block';
+    }, { capture: true });
+
+    briSlider.addEventListener('input', () => {
+      const percent = Math.round((parseInt(briSlider.value) / 254) * 100);
+      valueDisplay.textContent = percent + '%';
+    });
+
+    briSlider.addEventListener('pointerup', () => {
+      valueDisplay.style.display = 'none';
+      if (activeEffect) clearEffect(room.id);
+      sendRoomCommand(room.id, { action: 'brightness', value: parseInt(briSlider.value) }, room);
+    });
+
+    briSlider.addEventListener('pointercancel', () => {
+      valueDisplay.style.display = 'none';
+    });
+
+    sliderContainer.appendChild(valueDisplay);
+    sliderContainer.appendChild(briSlider);
+    ctrlRow.appendChild(sliderContainer);
+  }
+
   // Hide room controls when effect editor is open (so effect params take priority)
   if (activeEffect && openEffectEditorRoomId === room.id) {
     topRow.style.display = 'none';
