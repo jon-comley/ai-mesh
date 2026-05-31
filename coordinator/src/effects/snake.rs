@@ -203,9 +203,15 @@ impl Effect for SnakeEffect {
             self.last_color = Some(color);
         }
 
-        // Head position advances along the path at speed_bps, wrapping around.
+        // Head position bounces back and forth along the path at speed_bps.
+        // The effective cycle is 2*n (forward n, backward n).
         let elapsed_secs = ctx.now_ms.saturating_sub(ctx.started_at_ms) as f32 / 1000.0;
-        let head_pos = (elapsed_secs * speed).rem_euclid(n_f);
+        let distance = (elapsed_secs * speed).rem_euclid(2.0 * n_f);
+        let head_pos = if distance <= n_f {
+            distance
+        } else {
+            2.0 * n_f - distance
+        };
 
         // Transition slightly longer than the 200 ms tick so motion is continuous.
         const TRANSITION: f32 = 0.25;
