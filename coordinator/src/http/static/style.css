@@ -739,11 +739,25 @@ body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 .effects-palette-label {
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
+  flex-shrink: 0;
+}
+.effects-palette::-webkit-scrollbar {
+  height: 4px;
+}
+.effects-palette::-webkit-scrollbar-track {
+  background: transparent;
+}
+.effects-palette::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 2px;
 }
 .effect-chip {
   display: inline-flex;
@@ -759,6 +773,8 @@ body {
   cursor: grab;
   user-select: none;
   transition: opacity 0.15s;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .effect-chip:active, .effect-chip.dragging { opacity: 0.5; cursor: grabbing; }
 .badge-solar,
@@ -905,12 +921,14 @@ body {
   flex-direction: column;
   gap: 6px;
   margin-bottom: 10px;
+  min-width: 0;
 }
 
 .room-header-name-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .room-header-controls-row {
