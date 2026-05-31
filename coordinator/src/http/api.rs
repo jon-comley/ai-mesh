@@ -259,6 +259,20 @@ pub async fn group_light_command(
     }
 }
 
+/// DELETE /api/lights/{id} — delete a device completely from the system.
+pub async fn delete_device(
+    Path(device_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    registry.lock().unwrap().delete_device(&device_id);
+    StatusCode::NO_CONTENT.into_response()
+}
+
 // ── Rooms ─────────────────────────────────────────────────────────────────────
 
 fn rooms_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<RoomInfo> {
