@@ -1261,6 +1261,27 @@ body {
   min-width: 0;
 }
 
+/* ── Zigbee offline banner + disabled state ──────────────────────────────────── */
+.zigbee-offline-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--amber) 40%, var(--border));
+  border-radius: 10px;
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+}
+
+.room-list.zigbee-offline button,
+.room-list.zigbee-offline input[type="range"] {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 .room-colour-picker {
   margin: 0 0 8px;
 }

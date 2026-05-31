@@ -707,6 +707,17 @@ async fn process_message(
             );
             None
         }
+        MeshMessage::ZigbeeStatus { online } => {
+            if online {
+                info!("zigbee: bridge online");
+            } else {
+                warn!("zigbee: bridge offline");
+            }
+            if let Some(dash) = dashboard {
+                dash.push_zigbee_status(online);
+            }
+            None
+        }
         MeshMessage::Admin(admin) => match admin {
             AdminMessage::ResetRegistry => {
                 registry.lock().unwrap().clear_all();

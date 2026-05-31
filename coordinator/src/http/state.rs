@@ -51,6 +51,9 @@ pub enum DashboardEvent {
         params: serde_json::Value,
         overrides: Vec<String>,
     },
+    ZigbeeStatus {
+        online: bool,
+    },
 }
 
 /// Snapshot of the currently-active effect (if any) for one room. Pushed to a
@@ -489,6 +492,11 @@ impl DashboardState {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Broadcast zigbee bridge up/down status to all connected clients.
+    pub fn push_zigbee_status(&self, online: bool) {
+        let _ = self.tx.send(DashboardEvent::ZigbeeStatus { online });
     }
 
     /// Broadcast the current solar position to all connected clients.
