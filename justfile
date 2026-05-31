@@ -249,7 +249,7 @@ nodes:
     #!/usr/bin/env bash
     STATE="$HOME/.config/ai-mesh/coordinator.state"
     if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN; fi
-    cargo run -q -p cli -- nodes
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes
 
 # Set heartbeat interval for a node. Accepts hostname, IP, or UUID.
 # Usage: just set-heartbeat beelink1 10
