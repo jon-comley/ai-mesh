@@ -787,11 +787,6 @@ body {
   border-radius: 10px;
   margin-right: 6px;
   user-select: none;
-  flex-shrink: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 200px;
 }
 .badge-effect.dragging { opacity: 0.4; }
 
@@ -921,22 +916,18 @@ body {
   flex-direction: column;
   gap: 6px;
   margin-bottom: 10px;
-  min-width: 0;
 }
 
 .room-header-name-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
 }
 
 .room-header-controls-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
-  overflow: hidden;
 }
 
 .room-collapse-btn {
@@ -1002,8 +993,6 @@ body {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
-  min-width: 0;
-  overflow: hidden;
 }
 
 .room-action-btn {

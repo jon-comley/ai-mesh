@@ -937,6 +937,11 @@ function renderRoomCard(room) {
   }
   ctrlRow.appendChild(quickCtrl);
 
+  // Hide room controls when effect editor is open (so effect params take priority)
+  if (activeEffect && openEffectEditorRoomId === room.id) {
+    quickCtrl.style.display = 'none';
+  }
+
   const layoutBtn = document.createElement('button');
   layoutBtn.className = 'room-action-btn room-layout-btn';
   layoutBtn.title = 'Open floor plan';
