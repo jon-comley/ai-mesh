@@ -313,7 +313,7 @@ impl DashboardState {
                             brightness: Some(254),
                             color_xy: None,
                             color_temp: Some(370),
-                            online: true,
+                            online: false, // unknown until first state report arrives
                         },
                     );
                     updated = true;
