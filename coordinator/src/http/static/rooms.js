@@ -922,6 +922,10 @@ function renderRoomCard(room) {
     const sliderContainer = document.createElement('div');
     sliderContainer.className = 'room-slider-container';
 
+    const label = document.createElement('span');
+    label.className = 'room-slider-label';
+    label.textContent = 'Brightness';
+
     const valueDisplay = document.createElement('div');
     valueDisplay.className = 'room-slider-value';
     valueDisplay.textContent = Math.round((avgBri / 254) * 100) + '%';
@@ -956,9 +960,9 @@ function renderRoomCard(room) {
       valueDisplay.textContent = percent + '%';
     });
 
-    briSlider.addEventListener('pointerup', () => {
+    briSlider.addEventListener('change', async () => {
       valueDisplay.style.display = 'none';
-      if (activeEffect) clearEffect(room.id);
+      if (activeEffect) await clearEffect(room.id);
       sendRoomCommand(room.id, { action: 'brightness', value: parseInt(briSlider.value) }, room);
     });
 
@@ -966,6 +970,7 @@ function renderRoomCard(room) {
       valueDisplay.style.display = 'none';
     });
 
+    sliderContainer.appendChild(label);
     sliderContainer.appendChild(valueDisplay);
     sliderContainer.appendChild(briSlider);
     ctrlRow.appendChild(sliderContainer);
