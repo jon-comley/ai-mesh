@@ -17,18 +17,28 @@ For full documentation, see the `docs/` directory.
 
 ## Quick Start
 
-### 1. One-time controller setup
+### 1. One-time laptop setup
 
 ```
 just setup-controller
 ```
 
-Installs Rust, cross-compilation toolchains, git hooks, SSH keys, and Windows portproxy.
+Installs Rust, cross-compilation toolchains, git hooks, SSH keys, and cross-compilation targets (aarch64-unknown-linux-gnu for pi1, x86_64-pc-windows-gnu for Windows nodes).
 
-### 2. Provision compute nodes
+### 2. Deploy coordinator to pi1 (one-time)
 
 ```
-just deploy-node pi1
+just deploy-coordinator pi1
+```
+
+Cross-builds coordinator for ARM64, copies state/DB from laptop, installs as systemd service on pi1 (192.168.1.11:9001). The coordinator now runs 24/7 independent of laptop power. Verify with `just verify-coordinator pi1`.
+
+For remote phone access, install Tailscale on pi1 + phone; dashboard is then accessible at `http://100.100.100.100:9001/?token=...` or `http://pi1:9001/?token=...` (once MagicDNS propagates).
+
+### 3. Provision compute nodes
+
+```
+just deploy-node pi1      # (agent only — coordinator already running)
 just deploy-node beelink1
 ```
 
@@ -38,15 +48,15 @@ passwordless sudo on Linux nodes so fingerprint pushes work non-interactively. I
 coordinator is already running, credentials (TLS fingerprint + auth token) are pushed to
 the node automatically at the end of provisioning — no separate `set-fingerprint` step needed.
 
-### 3. Start the cluster
+### 4. Start the cluster
 
 ```
 just start-cluster
 ```
 
-Starts the coordinator (generates a TLS certificate on first run), pushes the TLS fingerprint **and auth token** to all compute nodes, starts the local controller agent, and loads the best-fit model on each compute node. Credentials are written to `~/.bashrc` automatically.
+Starts your laptop's agent (compute role), pushes TLS fingerprint + auth token to all remote nodes, and loads the best-fit model on each compute node. The coordinator on pi1 was already started by `deploy-coordinator` and keeps running whether your laptop is on or off.
 
-Use `just restart-coordinator` after waking from sleep — remote agents reconnect automatically, this just refreshes the coordinator and re-pushes credentials.
+Credentials are written to `~/.bashrc` automatically.
 
 ### 4. Check mesh state
 
@@ -69,13 +79,20 @@ just rotate-token               # zero-downtime auth token rotation (no inferenc
 
 ## Dashboard
 
-The coordinator serves a web dashboard on **port 9001** (override with `MESH_HTTP_PORT`):
+The coordinator on **pi1** serves a web dashboard on **port 9001** (override with `MESH_HTTP_PORT`):
 
+**Local access (home LAN):**
 ```
-http://localhost:9001
+http://192.168.1.11:9001/?token=<auth-token>
 ```
 
-A Progressive Web App — open in Chrome/Safari and use "Add to Home Screen" to install it on mobile. Six panels: Nodes, Health, Models, Lighting, Security, Errors. Real-time data via WebSocket arrives in Phase B; the shell is live now.
+**Remote access (Tailscale, anywhere):**
+```
+http://100.100.100.100:9001/?token=<auth-token>
+http://pi1:9001/?token=<auth-token>              (once MagicDNS propagates)
+```
+
+A Progressive Web App — open in Chrome/Safari and use "Add to Home Screen" to install it on mobile. Bookmark the remote URL for one-tap access from anywhere (cellular, public WiFi, etc.). Six panels: Nodes, Health, Models, Lighting, Security, Errors. Real-time data via WebSocket (Phase 11.B); the full lighting UI is live (rooms, effects, scenes, device control).
 
 ---
 

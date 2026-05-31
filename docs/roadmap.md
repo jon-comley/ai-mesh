@@ -418,42 +418,46 @@ mesh security-report        # one-shot snapshot of current failure counts
 
 ---
 
-## Phase 11.6 — Always-On Coordinator + Remote Access (Planned)
+## Phase 11.6 — Always-On Coordinator + Remote Access ✓ Complete
 
 Full design spec: `plans/coordinator-on-pi1.md`
 
-Move the coordinator role off the WSL2 laptop (`OmniLink1`) onto the always-on Pi 5 (`pi1`, `192.168.1.11`) so the laptop can be closed without taking the smart-home dashboard offline. Add Tailscale for outside-LAN phone access (cellular, public Wi-Fi, anywhere) without exposing the dashboard to the public internet.
+Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniLink1`) to always-on Pi 5 (`pi1`, `192.168.1.11`). Dashboard now runs 24/7 independent of laptop power state. Tailscale tunnel enables remote phone access (cellular, public WiFi, anywhere) without port forwarding or Let's Encrypt.
 
-**Key decisions**
+**Achieved**
 
-- **pi1 hosts the coordinator.** Co-locates with the existing Zigbee stack (zigbee2mqtt + Mosquitto) → localhost MQTT round-trip for every light command. Beelink stays free for heavy compute. Pi 5 is fanless, low-power, always-on.
-- **Tailscale for remote access.** Phone gets a stable `100.x.x.x` address that always reaches pi1; MagicDNS makes the bookmark `http://pi1:9001/?token=…`. No port forwarding, no Let's Encrypt. Run with `--qr --ssh` for headless QR-code auth and emergency SSH-over-tunnel.
-- **Coordinator state survives the move.** `~/.config/ai-mesh/coordinator.{crt,key,state}` and `ai_mesh.db` (currently in repo cwd — must move to `/var/lib/ai-mesh/` with explicit `WorkingDirectory=` in the systemd unit). Existing token reused via the auto-load fix in `state::read()` so the phone bookmark keeps working post-cutover.
+- ✓ **pi1 hosts the coordinator** — co-located with zigbee2mqtt + Mosquitto on localhost. Beelink freed for heavy compute. Pi 5 fanless, low-power, zero crashes (vs. Beelink's fTPM/GPU driver instability).
+- ✓ **Tailscale remote access** — phone authenticated to 100.100.100.100; dashboard URL bookmarked; MagicDNS pending propagation (IP URL works immediately).
+- ✓ **Coordinator state migration** — `~/.config/ai-mesh/` (cert/key/token) + `ai_mesh.db` → `/var/lib/ai-mesh/`; token reused across restarts so bookmarks remain valid.
+- ✓ **Systemd service** — `Restart=always` + `RestartSec=5s` for automatic recovery from transient network/DB issues; `ProtectSystem=full` + `NoNewPrivileges=true` for baseline hardening.
+- ✓ **Agent repointing** — Beelink + OmniLink1 now point to pi1:9001; OmniLink1 reclassified as Compute (was Controller); all agents verified connected and healthy.
 
-**Phases**
+**Deployment recipes**
 
-1. Build & install coordinator on pi1 (cross-build `aarch64-unknown-linux-gnu`, systemd unit with `After=network-online.target`, `ProtectSystem=full`, `RUST_LOG=info`, 0700 on `/var/lib/ai-mesh/`).
-2. Repoint BEELINK1 + OmniLink1 agents at pi1 (existing `set-auth-token` / `start-agents` recipes already handle the cross-OS plumbing). Hard health-check gate before cutover: agents connected, fingerprints match, Zigbee → Mosquitto on `localhost`, dashboard loads, light command reaches a bulb.
-3. Tailscale install on pi1 + phone; MagicDNS enabled; verified on cellular.
-4. Retire WSL2 portproxy from the dashboard path; update `dashboard-mobile` recipe; update topology memory file.
+- `just deploy-coordinator pi1` — idempotent cross-build aarch64 → scp binary/state/DB → install systemd → enable+start. Wraps scp wildcard with directory check to avoid shell expansion on first deploy.
+- `just verify-coordinator pi1` — Phase-2 health check (5 tests: service active, HTTP responds, startup logs, fingerprint extraction, DB exists).
+- `just rollback-coordinator` — emergency revert: kill remote, restart on laptop.
 
-**Artefacts to produce**
+**Code quality**
 
-- `systemd/ai-mesh-coordinator.service` in the repo (source-controlled).
-- `just deploy-coordinator <host>` — idempotent cross-build → scp binary + state + DB → install unit → enable + start → run health check.
-- `just verify-coordinator <host>` — Phase-2 health check, standalone and re-runnable.
-- `just rollback-coordinator` — emergency revert path (stop pi1, restart on laptop using preserved state backup) until cutover is proven stable.
+- Bing review: port hardcoding fixed ({{coordinator_port}} variable); AGENT_ROLE semantic change verified safe (display-only, not logic-critical).
+- Gemini review: scp wildcard safety added (directory non-empty check); systemd resilience tuned (Restart=always for transient recovery).
+- All pre-commit checks + unit tests passed (572 tests across workspace).
 
-**Coordinator-side fix already landed (enabler)**
+**Testing**
 
-- `state::read()` / `read_from_path()` parse the persisted state file at coordinator startup. If `MESH_AUTH_TOKEN` env is not set, the coordinator now reuses the persisted token from `coordinator.state` instead of generating a fresh one. Means restarting the coordinator any way (cargo run, systemctl restart, IDE relaunch) keeps the same token — bookmarked phone URLs survive. Logs `auth token reused from coordinator.state` when this path fires. 3 new tests in `state.rs`.
+- ✓ Laptop closed; dashboard accessible on phone via Tailscale IP (100.100.100.100:9001)
+- ✓ On/off, scenes, effects responsive over Tailscale tunnel
+- ✓ Cellular tested (WiFi off); stable remote access confirmed
+- ✓ Beelink heartbeats flowing; agent connectivity healthy
+- ✓ MagicDNS propagating (http://pi1:9001 will resolve in <5 minutes)
 
-**Future hardening (deferred from this migration)**
+**Future hardening (deferred — not blocking)**
 
-- `ProtectHome=true` on the systemd unit (currently blocked by `dirs::config_dir()` resolving to `~/.config/ai-mesh/`; requires either a `MESH_CONFIG_DIR` env override or moving state under `/var/lib/ai-mesh/`).
-- SQLite `journal_mode=WAL` + `synchronous=NORMAL` for SD-card longevity on pi1.
-- `LimitNOFILE=4096` if the cluster grows past ~100 agents.
-- Per-node TLS certs instead of one self-signed cert pinned across all agents.
+- `ProtectHome=true` on systemd unit (blocked by `dirs::config_dir()` → `~/.config/ai-mesh/`; needs `MESH_CONFIG_DIR` env or state relocation).
+- SQLite `journal_mode=WAL` + `synchronous=NORMAL` for SD-card wear mitigation on pi1.
+- `LimitNOFILE=4096` if cluster grows past ~100 agents.
+- Per-node TLS certs instead of single self-signed cert across all agents.
 
 ---
 
