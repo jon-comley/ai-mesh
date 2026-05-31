@@ -909,6 +909,8 @@ body {
   border-radius: 12px;
   margin-bottom: 10px;
   padding: 12px 14px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .room-card-header {
@@ -1135,6 +1137,7 @@ body {
 .room-list {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .room-colour-picker {
