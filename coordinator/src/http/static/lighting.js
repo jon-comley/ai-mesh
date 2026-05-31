@@ -1,6 +1,8 @@
 // ── Lighting panel ──────────────────────────────────────────────────────────
 // Renders per-device light state cards with interactive controls.
 
+import { wireDeviceSlider } from '/static/rooms.js';
+
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
 let groupsSet = new Set();
@@ -186,39 +188,25 @@ function wireControls(card, dev) {
 
   const bri = card.querySelector('[data-ctrl="brightness"]');
   if (bri) {
-    bri.addEventListener('pointerdown', () => bri.classList.add('slider-active'));
-    bri.addEventListener('pointercancel', () => bri.classList.remove('slider-active'));
-    bri.addEventListener('input', () => {
-      const pct = Math.round((bri.value / 255) * 100);
-      bri.title = `${pct}%`;
-      const label = bri.parentElement.querySelector('.light-detail-value');
-      if (label) label.textContent = `${pct}%`;
-    });
-    bri.addEventListener('change', () => {
-      bri.classList.remove('slider-active');
-      const val = parseInt(bri.value, 10);
-      const cur = devicesMap.get(dev.device_id) ?? dev;
-      devicesMap.set(dev.device_id, { ...cur, brightness: val });
-      sendCommand(dev.device_id, { action: 'brightness', value: val });
+    wireDeviceSlider(bri, {
+      format: v => Math.round((v / 255) * 100) + '%',
+      onInput: (v, valEl) => { valEl.textContent = Math.round((v / 255) * 100) + '%'; },
+      onChange: v => {
+        devicesMap.set(dev.device_id, { ...(devicesMap.get(dev.device_id) ?? dev), brightness: v });
+        sendCommand(dev.device_id, { action: 'brightness', value: v });
+      },
     });
   }
 
   const ct = card.querySelector('[data-ctrl="color_temp"]');
   if (ct) {
-    ct.addEventListener('pointerdown', () => ct.classList.add('slider-active'));
-    ct.addEventListener('pointercancel', () => ct.classList.remove('slider-active'));
-    ct.addEventListener('input', () => {
-      const kelvin = Math.round(1_000_000 / ct.value);
-      ct.title = `${kelvin} K`;
-      const label = ct.parentElement.querySelector('.light-detail-value');
-      if (label) label.textContent = `${kelvin} K`;
-    });
-    ct.addEventListener('change', () => {
-      ct.classList.remove('slider-active');
-      const val = parseInt(ct.value, 10);
-      const cur = devicesMap.get(dev.device_id) ?? dev;
-      devicesMap.set(dev.device_id, { ...cur, color_temp: val });
-      sendCommand(dev.device_id, { action: 'color_temp', value: val });
+    wireDeviceSlider(ct, {
+      format: v => Math.round(1e6 / v) + 'K',
+      onInput: (v, valEl) => { valEl.textContent = Math.round(1e6 / v) + 'K'; },
+      onChange: v => {
+        devicesMap.set(dev.device_id, { ...(devicesMap.get(dev.device_id) ?? dev), color_temp: v });
+        sendCommand(dev.device_id, { action: 'color_temp', value: v });
+      },
     });
   }
 

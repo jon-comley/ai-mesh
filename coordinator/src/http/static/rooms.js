@@ -463,16 +463,17 @@ function renderGlobalControls() {
   return bar;
 }
 
-// ── Room slider ───────────────────────────────────────────────────────────────
+// ── Shared slider builder ─────────────────────────────────────────────────────
 // A single-interaction slider: value changes ONLY by grabbing the thumb and
-// dragging. Clicking the track does nothing (event propagates to the card so
-// e.g. drag-to-reorder still works). A value bubble floats above the thumb
+// dragging. Clicking the track does nothing (event propagates to parent so
+// card-level gestures still fire). A value bubble floats above the thumb
 // while dragging. While active, the slider carries `.slider-active` so render()
 // won't wipe it out mid-drag.
 //
-// opts: { label, min, max, value, format(v)->string, onCommit(v)->void }
-function buildRoomSlider(opts) {
-  const { label, min, max, value, format, onCommit } = opts;
+// opts: { label, min, max, value, format(v)->string, onCommit(v)->void, onInput?(v)->void }
+// onInput is optional — fires on every thumb move for live feedback (e.g. 3D preview updates)
+export function buildSlider(opts) {
+  const { label, min, max, value, format, onCommit, onInput } = opts;
 
   const container = document.createElement('div');
   container.className = 'room-slider';
@@ -524,7 +525,10 @@ function buildRoomSlider(opts) {
     positionBubble();
   }, { capture: true });
 
-  slider.addEventListener('input', positionBubble);
+  slider.addEventListener('input', () => {
+    positionBubble();
+    if (onInput) onInput(parseInt(slider.value, 10));
+  });
 
   const finish = () => {
     slider.classList.remove('slider-active');
@@ -540,6 +544,57 @@ function buildRoomSlider(opts) {
   track.appendChild(slider);
   container.appendChild(track);
   return container;
+}
+
+// Wire the shared slider interaction onto an existing inline <input type=range>.
+// Exported so lighting.js can use it for device cards.
+// Used for device card sliders where the HTML structure is fixed.
+// opts: { format(v)->string, onInput(v, valEl)->void, onChange(v)->void }
+export function wireDeviceSlider(slider, opts) {
+  const { format, onInput, onChange } = opts;
+  const THUMB_W = 18;
+  const valEl = slider.parentElement?.querySelector('.light-detail-value');
+
+  // Inject floating bubble before the slider
+  const bubble = document.createElement('div');
+  bubble.className = 'room-slider-bubble device-slider-bubble';
+  slider.parentElement?.insertBefore(bubble, slider);
+
+  const positionBubble = () => {
+    const min = parseFloat(slider.min), max = parseFloat(slider.max);
+    const ratio = (slider.value - min) / (max - min);
+    const w = slider.getBoundingClientRect().width;
+    const centre = THUMB_W / 2 + ratio * (w - THUMB_W);
+    bubble.style.left = `${slider.offsetLeft + centre}px`;
+    bubble.textContent = format(parseInt(slider.value, 10));
+  };
+
+  lockSliderToThumb(slider);
+
+  slider.addEventListener('pointerdown', e => {
+    const rect = slider.getBoundingClientRect();
+    const min = parseFloat(slider.min), max = parseFloat(slider.max);
+    const ratio = (slider.value - min) / (max - min);
+    const thumbCentre = rect.left + THUMB_W / 2 + ratio * (rect.width - THUMB_W);
+    const hitRadius = e.pointerType === 'touch' ? 26 : 16;
+    if (Math.abs(e.clientX - thumbCentre) > hitRadius) { e.preventDefault(); return; }
+    slider.classList.add('slider-active');
+    bubble.classList.add('visible');
+    positionBubble();
+  }, { capture: true });
+
+  slider.addEventListener('input', () => {
+    const v = parseInt(slider.value, 10);
+    positionBubble();
+    if (valEl) onInput(v, valEl);
+  });
+
+  const finish = () => {
+    slider.classList.remove('slider-active');
+    bubble.classList.remove('visible');
+  };
+  slider.addEventListener('change', () => { finish(); onChange(parseInt(slider.value, 10)); });
+  slider.addEventListener('pointercancel', finish);
 }
 
 // ── Effects palette ──────────────────────────────────────────────────────────
@@ -1030,7 +1085,7 @@ function renderRoomCard(room) {
     const avgBri = briDevices.length > 0
       ? Math.round(briDevices.reduce((sum, d) => sum + (d.brightness ?? 0), 0) / briDevices.length)
       : 200;
-    ctrlRow.appendChild(buildRoomSlider({
+    ctrlRow.appendChild(buildSlider({
       label: 'Brightness',
       min: 1,
       max: 254,
@@ -1049,7 +1104,7 @@ function renderRoomCard(room) {
     const avgCT = ctDevices.length > 0
       ? Math.round(ctDevices.reduce((sum, d) => sum + (d.color_temp ?? 0), 0) / ctDevices.length)
       : 370;
-    ctrlRow.appendChild(buildRoomSlider({
+    ctrlRow.appendChild(buildSlider({
       label: 'Color temp',
       min: 154,
       max: 500,
@@ -1586,43 +1641,29 @@ function wireDeviceControls(card, dev, roomId) {
 
   const bri = card.querySelector('[data-ctrl="brightness"]');
   if (bri) {
-    lockSliderToThumb(bri);
-    bri.addEventListener('pointerdown', () => bri.classList.add('slider-active'));
-    bri.addEventListener('pointercancel', () => bri.classList.remove('slider-active'));
-    bri.addEventListener('input', () => {
-      const pct = Math.round((bri.value / 255) * 100);
-      bri.title = `${pct}%`;
-      bri.parentElement.querySelector('.light-detail-value').textContent = `${pct}%`;
-    });
-    bri.addEventListener('change', () => {
-      bri.classList.remove('slider-active');
-      maybeExclude();
-      const val = parseInt(bri.value, 10);
-      const cur = devicesMap.get(dev.device_id) ?? dev;
-      devicesMap.set(dev.device_id, { ...cur, brightness: val });
-      markPending(dev.device_id, 'brightness', val);
-      sendDeviceCommand(dev.device_id, { action: 'brightness', value: val, transition_secs: 0.4 });
+    wireDeviceSlider(bri, {
+      format: v => Math.round((v / 255) * 100) + '%',
+      onInput: (v, valEl) => { valEl.textContent = Math.round((v / 255) * 100) + '%'; },
+      onChange: v => {
+        maybeExclude();
+        devicesMap.set(dev.device_id, { ...(devicesMap.get(dev.device_id) ?? dev), brightness: v });
+        markPending(dev.device_id, 'brightness', v);
+        sendDeviceCommand(dev.device_id, { action: 'brightness', value: v, transition_secs: 0.4 });
+      },
     });
   }
 
   const ct = card.querySelector('[data-ctrl="color_temp"]');
   if (ct) {
-    lockSliderToThumb(ct);
-    ct.addEventListener('pointerdown', () => ct.classList.add('slider-active'));
-    ct.addEventListener('pointercancel', () => ct.classList.remove('slider-active'));
-    ct.addEventListener('input', () => {
-      const kelvin = Math.round(1_000_000 / ct.value);
-      ct.title = `${kelvin} K`;
-      ct.parentElement.querySelector('.light-detail-value').textContent = `${kelvin} K`;
-    });
-    ct.addEventListener('change', () => {
-      ct.classList.remove('slider-active');
-      maybeExclude();
-      const val = parseInt(ct.value, 10);
-      const cur = devicesMap.get(dev.device_id) ?? dev;
-      devicesMap.set(dev.device_id, { ...cur, color_temp: val });
-      markPending(dev.device_id, 'color_temp', val);
-      sendDeviceCommand(dev.device_id, { action: 'color_temp', value: val, transition_secs: 0.4 });
+    wireDeviceSlider(ct, {
+      format: v => Math.round(1e6 / v) + 'K',
+      onInput: (v, valEl) => { valEl.textContent = Math.round(1e6 / v) + 'K'; },
+      onChange: v => {
+        maybeExclude();
+        devicesMap.set(dev.device_id, { ...(devicesMap.get(dev.device_id) ?? dev), color_temp: v });
+        markPending(dev.device_id, 'color_temp', v);
+        sendDeviceCommand(dev.device_id, { action: 'color_temp', value: v, transition_secs: 0.4 });
+      },
     });
   }
 

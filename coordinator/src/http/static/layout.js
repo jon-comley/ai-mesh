@@ -2,6 +2,8 @@
 // SVG top-down floor plan for placing bulbs and (Phase B) windows/doors.
 // Coordinates are always 0–1 normalised; the SVG scales to any screen size.
 
+import { buildSlider } from '/static/rooms.js';
+
 // Prevent click-to-jump on any range slider — user must grab the thumb.
 function lockSliderToThumb(slider) {
   slider.addEventListener('pointerdown', e => {
@@ -2424,73 +2426,53 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
   // ── Brightness ────────────────────────────────────────────────────────────
   let briSlider = null;
   if (dev?.brightness != null) {
-    const briRow = document.createElement('div');
-    briRow.className = 'layout-popover-ctrl-row';
-    const briLbl = document.createElement('span'); briLbl.textContent = 'Brightness';
-    const briVal = document.createElement('span');
-    briVal.textContent = `${Math.round((dev.brightness / 255) * 100)}%`;
-    briRow.appendChild(briLbl); briRow.appendChild(briVal);
-    pop.appendChild(briRow);
-
-    briSlider = document.createElement('input');
-    briSlider.type = 'range'; briSlider.min = '1'; briSlider.max = '255';
-    briSlider.value = dev.brightness;
-    briSlider.disabled = !(dev?.on ?? true);
-    briSlider.className = 'layout-popover-slider';
-    lockSliderToThumb(briSlider);
-
     let briTimer = null;
-    briSlider.addEventListener('input', () => {
-      const val = parseInt(briSlider.value);
-      briVal.textContent = `${Math.round((val / 255) * 100)}%`;
-      const cur = devicesRef.get(deviceId) ?? {};
-      devicesRef.set(deviceId, { ...cur, brightness: val, on: true });
-      updateBulbIcon(entry, devicesRef.get(deviceId));
-      refreshDot();
-      clearTimeout(briTimer);
-      briTimer = setTimeout(() =>
-        sendLayoutDeviceCommand(deviceId, { action: 'brightness', value: val, transition_secs: 0.1 }), 80);
+    const briEl = buildSlider({
+      label: 'Brightness',
+      min: 1, max: 255,
+      value: dev.brightness,
+      format: v => Math.round((v / 255) * 100) + '%',
+      onInput: v => {
+        const cur = devicesRef.get(deviceId) ?? {};
+        devicesRef.set(deviceId, { ...cur, brightness: v, on: true });
+        updateBulbIcon(entry, devicesRef.get(deviceId));
+        refreshDot();
+        clearTimeout(briTimer);
+        briTimer = setTimeout(() =>
+          sendLayoutDeviceCommand(deviceId, { action: 'brightness', value: v, transition_secs: 0.1 }), 80);
+      },
+      onCommit: v => {
+        clearTimeout(briTimer);
+        sendLayoutDeviceCommand(deviceId, { action: 'brightness', value: v, transition_secs: 0.2 });
+      },
     });
-    briSlider.addEventListener('change', () => {
-      clearTimeout(briTimer);
-      sendLayoutDeviceCommand(deviceId, { action: 'brightness', value: parseInt(briSlider.value), transition_secs: 0.2 });
-    });
-    pop.appendChild(briSlider);
+    briSlider = briEl.querySelector('input');
+    if (!(dev?.on ?? true)) briSlider.disabled = true;
+    pop.appendChild(briEl);
   }
 
   // ── Colour temperature ────────────────────────────────────────────────────
   if (dev?.color_temp != null) {
-    const ctRow = document.createElement('div');
-    ctRow.className = 'layout-popover-ctrl-row';
-    const ctLbl = document.createElement('span'); ctLbl.textContent = 'Colour temp';
-    const ctVal = document.createElement('span');
-    ctVal.textContent = `${Math.round(1e6 / dev.color_temp)} K`;
-    ctRow.appendChild(ctLbl); ctRow.appendChild(ctVal);
-    pop.appendChild(ctRow);
-
-    const ctSlider = document.createElement('input');
-    ctSlider.type = 'range'; ctSlider.min = '154'; ctSlider.max = '500';
-    ctSlider.value = dev.color_temp;
-    ctSlider.className = 'layout-popover-slider layout-popover-slider-ct';
-    lockSliderToThumb(ctSlider);
-
     let ctTimer = null;
-    ctSlider.addEventListener('input', () => {
-      const val = parseInt(ctSlider.value);
-      ctVal.textContent = `${Math.round(1e6 / val)} K`;
-      const cur = devicesRef.get(deviceId) ?? {};
-      devicesRef.set(deviceId, { ...cur, color_temp: val });
-      updateBulbIcon(entry, devicesRef.get(deviceId));
-      refreshDot();
-      clearTimeout(ctTimer);
-      ctTimer = setTimeout(() =>
-        sendLayoutDeviceCommand(deviceId, { action: 'color_temp', value: val, transition_secs: 0.1 }), 80);
-    });
-    ctSlider.addEventListener('change', () => {
-      clearTimeout(ctTimer);
-      sendLayoutDeviceCommand(deviceId, { action: 'color_temp', value: parseInt(ctSlider.value), transition_secs: 0.2 });
-    });
-    pop.appendChild(ctSlider);
+    pop.appendChild(buildSlider({
+      label: 'Colour temp',
+      min: 154, max: 500,
+      value: dev.color_temp,
+      format: v => Math.round(1e6 / v) + 'K',
+      onInput: v => {
+        const cur = devicesRef.get(deviceId) ?? {};
+        devicesRef.set(deviceId, { ...cur, color_temp: v });
+        updateBulbIcon(entry, devicesRef.get(deviceId));
+        refreshDot();
+        clearTimeout(ctTimer);
+        ctTimer = setTimeout(() =>
+          sendLayoutDeviceCommand(deviceId, { action: 'color_temp', value: v, transition_secs: 0.1 }), 80);
+      },
+      onCommit: v => {
+        clearTimeout(ctTimer);
+        sendLayoutDeviceCommand(deviceId, { action: 'color_temp', value: v, transition_secs: 0.2 });
+      },
+    }));
   }
 
   // ── Divider ───────────────────────────────────────────────────────────────
@@ -2522,32 +2504,22 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
   });
   pop.appendChild(typeSelect);
 
-  // ── Height (thumb-only slider) ────────────────────────────────────────────
-  const heightRow = document.createElement('div');
-  heightRow.className = 'layout-popover-ctrl-row';
-  const heightLbl = document.createElement('span'); heightLbl.textContent = 'Height';
-  const heightVal = document.createElement('span');
-  heightVal.textContent = `${Math.round(entry.z * 100)}%`;
-  heightRow.appendChild(heightLbl); heightRow.appendChild(heightVal);
-  pop.appendChild(heightRow);
-
-  const slider = document.createElement('input');
-  slider.type = 'range'; slider.min = '0'; slider.max = '100';
-  slider.value = Math.round(entry.z * 100);
-  slider.className = 'layout-popover-slider';
-  lockSliderToThumb(slider);
-  slider.addEventListener('input', () => {
-    const z = parseInt(slider.value) / 100;
-    heightVal.textContent = `${slider.value}%`;
-    entry.z = z;
-    drawFixtureIcon(entry.el, entry.x * 1000, entry.y * 1000, z, entry.fixture_type, devicesRef.get(deviceId));
-    syncBulbToThree(deviceId, entry, devicesRef.get(deviceId));
-  });
-  slider.addEventListener('change', () => {
-    pushUndo();
-    postPosition(deviceId, entry.x, entry.y, entry.z, entry.fixture_type);
-  });
-  pop.appendChild(slider);
+  // ── Height ────────────────────────────────────────────────────────────────
+  pop.appendChild(buildSlider({
+    label: 'Height',
+    min: 0, max: 100,
+    value: Math.round(entry.z * 100),
+    format: v => v + '%',
+    onInput: v => {
+      entry.z = v / 100;
+      drawFixtureIcon(entry.el, entry.x * 1000, entry.y * 1000, entry.z, entry.fixture_type, devicesRef.get(deviceId));
+      syncBulbToThree(deviceId, entry, devicesRef.get(deviceId));
+    },
+    onCommit: () => {
+      pushUndo();
+      postPosition(deviceId, entry.x, entry.y, entry.z, entry.fixture_type);
+    },
+  }));
 
   // ── Remove ────────────────────────────────────────────────────────────────
   const removeBtn = document.createElement('button');
