@@ -1016,6 +1016,18 @@ body {
   opacity: 1;
 }
 
+/* Bubble for inline device sliders (lighting panel + room device cards) */
+.light-detail-row {
+  position: relative;
+}
+.device-slider-bubble {
+  bottom: calc(100% + 4px);
+  top: auto;
+}
+.device-slider-bubble.visible {
+  opacity: 1;
+}
+
 /* Track is invisible at rest and only appears while dragging, so the resting
    state is a clean dot. Track height 6px; thumb 18px centred on it. */
 .room-slider-input::-webkit-slider-runnable-track {
