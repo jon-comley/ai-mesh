@@ -238,7 +238,7 @@ These rules are enforced by the pre-commit hook.
 
 ## 7. AI Collaboration
 
-AIs (Copilot, , Gemini) are expected to:
+AIs (Copilot, Gemini) are expected to:
 
 - Generate tests alongside code
 - Review diffs
