@@ -154,13 +154,13 @@ function Ensure-Nssm {
     $ProgressPreference = 'SilentlyContinue'
 
     # Try direct download from mirrors first (faster and avoids winget source issues).
-    # NOTE: nssm-2.24 is the last OFFICIAL STABLE (released 2014-08-31) — it predates
+    # NOTE: nssm-2.24 is the last OFFICIAL STABLE (released 2014-08-31) - it predates
     # AppKillProcessTree (added in later dev builds, never cut as a stable release).
     # Prefer the 2.24-101 CI build, which supports AppKillProcessTree for clean
     # llama-server child cleanup; fall back to the 2.24 stable mirrors.
-    # 1. nssm.cc CI build (2.24-101) — has AppKillProcessTree
+    # 1. nssm.cc CI build (2.24-101) - has AppKillProcessTree
     # 2. Official 2.24 stable (nssm.cc)
-    # 3. fawno mirror / ONLYOFFICE mirror — 2.24 stable repackages
+    # 3. fawno mirror / ONLYOFFICE mirror - 2.24 stable repackages
     $nssmZipUrls = @(
         "https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip",
         "https://nssm.cc/release/nssm-2.24.zip",
@@ -456,9 +456,15 @@ function Ensure-AgentService {
     & $nssm set $agentService AppThrottle 1500
     & $nssm set $agentService AppRestartDelay 5000
     # AppKillProcessTree (kills the spawned llama-server on stop) only exists in
-    # NSSM builds newer than the 2.24 stable. Suppress the "Invalid parameter"
-    # noise on older nssm.exe — it's applied when the build supports it.
-    & $nssm set $agentService AppKillProcessTree 1 2>&1 | Out-Null
+    # NSSM builds newer than the 2.24 stable. The script runs under
+    # $ErrorActionPreference = 'Stop', so nssm writing 'Invalid parameter' to
+    # stderr becomes a terminating NativeCommandError - swallow it via try/catch
+    # so an older nssm.exe doesn't abort provisioning. Applied when supported.
+    try {
+        & $nssm set $agentService AppKillProcessTree 1 2>&1 | Out-Null
+    } catch {
+        Write-Host ">>> (skipping AppKillProcessTree - not supported by this NSSM build)"
+    }
 
     & sc.exe stop $agentService 2>&1 | Out-Null
     Start-Sleep -Seconds 2
