@@ -813,6 +813,8 @@ body {
   font-weight: 600;
   cursor: grab;
   user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;            /* a finger-drag drags the chip, not the page */
   transition: opacity 0.15s;
   flex-shrink: 0;
   white-space: nowrap;
@@ -1718,6 +1720,34 @@ body {
   transform: translate(-50%, -50%) scale(1.18);
 }
 
+/* ── Temperature bar (warm→cool, tap/drag anywhere) ─────────────────────────── */
+.temp-bar {
+  position: relative;
+  flex: 1;
+  height: 28px;
+  border-radius: 14px;
+  cursor: pointer;
+  touch-action: none;                 /* don't scroll the page while dragging on mobile */
+  user-select: none;
+  -webkit-user-select: none;
+  box-shadow: inset 0 0 0 1px var(--border), 0 1px 4px rgba(0,0,0,0.3);
+}
+.temp-bar-handle {
+  position: absolute;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.45), 0 1px 4px rgba(0,0,0,0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;               /* the bar handles all pointer events */
+  transition: transform 0.08s;
+}
+.temp-bar.dragging .temp-bar-handle {
+  transform: translate(-50%, -50%) scale(1.18);
+}
+
 /* ── Scenes ─────────────────────────────────────────────────────────────────── */
 
 .room-scenes {
@@ -1882,43 +1912,6 @@ body {
   white-space: nowrap;
 }
 
-/* Controls live in a horizontal scroll box so Undo/Redo/3D never run off the
-   edge on a narrow screen — they scroll instead. */
-.layout-header-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex-shrink: 1;
-  overflow-x: auto;
-  scrollbar-width: none;            /* clean header; clipped buttons cue scrollability */
-  -webkit-overflow-scrolling: touch;
-}
-.layout-header-controls::-webkit-scrollbar { display: none; }
-.layout-header-controls > * { flex-shrink: 0; }
-
-.layout-toggle {
-  font-size: 12px;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.layout-undo-btn,
-.layout-redo-btn {
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 4px 10px;
-  cursor: pointer;
-  font-size: 12px;
-}
-.layout-undo-btn:hover,
-.layout-redo-btn:hover { background: var(--border); }
-
 .layout-body {
   display: flex;
   gap: 0;
@@ -2055,6 +2048,108 @@ body {
   font-size: 12px;
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* ── Bottom action bar (phone-first layout controls) ────────────────────────── */
+/* Sits in normal flow as the last row of .layout-view, just above the app tab
+   bar, so it's within easy one-handed thumb reach. */
+.layout-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 6px 8px;
+  background: var(--surface-2, #1e1e2e);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.layout-act-spacer { flex: 1; }
+
+.layout-seg {
+  display: inline-flex;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 2px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.layout-seg-btn {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.layout-seg-btn.active { background: var(--accent); color: #fff; }
+
+.layout-act-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 9px;
+  padding: 8px 12px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.layout-act-btn:hover { background: var(--border); }
+.layout-act-btn.active { color: var(--accent); border-color: var(--accent); }
+.layout-add-btn {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 3D is view-only — hide the editing affordances, the 2D-only Labels toggle, the
+   device sidebar, and the 2D-only light-model select. */
+.layout-view.is-3d .layout-edit-only,
+.layout-view.is-3d .layout-2d-only,
+.layout-view.is-3d .layout-sidebar,
+.layout-view.is-3d .layout-sidebar-resize,
+.layout-view.is-3d #lc-model-select { display: none; }
+
+/* ── Device-palette bottom sheet (phone) ────────────────────────────────────── */
+.layout-sheet-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 55;
+}
+.layout-sheet-backdrop.visible { display: block; }
+
+@media (max-width: 899px) {
+  /* The sidebar becomes a bottom sheet, opened by ＋ Add. */
+  .layout-sidebar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto !important;            /* beat any inline width from the resize handle */
+    max-height: 60vh;
+    border-radius: 16px 16px 0 0;
+    transform: translateY(110%);
+    transition: transform 0.25s ease;
+    z-index: 60;
+    padding-bottom: calc(12px + var(--safe-bottom, 0px));
+  }
+  .layout-sidebar.sheet-open { transform: translateY(0); }
+  .layout-sidebar-resize,
+  .layout-sidebar-toggle { display: none; }   /* collapse/resize are desktop-only */
+}
+
+@media (min-width: 900px) {
+  /* On desktop the sidebar is inline, so the sheet chrome is unused. */
+  .layout-sheet-backdrop,
+  .layout-add-btn { display: none !important; }
 }
 
 /* Ghost chip that follows the pointer when dragging a placed bulb outside the SVG canvas */
@@ -2591,12 +2686,32 @@ body {
 /* ── Phase D: Scrubber bar ───────────────────────────────────────────────────── */
 #lc-scrubber-bar {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 6px 12px;
   background: var(--surface2, #1e1e2e);
   border-top: 1px solid var(--border, #333);
   flex-shrink: 0;
+}
+.lc-scrub-track-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* Secondary buttons scroll horizontally instead of clipping on a phone. */
+.lc-scrub-btn-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.lc-scrub-btn-row::-webkit-scrollbar { display: none; }
+.lc-scrub-btn-row > * { flex-shrink: 0; }
+@media (min-width: 900px) {
+  #lc-scrubber-bar { flex-direction: row; align-items: center; }
+  .lc-scrub-track-row { flex: 1; }
 }
 #lc-scrubber-time {
   font-size: 12px;
@@ -2813,4 +2928,7 @@ body {
   .light-slider { height: 6px; }
   /* Layout view controls — make compass + scrubber thumbs grabbable */
   #lc-scrubber { height: 24px; }
+  .lc-scrub-btn-row > button,
+  .lc-scrub-btn-row > select,
+  #lc-scrubber-play { min-height: 36px; }
 }
