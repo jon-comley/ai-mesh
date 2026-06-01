@@ -996,14 +996,6 @@ function buildLayoutView(room) {
   labelToggle.appendChild(document.createTextNode(' Labels'));
   controls.appendChild(labelToggle);
 
-  const autoBtn = document.createElement('button');
-  autoBtn.className = 'layout-auto-btn';
-  autoBtn.textContent = 'Auto-arrange remaining';
-  autoBtn.style.display = 'none';
-  autoBtn.id = 'layout-auto-btn';
-  autoBtn.addEventListener('click', autoArrange);
-  controls.appendChild(autoBtn);
-
   const undoBtn = document.createElement('button');
   undoBtn.className = 'layout-undo-btn';
   undoBtn.textContent = '↩ Undo';
@@ -1286,13 +1278,6 @@ function rebuildSidebar() {
     for (const id of unplaced) {
       chips.appendChild(makeSidebarChip(id));
     }
-  }
-
-  // Show/hide auto-arrange button
-  const autoBtn = document.getElementById('layout-auto-btn');
-  if (autoBtn) {
-    autoBtn.style.display =
-      Object.keys(placedBulbs).length >= 2 && unplaced.length > 0 ? '' : 'none';
   }
 
   rebuildPlacedPanel();
@@ -2551,60 +2536,6 @@ function removeBulb(deviceId) {
   rebuildSidebar();
   // Server: post zero coords so the position record is cleared
   postPosition(deviceId, 0, 0, 0, null);
-}
-
-// ── Auto-arrange ──────────────────────────────────────────────────────────────
-
-function autoArrange() {
-  const room = layoutRoom;
-  if (!room) return;
-
-  const unplaced = (room.device_ids || []).filter(id => !placedBulbs[id]);
-  if (unplaced.length === 0) return;
-
-  pushUndo();
-
-  const wallTypes = new Set(['floor_lamp', 'table_lamp', 'led_strip']);
-  const n = unplaced.length;
-  const cols = Math.ceil(Math.sqrt(n));
-
-  unplaced.forEach((id, i) => {
-    const fixtureType = guessFixtureType(id);
-    const z = defaultZ(fixtureType);
-    let x, y;
-
-    if (wallTypes.has(fixtureType)) {
-      // Distribute along the walls (perimeter)
-      const perimeterFrac = i / Math.max(n - 1, 1);
-      ({ x, y } = perimeterPoint(perimeterFrac));
-    } else {
-      // Uniform grid, centred, avoiding edges
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const rows = Math.ceil(n / cols);
-      x = 0.15 + (col / Math.max(cols - 1, 1)) * 0.7;
-      y = 0.15 + (row / Math.max(rows - 1, 1)) * 0.7;
-    }
-
-    x = snapX(x); y = snapY(y);
-    placeBulb(id, x, y, z, fixtureType, true);
-  });
-}
-
-function perimeterPoint(frac) {
-  // Walk perimeter: top → right → bottom → left, inset by 0.1
-  const p = frac * 4;
-  const inset = 0.12;
-  if (p < 1) return { x: inset + (1 - 2 * inset) * p, y: inset };
-  if (p < 2) return { x: 1 - inset, y: inset + (1 - 2 * inset) * (p - 1) };
-  if (p < 3) return { x: 1 - inset - (1 - 2 * inset) * (p - 2), y: 1 - inset };
-  return { x: inset, y: 1 - inset - (1 - 2 * inset) * (p - 3) };
-}
-
-function guessFixtureType(deviceId) {
-  // If user already placed it before and it had a type, reuse it.
-  // Otherwise default to ceiling_spot.
-  return placedBulbs[deviceId]?.fixture_type ?? 'ceiling_spot';
 }
 
 function defaultZ(fixtureType) {
