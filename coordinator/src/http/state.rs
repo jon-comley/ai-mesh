@@ -1010,6 +1010,10 @@ mod tests {
         assert_eq!(snap[0].device_id, "new_bulb");
         assert_eq!(snap[0].node_id, "n1");
         assert!(!snap[0].on);
+        // Placeholders start offline — only a real LightState report marks a
+        // device online (otherwise the dashboard shows controls for bulbs the
+        // zigbee bridge has never actually reported).
+        assert!(!snap[0].online);
     }
 
     #[test]

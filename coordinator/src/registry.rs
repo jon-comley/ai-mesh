@@ -2189,6 +2189,23 @@ mod tests {
     }
 
     #[test]
+    fn delete_device_clears_room_membership_and_position() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Hall");
+        reg.add_device_to_room(&r.id, "bulb_x");
+        reg.update_light_position("bulb_x", 0.5, 0.5, 0.5, Some(r.id.clone()), None);
+        assert_eq!(reg.get_room_for_device("bulb_x"), Some(r.id.clone()));
+        assert!(reg.get_light_position("bulb_x").is_some());
+
+        reg.delete_device("bulb_x");
+
+        assert!(reg.get_room_for_device("bulb_x").is_none());
+        assert!(reg.get_light_position("bulb_x").is_none());
+        // The room itself survives; only the device is gone.
+        assert!(reg.list_rooms().iter().any(|room| room.id == r.id));
+    }
+
+    #[test]
     fn rename_room_updates_name() {
         let mut reg = Registry::new();
         let r = reg.create_room("Old Name");
