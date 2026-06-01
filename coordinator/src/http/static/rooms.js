@@ -52,6 +52,9 @@ const EFFECT_ICONS = {                         // static icon per effect_id; fal
   snake: '\u{1F40D}',        // 🐍
 };
 const DEFAULT_EFFECT_ICON = '✨';          // ✨
+// Warm→neutral→cool gradient used to fill the mode dot when a light is in
+// colour-temperature mode (visually distinct from a solid colour).
+const CT_SWATCH = 'linear-gradient(135deg, #ffae5c 0%, #fff6ec 50%, #cfe3ff 100%)';
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
 let _sceneReorderTimer = null;
 
@@ -346,6 +349,36 @@ export function notifyDevices(devices) {
   // Skip full re-render while a slider is being dragged to prevent mid-drag jumps
   if (document.querySelector('.slider-active')) return;
   patchDeviceCards();
+  refreshRoomColourDots();
+}
+
+// Paint a room's colour trigger: a coloured dot when every bulb shares one
+// colour, otherwise the 🎨 palette icon. Shared by the initial render and the
+// live refresh so the two never drift.
+function paintRoomColourDot(btn, devices) {
+  const uniform = roomUniformColour(devices);
+  if (uniform) {
+    btn.classList.add('room-colour-dot');
+    btn.style.background = `hsl(${uniform.h},${uniform.s}%,50%)`;
+    btn.textContent = '';
+  } else {
+    btn.classList.remove('room-colour-dot');
+    btn.style.background = '';
+    btn.textContent = '🎨';
+  }
+}
+
+// Keep each room's colour trigger in sync with its bulbs without a full render:
+// when every bulb in the room shares one colour (e.g. after a scene is recalled)
+// the icon becomes a dot of that colour; otherwise it falls back to the palette.
+function refreshRoomColourDots() {
+  for (const room of roomsData) {
+    const card = document.querySelector(`.room-card[data-room-id="${CSS.escape(room.id)}"]`);
+    const btn = card?.querySelector('.room-ctrl-trigger[data-role="room-colour"]');
+    if (!btn) continue;
+    const devs = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
+    paintRoomColourDot(btn, devs);
+  }
 }
 
 // Lightweight patch: update on/off badge and colour swatch without touching
@@ -443,6 +476,7 @@ function render() {
   if (!container || dragSrc || roomDragId) return;
   if (container.querySelector('.layout-view')) return; // layout open — don't wipe
   if (container.querySelector('.room-slider-input.slider-active')) return; // room slider thumb being dragged — don't wipe it out
+  if (container.querySelector('.colour-wheel.dragging')) return; // colour wheel being dragged — don't wipe it out
   // NOTE: device-card sliders (.lc-slider) are not guarded here — the common
   // WS-update path (notifyDevices) already bails on any .slider-active before
   // patchDeviceCards. Only a rare full render() mid-device-drag is unguarded;
@@ -710,10 +744,25 @@ export function buildLightControls(dev, cb) {
       const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
       ({ h, s } = rgbToHsl(r, g, b));
     }
-    const dotBtn = document.createElement('button');
-    dotBtn.className = 'lc-toggle-btn lc-colour-btn';
-    dotBtn.style.background = lcMode === 'colour' ? `hsl(${h},${s}%,50%)` : 'transparent';
-    row1.appendChild(dotBtn);
+    // Two mode buttons side by side (only when the bulb supports both): a
+    // warm→cool "temperature" swatch and a colour swatch. Tap one to switch.
+    let tempBtn = null, colourBtn = null;
+    if (supportsBoth) {
+      tempBtn = document.createElement('button');
+      tempBtn.className = 'lc-mode-btn';
+      tempBtn.title = 'Temperature';
+      tempBtn.style.background = CT_SWATCH;
+
+      colourBtn = document.createElement('button');
+      colourBtn.className = 'lc-mode-btn';
+      colourBtn.title = 'Colour';
+      colourBtn.style.background = `hsl(${h},${s}%,50%)`;
+
+      const modeGroup = document.createElement('div');
+      modeGroup.className = 'lc-mode-group';
+      modeGroup.append(tempBtn, colourBtn);
+      row1.appendChild(modeGroup);
+    }
 
     // Secondary rows — only one visible at a time
     let tempRow = null, colourRows = null;
@@ -721,45 +770,42 @@ export function buildLightControls(dev, cb) {
     if (supportsTemp) {
       tempRow = makeLcSliderRow('Temperature', 154, 500, dev.color_temp ?? 370,
         v => Math.round(1e6 / v) + 'K',
-        v => { setMode('temp'); cb.onTemp?.(v); });   // adjusting temp pins temp mode
+        v => { setMode('temp'); applyMode(); cb.onTemp?.(v); });
     }
 
     if (supportsColour) {
       colourRows = document.createElement('div');
-      const hueRow = makeLcSliderRow('Hue', 0, 359, h, v => v + '°', () => sendXY());
-      const satRow = makeLcSliderRow('Saturation', 0, 100, s, v => v + '%', () => sendXY());
-      colourRows.appendChild(hueRow);
-      colourRows.appendChild(satRow);
-
-      const hueSlider = hueRow.querySelector('input');
-      const satSlider = satRow.querySelector('input');
-      function sendXY() {
-        setMode('colour');                            // adjusting hue/sat pins colour mode
-        const { x, y } = hslToXy(parseInt(hueSlider.value), parseInt(satSlider.value));
-        dotBtn.style.background = `hsl(${hueSlider.value},${satSlider.value}%,50%)`;
-        cb.onColorXY?.(x, y);
-      }
+      colourRows.className = 'lc-colour-wheel-wrap';
+      colourRows.appendChild(buildColourWheel({
+        hue: h, sat: s,
+        onInput: (hh, ss) => { if (colourBtn) colourBtn.style.background = `hsl(${hh},${ss}%,50%)`; },
+        onChange: (hh, ss) => {
+          setMode('colour'); applyMode();
+          if (colourBtn) colourBtn.style.background = `hsl(${hh},${ss}%,50%)`;
+          const { x, y } = hslToXy(hh, ss);
+          cb.onColorXY?.(x, y);
+        },
+      }));
     }
 
-    // applyMode only toggles visibility; rows are appended once below.
+    // The secondary control can be collapsed: tapping the active swatch again
+    // hides it. Single-capability bulbs (no swatches) always show their control.
+    let lcExpanded = !supportsBoth;
     const applyMode = () => {
-      if (tempRow)    tempRow.style.display    = lcMode === 'temp'   ? '' : 'none';
-      if (colourRows) colourRows.style.display = lcMode === 'colour' ? '' : 'none';
-      if (supportsBoth) {
-        dotBtn.title = lcMode === 'colour' ? 'Switch to Temperature' : 'Switch to Colour';
-        dotBtn.style.background = lcMode === 'colour' ? `hsl(${h},${s}%,50%)` : 'transparent';
-      } else {
-        dotBtn.title = lcMode === 'colour' ? 'Colour' : 'Temperature';
-      }
-      dotBtn.classList.toggle('lc-colour-active', lcMode === 'colour');
+      const showTemp   = supportsTemp   && lcMode === 'temp'   && lcExpanded;
+      const showColour = supportsColour && lcMode === 'colour' && lcExpanded;
+      if (tempRow)    tempRow.style.display    = showTemp   ? '' : 'none';
+      if (colourRows) colourRows.style.display = showColour ? '' : 'none';
+      tempBtn?.classList.toggle('active', showTemp);
+      colourBtn?.classList.toggle('active', showColour);
     };
-    if (supportsBoth) {
-      dotBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        setMode(lcMode === 'colour' ? 'temp' : 'colour');
-        applyMode();
-      });
-    }
+    const pickMode = (mode) => {
+      if (lcMode === mode && lcExpanded) { lcExpanded = false; }   // tap active again → hide
+      else { setMode(mode); lcExpanded = true; }
+      applyMode();
+    };
+    tempBtn?.addEventListener('click', e => { e.stopPropagation(); pickMode('temp'); });
+    colourBtn?.addEventListener('click', e => { e.stopPropagation(); pickMode('colour'); });
 
     // Assemble once: controls row, brightness, then the active secondary section
     const briRow = makeLcSliderRow('Brightness', 1, 254, dev.brightness ?? 200,
@@ -810,6 +856,97 @@ function makeLcSliderRow(label, min, max, value, format, onCommit) {
   row.appendChild(slider);
   row.appendChild(valEl);
   return row;
+}
+
+// ── Colour wheel ──────────────────────────────────────────────────────────────
+// A Hue/Saturation wheel (the "ball thing" from Hue): angle around the circle is
+// hue (0° at top, clockwise), distance from the centre is saturation (centre =
+// white, edge = full). Grab the knob (or tap anywhere) and drag.
+//   opts: { hue, sat, onInput?(h,s), onChange(h,s) }
+// onInput fires live during the drag (for preview); onChange fires on release.
+// While dragging, the wheel carries `.dragging` so render() won't wipe it mid-drag.
+export function buildColourWheel({ hue, sat, onInput, onChange }) {
+  const wheel = document.createElement('div');
+  wheel.className = 'colour-wheel';
+
+  const knob = document.createElement('div');
+  knob.className = 'colour-wheel-knob';
+  wheel.appendChild(knob);
+
+  let curH = hue, curS = sat;
+
+  const placeKnob = () => {
+    const r = curS / 100;                 // 0..1 from centre
+    const rad = (curH * Math.PI) / 180;   // 0° at top, clockwise
+    const x = 50 + r * Math.sin(rad) * 50;
+    const y = 50 - r * Math.cos(rad) * 50;
+    knob.style.left = `${x}%`;
+    knob.style.top = `${y}%`;
+    knob.style.background = `hsl(${curH},${curS}%,50%)`;
+  };
+
+  const fromPointer = (e) => {
+    const rect = wheel.getBoundingClientRect();
+    const dx = e.clientX - (rect.left + rect.width / 2);
+    const dy = e.clientY - (rect.top + rect.height / 2);
+    const R = rect.width / 2;
+    curS = Math.round(Math.min(Math.hypot(dx, dy) / R, 1) * 100);
+    let deg = (Math.atan2(dx, -dy) * 180) / Math.PI; // 0 at top, clockwise
+    if (deg < 0) deg += 360;
+    curH = Math.round(deg);
+    placeKnob();
+  };
+
+  let dragging = false;
+  // While using the wheel, disable native drag on EVERY draggable ancestor
+  // (device card AND room card) — otherwise grabbing the wheel starts a card
+  // reorder, the gesture is hijacked, no pointerup fires, and the colour never
+  // commits (the symptom: knob snaps back, light doesn't change).
+  let suppressedDrags = [];
+  const suppressAncestorDrags = () => {
+    suppressedDrags = [];
+    for (let el = wheel.parentElement; el; el = el.parentElement) {
+      if (el.getAttribute && el.getAttribute('draggable') === 'true') {
+        el.setAttribute('draggable', 'false');
+        suppressedDrags.push(el);
+      }
+    }
+  };
+  const restoreAncestorDrags = () => {
+    suppressedDrags.forEach(el => el.setAttribute('draggable', 'true'));
+    suppressedDrags = [];
+  };
+
+  wheel.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragging = true;
+    wheel.classList.add('dragging');
+    suppressAncestorDrags();
+    try { wheel.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+    fromPointer(e);
+    onInput?.(curH, curS);
+  });
+  wheel.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    fromPointer(e);
+    onInput?.(curH, curS);
+  });
+  // Belt-and-braces: cancel any native drag that still tries to start.
+  wheel.addEventListener('dragstart', e => e.preventDefault());
+  const end = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    wheel.classList.remove('dragging');
+    restoreAncestorDrags();
+    try { wheel.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    onChange(curH, curS);
+  };
+  wheel.addEventListener('pointerup', end);
+  wheel.addEventListener('pointercancel', end);
+
+  placeKnob();
+  return wheel;
 }
 
 // ── Effects palette ──────────────────────────────────────────────────────────
@@ -1100,24 +1237,7 @@ function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose)
   title.textContent = mode === 'colour' ? 'Colour' : 'Temperature';
   hdr.appendChild(title);
 
-  // Colour dot mode toggle (only if room has both capabilities)
-  if (hasColour && hasTempDevices) {
-    const { h, s } = getRoomColourHsl(devices);
-    const modeBtn = document.createElement('button');
-    modeBtn.className = 'color-swatch-btn room-ctrl-mode-btn';
-    modeBtn.style.background = mode === 'colour' ? `hsl(${h},${s}%,50%)` : 'var(--surface-2)';
-    modeBtn.title = mode === 'colour' ? 'Switch to Temperature' : 'Switch to Colour';
-    modeBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      setMode(mode === 'colour' ? 'temp' : 'colour');
-      modeBtn.title = mode === 'colour' ? 'Switch to Temperature' : 'Switch to Colour';
-      modeBtn.style.background = mode === 'colour' ? `hsl(${h},${s}%,50%)` : 'var(--surface-2)';
-      title.textContent = mode === 'colour' ? 'Colour' : 'Temperature';
-      tempSliderEl.style.display   = mode === 'temp'   ? '' : 'none';
-      colourSliderEl.style.display = mode === 'colour' ? '' : 'none';
-    });
-    hdr.appendChild(modeBtn);
-  }
+  // Mode is chosen by the 🎨 / 🌡 buttons on the room card (above), not in here.
 
   const closeBtn = document.createElement('button');
   closeBtn.className = 'effect-editor-close';
@@ -1144,28 +1264,17 @@ function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose)
   tempSliderEl.style.display = mode === 'temp' ? '' : 'none';
   panel.appendChild(tempSliderEl);
 
-  // Colour sliders (Hue + Saturation)
+  // Colour wheel (Hue + Saturation)
   const colourSliderEl = document.createElement('div');
+  colourSliderEl.className = 'lc-colour-wheel-wrap';
   colourSliderEl.style.display = mode === 'colour' ? '' : 'none';
   if (hasColourXY) {
     const { h, s } = getRoomColourHsl(devices);
-    colourSliderEl.appendChild(buildSlider({
-      label: 'Hue', min: 0, max: 359, value: h,
-      format: v => v + '°',
-      onCommit: v => {
+    colourSliderEl.appendChild(buildColourWheel({
+      hue: h, sat: s,
+      onChange: (hh, ss) => {
         setMode('colour');
-        const curSat = parseInt(colourSliderEl.querySelector('input:last-of-type')?.value ?? s);
-        const { x, y } = hslToXy(v, curSat);
-        sendRoomCommand(room.id, { action: 'color_xy', x, y }, room);
-      },
-    }));
-    colourSliderEl.appendChild(buildSlider({
-      label: 'Saturation', min: 0, max: 100, value: s,
-      format: v => v + '%',
-      onCommit: v => {
-        setMode('colour');
-        const curHue = parseInt(colourSliderEl.querySelector('input:first-of-type')?.value ?? h);
-        const { x, y } = hslToXy(curHue, v);
+        const { x, y } = hslToXy(hh, ss);
         sendRoomCommand(room.id, { action: 'color_xy', x, y }, room);
       },
     }));
@@ -1311,6 +1420,7 @@ function renderRoomCard(room) {
   card.addEventListener('pointercancel', () => card.setAttribute('draggable', 'true'));
   card.addEventListener('dragstart', e => {
     if (effectDragSrc) { e.preventDefault(); return; } // let effect drag pass through
+    if (card.classList.contains('room-wheel-open')) { e.preventDefault(); return; } // colour wheel open — no reorder
     if (card.getAttribute('draggable') !== 'true') { e.preventDefault(); return; }
     roomDragId = room.id;
     e.dataTransfer.effectAllowed = 'move';
@@ -1435,15 +1545,24 @@ function renderRoomCard(room) {
   onOffWrap.appendChild(onBtn);
   onOffWrap.appendChild(offBtn);
 
-  // Secondary controls: colour & temperature (popup), floor plan
+  // Secondary controls: separate colour (🎨) and temperature (🌡) triggers, floor plan
   const hasTempDevices = roomDevicesAll.some(d => d.color_temp != null);
+  const roomModeKey = 'mesh-room-mode-' + room.id;
 
-  let colourTempBtn = null;
-  if (!empty && (hasColour || hasTempDevices)) {
-    colourTempBtn = document.createElement('button');
-    colourTempBtn.className = 'room-action-btn room-ctrl-trigger';
-    colourTempBtn.title = 'Colour & temperature';
-    colourTempBtn.textContent = '🎨';
+  let colourBtn = null, tempBtn = null;
+  if (!empty && hasColour) {
+    colourBtn = document.createElement('button');
+    colourBtn.className = 'room-action-btn room-ctrl-trigger';
+    colourBtn.dataset.role = 'room-colour';
+    colourBtn.title = 'Colour';
+    // Coloured dot when all bulbs match, else the palette icon (shared helper).
+    paintRoomColourDot(colourBtn, roomDevicesAll);
+  }
+  if (!empty && hasTempDevices) {
+    tempBtn = document.createElement('button');
+    tempBtn.className = 'room-action-btn room-ctrl-trigger';
+    tempBtn.title = 'Temperature';
+    tempBtn.textContent = '🌡';
   }
 
   const layoutBtn = document.createElement('button');
@@ -1471,7 +1590,8 @@ function renderRoomCard(room) {
   } else if (lastEffectByRoom.has(room.id)) {
     topRow.appendChild(buildEffectGhostBadge(room, lastEffectByRoom.get(room.id)));
   }
-  if (colourTempBtn) topRow.appendChild(colourTempBtn);
+  if (colourBtn) topRow.appendChild(colourBtn);
+  if (tempBtn) topRow.appendChild(tempBtn);
   topRow.appendChild(layoutBtn);
   ctrlRow.appendChild(topRow);
 
@@ -1491,28 +1611,45 @@ function renderRoomCard(room) {
     }));
   }
 
-  // Colour & temperature popup — toggled by 🎨. Open-state lives in a module Set
-  // (openRoomCtrlIds) so a commit-triggered render() re-opens it rather than
-  // wiping it out from under the user.
-  if (colourTempBtn) {
+  // Colour / temperature popup. Open-state lives in a module Set (openRoomCtrlIds)
+  // so a commit-triggered render() re-opens it. The 🎨 and 🌡 buttons each open
+  // the panel in their mode; clicking the active one closes it.
+  if (colourBtn || tempBtn) {
     let ctPanel = null;
+    const curMode = () => localStorage.getItem(roomModeKey) || (hasTempDevices ? 'temp' : 'colour');
+
+    const syncButtons = () => {
+      const m = curMode();
+      colourBtn?.classList.toggle('active', !!ctPanel && m === 'colour');
+      tempBtn?.classList.toggle('active', !!ctPanel && m === 'temp');
+      // Disable room drag-to-reorder while the colour wheel is showing.
+      card.classList.toggle('room-wheel-open', !!ctPanel && m === 'colour');
+    };
     const openPanel = () => {
-      if (ctPanel) return;
-      colourTempBtn.classList.add('active');
-      ctPanel = buildRoomControlsPanel(room, roomDevicesAll, hasColour, activeEffect, closePanel);
-      ctrlRow.appendChild(ctPanel);
+      if (!ctPanel) {
+        ctPanel = buildRoomControlsPanel(room, roomDevicesAll, hasColour, activeEffect, closePanel);
+        ctrlRow.appendChild(ctPanel);
+      }
+      syncButtons();
     };
     const closePanel = () => {
       openRoomCtrlIds.delete(room.id);
-      colourTempBtn.classList.remove('active');
       ctPanel?.remove();
       ctPanel = null;
+      card.classList.remove('room-wheel-open');
+      syncButtons();
     };
-    colourTempBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      if (openRoomCtrlIds.has(room.id)) { closePanel(); }
-      else { openRoomCtrlIds.add(room.id); openPanel(); }
-    });
+    const selectMode = (mode) => {
+      if (ctPanel && curMode() === mode) { closePanel(); return; }   // toggle off
+      localStorage.setItem(roomModeKey, mode);
+      openRoomCtrlIds.add(room.id);
+      ctPanel?.remove(); ctPanel = null;   // rebuild in the chosen mode
+      openPanel();
+    };
+
+    colourBtn?.addEventListener('click', e => { e.stopPropagation(); selectMode('colour'); });
+    tempBtn?.addEventListener('click', e => { e.stopPropagation(); selectMode('temp'); });
+
     // Restore on render if it was open before
     if (openRoomCtrlIds.has(room.id)) openPanel();
   }
@@ -1585,9 +1722,12 @@ function renderRoomCard(room) {
     for (const deviceId of room.device_ids) {
       const dev = devicesMap.get(deviceId);
       if (dev) {
+        // Device cards are intentionally NOT draggable — accidental drags were
+        // yanking bulbs out of rooms. Removal is via the card's ✕ button only.
+        // (Assigning a bulb INTO a room still works by dragging it from the
+        // Unassigned strip onto the room.)
         const devCard = buildDeviceCard(dev, room.id);
         devicesEl.appendChild(devCard);
-        wireDeviceDrag(devCard, dev.device_id, room.id);
       } else {
         devicesEl.appendChild(buildDevicePlaceholder(deviceId, room.id));
       }
@@ -1595,7 +1735,6 @@ function renderRoomCard(room) {
   }
   body.appendChild(devicesEl);
   wireDropZone(body, room.id);
-  wireDeviceReorder(devicesEl, room.id);
 
   // Scenes section (full list with save button)
   body.appendChild(buildScenesSection(room.id));
@@ -1758,6 +1897,19 @@ function getRoomColourHsl(roomDevices) {
     return { h, s };
   }
   return { h: 30, s: 80 };
+}
+
+// Returns { h, s } only when EVERY colour-capable bulb in the room shares the
+// same colour (within tolerance) — so the room can show a single colour dot.
+// Returns null when bulbs disagree or none are colour-capable.
+function roomUniformColour(roomDevices) {
+  const cols = roomDevices.filter(d => d.color_xy != null).map(d => d.color_xy);
+  if (cols.length === 0) return null;
+  const [x0, y0] = cols[0];
+  const same = cols.every(([x, y]) => Math.abs(x - x0) < 0.02 && Math.abs(y - y0) < 0.02);
+  if (!same) return null;
+  const { r, g, b } = xyToRgb(x0, y0, 254);
+  return rgbToHsl(r, g, b);
 }
 
 // ── Device card inside a room ────────────────────────────────────────────────
@@ -2352,10 +2504,15 @@ async function sendRoomCommand(roomId, body, room, isGlobal = false) {
         else if (body.action === 'off') updated = { ...updated, on: false };
         else if (body.action === 'brightness') updated = { ...updated, brightness: body.value, on: true };
         else if (body.action === 'color_temp') updated = { ...updated, color_temp: body.value };
+        else if (body.action === 'color_xy') updated = { ...updated, color_xy: [body.x, body.y] };
         devicesMap.set(deviceId, updated);
       }
     }
-    render();
+    // Skip the rebuild for colour picks: the wheel already sits where the user
+    // released it, and re-deriving its position from the stored CIE xy
+    // (xy → rgb → hsl) isn't lossless — saturated hues snap to the gamut edge.
+    // The next WS state report settles the rest of the card.
+    if (body.action !== 'color_xy') render();
   }
   try {
     const res = await fetch(`/api/rooms/${roomId}/command?token=${encodeURIComponent(tok())}`, {

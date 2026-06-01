@@ -579,28 +579,33 @@ body {
   border: none;
 }
 
+/* White fill + accent ring so the thumb reads as a control handle, not a
+   colour dot (we now have colour dots/swatches elsewhere in the UI). */
 .light-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: var(--accent);
+  background: #fff;
+  border: 3px solid var(--accent);
+  box-sizing: border-box;
   cursor: pointer;
 }
 
 .light-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: var(--accent);
+  background: #fff;
+  border: 3px solid var(--accent);
+  box-sizing: border-box;
   cursor: pointer;
-  border: none;
 }
 
 .light-slider:disabled { cursor: not-allowed; opacity: 0.4; }
-.light-slider:disabled::-webkit-slider-thumb { background: var(--text-muted); cursor: not-allowed; }
-.light-slider:disabled::-moz-range-thumb { background: var(--text-muted); cursor: not-allowed; }
+.light-slider:disabled::-webkit-slider-thumb { border-color: var(--text-muted); cursor: not-allowed; }
+.light-slider:disabled::-moz-range-thumb { border-color: var(--text-muted); cursor: not-allowed; }
 .light-detail-row-disabled .light-detail-label,
 .light-detail-row-disabled .light-detail-value { opacity: 0.5; }
 
@@ -1160,6 +1165,19 @@ body {
 .room-ctrl-trigger:hover {
   border-color: var(--accent);
 }
+/* Trigger shows the room's colour as a filled dot when all bulbs match */
+.room-ctrl-trigger.room-colour-dot {
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  min-width: 24px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
+.room-ctrl-trigger.room-colour-dot:hover,
+.room-ctrl-trigger.room-colour-dot.active {
+  border-color: var(--accent);
+}
 .room-ctrl-mode-btn {
   width: 18px;
   height: 18px;
@@ -1637,11 +1655,67 @@ body {
   border-color: var(--accent);
 }
 
-.lc-colour-btn {
-  border-color: transparent;
+/* Two mode swatches side by side (temperature | colour) */
+.lc-mode-group {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
 }
-.lc-colour-btn.lc-colour-active {
+.lc-mode-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: opacity 0.15s, box-shadow 0.15s, transform 0.1s;
+}
+.lc-mode-btn:hover { opacity: 0.85; }
+.lc-mode-btn.active {
+  opacity: 1;
+  border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* ── Colour wheel (Hue/Saturation picker) ───────────────────────────────────── */
+.lc-colour-wheel-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 2px;
+}
+.colour-wheel {
+  position: relative;
+  width: 170px;
+  height: 170px;
+  border-radius: 50%;
+  cursor: crosshair;
+  touch-action: none;                 /* don't scroll the page while dragging on mobile */
+  user-select: none;
+  -webkit-user-select: none;
+  /* white centre (low saturation) fading to full hue at the rim, over a hue ring */
+  background:
+    radial-gradient(circle at 50% 50%, #fff 0%, rgba(255,255,255,0) 70%),
+    conic-gradient(from 0deg,
+      hsl(0,100%,50%), hsl(60,100%,50%), hsl(120,100%,50%), hsl(180,100%,50%),
+      hsl(240,100%,50%), hsl(300,100%,50%), hsl(360,100%,50%));
+  box-shadow: inset 0 0 0 1px var(--border), 0 1px 6px rgba(0,0,0,0.3);
+}
+.colour-wheel-knob {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.45), 0 1px 4px rgba(0,0,0,0.5);
+  transform: translate(-50%, -50%);
+  pointer-events: none;               /* the wheel handles all pointer events */
+  transition: transform 0.08s;
+}
+.colour-wheel.dragging .colour-wheel-knob {
+  transform: translate(-50%, -50%) scale(1.18);
 }
 
 /* ── Scenes ─────────────────────────────────────────────────────────────────── */
@@ -1802,13 +1876,26 @@ body {
   font-size: 16px;
   font-weight: 600;
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* Controls live in a horizontal scroll box so Undo/Redo/3D never run off the
+   edge on a narrow screen — they scroll instead. */
 .layout-header-controls {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex-shrink: 1;
+  overflow-x: auto;
+  scrollbar-width: none;            /* clean header; clipped buttons cue scrollability */
+  -webkit-overflow-scrolling: touch;
 }
+.layout-header-controls::-webkit-scrollbar { display: none; }
+.layout-header-controls > * { flex-shrink: 0; }
 
 .layout-toggle {
   font-size: 12px;
@@ -1819,7 +1906,6 @@ body {
   gap: 4px;
 }
 
-.layout-auto-btn,
 .layout-undo-btn,
 .layout-redo-btn {
   background: var(--surface-2);
@@ -1830,7 +1916,6 @@ body {
   cursor: pointer;
   font-size: 12px;
 }
-.layout-auto-btn:hover,
 .layout-undo-btn:hover,
 .layout-redo-btn:hover { background: var(--border); }
 
