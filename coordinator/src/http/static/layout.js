@@ -22,6 +22,9 @@ let dragType = null;            // 'bulb' | 'opening' — set on dragstart
 const bulbDragStarters = {};    // deviceId → fn(e) — called when drag begins externally
 
 function setCanvasDragClass(on) {
+  // Starting a drag (e.g. a chip from the device palette) closes the bottom
+  // sheet so the canvas is visible to drop onto.
+  if (on) closeSidebarSheet();
   const svg = document.getElementById('layout-canvas');
   if (!svg) return;
   svg.classList.toggle('layout-dragging', on);
@@ -65,6 +68,7 @@ let threeRoomGroup = null;
 let threePerspCamera = null;
 let threeControls = null;
 let threeSunLight = null;
+let threeAmbientHemi = null;  // HemisphereLight tinted by the mix of on-bulb colours
 let threeBulbMeshes = {};     // deviceId → { mesh, ptLight, mat }
 let threeOpeningMeshes = {};  // openingId → mesh
 let threeNeedsRender = false; // on-demand rendering — only draw when something changed
@@ -974,52 +978,9 @@ function buildLayoutView(room) {
     inp.focus();
   });
   header.appendChild(title);
-
-  const controls = document.createElement('div');
-  controls.className = 'layout-header-controls';
-
-  const labelToggle = document.createElement('label');
-  labelToggle.className = 'layout-toggle';
-  const labelCb = document.createElement('input');
-  labelCb.type = 'checkbox';
-  labelCb.checked = showLabels;
-  labelCb.addEventListener('change', () => {
-    showLabels = labelCb.checked;
-    Object.values(placedBulbs).forEach(e => {
-      if (!e.el) return;
-      e.el.querySelectorAll('text, rect[fill="rgba(0,0,0,0.55)"]').forEach(el => {
-        el.style.display = showLabels ? '' : 'none';
-      });
-    });
-  });
-  labelToggle.appendChild(labelCb);
-  labelToggle.appendChild(document.createTextNode(' Labels'));
-  controls.appendChild(labelToggle);
-
-  const undoBtn = document.createElement('button');
-  undoBtn.className = 'layout-undo-btn';
-  undoBtn.textContent = '↩ Undo';
-  undoBtn.addEventListener('click', undo);
-  controls.appendChild(undoBtn);
-
-  const redoBtn = document.createElement('button');
-  redoBtn.className = 'layout-redo-btn';
-  redoBtn.textContent = '↪ Redo';
-  redoBtn.addEventListener('click', redo);
-  controls.appendChild(redoBtn);
-
-  const btn3d = document.createElement('button');
-  btn3d.id = 'lc-3d-toggle';
-  btn3d.className = 'layout-toolbar-btn';
-  btn3d.textContent = '3D';
-  btn3d.title = 'Switch to 3D perspective view';
-  btn3d.addEventListener('click', () => toggle3D(btn3d));
-  controls.appendChild(btn3d);
-
-  header.appendChild(controls);
   view.appendChild(header);
 
-  // Body: sidebar + resize handle + canvas
+  // Body: sidebar (a bottom sheet on phone) + resize handle + canvas
   const body = document.createElement('div');
   body.className = 'layout-body';
 
@@ -1027,9 +988,106 @@ function buildLayoutView(room) {
   body.appendChild(sidebar);
   body.appendChild(buildSidebarResizeHandle(sidebar));
   body.appendChild(buildCanvas());
-
   view.appendChild(body);
+
+  // Backdrop behind the device-palette sheet (phone only; hidden on desktop).
+  const backdrop = document.createElement('div');
+  backdrop.className = 'layout-sheet-backdrop';
+  backdrop.addEventListener('click', closeSidebarSheet);
+  view.appendChild(backdrop);
+
+  // Bottom action bar — the primary one-handed controls. It sits in normal flow
+  // as the last row of the layout view, resting just above the app tab bar, so
+  // no fixed-position safe-area maths is needed.
+  view.appendChild(buildActionBar(sidebar));
+
   return view;
+}
+
+// The phone-first control strip at the bottom of the layout view. On desktop the
+// same bar still works but the sidebar is shown inline (see CSS), so ＋ Add is a
+// no-op convenience there.
+function buildActionBar(sidebar) {
+  const bar = document.createElement('div');
+  bar.className = 'layout-action-bar';
+
+  // 2D / 3D segmented toggle
+  const seg = document.createElement('div');
+  seg.className = 'layout-seg';
+  const seg2d = document.createElement('button');
+  seg2d.className = 'layout-seg-btn active';
+  seg2d.textContent = '2D';
+  const seg3d = document.createElement('button');
+  seg3d.className = 'layout-seg-btn';
+  seg3d.textContent = '3D';
+  seg2d.addEventListener('click', () => setView3D(false, seg2d, seg3d));
+  seg3d.addEventListener('click', () => setView3D(true, seg2d, seg3d));
+  seg.append(seg2d, seg3d);
+  bar.appendChild(seg);
+
+  // Undo / Redo — editing only, hidden in the view-only 3D mode.
+  const undoBtn = document.createElement('button');
+  undoBtn.className = 'layout-act-btn layout-edit-only';
+  undoBtn.textContent = '↩';
+  undoBtn.title = 'Undo';
+  undoBtn.addEventListener('click', undo);
+  bar.appendChild(undoBtn);
+
+  const redoBtn = document.createElement('button');
+  redoBtn.className = 'layout-act-btn layout-edit-only';
+  redoBtn.textContent = '↪';
+  redoBtn.title = 'Redo';
+  redoBtn.addEventListener('click', redo);
+  bar.appendChild(redoBtn);
+
+  // Labels toggle — 2D only (the 3D view never shows labels).
+  const labelsBtn = document.createElement('button');
+  labelsBtn.className = 'layout-act-btn layout-2d-only' + (showLabels ? ' active' : '');
+  labelsBtn.textContent = '🏷';
+  labelsBtn.title = 'Show device labels';
+  labelsBtn.addEventListener('click', () => {
+    setShowLabels(!showLabels);
+    labelsBtn.classList.toggle('active', showLabels);
+  });
+  bar.appendChild(labelsBtn);
+
+  const spacer = document.createElement('span');
+  spacer.className = 'layout-act-spacer';
+  bar.appendChild(spacer);
+
+  // ＋ Add — opens the device-palette sheet (phone). Editing only.
+  const addBtn = document.createElement('button');
+  addBtn.className = 'layout-act-btn layout-add-btn layout-edit-only';
+  addBtn.textContent = '＋ Add';
+  addBtn.title = 'Add lights & openings';
+  addBtn.addEventListener('click', () => toggleSidebarSheet(sidebar));
+  bar.appendChild(addBtn);
+
+  return bar;
+}
+
+// Show/hide device labels in the 2D SVG. The 3D view never shows labels (the
+// toggle is hidden there).
+function setShowLabels(v) {
+  showLabels = v;
+  Object.values(placedBulbs).forEach(e => {
+    if (!e.el) return;
+    e.el.querySelectorAll('text, rect[fill="rgba(0,0,0,0.55)"]').forEach(el => {
+      el.style.display = showLabels ? '' : 'none';
+    });
+  });
+}
+
+// Open/close the device-palette bottom sheet (phone). On desktop the sidebar is
+// inline, the backdrop is hidden, and these just toggle a harmless class.
+function toggleSidebarSheet(sidebar) {
+  const open = !sidebar.classList.contains('sheet-open');
+  sidebar.classList.toggle('sheet-open', open);
+  document.querySelector('.layout-sheet-backdrop')?.classList.toggle('visible', open);
+}
+function closeSidebarSheet() {
+  document.querySelector('.layout-sidebar')?.classList.remove('sheet-open');
+  document.querySelector('.layout-sheet-backdrop')?.classList.remove('visible');
 }
 
 const SIDEBAR_WIDTH_KEY = 'mesh-layout-sidebar-width';
@@ -1040,9 +1098,11 @@ function buildSidebarResizeHandle(sidebar) {
   const handle = document.createElement('div');
   handle.className = 'layout-sidebar-resize';
 
-  // Restore saved width.
+  // Restore saved width — desktop only, so an inline width never overrides the
+  // mobile bottom-sheet layout (which is full-width).
   const saved = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
-  if (saved >= SIDEBAR_MIN_PX && saved <= SIDEBAR_MAX_PX) {
+  if (saved >= SIDEBAR_MIN_PX && saved <= SIDEBAR_MAX_PX
+      && window.matchMedia('(min-width: 900px)').matches) {
     sidebar.style.width = saved + 'px';
   }
 
@@ -1571,16 +1631,24 @@ function buildCanvas() {
   const scrubBar = document.createElement('div');
   scrubBar.id = 'lc-scrubber-bar';
   const nowMins = new Date().getHours() * 60 + new Date().getMinutes();
+  // Two rows on phone: the time scrubber gets a full-width track row of its own
+  // (a range can't live inside a horizontal-scroll strip — it collapses and the
+  // drag fights the scroll), while the secondary buttons sit in a scrollable
+  // strip so they never clip. At ≥900px both rows fold back onto one line.
   scrubBar.innerHTML = `
-    <button id="lc-scrubber-play" title="Play through the day">▶</button>
-    <span id="lc-scrubber-time">Now</span>
-    <input type="range" id="lc-scrubber" min="0" max="1440" step="5" value="${nowMins}">
-    <button id="lc-scrubber-live" title="Return to live">↺ Live</button>
-    <button id="lc-sun-calib" title="Calibrate orientation from sun position" style="display:none">☀ Calibrate</button>
-    <button id="lc-phone-compass-btn" title="Set orientation using phone compass">📱 Phone compass</button>
-    <select id="lc-model-select" title="Light model">
-      ${LIGHT_MODELS.map(m => `<option value="${m.id}">${m.label}</option>`).join('')}
-    </select>
+    <div class="lc-scrub-track-row">
+      <button id="lc-scrubber-play" title="Play through the day">▶</button>
+      <span id="lc-scrubber-time">Now</span>
+      <input type="range" id="lc-scrubber" min="0" max="1440" step="5" value="${nowMins}">
+    </div>
+    <div class="lc-scrub-btn-row">
+      <button id="lc-scrubber-live" title="Return to live">↺ Live</button>
+      <button id="lc-sun-calib" title="Calibrate orientation from sun position" style="display:none">☀ Calibrate</button>
+      <button id="lc-phone-compass-btn" title="Set orientation using phone compass">📱 Phone compass</button>
+      <select id="lc-model-select" title="Light model">
+        ${LIGHT_MODELS.map(m => `<option value="${m.id}">${m.label}</option>`).join('')}
+      </select>
+    </div>
   `;
   outer.appendChild(scrubBar);
 
@@ -2647,7 +2715,7 @@ function xyToHex(x, y) {
   return `rgb(${r},${g},${b})`;
 }
 
-function ctToHex(mireds) {
+export function ctToHex(mireds) {
   // Approximate colour temperature (mireds) → warm/cool white
   const t = ((mireds - 153) / (500 - 153));
   const r = Math.round(255);
@@ -3675,7 +3743,9 @@ async function initThree(room) {
   // Floor
   const floorMesh = new THREE.Mesh(
     new THREE.PlaneGeometry(W, D),
-    new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.9 })
+    // Mid-tone floor (not near-black) so it actually catches and shows the
+    // light the bulbs throw onto it.
+    new THREE.MeshStandardMaterial({ color: 0x3a3a52, roughness: 0.85 })
   );
   floorMesh.rotation.x = -Math.PI / 2;
   floorMesh.receiveShadow = true;
@@ -3705,8 +3775,13 @@ async function initThree(room) {
   line.position.y = H / 2;
   threeRoomGroup.add(line);
 
-  // Lighting
-  threeScene.add(new THREE.AmbientLight(0xffffff, 0.35));
+  // Lighting. A small permanent neutral fill keeps an all-off room from going
+  // pitch black; on top sits a HemisphereLight tinted by the mix of the bulbs
+  // that are on (see recomputeRoomAmbient) so the room gently takes on the mood
+  // of its lights without a saturated wash.
+  threeScene.add(new THREE.AmbientLight(0x202028, 0.12));
+  threeAmbientHemi = new THREE.HemisphereLight(0x202028, 0x101018, 0.0);
+  threeScene.add(threeAmbientHemi);
   threeSunLight = new THREE.DirectionalLight(0xfff8e0, 1.2);
   threeSunLight.castShadow = true;
   threeSunLight.shadow.mapSize.set(1024, 1024);
@@ -3756,6 +3831,7 @@ async function initThree(room) {
   for (const [id, entry] of Object.entries(placedBulbs)) {
     syncBulbToThree(id, entry, devicesRef.get(id));
   }
+  recomputeRoomAmbient();
 
   // Sync all already-placed openings
   for (const o of Object.values(placedOpenings)) {
@@ -3798,7 +3874,7 @@ function teardownThree() {
   const c = document.getElementById('lc-3d-container');
   if (c?._ro) { c._ro.disconnect(); delete c._ro; }
   threeScene = null; threeRoomGroup = null; threePerspCamera = null;
-  threeSunLight = null; threeBulbMeshes = {}; threeOpeningMeshes = {};
+  threeSunLight = null; threeAmbientHemi = null; threeBulbMeshes = {}; threeOpeningMeshes = {};
   threeIs3D = false;
   threeRaycaster = null; threeFloorPlane = null;
 }
@@ -3830,12 +3906,16 @@ function syncBulbToThree(deviceId, entry, dev) {
   mesh.castShadow = true;
   mesh.userData.deviceId = deviceId;
 
-  const ptLight = new THREE.PointLight(color, bri * 3, W * 2.5);
+  // Each bulb throws a real pool of light into the room. Generous intensity +
+  // reach (decay kept low) so the fixtures visibly shine onto the floor and
+  // walls; the room-wide colour mix is layered on top by recomputeRoomAmbient.
+  const ptLight = new THREE.PointLight(color, bri * 18, W * 4, 1.4);
   ptLight.castShadow = false;
   mesh.add(ptLight);
 
   threeRoomGroup.add(mesh);
   threeBulbMeshes[deviceId] = { mesh, ptLight, mat };
+  recomputeRoomAmbient();
   threeMarkDirty();
 }
 
@@ -3845,6 +3925,7 @@ function removeBulbFromThree(deviceId) {
   b.mesh.removeFromParent();
   b.mat.dispose();
   delete threeBulbMeshes[deviceId];
+  recomputeRoomAmbient();
   threeMarkDirty();
 }
 
@@ -3927,24 +4008,59 @@ function threeUpdateBulbColor(deviceId, dev) {
   b.mat.emissive.set(color);
   b.mat.emissiveIntensity = Math.max(bri, 0.1);
   b.ptLight.color.set(color);
-  b.ptLight.intensity = bri * 3;
+  b.ptLight.intensity = bri * 18;
+  recomputeRoomAmbient();
   threeMarkDirty();
 }
 
-function toggle3D(btn) {
+// Gently fill the room with the MIXTURE of every on-bulb's colour: a
+// brightness-weighted average of the bulb colours, desaturated toward white so
+// a saturated bulb only faintly tints the room (realistic light bleed, not a
+// disco wash). Drives the HemisphereLight; an all-off room falls back to the
+// dim neutral floor so it reads as "off", not black.
+function recomputeRoomAmbient() {
+  if (!threeAmbientHemi || !THREE) return;
+  let r = 0, g = 0, b = 0, wSum = 0;
+  for (const id of Object.keys(threeBulbMeshes)) {
+    const dev = devicesRef.get(id);
+    if (!dev || !dev.on) continue;
+    const c = new THREE.Color(devStateColor(dev));
+    const w = (dev.brightness ?? 200) / 254;
+    r += c.r * w; g += c.g * w; b += c.b * w; wSum += w;
+  }
+  if (wSum <= 0) {
+    threeAmbientHemi.color.setHex(0x202028);
+    threeAmbientHemi.groundColor.setHex(0x101018);
+    threeAmbientHemi.intensity = 0.0;
+    return;
+  }
+  const mix = new THREE.Color(r / wSum, g / wSum, b / wSum);
+  // Desaturate a little toward white so the tint reads as light, not paint, but
+  // keep enough colour that the room visibly takes on the bulbs' hue.
+  const hsl = { h: 0, s: 0, l: 0 };
+  mix.getHSL(hsl);
+  const sky = new THREE.Color().setHSL(hsl.h, hsl.s * 0.6, Math.max(hsl.l, 0.5));
+  const ground = new THREE.Color().setHSL(hsl.h, hsl.s * 0.6, Math.max(hsl.l, 0.5) * 0.5);
+  threeAmbientHemi.color.copy(sky);
+  threeAmbientHemi.groundColor.copy(ground);
+  // Ramp the room-fill up with total light so a lit room clearly glows.
+  threeAmbientHemi.intensity = Math.min(2.2, 0.4 + wSum * 0.5);
+}
+
+// Switch the layout view to/from 3D. `is-3d` on the view drives CSS — hiding the
+// editing-only controls, the device sidebar, and the 2D-only light-model select
+// (3D is purely for visualising). The SVG/WebGL swap stays explicit here.
+function toggle3D() {
   threeIs3D = !threeIs3D;
-  const svg     = document.getElementById('layout-canvas');
-  const c3d     = document.getElementById('lc-3d-container');
-  const sidebar = document.querySelector('.layout-sidebar');
-  const modelSel = document.getElementById('lc-model-select');
+  const svg  = document.getElementById('layout-canvas');
+  const c3d  = document.getElementById('lc-3d-container');
+  const view = document.querySelector('.layout-view');
+  view?.classList.toggle('is-3d', threeIs3D);
   if (threeIs3D) {
     dismissPopover();
+    closeSidebarSheet();
     if (svg) svg.style.display = 'none';
     if (c3d) c3d.style.display = '';
-    if (sidebar) sidebar.style.display = 'none';
-    if (modelSel) modelSel.style.display = 'none';
-    btn.textContent = '2D';
-    btn.title = 'Switch to 2D editing view';
     // Force a renderer resize now that the container is visible
     if (threeRenderer && threePerspCamera && c3d) {
       const w = c3d.clientWidth, h = c3d.clientHeight;
@@ -3961,12 +4077,16 @@ function toggle3D(btn) {
   } else {
     if (svg) svg.style.display = '';
     if (c3d) c3d.style.display = 'none';
-    if (sidebar) sidebar.style.display = '';
-    if (modelSel) modelSel.style.display = '';
-    btn.textContent = '3D';
-    btn.title = 'Switch to 3D perspective view';
   }
   threeMarkDirty();
+}
+
+// Drive the segmented 2D/3D control: flip the view if needed and sync the active
+// pill regardless (so a programmatic call keeps the UI in step).
+function setView3D(want3D, seg2d, seg3d) {
+  if (want3D !== threeIs3D) toggle3D();
+  seg2d?.classList.toggle('active', !threeIs3D);
+  seg3d?.classList.toggle('active', threeIs3D);
 }
 
 // ── Three.js raycaster interactions ───────────────────────────────────────────

@@ -52,10 +52,8 @@ const EFFECT_ICONS = {                         // static icon per effect_id; fal
   snake: '\u{1F40D}',        // 🐍
 };
 const DEFAULT_EFFECT_ICON = '✨';          // ✨
-// Warm→neutral→cool gradient used to fill the mode dot when a light is in
-// colour-temperature mode (visually distinct from a solid colour).
-const CT_SWATCH = 'linear-gradient(135deg, #ffae5c 0%, #fff6ec 50%, #cfe3ff 100%)';
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
+let _lcOpenDismiss = null;            // collapse fn of the currently-open temp/colour section (only one at a time)
 let _sceneReorderTimer = null;
 
 // Pending optimistic command values per (deviceId, field). Each entry { value, ts }.
@@ -155,6 +153,12 @@ document.addEventListener('drop', e => {
   if (permanent) removeEffect(roomId);
   else clearEffect(roomId); // pause — remembers config
 });
+// Safety net: a cancelled drag (Esc, or a release on an invalid target) fires no
+// drop/dragleave on the highlighted card, so the drop glow would otherwise stick
+// until the next render. Clear any lingering highlight when the drag ends.
+document.addEventListener('dragend', () => {
+  document.querySelectorAll('.room-drop-active').forEach(el => el.classList.remove('room-drop-active'));
+}, true);
 
 // ── Auto-scroll during drag ───────────────────────────────────────────────────
 // Scrolls the lighting panel (or body on desktop) when the pointer is near the
@@ -751,7 +755,7 @@ export function buildLightControls(dev, cb) {
       tempBtn = document.createElement('button');
       tempBtn.className = 'lc-mode-btn';
       tempBtn.title = 'Temperature';
-      tempBtn.style.background = CT_SWATCH;
+      tempBtn.style.background = TEMP_GRADIENT;
 
       colourBtn = document.createElement('button');
       colourBtn.className = 'lc-mode-btn';
@@ -768,9 +772,21 @@ export function buildLightControls(dev, cb) {
     let tempRow = null, colourRows = null;
 
     if (supportsTemp) {
-      tempRow = makeLcSliderRow('Temperature', 154, 500, dev.color_temp ?? 370,
-        v => Math.round(1e6 / v) + 'K',
-        v => { setMode('temp'); applyMode(); cb.onTemp?.(v); });
+      tempRow = document.createElement('div');
+      tempRow.className = 'lc-row lc-slider-row';
+      const tempLabel = document.createElement('span');
+      tempLabel.className = 'lc-label';
+      tempLabel.textContent = 'Temperature';
+      const tempVal = document.createElement('span');
+      tempVal.className = 'lc-value';
+      const fmtK = v => Math.round(1e6 / v) + 'K';
+      tempVal.textContent = fmtK(dev.color_temp ?? 370);
+      const tempBar = buildTempBar({
+        mireds: dev.color_temp ?? 370,
+        onInput: v => { tempVal.textContent = fmtK(v); },
+        onChange: v => { tempVal.textContent = fmtK(v); setMode('temp'); applyMode(); cb.onTemp?.(v); },
+      });
+      tempRow.append(tempLabel, tempBar, tempVal);
     }
 
     if (supportsColour) {
@@ -789,8 +805,13 @@ export function buildLightControls(dev, cb) {
     }
 
     // The secondary control can be collapsed: tapping the active swatch again
-    // hides it. Single-capability bulbs (no swatches) always show their control.
+    // hides it, and so does a tap anywhere outside the open section (popover
+    // dismiss). Single-capability bulbs (no swatches) always show their control.
     let lcExpanded = !supportsBoth;
+    let lcOutside = null;
+    const disarmOutside = () => {
+      if (lcOutside) { document.removeEventListener('pointerdown', lcOutside, true); lcOutside = null; }
+    };
     const applyMode = () => {
       const showTemp   = supportsTemp   && lcMode === 'temp'   && lcExpanded;
       const showColour = supportsColour && lcMode === 'colour' && lcExpanded;
@@ -799,10 +820,35 @@ export function buildLightControls(dev, cb) {
       tempBtn?.classList.toggle('active', showTemp);
       colourBtn?.classList.toggle('active', showColour);
     };
-    const pickMode = (mode) => {
-      if (lcMode === mode && lcExpanded) { lcExpanded = false; }   // tap active again → hide
-      else { setMode(mode); lcExpanded = true; }
+    const collapse = () => {
+      if (!lcExpanded) return;
+      lcExpanded = false;
       applyMode();
+      disarmOutside();
+      if (_lcOpenDismiss === collapse) _lcOpenDismiss = null;
+    };
+    const expand = (mode) => {
+      // Close any other card's open section first (one popover at a time).
+      if (_lcOpenDismiss && _lcOpenDismiss !== collapse) _lcOpenDismiss();
+      setMode(mode);
+      lcExpanded = true;
+      applyMode();
+      _lcOpenDismiss = collapse;
+      // Arm dismissal: a tap outside the open section (and off the swatches)
+      // closes it. Capture phase so we see the tap before the wheel/bar's own
+      // pointerdown calls stopPropagation.
+      disarmOutside();
+      lcOutside = (e) => {
+        const sect = lcMode === 'temp' ? tempRow : colourRows;
+        if (sect?.contains(e.target)) return;
+        if (tempBtn?.contains(e.target) || colourBtn?.contains(e.target)) return;
+        collapse();
+      };
+      document.addEventListener('pointerdown', lcOutside, true);
+    };
+    const pickMode = (mode) => {
+      if (lcMode === mode && lcExpanded) collapse();   // tap active again → hide
+      else expand(mode);
     };
     tempBtn?.addEventListener('click', e => { e.stopPropagation(); pickMode('temp'); });
     colourBtn?.addEventListener('click', e => { e.stopPropagation(); pickMode('colour'); });
@@ -897,56 +943,120 @@ export function buildColourWheel({ hue, sat, onInput, onChange }) {
     placeKnob();
   };
 
+  wireDragSurface(wheel, {
+    fromPointer,
+    onInput: () => onInput?.(curH, curS),
+    onChange: () => onChange(curH, curS),
+  });
+
+  placeKnob();
+  return wheel;
+}
+
+// Shared pointer machinery for the direct-manipulation colour controls (the
+// colour wheel and the temperature bar). Grabbing the surface captures the
+// pointer, disables native drag on EVERY draggable ancestor (device card AND
+// room card) — otherwise the gesture is hijacked into a card reorder, no
+// pointerup fires, and the value never commits (symptom: handle snaps back,
+// light doesn't change) — and marks `.dragging` so render() won't wipe the
+// control out from under the user mid-drag.
+//   el: the draggable surface. fromPointer(e) reads the pointer and updates
+//   internal state + visuals. onInput fires live during the drag (preview);
+//   onChange fires once on release (commit).
+function wireDragSurface(el, { fromPointer, onInput, onChange }) {
   let dragging = false;
-  // While using the wheel, disable native drag on EVERY draggable ancestor
-  // (device card AND room card) — otherwise grabbing the wheel starts a card
-  // reorder, the gesture is hijacked, no pointerup fires, and the colour never
-  // commits (the symptom: knob snaps back, light doesn't change).
   let suppressedDrags = [];
   const suppressAncestorDrags = () => {
     suppressedDrags = [];
-    for (let el = wheel.parentElement; el; el = el.parentElement) {
-      if (el.getAttribute && el.getAttribute('draggable') === 'true') {
-        el.setAttribute('draggable', 'false');
-        suppressedDrags.push(el);
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      if (p.getAttribute && p.getAttribute('draggable') === 'true') {
+        p.setAttribute('draggable', 'false');
+        suppressedDrags.push(p);
       }
     }
   };
   const restoreAncestorDrags = () => {
-    suppressedDrags.forEach(el => el.setAttribute('draggable', 'true'));
+    suppressedDrags.forEach(p => p.setAttribute('draggable', 'true'));
     suppressedDrags = [];
   };
 
-  wheel.addEventListener('pointerdown', e => {
+  el.addEventListener('pointerdown', e => {
     e.preventDefault();
     e.stopPropagation();
     dragging = true;
-    wheel.classList.add('dragging');
+    el.classList.add('dragging');
     suppressAncestorDrags();
-    try { wheel.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+    try { el.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
     fromPointer(e);
-    onInput?.(curH, curS);
+    onInput?.();
   });
-  wheel.addEventListener('pointermove', e => {
+  el.addEventListener('pointermove', e => {
     if (!dragging) return;
     fromPointer(e);
-    onInput?.(curH, curS);
+    onInput?.();
   });
   // Belt-and-braces: cancel any native drag that still tries to start.
-  wheel.addEventListener('dragstart', e => e.preventDefault());
+  el.addEventListener('dragstart', e => e.preventDefault());
   const end = (e) => {
     if (!dragging) return;
     dragging = false;
-    wheel.classList.remove('dragging');
+    el.classList.remove('dragging');
     restoreAncestorDrags();
-    try { wheel.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
-    onChange(curH, curS);
+    try { el.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    onChange();
   };
-  wheel.addEventListener('pointerup', end);
-  wheel.addEventListener('pointercancel', end);
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+}
 
-  placeKnob();
-  return wheel;
+// ── Temperature bar ────────────────────────────────────────────────────────────
+// A warm→cool track you can tap or drag anywhere along (no thumb-hit gate — the
+// generic sliders are thumb-only, which is what made the old temperature control
+// impossible to grab). The handle shows the live colour at the current
+// temperature. Range is 154–500 mireds (cool ≈ 6500K → warm ≈ 2000K).
+const TEMP_MIN_MIRED = 154, TEMP_MAX_MIRED = 500;
+// Gradient sampled from the real mireds→colour mapping so the bar shows the
+// actual perceived colour: cool/white on the left (154), warm/amber on the
+// right (500). Single source of truth for the bar and the mode swatch.
+const TEMP_GRADIENT = (() => {
+  const stops = [];
+  for (let i = 0; i <= 6; i++) {
+    const m = TEMP_MIN_MIRED + (i / 6) * (TEMP_MAX_MIRED - TEMP_MIN_MIRED);
+    stops.push(layout.ctToHex(m));
+  }
+  return `linear-gradient(to right, ${stops.join(', ')})`;
+})();
+
+// opts: { mireds, onInput?(m), onChange(m) }
+// onInput fires live during the drag; onChange fires on release.
+export function buildTempBar({ mireds, onInput, onChange }) {
+  const bar = document.createElement('div');
+  bar.className = 'temp-bar';
+  bar.style.background = TEMP_GRADIENT;
+
+  const handle = document.createElement('div');
+  handle.className = 'temp-bar-handle';
+  bar.appendChild(handle);
+
+  let cur = mireds;
+  const place = () => {
+    const ratio = (cur - TEMP_MIN_MIRED) / (TEMP_MAX_MIRED - TEMP_MIN_MIRED);
+    handle.style.left = `${ratio * 100}%`;
+    handle.style.background = layout.ctToHex(cur);
+  };
+  const fromPointer = (e) => {
+    const rect = bar.getBoundingClientRect();
+    const ratio = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+    cur = Math.round(TEMP_MIN_MIRED + ratio * (TEMP_MAX_MIRED - TEMP_MIN_MIRED));
+    place();
+  };
+  wireDragSurface(bar, {
+    fromPointer,
+    onInput: () => onInput?.(cur),
+    onChange: () => onChange(cur),
+  });
+  place();
+  return bar;
 }
 
 // ── Effects palette ──────────────────────────────────────────────────────────
@@ -1303,7 +1413,107 @@ function buildEffectChip(meta) {
     effectDragSrc = null;
     chip.classList.remove('dragging');
   });
+  wireEffectChipTouchDrag(chip, meta.id);
   return chip;
+}
+
+// Touch / pen drag for effect chips. Native HTML5 drag never fires from a
+// finger, so on phones the chips would be inert. This mirrors wireChipTouchDrag
+// (used for bulbs): past an 8px threshold a floating ghost follows the finger,
+// the room card under it highlights, and releasing over a room applies the
+// effect. Mouse falls through to the native DnD path already wired above.
+function wireEffectChipTouchDrag(chip, effectId) {
+  const EDGE = 80, MAX_SPEED = 16;                  // edge auto-scroll, mirrors the native-drag one
+  let startX = 0, startY = 0;
+  let dragging = false;
+  let ghost = null;
+  let pointerId = null;
+  let lastCard = null;
+  let scrollRaf = null, scrollSpeed = 0, scrollTarget = null;
+
+  const cardUnder = (x, y) => {
+    // The ghost has pointer-events:none, so elementFromPoint sees through it.
+    const card = document.elementFromPoint(x, y)?.closest('.room-card');
+    return (card?.dataset.roomId && card.dataset.roomId !== 'unassigned') ? card : null;
+  };
+  const highlight = (card) => {
+    if (lastCard === card) return;
+    lastCard?.classList.remove('room-drop-active');
+    card?.classList.add('room-drop-active');
+    lastCard = card;
+  };
+  // Auto-scroll the room list when the finger nears the top/bottom edge, so a
+  // target card below the fold can be reached (the native-drag autoscroller
+  // keys off dragover events, which pointer drags never fire).
+  const stopScroll = () => { if (scrollRaf) cancelAnimationFrame(scrollRaf); scrollRaf = null; scrollSpeed = 0; scrollTarget = null; };
+  const edgeScroll = (y) => {
+    const h = window.innerHeight;
+    scrollSpeed = y < EDGE ? -MAX_SPEED * (1 - y / EDGE)
+                : y > h - EDGE ?  MAX_SPEED * (1 - (h - y) / EDGE) : 0;
+    if (!scrollSpeed) { stopScroll(); return; }
+    if (!scrollTarget) scrollTarget = document.getElementById('panel-lighting') || document.scrollingElement || document.documentElement;
+    if (!scrollRaf) {
+      const tick = () => {
+        if (!scrollSpeed) { scrollRaf = null; return; }
+        scrollTarget?.scrollBy(0, scrollSpeed);
+        scrollRaf = requestAnimationFrame(tick);
+      };
+      scrollRaf = requestAnimationFrame(tick);
+    }
+  };
+  const cleanup = () => {
+    if (ghost) { ghost.remove(); ghost = null; }
+    highlight(null);
+    stopScroll();
+    effectDragSrc = null;
+    dragging = false;
+    pointerId = null;
+  };
+
+  chip.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse') return;            // mouse uses native HTML5 DnD
+    if (e.button !== 0 && e.button !== -1) return;
+    startX = e.clientX; startY = e.clientY;
+    pointerId = e.pointerId;
+    dragging = false;
+    chip.setPointerCapture(e.pointerId);
+  });
+
+  chip.addEventListener('pointermove', e => {
+    if (e.pointerType === 'mouse') return;
+    if (e.pointerId !== pointerId) return;
+    if (!dragging) {
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) < 8) return;
+      dragging = true;
+      effectDragSrc = effectId;
+      ghost = chip.cloneNode(true);
+      ghost.style.position = 'fixed';
+      ghost.style.transform = 'translate(-50%, -50%)';
+      ghost.style.pointerEvents = 'none';
+      ghost.style.opacity = '0.85';
+      ghost.style.zIndex = '9999';
+      ghost.style.boxShadow = '0 4px 16px rgba(0,0,0,0.4)';
+      document.body.appendChild(ghost);
+      e.preventDefault();
+    }
+    ghost.style.left = `${e.clientX}px`;
+    ghost.style.top = `${e.clientY}px`;
+    highlight(cardUnder(e.clientX, e.clientY));
+    edgeScroll(e.clientY);
+  });
+
+  const finish = e => {
+    if (e.pointerType === 'mouse') return;
+    if (e.pointerId !== pointerId) return;
+    if (chip.hasPointerCapture(e.pointerId)) chip.releasePointerCapture(e.pointerId);
+    if (dragging) {
+      const card = cardUnder(e.clientX, e.clientY);
+      if (card) activateEffect(card.dataset.roomId, effectId);
+    }
+    cleanup();
+  };
+  chip.addEventListener('pointerup', finish);
+  chip.addEventListener('pointercancel', finish);
 }
 
 // ── New Room button ──────────────────────────────────────────────────────────
