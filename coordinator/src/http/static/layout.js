@@ -2,18 +2,7 @@
 // SVG top-down floor plan for placing bulbs and (Phase B) windows/doors.
 // Coordinates are always 0–1 normalised; the SVG scales to any screen size.
 
-import { buildSlider } from '/static/rooms.js';
-
-// Prevent click-to-jump on any range slider — user must grab the thumb.
-function lockSliderToThumb(slider) {
-  slider.addEventListener('pointerdown', e => {
-    const rect = slider.getBoundingClientRect();
-    const ratio = (slider.value - slider.min) / (slider.max - slider.min);
-    const thumbX = rect.left + ratio * rect.width;
-    if (Math.abs(e.clientX - thumbX) > (e.pointerType === 'touch' ? 30 : 16))
-      e.preventDefault();
-  }, { capture: true });
-}
+import { buildSlider, lockSliderToThumb } from '/static/rooms.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
