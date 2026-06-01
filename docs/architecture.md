@@ -9,7 +9,7 @@ This document captures the foundational design principles, workflows, and engine
 - Build a distributed mesh of nodes capable of hardware detection, capability reporting, and coordinated model execution.
 - Support auto-discovery, auto-updates, and a flexible message protocol.
 - Maintain extremely high code quality, test coverage, and documentation.
-- Enable multiple AIs (Copilot, , Gemini) to collaborate effectively.
+- Enable multiple AIs (Copilot, Gemini) to collaborate effectively.
 
 ---
 
@@ -37,17 +37,12 @@ ai-mesh/
 
 ## 3. AI-Augmented Development Workflow
 
-The project uses a three-AI development loop:
+The project uses a multi-AI development loop:
 
 ### Copilot (Architect)
 - Designs modules
 - Generates code, tests, and documentation
 - Ensures architectural consistency
-
-###  CLI (Implementation Engineer)
-- Creates and edits files
-- Applies patches
-- Shows diffs for human review
 
 ### Gemini (Debugger & Reviewer)
 - Explains errors
