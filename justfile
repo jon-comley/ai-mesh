@@ -1,5 +1,5 @@
 coordinator_ip   := "192.168.1.11"
-coordinator_port := "9001"
+coordinator_port := "9000"
 
 export PATH := env_var("HOME") / ".cargo/bin" + ":" + env_var("PATH")
 
@@ -346,17 +346,28 @@ deploy-node node:
             scp -q scripts/install-node-windows.ps1 \
                 ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
 
-        echo ">>> Stopping service, swapping binary, provisioning..."
-        ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
-            sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-            Start-Sleep 2;\
-            \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
-            foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
-            Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
-            Start-Sleep 2;\
-            cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
-            & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}'\
-        \""
+        PUBKEY=""
+        if [ -f "$HOME/.ssh/id_ed25519.pub" ]; then
+            PUBKEY=$(cat "$HOME/.ssh/id_ed25519.pub")
+        elif [ -f "$HOME/.ssh/id_rsa.pub" ]; then
+            PUBKEY=$(cat "$HOME/.ssh/id_rsa.pub")
+        fi
+
+        scp_dots ">>> Stopping service and swapping binary" \
+            ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
+                sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+                Start-Sleep 2;\
+                \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
+                foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
+                Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
+                Start-Sleep 2;\
+                cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
+            \""
+        echo ">>> Running provisioning script (this takes a minute — installing NSSM, llama.cpp, registering service)..."
+        scp_dots ">>> Provisioning" \
+            ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
+                & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}'\
+            \""
         ;;
 
       *)
@@ -451,12 +462,12 @@ provision-all:
                 scp -q scripts/install-node-windows.ps1 \
                     ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
 
-            echo ">>> Swapping binary and provisioning..."
-            ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
-                Start-Sleep 2;\
-                cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
-                & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}'\
-            \""
+            scp_dots ">>> Swapping binary and provisioning" \
+                ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
+                    Start-Sleep 2;\
+                    cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
+                    & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}'\
+                \""
             ;;
         esac
         echo ">>> ${NODE_NAME} done."
@@ -622,7 +633,9 @@ set-fingerprint node:
       windows)
         DEFAULT_MODEL="${DEFAULT_MODEL:-qwen2.5:7b}"
         ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
-            \$nssm = (Get-Command nssm.exe -ErrorAction Stop).Source;\
+            \$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source;\
+            if (-not \$nssm) { \$nssm = 'C:\\Users\\${NODE_USER}\\ai-mesh\\bin\\nssm.exe' };\
+            if (-not (Test-Path \$nssm)) { throw 'nssm.exe not found' };\
             & \$nssm set ai-mesh-agent AppEnvironmentExtra \
                 'COORDINATOR_IP={{coordinator_ip}}' \
                 'AGENT_ROLE=${NODE_ROLE}' \
@@ -691,7 +704,9 @@ set-auth-token token:
           windows)
             DEFAULT_MODEL="${DEFAULT_MODEL:-qwen2.5:7b}"
             ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
-                \$nssm = (Get-Command nssm.exe -ErrorAction Stop).Source;\
+                \$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source;\
+                if (-not \$nssm) { \$nssm = 'C:\\Users\\${NODE_USER}\\ai-mesh\\bin\\nssm.exe' };\
+                if (-not (Test-Path \$nssm)) { throw 'nssm.exe not found' };\
                 & \$nssm set ai-mesh-agent AppEnvironmentExtra \
                     'COORDINATOR_IP={{coordinator_ip}}' \
                     'AGENT_ROLE=${NODE_ROLE}' \
@@ -917,7 +932,7 @@ load-model node model:
     # Retry for up to 120s — allow time for reconnect after coordinator restart.
     NODE_ID=""
     for i in $(seq 1 60); do
-        NODE_ID=$(cargo run -q -p cli -- find-node "${NODE_HOST}" 2>/dev/null || true)
+        NODE_ID=$(cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" find-node "${NODE_HOST}" 2>/dev/null || true)
         [ -n "$NODE_ID" ] && break
         printf "\r>>> Waiting for ${NODE_HOST} to register... (%ds) " "$((i*2))"
         sleep 2
@@ -994,7 +1009,7 @@ load-model node model:
             echo ">>>   just load-model {{node}} ${MODEL_NAMES[$i]}"
         done
     fi
-    cargo run -q -p cli -- load --node-id "${NODE_ID}" "${MODEL}" "${SIZE_MB}" | sed 's/^/>>> /'
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" load --node-id "${NODE_ID}" "${MODEL}" "${SIZE_MB}" | sed 's/^/>>> /'
 
 # Detect hardware on a node and load the best-fit model automatically.
 # Usage: just auto-load-model pi1
@@ -1193,6 +1208,9 @@ start-cluster: update-portproxy
     else
         # Remote coordinator mode (running on pi1 as systemd service)
         echo ">>> Coordinator is running remotely on {{coordinator_ip}}"
+        echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
+        scp -q "jonno@{{coordinator_ip}}:.config/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
+
         echo ">>> Verifying connectivity to {{coordinator_ip}}:9000..."
         if timeout 5 bash -c "echo > /dev/tcp/{{coordinator_ip}}/9000" 2>/dev/null; then
             echo ">>> Coordinator ready."
@@ -1280,12 +1298,13 @@ start-cluster: update-portproxy
     done
 
     echo ""
-    cargo run -q -p cli -- wait-ready "${WAIT_IPS[@]}" --timeout 600 \
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
+        wait-ready "${WAIT_IPS[@]}" --timeout 600 \
         || echo ">>> Warning: timed out or aborted before all models were Ready"
 
     echo ""
     echo ">>> Cluster ready. Run: just validate-routing"
-    cargo run -q -p cli -- nodes
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes
 
 # Restart the coordinator after laptop suspend/resume without restarting remote agents.
 # Remote agent services reconnect automatically; this just gives them a fresh coordinator.
@@ -1330,6 +1349,9 @@ restart-coordinator: update-portproxy
     else
         # Remote coordinator mode (running on pi1 as systemd service)
         echo ">>> Coordinator is running remotely on {{coordinator_ip}}"
+        echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
+        scp -q "jonno@{{coordinator_ip}}:.config/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
+
         echo ">>> Verifying connectivity to {{coordinator_ip}}:9000..."
         if timeout 5 bash -c "echo > /dev/tcp/{{coordinator_ip}}/9000" 2>/dev/null; then
             echo ">>> Coordinator ready."
@@ -1412,11 +1434,12 @@ restart-coordinator: update-portproxy
         WAIT_IPS+=("${entry##*:}")
     done
 
-    cargo run -q -p cli -- wait-ready "${WAIT_IPS[@]}" --timeout 120 \
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
+        wait-ready "${WAIT_IPS[@]}" --timeout 120 \
         || { echo ">>> Nodes did not come Ready in time. Try: just start-cluster"; exit 1; }
 
     echo ">>> Cluster reconnected. Run: just validate-routing"
-    cargo run -q -p cli -- nodes
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes
 
 # Stop the full cluster: remote agents first, then local coordinator and controller.
 # Usage: just stop-cluster

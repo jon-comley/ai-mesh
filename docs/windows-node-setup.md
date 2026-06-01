@@ -280,6 +280,28 @@ The agent generates a new UUID on each start, so every service restart adds a ne
 just reset          # calls: cargo run -p cli -- reset-registry
 ```
 
+### NSSM — `nssm.exe not found on PATH` during deploy
+
+Two causes, often together, on a fresh/recovered Windows image:
+
+1. **Broken winget source** — the install fails with
+   `Failed when opening source(s)` / `0x8a15000f : Data required by the source is missing`,
+   so NSSM never actually installs. Repair the source:
+   ```powershell
+   winget source reset --force
+   winget source update
+   ```
+2. **PATH not refreshed in-session** — winget adds NSSM to the registry PATH, but the
+   *running* PowerShell session doesn't see it, so `Get-Command nssm.exe` fails until a
+   new shell is opened.
+
+`install-node-windows.ps1` now handles both automatically: `Ensure-WingetPackage` resets
+the winget source and retries on failure, and `Get-Nssm` refreshes `$env:Path` from the
+registry and falls back to winget's install dirs
+(`%LOCALAPPDATA%\Microsoft\WinGet\Links\nssm.exe` and `…\WinGet\Packages\…\win64\`).
+If it still can't be found, reset the winget source (above) and re-run the deploy — it's
+idempotent (llama-server and other already-present steps are skipped).
+
 ### NSSM — environment variables not being set
 
 NSSM `AppEnvironmentExtra` requires each variable as a **separate argument**, not semicolon-separated:
