@@ -1,7 +1,7 @@
 // ── Lighting panel ──────────────────────────────────────────────────────────
 // Renders per-device light state cards with interactive controls.
 
-import { wireDeviceSlider } from '/static/rooms.js';
+import { buildLightControls } from '/static/rooms.js';
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
@@ -90,161 +90,39 @@ function render() {
     card.className = 'light-card';
     card.setAttribute('draggable', 'true');
     card.setAttribute('data-drag-id', dev.device_id);
-    card.innerHTML = deviceCard(dev);
+    card.setAttribute('data-device-id', dev.device_id);
+
+    // Header
+    const displayName = formatDeviceName(dev.device_id);
+    const header = document.createElement('div');
+    header.className = 'light-card-header';
+    header.innerHTML = `
+      <div class="light-name-group">
+        <span class="light-name">${esc(displayName)}</span>
+        <span class="light-node-badge">${esc(dev.node_id)}</span>
+      </div>`;
+    card.appendChild(header);
+
+    // Controls
+    if (dev.brightness != null) {
+      const patch = fields => { const c = devicesMap.get(dev.device_id); if (c) devicesMap.set(dev.device_id, { ...c, ...fields }); };
+      const controls = buildLightControls(dev, {
+        onOn:  () => { patch({ on: true  }); render(); sendCommand(dev.device_id, { action: 'on' }); },
+        onOff: () => { patch({ on: false }); render(); sendCommand(dev.device_id, { action: 'off' }); },
+        onBrightness: v => { patch({ brightness: v }); sendCommand(dev.device_id, { action: 'brightness', value: v }); },
+        onTemp:       v => { patch({ color_temp: v }); sendCommand(dev.device_id, { action: 'color_temp', value: v }); },
+        onColorXY: (x, y) => { patch({ color_xy: [x, y] }); sendCommand(dev.device_id, { action: 'color_xy', x, y }); },
+      });
+      controls.className += ' light-card-details';
+      card.appendChild(controls);
+    }
+
     container.appendChild(card);
     enableDrag(card);
-    wireControls(card, dev);
   }
   renderedIds = new Set(devicesMap.keys());
 }
 
-function deviceCard(dev) {
-  const badgeClass = dev.on ? 'badge-green' : 'badge-muted';
-  const badgeLabel = dev.on ? 'On' : 'Off';
-  const displayName = formatDeviceName(dev.device_id);
-
-  let swatch = '';
-  let colourPicker = '';
-  if (dev.color_xy != null || dev.color_temp != null) {
-    let h = 30, s = 80;
-    let swatchRgb = `hsl(${h},${s}%,50%)`;
-    if (dev.color_xy != null) {
-      const [x, y] = dev.color_xy;
-      const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
-      ({ h, s } = rgbToHsl(r, g, b));
-      swatchRgb = `rgb(${r},${g},${b})`;
-    }
-    swatch = `<button class="color-swatch-btn" data-ctrl="colour-toggle"
-      style="background:${swatchRgb}"
-      title="Pick colour" aria-label="Pick colour for ${esc(displayName)}"></button>`;
-    colourPicker = `
-      <div class="light-colour-picker" data-ctrl="colour-picker" role="group" aria-label="Colour controls">
-        <div class="light-detail-row">
-          <span class="light-detail-label">Hue</span>
-          <input class="hue-slider" type="range" min="0" max="359" value="${h}"
-                 data-ctrl="hue" aria-label="Hue">
-          <span class="colour-swatch-preview" style="background:hsl(${h},${s}%,50%)"></span>
-        </div>
-        <div class="light-detail-row">
-          <span class="light-detail-label">Saturation</span>
-          <input class="light-slider" type="range" min="0" max="100" value="${s}"
-                 data-ctrl="saturation" aria-label="Saturation"
-                 style="background:linear-gradient(to right,#fff,hsl(${h},100%,50%))">
-          <span class="light-detail-value">${s}%</span>
-        </div>
-      </div>`;
-  }
-
-  let controls = '';
-  if (dev.brightness != null) {
-    const pct = Math.round((dev.brightness / 255) * 100);
-    controls += `
-      <div class="light-detail-row">
-        <span class="light-detail-label">Brightness</span>
-        <input class="light-slider" type="range" min="0" max="255" value="${dev.brightness}"
-               data-ctrl="brightness" title="${pct}%" aria-label="Brightness">
-        <span class="light-detail-value">${pct}%</span>
-      </div>`;
-  }
-  if (dev.color_temp != null) {
-    const kelvin = Math.round(1_000_000 / dev.color_temp);
-    controls += `
-      <div class="light-detail-row">
-        <span class="light-detail-label">Color temp</span>
-        <input class="light-slider" type="range" min="154" max="500" value="${dev.color_temp}"
-               data-ctrl="color_temp" title="${kelvin} K" aria-label="Color temperature">
-        <span class="light-detail-value">${kelvin} K</span>
-      </div>`;
-  }
-  controls += colourPicker;
-
-  return `
-    <div class="light-card-header">
-      <div class="light-name-group">
-        <span class="light-name">${esc(displayName)}</span>
-        <span class="light-node-badge">${esc(dev.node_id)}</span>
-      </div>
-      <div class="light-card-header-right">
-        ${swatch}
-        <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(displayName)}">
-          <span class="badge ${badgeClass}">${badgeLabel}</span>
-        </button>
-      </div>
-    </div>
-    ${controls ? `<div class="light-card-details">${controls}</div>` : ''}
-  `;
-}
-
-function wireControls(card, dev) {
-  const toggleBtn = card.querySelector('[data-ctrl="toggle"]');
-  if (toggleBtn) {
-    toggleBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      devicesMap.set(dev.device_id, { ...dev, on: !dev.on });
-      render();
-      sendCommand(dev.device_id, { action: 'toggle' });
-    });
-  }
-
-  const bri = card.querySelector('[data-ctrl="brightness"]');
-  if (bri) {
-    wireDeviceSlider(bri, {
-      format: v => Math.round((v / 255) * 100) + '%',
-      onInput: (v, valEl) => { valEl.textContent = Math.round((v / 255) * 100) + '%'; },
-      onChange: v => {
-        devicesMap.set(dev.device_id, { ...(devicesMap.get(dev.device_id) ?? dev), brightness: v });
-        sendCommand(dev.device_id, { action: 'brightness', value: v });
-      },
-    });
-  }
-
-  const ct = card.querySelector('[data-ctrl="color_temp"]');
-  if (ct) {
-    wireDeviceSlider(ct, {
-      format: v => Math.round(1e6 / v) + 'K',
-      onInput: (v, valEl) => { valEl.textContent = Math.round(1e6 / v) + 'K'; },
-      onChange: v => {
-        devicesMap.set(dev.device_id, { ...(devicesMap.get(dev.device_id) ?? dev), color_temp: v });
-        sendCommand(dev.device_id, { action: 'color_temp', value: v });
-      },
-    });
-  }
-
-  // Colour picker
-  const colourToggle = card.querySelector('[data-ctrl="colour-toggle"]');
-  const colourPicker = card.querySelector('[data-ctrl="colour-picker"]');
-  const hue = card.querySelector('[data-ctrl="hue"]');
-  const sat = card.querySelector('[data-ctrl="saturation"]');
-  const preview = colourPicker?.querySelector('.colour-swatch-preview');
-
-  if (colourToggle && colourPicker) {
-    colourToggle.addEventListener('click', e => {
-      e.stopPropagation();
-      colourPicker.classList.toggle('open');
-    });
-  }
-
-  function syncColourUI() {
-    if (!hue || !sat) return;
-    const h = hue.value, s = sat.value;
-    if (preview) preview.style.background = `hsl(${h},${s}%,50%)`;
-    sat.style.background = `linear-gradient(to right,#fff,hsl(${h},100%,50%))`;
-    const satLabel = sat.parentElement?.querySelector('.light-detail-value');
-    if (satLabel) satLabel.textContent = `${s}%`;
-    if (colourToggle) colourToggle.style.background = `hsl(${h},${s}%,50%)`;
-  }
-
-  function sendColour() {
-    if (!hue || !sat) return;
-    const { x, y } = hslToXy(parseInt(hue.value), parseInt(sat.value));
-    devicesMap.set(dev.device_id, { ...dev, color_xy: [x, y] });
-    sendCommand(dev.device_id, { action: 'color_xy', x, y });
-  }
-
-  if (hue) { hue.addEventListener('input', syncColourUI); hue.addEventListener('change', sendColour); }
-  if (sat) { sat.addEventListener('input', syncColourUI); sat.addEventListener('change', sendColour); }
-  if (hue || sat) syncColourUI();
-}
 
 function groupCard(name) {
   const displayName = formatDeviceName(name);

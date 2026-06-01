@@ -3,7 +3,9 @@
 // and drag-to-reorder room cards.
 
 // Prevent click-to-jump on any range slider — user must grab the thumb.
-function lockSliderToThumb(slider) {
+// Standalone helper for sliders not built via attachThumbSlider (e.g. the
+// layout time-scrubber). Exported for layout.js.
+export function lockSliderToThumb(slider) {
   slider.addEventListener('pointerdown', e => {
     const rect = slider.getBoundingClientRect();
     const ratio = (slider.value - slider.min) / (slider.max - slider.min);
@@ -19,6 +21,7 @@ import * as layout from '/static/layout.js';
 
 let roomsData = [];
 let devicesMap = new Map();
+let globalLightState = null;  // 'on' | 'off' | null — tracks last All On/Off press, cleared on any individual change
 let scenesData = [];
 let deviceNamesMap = new Map();
 let dragSrc = null;             // chip drag: { deviceId, fromRoomId }
@@ -28,6 +31,7 @@ let effectRemoveRoomId = null;  // effect badge drag: room id whose effect is be
 let effectDragIsPermanent = false; // true when dragging a ghost (paused) badge → permanent delete
 const lastEffectByRoom = new Map(); // roomId → { effect_id, params } — paused/remembered state
 const openPickerIds = new Set();      // device IDs whose colour picker is currently open
+const openRoomCtrlIds = new Set();    // room IDs whose 🎨 colour/temp panel is open (survives render)
 const activeSceneByRoom = new Map();      // roomId → sceneId of last-recalled scene
 const preSceneStateByRoom = new Map();    // roomId → Map<deviceId, snapshot> before last recall
 
@@ -61,6 +65,12 @@ function markPending(deviceId, field, value) {
   let fields = pendingCommands.get(deviceId);
   if (!fields) { fields = {}; pendingCommands.set(deviceId, fields); }
   fields[field] = { value, ts: Date.now() };
+}
+
+// Optimistically merge fields into a device's cached state (no-op if unknown).
+function patchDevice(deviceId, fields) {
+  const cur = devicesMap.get(deviceId);
+  if (cur) devicesMap.set(deviceId, { ...cur, ...fields });
 }
 
 function reconcilePending(dev) {
@@ -433,6 +443,10 @@ function render() {
   if (!container || dragSrc || roomDragId) return;
   if (container.querySelector('.layout-view')) return; // layout open — don't wipe
   if (container.querySelector('.room-slider-input.slider-active')) return; // room slider thumb being dragged — don't wipe it out
+  // NOTE: device-card sliders (.lc-slider) are not guarded here — the common
+  // WS-update path (notifyDevices) already bails on any .slider-active before
+  // patchDeviceCards. Only a rare full render() mid-device-drag is unguarded;
+  // widen this selector to `.slider-active` if that edge case ever bites.
   inferZigbeeStatus();
 
   const assigned = new Set(roomsData.flatMap(r => r.device_ids));
@@ -494,19 +508,21 @@ function renderGlobalControls() {
   bar.className = 'room-global-controls';
 
   const allOnBtn = document.createElement('button');
-  allOnBtn.className = 'room-action-btn room-action-on';
+  allOnBtn.className = 'room-action-btn' + (globalLightState === 'on' ? ' room-action-active-on' : '');
   allOnBtn.textContent = 'All On';
   allOnBtn.addEventListener('click', () => {
+    globalLightState = 'on';
     layout.freezeIconUpdates(3000);
-    for (const r of roomsData) sendRoomCommand(r.id, { action: 'on' }, r);
+    for (const r of roomsData) sendRoomCommand(r.id, { action: 'on' }, r, true);
   });
 
   const allOffBtn = document.createElement('button');
-  allOffBtn.className = 'room-action-btn room-action-delete';
+  allOffBtn.className = 'room-action-btn' + (globalLightState === 'off' ? ' room-action-active-off' : '');
   allOffBtn.textContent = 'All Off';
   allOffBtn.addEventListener('click', () => {
+    globalLightState = 'off';
     layout.freezeIconUpdates(3000);
-    for (const r of roomsData) sendRoomCommand(r.id, { action: 'off' }, r);
+    for (const r of roomsData) sendRoomCommand(r.id, { action: 'off' }, r, true);
   });
 
   bar.appendChild(allOnBtn);
@@ -514,29 +530,79 @@ function renderGlobalControls() {
   return bar;
 }
 
-// ── Shared slider builder ─────────────────────────────────────────────────────
-// A single-interaction slider: value changes ONLY by grabbing the thumb and
-// dragging. Clicking the track does nothing (event propagates to parent so
-// card-level gestures still fire). A value bubble floats above the thumb
-// while dragging. While active, the slider carries `.slider-active` so render()
-// won't wipe it out mid-drag.
-//
+// ── Shared slider core ────────────────────────────────────────────────────────
+const SLIDER_THUMB_W = 18;
+
+// The single thumb-only slider interaction used by every slider in the UI:
+//  • value changes ONLY by grabbing the thumb (track clicks pass through so
+//    card-level gestures like drag-to-reorder still fire)
+//  • a value bubble follows the thumb while dragging
+//  • the slider carries `.slider-active` (and the container `.dragging`) so
+//    render() won't wipe the element out from under the user mid-drag
+// slider: <input type=range>. opts: { format, bubble?, container?, onInput?(v), onChange(v) }
+function attachThumbSlider(slider, { format, bubble, container, onInput, onChange }) {
+  const positionBubble = () => {
+    if (!bubble) return;
+    const min = parseFloat(slider.min), max = parseFloat(slider.max);
+    const ratio = (slider.value - min) / (max - min);
+    const w = slider.getBoundingClientRect().width;
+    const centre = SLIDER_THUMB_W / 2 + ratio * (w - SLIDER_THUMB_W);
+    // offsetLeft is correct here because the bubble's offsetParent is the same
+    // positioned ancestor offsetLeft is measured against, and no slider sits
+    // inside a transformed parent. If that changes, switch to getBoundingClientRect
+    // deltas (bubble vs offsetParent) for transform-safe positioning.
+    bubble.style.left = `${slider.offsetLeft + centre}px`;
+    bubble.textContent = format(parseInt(slider.value, 10));
+  };
+
+  slider.addEventListener('pointerdown', e => {
+    const rect = slider.getBoundingClientRect();
+    const min = parseFloat(slider.min), max = parseFloat(slider.max);
+    const ratio = (slider.value - min) / (max - min);
+    const thumbCentre = rect.left + SLIDER_THUMB_W / 2 + ratio * (rect.width - SLIDER_THUMB_W);
+    const hitRadius = e.pointerType === 'touch' ? 26 : 16;
+    if (Math.abs(e.clientX - thumbCentre) > hitRadius) { e.preventDefault(); return; }
+    slider.classList.add('slider-active');
+    container?.classList.add('dragging');
+    bubble?.classList.add('visible');
+    positionBubble();
+  }, { capture: true });
+
+  slider.addEventListener('input', () => {
+    positionBubble();
+    onInput?.(parseInt(slider.value, 10));
+  });
+
+  const finish = () => {
+    slider.classList.remove('slider-active');
+    container?.classList.remove('dragging');
+    bubble?.classList.remove('visible');
+  };
+  slider.addEventListener('change', () => { finish(); onChange(parseInt(slider.value, 10)); });
+  slider.addEventListener('pointercancel', finish);
+}
+
+// Full-width slider with its own label/value header and floating bubble.
 // opts: { label, min, max, value, format(v)->string, onCommit(v)->void, onInput?(v)->void }
-// onInput is optional — fires on every thumb move for live feedback (e.g. 3D preview updates)
 export function buildSlider(opts) {
   const { label, min, max, value, format, onCommit, onInput } = opts;
 
   const container = document.createElement('div');
   container.className = 'room-slider';
 
+  const headerRow = document.createElement('div');
+  headerRow.className = 'room-slider-header';
   const labelEl = document.createElement('span');
   labelEl.className = 'room-slider-label';
   labelEl.textContent = label;
-  container.appendChild(labelEl);
+  const valueEl = document.createElement('span');
+  valueEl.className = 'room-slider-current-value';
+  valueEl.textContent = format(value);
+  headerRow.append(labelEl, valueEl);
+  container.appendChild(headerRow);
 
   const track = document.createElement('div');
   track.className = 'room-slider-track';
-
   const bubble = document.createElement('div');
   bubble.className = 'room-slider-bubble';
   bubble.textContent = format(value);
@@ -549,103 +615,201 @@ export function buildSlider(opts) {
   slider.className = 'light-slider room-slider-input';
   slider.title = label;
 
-  // Position the bubble horizontally above the thumb, accounting for the fact
-  // that the thumb centre only travels over [thumbW/2, width - thumbW/2].
-  const THUMB_W = 18;
-  const positionBubble = () => {
-    const ratio = (slider.value - min) / (max - min);
-    const w = slider.getBoundingClientRect().width;
-    const centre = THUMB_W / 2 + ratio * (w - THUMB_W);
-    bubble.style.left = `${centre}px`;
-    bubble.textContent = format(parseInt(slider.value, 10));
-  };
-
-  // Only a grab ON the thumb counts. A track click is swallowed AND allowed to
-  // propagate to the card (no stopPropagation) so card-level gestures still fire.
-  slider.addEventListener('pointerdown', e => {
-    const rect = slider.getBoundingClientRect();
-    const ratio = (slider.value - min) / (max - min);
-    const thumbCentre = rect.left + THUMB_W / 2 + ratio * (rect.width - THUMB_W);
-    const hitRadius = e.pointerType === 'touch' ? 26 : 16;
-    if (Math.abs(e.clientX - thumbCentre) > hitRadius) {
-      e.preventDefault();   // cancel the native track-jump
-      return;               // let it bubble to the card
-    }
-    slider.classList.add('slider-active');
-    container.classList.add('dragging');
-    positionBubble();
-  }, { capture: true });
-
-  slider.addEventListener('input', () => {
-    positionBubble();
-    if (onInput) onInput(parseInt(slider.value, 10));
+  attachThumbSlider(slider, {
+    format, bubble, container,
+    onInput: v => { valueEl.textContent = format(v); onInput?.(v); },
+    onChange: v => onCommit(v),
   });
 
-  const finish = () => {
-    slider.classList.remove('slider-active');
-    container.classList.remove('dragging');
-  };
-  slider.addEventListener('change', async () => {
-    finish();
-    await onCommit(parseInt(slider.value, 10));
-  });
-  slider.addEventListener('pointercancel', finish);
-
-  track.appendChild(bubble);
-  track.appendChild(slider);
+  track.append(bubble, slider);
   container.appendChild(track);
   return container;
 }
 
-// Wire the shared slider interaction onto an existing inline <input type=range>.
-// Exported so lighting.js can use it for device cards.
-// Used for device card sliders where the HTML structure is fixed.
+// Wire the shared interaction onto an existing inline <input type=range> (device
+// cards, where the row HTML is fixed). Exported for lighting.js.
 // opts: { format(v)->string, onInput(v, valEl)->void, onChange(v)->void }
 export function wireDeviceSlider(slider, opts) {
   const { format, onInput, onChange } = opts;
-  const THUMB_W = 18;
   const valEl = slider.parentElement?.querySelector('.light-detail-value');
 
-  // Inject floating bubble before the slider
   const bubble = document.createElement('div');
   bubble.className = 'room-slider-bubble device-slider-bubble';
   slider.parentElement?.insertBefore(bubble, slider);
 
-  const positionBubble = () => {
-    const min = parseFloat(slider.min), max = parseFloat(slider.max);
-    const ratio = (slider.value - min) / (max - min);
-    const w = slider.getBoundingClientRect().width;
-    const centre = THUMB_W / 2 + ratio * (w - THUMB_W);
-    bubble.style.left = `${slider.offsetLeft + centre}px`;
-    bubble.textContent = format(parseInt(slider.value, 10));
-  };
+  attachThumbSlider(slider, {
+    format, bubble,
+    onInput: v => { if (valEl) onInput(v, valEl); },
+    onChange: v => onChange(v),
+  });
+}
 
-  lockSliderToThumb(slider);
+// ── Common light control card ─────────────────────────────────────────────────
+// Renders a standardised control block usable in both the lighting panel and
+// room device cards:
+//   Row 1 (always): [On] [Off]  ───────────────────────────────  [● mode dot]
+//   Row 2 (always): Brightness   ──────────●──────  78%
+//   Row 3 (one of): Temperature OR Hue+Saturation — chosen by the mode dot
+//
+// The dot toggles between Temperature and Colour. Mode is persisted per device
+// in localStorage (`mesh-mode-<id>`) — it can't be inferred from state because
+// Hue bulbs always report both color_xy and color_temp. Adjusting either slider
+// pins its mode so the card stays put across the next render.
+//
+// dev: LightStateReport-shaped object
+// cb:  { onOn, onOff, onBrightness(v), onTemp(v), onColorXY(x,y) }
+//      each callback fires on committed value (change event)
+export function buildLightControls(dev, cb) {
+  const hasTemp = dev.color_temp != null;
 
-  slider.addEventListener('pointerdown', e => {
-    const rect = slider.getBoundingClientRect();
-    const min = parseFloat(slider.min), max = parseFloat(slider.max);
-    const ratio = (slider.value - min) / (max - min);
-    const thumbCentre = rect.left + THUMB_W / 2 + ratio * (rect.width - THUMB_W);
-    const hitRadius = e.pointerType === 'touch' ? 26 : 16;
-    if (Math.abs(e.clientX - thumbCentre) > hitRadius) { e.preventDefault(); return; }
-    slider.classList.add('slider-active');
-    bubble.classList.add('visible');
-    positionBubble();
-  }, { capture: true });
+  const wrap = document.createElement('div');
+  wrap.className = 'lc-wrap';
 
-  slider.addEventListener('input', () => {
-    const v = parseInt(slider.value, 10);
-    positionBubble();
-    if (valEl) onInput(v, valEl);
+  // ── Row 1: on/off + toggle buttons ───────────────────────────────────────
+  const row1 = document.createElement('div');
+  row1.className = 'lc-row lc-row-controls';
+
+  const onBtn = document.createElement('button');
+  onBtn.className = 'light-toggle-btn';
+  onBtn.innerHTML = `<span class="badge ${dev.on ? 'badge-green' : 'badge-muted'}">On</span>`;
+  onBtn.addEventListener('click', e => { e.stopPropagation(); cb.onOn?.(); });
+
+  const offBtn = document.createElement('button');
+  offBtn.className = 'light-toggle-btn';
+  offBtn.innerHTML = `<span class="badge ${!dev.on ? 'badge-red' : 'badge-muted'}">Off</span>`;
+  offBtn.addEventListener('click', e => { e.stopPropagation(); cb.onOff?.(); });
+
+  row1.appendChild(onBtn);
+  row1.appendChild(offBtn);
+
+  // Spacer
+  const spacer = document.createElement('span');
+  spacer.style.flex = '1';
+  row1.appendChild(spacer);
+
+  // ── Single colour dot — switches between temperature and colour mode ─────
+  // Hue bulbs always report BOTH color_xy and color_temp, so the active mode
+  // can't be inferred from state — it's persisted per device in localStorage
+  // (default Temperature). Adjusting a slider also pins that mode so the card
+  // stays put after the next render.
+  const supportsTemp   = hasTemp;
+  const supportsColour = dev.color_xy != null;
+  const supportsBoth   = supportsTemp && supportsColour;
+
+  const modeKey = 'mesh-mode-' + dev.device_id;
+  let lcMode = (!supportsTemp && !supportsColour) ? null
+    : (localStorage.getItem(modeKey) || (supportsTemp ? 'temp' : 'colour'));
+  if (lcMode === 'temp'   && !supportsTemp)   lcMode = 'colour';
+  if (lcMode === 'colour' && !supportsColour) lcMode = 'temp';
+  const setMode = (m) => { lcMode = m; localStorage.setItem(modeKey, m); };
+
+  if (lcMode) {
+    let h = 30, s = 80;
+    if (dev.color_xy) {
+      const [x, y] = dev.color_xy;
+      const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
+      ({ h, s } = rgbToHsl(r, g, b));
+    }
+    const dotBtn = document.createElement('button');
+    dotBtn.className = 'lc-toggle-btn lc-colour-btn';
+    dotBtn.style.background = lcMode === 'colour' ? `hsl(${h},${s}%,50%)` : 'transparent';
+    row1.appendChild(dotBtn);
+
+    // Secondary rows — only one visible at a time
+    let tempRow = null, colourRows = null;
+
+    if (supportsTemp) {
+      tempRow = makeLcSliderRow('Temperature', 154, 500, dev.color_temp ?? 370,
+        v => Math.round(1e6 / v) + 'K',
+        v => { setMode('temp'); cb.onTemp?.(v); });   // adjusting temp pins temp mode
+    }
+
+    if (supportsColour) {
+      colourRows = document.createElement('div');
+      const hueRow = makeLcSliderRow('Hue', 0, 359, h, v => v + '°', () => sendXY());
+      const satRow = makeLcSliderRow('Saturation', 0, 100, s, v => v + '%', () => sendXY());
+      colourRows.appendChild(hueRow);
+      colourRows.appendChild(satRow);
+
+      const hueSlider = hueRow.querySelector('input');
+      const satSlider = satRow.querySelector('input');
+      function sendXY() {
+        setMode('colour');                            // adjusting hue/sat pins colour mode
+        const { x, y } = hslToXy(parseInt(hueSlider.value), parseInt(satSlider.value));
+        dotBtn.style.background = `hsl(${hueSlider.value},${satSlider.value}%,50%)`;
+        cb.onColorXY?.(x, y);
+      }
+    }
+
+    // applyMode only toggles visibility; rows are appended once below.
+    const applyMode = () => {
+      if (tempRow)    tempRow.style.display    = lcMode === 'temp'   ? '' : 'none';
+      if (colourRows) colourRows.style.display = lcMode === 'colour' ? '' : 'none';
+      if (supportsBoth) {
+        dotBtn.title = lcMode === 'colour' ? 'Switch to Temperature' : 'Switch to Colour';
+        dotBtn.style.background = lcMode === 'colour' ? `hsl(${h},${s}%,50%)` : 'transparent';
+      } else {
+        dotBtn.title = lcMode === 'colour' ? 'Colour' : 'Temperature';
+      }
+      dotBtn.classList.toggle('lc-colour-active', lcMode === 'colour');
+    };
+    if (supportsBoth) {
+      dotBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        setMode(lcMode === 'colour' ? 'temp' : 'colour');
+        applyMode();
+      });
+    }
+
+    // Assemble once: controls row, brightness, then the active secondary section
+    const briRow = makeLcSliderRow('Brightness', 1, 254, dev.brightness ?? 200,
+      v => Math.round((v / 254) * 100) + '%',
+      v => cb.onBrightness?.(v));
+    wrap.append(row1, briRow);
+    if (tempRow)    wrap.appendChild(tempRow);
+    if (colourRows) wrap.appendChild(colourRows);
+    applyMode();
+  } else {
+    // No secondary controls at all — just brightness
+    const briRow = makeLcSliderRow('Brightness', 1, 254, dev.brightness ?? 200,
+      v => Math.round((v / 254) * 100) + '%',
+      v => cb.onBrightness?.(v));
+    wrap.append(row1, briRow);
+  }
+
+  return wrap;
+}
+
+// Build one label + slider + value row for buildLightControls
+function makeLcSliderRow(label, min, max, value, format, onCommit) {
+  const row = document.createElement('div');
+  row.className = 'lc-row lc-slider-row';
+
+  const labelEl = document.createElement('span');
+  labelEl.className = 'lc-label';
+  labelEl.textContent = label;
+
+  const valEl = document.createElement('span');
+  valEl.className = 'lc-value';
+  valEl.textContent = format(value);
+
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = String(min);
+  slider.max = String(max);
+  slider.value = String(value);
+  slider.className = 'light-slider lc-slider';
+
+  wireDeviceSlider(slider, {
+    format,
+    onInput: (v, _) => { valEl.textContent = format(v); },
+    onChange: onCommit,
   });
 
-  const finish = () => {
-    slider.classList.remove('slider-active');
-    bubble.classList.remove('visible');
-  };
-  slider.addEventListener('change', () => { finish(); onChange(parseInt(slider.value, 10)); });
-  slider.addEventListener('pointercancel', finish);
+  row.appendChild(labelEl);
+  row.appendChild(slider);
+  row.appendChild(valEl);
+  return row;
 }
 
 // ── Effects palette ──────────────────────────────────────────────────────────
@@ -910,6 +1074,107 @@ function buildSchemaField(key, spec, paramsObj, onChange) {
   return null;
 }
 
+// ── Room controls panel (effect-editor style) ─────────────────────────────────
+// Brightness always shown. Temperature OR Colour — based on current room state.
+// Colour dot at top switches between the two modes.
+function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose) {
+  const hasColourXY = devices.some(d => d.color_xy != null);
+  const hasTempDevices = devices.some(d => d.color_temp != null);
+  // Mode is persisted per room (Hue bulbs always report both, so it can't be
+  // inferred from state). Default Temperature; adjusting a slider pins its mode.
+  const modeKey = 'mesh-room-mode-' + room.id;
+  let mode = localStorage.getItem(modeKey) || (hasTempDevices ? 'temp' : 'colour');
+  if (mode === 'temp'   && !hasTempDevices) mode = 'colour';
+  if (mode === 'colour' && !hasColourXY)    mode = 'temp';
+  const setMode = (m) => { mode = m; localStorage.setItem(modeKey, m); };
+
+  const panel = document.createElement('div');
+  panel.className = 'room-ctrl-panel';
+
+  // Header
+  const hdr = document.createElement('div');
+  hdr.className = 'room-ctrl-panel-header';
+
+  const title = document.createElement('span');
+  title.className = 'room-ctrl-panel-title';
+  title.textContent = mode === 'colour' ? 'Colour' : 'Temperature';
+  hdr.appendChild(title);
+
+  // Colour dot mode toggle (only if room has both capabilities)
+  if (hasColour && hasTempDevices) {
+    const { h, s } = getRoomColourHsl(devices);
+    const modeBtn = document.createElement('button');
+    modeBtn.className = 'color-swatch-btn room-ctrl-mode-btn';
+    modeBtn.style.background = mode === 'colour' ? `hsl(${h},${s}%,50%)` : 'var(--surface-2)';
+    modeBtn.title = mode === 'colour' ? 'Switch to Temperature' : 'Switch to Colour';
+    modeBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      setMode(mode === 'colour' ? 'temp' : 'colour');
+      modeBtn.title = mode === 'colour' ? 'Switch to Temperature' : 'Switch to Colour';
+      modeBtn.style.background = mode === 'colour' ? `hsl(${h},${s}%,50%)` : 'var(--surface-2)';
+      title.textContent = mode === 'colour' ? 'Colour' : 'Temperature';
+      tempSliderEl.style.display   = mode === 'temp'   ? '' : 'none';
+      colourSliderEl.style.display = mode === 'colour' ? '' : 'none';
+    });
+    hdr.appendChild(modeBtn);
+  }
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'effect-editor-close';
+  closeBtn.textContent = '×';
+  closeBtn.addEventListener('click', e => { e.stopPropagation(); onClose(); });
+  hdr.appendChild(closeBtn);
+  panel.appendChild(hdr);
+
+  // Temperature slider
+  const ctDevices = devices.filter(d => d.color_temp != null);
+  const avgCT = ctDevices.length > 0
+    ? Math.round(ctDevices.reduce((s, d) => s + (d.color_temp ?? 0), 0) / ctDevices.length)
+    : 370;
+  const tempSliderEl = buildSlider({
+    label: 'Temperature',
+    min: 154, max: 500, value: avgCT,
+    format: v => Math.round(1e6 / v) + 'K',
+    onCommit: async v => {
+      setMode('temp');
+      if (activeEffect) await clearEffect(room.id);
+      sendRoomCommand(room.id, { action: 'color_temp', value: v }, room);
+    },
+  });
+  tempSliderEl.style.display = mode === 'temp' ? '' : 'none';
+  panel.appendChild(tempSliderEl);
+
+  // Colour sliders (Hue + Saturation)
+  const colourSliderEl = document.createElement('div');
+  colourSliderEl.style.display = mode === 'colour' ? '' : 'none';
+  if (hasColourXY) {
+    const { h, s } = getRoomColourHsl(devices);
+    colourSliderEl.appendChild(buildSlider({
+      label: 'Hue', min: 0, max: 359, value: h,
+      format: v => v + '°',
+      onCommit: v => {
+        setMode('colour');
+        const curSat = parseInt(colourSliderEl.querySelector('input:last-of-type')?.value ?? s);
+        const { x, y } = hslToXy(v, curSat);
+        sendRoomCommand(room.id, { action: 'color_xy', x, y }, room);
+      },
+    }));
+    colourSliderEl.appendChild(buildSlider({
+      label: 'Saturation', min: 0, max: 100, value: s,
+      format: v => v + '%',
+      onCommit: v => {
+        setMode('colour');
+        const curHue = parseInt(colourSliderEl.querySelector('input:first-of-type')?.value ?? h);
+        const { x, y } = hslToXy(curHue, v);
+        sendRoomCommand(room.id, { action: 'color_xy', x, y }, room);
+      },
+    }));
+  }
+  panel.appendChild(colourSliderEl);
+
+  return panel;
+}
+
 function buildEffectChip(meta) {
   const chip = document.createElement('div');
   chip.className = 'effect-chip';
@@ -1135,56 +1400,55 @@ function renderRoomCard(room) {
   const ctrlRow = document.createElement('div');
   ctrlRow.className = 'room-header-controls-row';
 
-  // Quick on/off in header
+  // ── On / Off — big segmented control (primary casual action) ─────────────
   const onBtn  = document.createElement('button');
   const offBtn = document.createElement('button');
   const setRoomOnOff = (isOn) => {
-    onBtn.innerHTML  = `<span class="badge ${isOn  ? 'badge-green' : 'badge-muted'}">On</span>`;
-    offBtn.innerHTML = `<span class="badge ${!isOn ? 'badge-red'   : 'badge-muted'}">Off</span>`;
+    onBtn.classList.toggle('active', isOn);
+    offBtn.classList.toggle('active', !isOn);
   };
-  onBtn.className = 'light-toggle-btn';
+  onBtn.className = 'room-onoff-btn room-onoff-on';
+  onBtn.textContent = 'On';
   onBtn.disabled = empty;
   if (!empty) onBtn.addEventListener('click', async e => {
     e.stopPropagation();
     setRoomOnOff(true);
-    // Disable active effect and send power-on with defaults (brightness 200, CT 370)
+    // Power on with sensible defaults so the light is visibly on
     if (activeEffect) await clearEffect(room.id);
     await sendRoomCommand(room.id, { action: 'brightness', value: 200 }, room);
     await sendRoomCommand(room.id, { action: 'color_temp', value: 370 }, room);
     await sendRoomCommand(room.id, { action: 'on' }, room);
   });
-  offBtn.className = 'light-toggle-btn';
+  offBtn.className = 'room-onoff-btn room-onoff-off';
+  offBtn.textContent = 'Off';
   offBtn.disabled = empty;
   if (!empty) offBtn.addEventListener('click', async e => {
     e.stopPropagation();
     setRoomOnOff(false);
-    // Disable active effect and send power-off
     if (activeEffect) await clearEffect(room.id);
     sendRoomCommand(room.id, { action: 'off' }, room);
   });
   setRoomOnOff(anyOn);
 
-  // Color swatch
-  let roomSwatchBtn = null;
-  if (hasColour) {
-    const { h, s } = getRoomColourHsl(roomDevicesAll);
-    roomSwatchBtn = document.createElement('button');
-    roomSwatchBtn.className = 'color-swatch-btn room-colour-swatch';
-    roomSwatchBtn.style.background = `hsl(${h},${s}%,50%)`;
-    roomSwatchBtn.title = 'Set room colour';
-    roomSwatchBtn.setAttribute('data-ctrl', 'room-colour-toggle');
+  const onOffWrap = document.createElement('div');
+  onOffWrap.className = 'room-onoff';
+  onOffWrap.appendChild(onBtn);
+  onOffWrap.appendChild(offBtn);
+
+  // Secondary controls: colour & temperature (popup), floor plan
+  const hasTempDevices = roomDevicesAll.some(d => d.color_temp != null);
+
+  let colourTempBtn = null;
+  if (!empty && (hasColour || hasTempDevices)) {
+    colourTempBtn = document.createElement('button');
+    colourTempBtn.className = 'room-action-btn room-ctrl-trigger';
+    colourTempBtn.title = 'Colour & temperature';
+    colourTempBtn.textContent = '🎨';
   }
-  // Top row: on/off, color swatch, layout button
-  const topRow = document.createElement('div');
-  topRow.className = 'room-controls-top';
-  topRow.appendChild(onBtn);
-  topRow.appendChild(offBtn);
-  if (roomSwatchBtn) {
-    topRow.appendChild(roomSwatchBtn);
-  }
+
   const layoutBtn = document.createElement('button');
   layoutBtn.className = 'room-action-btn room-layout-btn';
-  layoutBtn.title = 'Open floor plan';
+  layoutBtn.title = 'Floor plan';
   layoutBtn.textContent = '⊞';
   layoutBtn.addEventListener('click', e => {
     e.stopPropagation();
@@ -1192,20 +1456,33 @@ function renderRoomCard(room) {
     if (eff) layout.notifyEffectActive(room.id, eff.effect_id, eff.params ?? {});
     layout.openLayout(room);
   });
+
+  // Top row: [On|Off]  ───spacer───  [effect]  🎨  ⊞
+  const topRow = document.createElement('div');
+  topRow.className = 'room-controls-top';
+  topRow.appendChild(onOffWrap);
+
+  const topSpacer = document.createElement('span');
+  topSpacer.className = 'room-controls-spacer';
+  topRow.appendChild(topSpacer);
+
+  if (activeEffect) {
+    topRow.appendChild(buildEffectBadge(room, activeEffect));
+  } else if (lastEffectByRoom.has(room.id)) {
+    topRow.appendChild(buildEffectGhostBadge(room, lastEffectByRoom.get(room.id)));
+  }
+  if (colourTempBtn) topRow.appendChild(colourTempBtn);
   topRow.appendChild(layoutBtn);
   ctrlRow.appendChild(topRow);
 
-  // Room brightness slider
+  // ── Brightness — always visible (top casual control) ─────────────────────
   if (!empty) {
     const briDevices = roomDevicesAll.filter(d => d.brightness != null);
     const avgBri = briDevices.length > 0
-      ? Math.round(briDevices.reduce((sum, d) => sum + (d.brightness ?? 0), 0) / briDevices.length)
+      ? Math.round(briDevices.reduce((s, d) => s + (d.brightness ?? 0), 0) / briDevices.length)
       : 200;
     ctrlRow.appendChild(buildSlider({
-      label: 'Brightness',
-      min: 1,
-      max: 254,
-      value: avgBri,
+      label: 'Brightness', min: 1, max: 254, value: avgBri,
       format: v => Math.round((v / 254) * 100) + '%',
       onCommit: async v => {
         if (activeEffect) await clearEffect(room.id);
@@ -1214,45 +1491,37 @@ function renderRoomCard(room) {
     }));
   }
 
-  // Room color temp slider (only if room has colour-temp capable devices)
-  if (!empty && hasColour) {
-    const ctDevices = roomDevicesAll.filter(d => d.color_temp != null);
-    const avgCT = ctDevices.length > 0
-      ? Math.round(ctDevices.reduce((sum, d) => sum + (d.color_temp ?? 0), 0) / ctDevices.length)
-      : 370;
-    ctrlRow.appendChild(buildSlider({
-      label: 'Color temp',
-      min: 154,
-      max: 500,
-      value: avgCT,
-      format: v => Math.round(1e6 / v) + 'K',
-      onCommit: async v => {
-        if (activeEffect) await clearEffect(room.id);
-        sendRoomCommand(room.id, { action: 'color_temp', value: v }, room);
-      },
-    }));
+  // Colour & temperature popup — toggled by 🎨. Open-state lives in a module Set
+  // (openRoomCtrlIds) so a commit-triggered render() re-opens it rather than
+  // wiping it out from under the user.
+  if (colourTempBtn) {
+    let ctPanel = null;
+    const openPanel = () => {
+      if (ctPanel) return;
+      colourTempBtn.classList.add('active');
+      ctPanel = buildRoomControlsPanel(room, roomDevicesAll, hasColour, activeEffect, closePanel);
+      ctrlRow.appendChild(ctPanel);
+    };
+    const closePanel = () => {
+      openRoomCtrlIds.delete(room.id);
+      colourTempBtn.classList.remove('active');
+      ctPanel?.remove();
+      ctPanel = null;
+    };
+    colourTempBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (openRoomCtrlIds.has(room.id)) { closePanel(); }
+      else { openRoomCtrlIds.add(room.id); openPanel(); }
+    });
+    // Restore on render if it was open before
+    if (openRoomCtrlIds.has(room.id)) openPanel();
   }
 
-  // Hide room controls when effect editor is open (so effect params take priority)
+  // Hide room controls when the effect editor is open
   if (activeEffect && openEffectEditorRoomId === room.id) {
     topRow.style.display = 'none';
   }
 
-  // Bottom row: effect badge (and delete room button removed - unclear purpose)
-  const effectsRow = document.createElement('div');
-  effectsRow.className = 'room-effects-row';
-  if (activeEffect) {
-    effectsRow.appendChild(buildEffectBadge(room, activeEffect));
-  } else if (lastEffectByRoom.has(room.id)) {
-    effectsRow.appendChild(buildEffectGhostBadge(room, lastEffectByRoom.get(room.id)));
-  }
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'room-action-btn room-action-delete';
-  deleteBtn.textContent = 'delete';
-  deleteBtn.title = 'Delete room';
-  deleteBtn.addEventListener('click', () => deleteRoom(room.id));
-  effectsRow.appendChild(deleteBtn);
-  ctrlRow.appendChild(effectsRow);
   header.appendChild(ctrlRow);
   card.appendChild(header);
 
@@ -1261,18 +1530,16 @@ function renderRoomCard(room) {
     card.appendChild(buildEffectEditor(room, activeEffect));
   }
 
-  // Room colour picker — outside body so it stays accessible when collapsed
-  if (hasColour && roomSwatchBtn) {
-    const { h, s } = getRoomColourHsl(roomDevicesAll);
-    const pickerEl = buildRoomColourPicker(h, s);
-    card.appendChild(pickerEl);
-    roomSwatchBtn.addEventListener('click', e => { e.stopPropagation(); pickerEl.classList.toggle('open'); });
-    wireRoomColourPicker(pickerEl, room.id, roomSwatchBtn);
-  }
-
-  // Quick scenes bar — always visible, horizontal scroll
+  // Quick scenes bar — always visible, horizontal scroll (primary casual control)
   const roomScenesList = scenesData.filter(s => s.room_id === room.id).sort((a, b) => (a.position - b.position) || (b.created_at - a.created_at));
   if (roomScenesList.length > 0) {
+    const sceneWrap = document.createElement('div');
+    sceneWrap.className = 'room-scenes-wrap';
+    const sceneLabel = document.createElement('span');
+    sceneLabel.className = 'room-scenes-label';
+    sceneLabel.textContent = 'Scenes';
+    sceneWrap.appendChild(sceneLabel);
+
     const sceneBar = document.createElement('div');
     sceneBar.className = 'room-quick-scenes';
     for (const scene of roomScenesList) {
@@ -1291,7 +1558,8 @@ function renderRoomCard(room) {
       sceneBar.appendChild(chip);
     }
     wireSceneBarDrag(sceneBar, room.id);
-    card.appendChild(sceneBar);
+    sceneWrap.appendChild(sceneBar);
+    card.appendChild(sceneWrap);
   }
 
   // Collapsible body
@@ -1319,7 +1587,6 @@ function renderRoomCard(room) {
       if (dev) {
         const devCard = buildDeviceCard(dev, room.id);
         devicesEl.appendChild(devCard);
-        wireDeviceControls(devCard, dev, room.id);
         wireDeviceDrag(devCard, dev.device_id, room.id);
       } else {
         devicesEl.appendChild(buildDevicePlaceholder(deviceId, room.id));
@@ -1332,6 +1599,17 @@ function renderRoomCard(room) {
 
   // Scenes section (full list with save button)
   body.appendChild(buildScenesSection(room.id));
+
+  // Delete room — tucked at the bottom of the body, subtle (rare, destructive)
+  const deleteRow = document.createElement('div');
+  deleteRow.className = 'room-delete-row';
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'room-action-btn room-action-delete';
+  deleteBtn.textContent = 'Delete room';
+  deleteBtn.title = 'Delete room';
+  deleteBtn.addEventListener('click', () => deleteRoom(room.id));
+  deleteRow.appendChild(deleteBtn);
+  body.appendChild(deleteRow);
 
   card.appendChild(body);
 
@@ -1482,54 +1760,6 @@ function getRoomColourHsl(roomDevices) {
   return { h: 30, s: 80 };
 }
 
-function buildRoomColourPicker(h, s) {
-  const picker = document.createElement('div');
-  picker.className = 'light-colour-picker room-colour-picker';
-  picker.innerHTML = `
-    <div class="light-detail-row">
-      <span class="light-detail-label">Hue</span>
-      <input class="hue-slider" type="range" min="0" max="359" value="${h}"
-             data-ctrl="room-hue" aria-label="Room hue">
-      <span class="colour-swatch-preview" style="background:hsl(${h},${s}%,50%)"></span>
-    </div>
-    <div class="light-detail-row">
-      <span class="light-detail-label">Saturation</span>
-      <input class="light-slider" type="range" min="0" max="100" value="${s}"
-             data-ctrl="room-sat" aria-label="Room saturation"
-             style="background:linear-gradient(to right,#fff,hsl(${h},100%,50%))">
-      <span class="light-detail-value">${s}%</span>
-    </div>`;
-  return picker;
-}
-
-function wireRoomColourPicker(pickerEl, roomId, swatchBtn) {
-  const hue = pickerEl.querySelector('[data-ctrl="room-hue"]');
-  const sat = pickerEl.querySelector('[data-ctrl="room-sat"]');
-  const preview = pickerEl.querySelector('.colour-swatch-preview');
-
-  function syncUI() {
-    const h = hue.value, s = sat.value;
-    if (preview) preview.style.background = `hsl(${h},${s}%,50%)`;
-    sat.style.background = `linear-gradient(to right,#fff,hsl(${h},100%,50%))`;
-    const satLabel = sat.parentElement?.querySelector('.light-detail-value');
-    if (satLabel) satLabel.textContent = `${s}%`;
-    if (swatchBtn) swatchBtn.style.background = `hsl(${h},${s}%,50%)`;
-  }
-
-  function sendColour() {
-    const { x, y } = hslToXy(parseInt(hue.value), parseInt(sat.value));
-    sendRoomCommand(roomId, { action: 'color_xy', x, y });
-  }
-
-  lockSliderToThumb(hue);
-  lockSliderToThumb(sat);
-  hue.addEventListener('input', syncUI);
-  hue.addEventListener('change', sendColour);
-  sat.addEventListener('input', syncUI);
-  sat.addEventListener('change', sendColour);
-  syncUI();
-}
-
 // ── Device card inside a room ────────────────────────────────────────────────
 
 function buildDeviceCard(dev, roomId) {
@@ -1540,14 +1770,37 @@ function buildDeviceCard(dev, roomId) {
 
   const eff = roomEffectsMap.get(roomId);
   const underEffect = eff && !eff.overrides.has(dev.device_id);
-  card.innerHTML = deviceCardHtml(dev);
   if (underEffect) card.classList.add('device-under-effect');
-  if (offline) {
-    const badge = card.querySelector('.badge');
-    if (badge) { badge.className = 'badge badge-offline'; badge.textContent = 'Offline'; }
-  }
 
-  // Per-bulb effect indicator: shown when a room effect is active.
+  // Header: name + remove button
+  const displayName = formatDeviceName(dev.device_id);
+  const header = document.createElement('div');
+  header.className = 'light-card-header';
+  header.innerHTML = `
+    <div class="light-name-group">
+      <span class="light-name" title="Click to rename" style="cursor:pointer">${esc(displayName)}</span>
+      <span class="light-node-badge">${esc(dev.node_id)}</span>
+    </div>
+    <div class="light-card-header-right">
+      <button class="room-remove-btn" data-ctrl="room-remove"
+              title="Remove from room" aria-label="Remove from room">✕</button>
+    </div>`;
+  if (offline) {
+    const badge = document.createElement('span');
+    badge.className = 'badge badge-offline';
+    badge.textContent = 'Offline';
+    header.querySelector('.light-card-header-right').prepend(badge);
+  }
+  card.appendChild(header);
+
+  // Rename + remove wiring
+  const nameEl2 = card.querySelector('.light-name');
+  if (nameEl2) nameEl2.addEventListener('click', e => { e.stopPropagation(); startDeviceRename(nameEl2, dev.device_id); });
+  card.querySelector('[data-ctrl="room-remove"]')?.addEventListener('click', e => {
+    e.stopPropagation(); removeDeviceFromRoom(roomId, dev.device_id);
+  });
+
+  // Per-bulb effect indicator
   if (eff) {
     const overridden = eff.overrides.has(dev.device_id);
     const icon = EFFECT_ICONS[eff.effect_id] || DEFAULT_EFFECT_ICON;
@@ -1563,91 +1816,52 @@ function buildDeviceCard(dev, roomId) {
     card.querySelector('.light-card-header-right')?.prepend(btn);
   }
 
+  // Controls — only if online and has brightness
+  if (!offline && dev.brightness != null) {
+    const maybeExclude = () => {
+      const e2 = roomEffectsMap.get(roomId);
+      if (!e2 || e2.overrides.has(dev.device_id)) return;
+      e2.overrides.add(dev.device_id);
+      const btn2 = card.querySelector('.device-effect-btn');
+      if (btn2) { btn2.classList.add('device-effect-overridden'); btn2.title = 'Excluded from effect — click to re-include'; }
+      fetch(`/api/rooms/${encodeURIComponent(roomId)}/effect/override?token=${encodeURIComponent(tok())}`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_id: dev.device_id, excluded: true }) })
+        .catch(err => {
+          e2.overrides.delete(dev.device_id);
+          if (btn2) { btn2.classList.remove('device-effect-overridden'); btn2.title = 'In effect'; }
+          showToast(`Override error: ${err.message}`, true);
+        });
+    };
+
+    const controls = buildLightControls(dev, {
+      onOn:  () => { maybeExclude(); sendDeviceCommand(dev.device_id, { action: 'on' }); },
+      onOff: () => { maybeExclude(); sendDeviceCommand(dev.device_id, { action: 'off' }); },
+      onBrightness: v => {
+        maybeExclude();
+        patchDevice(dev.device_id, { brightness: v });
+        markPending(dev.device_id, 'brightness', v);
+        sendDeviceCommand(dev.device_id, { action: 'brightness', value: v, transition_secs: 0.4 });
+      },
+      onTemp: v => {
+        maybeExclude();
+        patchDevice(dev.device_id, { color_temp: v });
+        markPending(dev.device_id, 'color_temp', v);
+        sendDeviceCommand(dev.device_id, { action: 'color_temp', value: v, transition_secs: 0.4 });
+      },
+      onColorXY: (x, y) => {
+        maybeExclude();
+        patchDevice(dev.device_id, { color_xy: [x, y] });
+        sendDeviceCommand(dev.device_id, { action: 'color_xy', x, y });
+      },
+    });
+    controls.className += ' light-card-details';
+    card.appendChild(controls);
+  }
+
   return card;
 }
 
-function deviceCardHtml(dev) {
-  const badgeClass = dev.on ? 'badge-green' : 'badge-muted';
-  const badgeLabel = dev.on ? 'On' : 'Off';
-  const displayName = formatDeviceName(dev.device_id);
-
-  let swatch = '';
-  let colourPicker = '';
-  if (dev.color_xy != null || dev.color_temp != null) {
-    let h = 30, s = 80;
-    let swatchRgb = `hsl(${h},${s}%,50%)`;
-    if (dev.color_xy != null) {
-      const [x, y] = dev.color_xy;
-      const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
-      ({ h, s } = rgbToHsl(r, g, b));
-      swatchRgb = `rgb(${r},${g},${b})`;
-    }
-    swatch = `<button class="color-swatch-btn" data-ctrl="colour-toggle"
-      style="background:${swatchRgb}" title="Pick colour"
-      aria-label="Pick colour for ${esc(displayName)}"></button>`;
-    colourPicker = `
-      <div class="light-colour-picker" data-ctrl="colour-picker" role="group" aria-label="Colour controls">
-        <div class="light-detail-row">
-          <span class="light-detail-label">Hue</span>
-          <input class="hue-slider" type="range" min="0" max="359" value="${h}"
-                 data-ctrl="hue" aria-label="Hue">
-          <span class="colour-swatch-preview" style="background:hsl(${h},${s}%,50%)"></span>
-        </div>
-        <div class="light-detail-row">
-          <span class="light-detail-label">Saturation</span>
-          <input class="light-slider" type="range" min="0" max="100" value="${s}"
-                 data-ctrl="saturation" aria-label="Saturation"
-                 style="background:linear-gradient(to right,#fff,hsl(${h},100%,50%))">
-          <span class="light-detail-value">${s}%</span>
-        </div>
-      </div>`;
-  }
-
-  let controls = '';
-  if (dev.brightness != null) {
-    const pct = Math.round((dev.brightness / 255) * 100);
-    controls += `
-      <div class="light-detail-row">
-        <span class="light-detail-label">Brightness</span>
-        <input class="light-slider" type="range" min="0" max="255" value="${dev.brightness}"
-               data-ctrl="brightness" title="${pct}%" aria-label="Brightness">
-        <span class="light-detail-value">${pct}%</span>
-      </div>`;
-  }
-  if (dev.color_temp != null) {
-    const kelvin = Math.round(1_000_000 / dev.color_temp);
-    controls += `
-      <div class="light-detail-row light-ct-row" data-ctrl="ct-row">
-        <span class="light-detail-label">Color temp</span>
-        <input class="light-slider" type="range" min="154" max="500" value="${dev.color_temp}"
-               data-ctrl="color_temp" title="${kelvin} K" aria-label="Color temperature">
-        <span class="light-detail-value">${kelvin} K</span>
-      </div>`;
-  }
-  controls += colourPicker;
-
-  const ctToggle = dev.color_temp != null
-    ? `<button class="color-temp-toggle-btn" data-ctrl="ct-toggle" title="Color temperature">⊹</button>`
-    : '';
-
-  return `
-    <div class="light-card-header">
-      <div class="light-name-group">
-        <span class="light-name" title="Click to rename" style="cursor:pointer">${esc(displayName)}</span>
-        <span class="light-node-badge">${esc(dev.node_id)}</span>
-      </div>
-      <div class="light-card-header-right">
-        ${ctToggle}
-        ${swatch}
-        <button class="light-toggle-btn" data-ctrl="toggle" aria-label="Toggle ${esc(displayName)}">
-          <span class="badge ${badgeClass}">${badgeLabel}</span>
-        </button>
-        <button class="room-remove-btn" data-ctrl="room-remove"
-                title="Remove from room" aria-label="Remove ${esc(displayName)} from room">✕</button>
-      </div>
-    </div>
-    ${controls ? `<div class="light-card-details">${controls}</div>` : ''}`;
-}
 
 function buildDevicePlaceholder(deviceId, roomId) {
   const card = document.createElement('div');
@@ -1714,141 +1928,6 @@ function wireDeviceDrag(card, deviceId, roomId) {
   });
 }
 
-function wireDeviceControls(card, dev, roomId) {
-  // Targeted exclusion on first manual control — avoids a full render() mid-
-  // interaction (which would destroy the slider element the user is touching).
-  // We keep device-under-effect on the card so patchDeviceCards continues to
-  // freeze the slider until the server-side runner stops ticking the device
-  // (~one rehydrate cycle, < 200 ms). The WS EffectUpdate that arrives after
-  // the PATCH triggers render() which fully settles the card.
-  const maybeExclude = () => {
-    const eff = roomEffectsMap.get(roomId);
-    if (!eff || eff.overrides.has(dev.device_id)) return;
-    eff.overrides.add(dev.device_id);
-    // Grey the effect button in-place — no render().
-    const btn = card.querySelector('.device-effect-btn');
-    if (btn) {
-      btn.classList.add('device-effect-overridden');
-      btn.title = 'Excluded from effect — click to re-include';
-    }
-    // Fire PATCH; the WS EffectUpdate callback will call render() on success.
-    fetch(
-      `/api/rooms/${encodeURIComponent(roomId)}/effect/override?token=${encodeURIComponent(tok())}`,
-      { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device_id: dev.device_id, excluded: true }) },
-    ).catch(e => {
-      eff.overrides.delete(dev.device_id);
-      if (btn) { btn.classList.remove('device-effect-overridden'); btn.title = 'In effect'; }
-      showToast(`Override error: ${e.message}`, true);
-    });
-  };
-
-  card.querySelector('[data-ctrl="toggle"]')?.addEventListener('click', e => {
-    e.stopPropagation();
-    maybeExclude();
-    devicesMap.set(dev.device_id, { ...dev, on: !dev.on });
-    render();
-    sendDeviceCommand(dev.device_id, { action: 'toggle' });
-  });
-
-  card.querySelector('[data-ctrl="room-remove"]')?.addEventListener('click', e => {
-    e.stopPropagation();
-    removeDeviceFromRoom(roomId, dev.device_id);
-  });
-
-  // Device rename on name click
-  const nameEl = card.querySelector('.light-name');
-  if (nameEl) nameEl.addEventListener('click', e => { e.stopPropagation(); startDeviceRename(nameEl, dev.device_id); });
-
-  const bri = card.querySelector('[data-ctrl="brightness"]');
-  if (bri) {
-    wireDeviceSlider(bri, {
-      format: v => Math.round((v / 255) * 100) + '%',
-      onInput: (v, valEl) => { valEl.textContent = Math.round((v / 255) * 100) + '%'; },
-      onChange: v => {
-        maybeExclude();
-        devicesMap.set(dev.device_id, { ...(devicesMap.get(dev.device_id) ?? dev), brightness: v });
-        markPending(dev.device_id, 'brightness', v);
-        sendDeviceCommand(dev.device_id, { action: 'brightness', value: v, transition_secs: 0.4 });
-      },
-    });
-  }
-
-  const ct = card.querySelector('[data-ctrl="color_temp"]');
-  if (ct) {
-    wireDeviceSlider(ct, {
-      format: v => Math.round(1e6 / v) + 'K',
-      onInput: (v, valEl) => { valEl.textContent = Math.round(1e6 / v) + 'K'; },
-      onChange: v => {
-        maybeExclude();
-        devicesMap.set(dev.device_id, { ...(devicesMap.get(dev.device_id) ?? dev), color_temp: v });
-        markPending(dev.device_id, 'color_temp', v);
-        sendDeviceCommand(dev.device_id, { action: 'color_temp', value: v, transition_secs: 0.4 });
-      },
-    });
-  }
-
-  const colourToggle = card.querySelector('[data-ctrl="colour-toggle"]');
-  const colourPicker = card.querySelector('[data-ctrl="colour-picker"]');
-  const hue = card.querySelector('[data-ctrl="hue"]');
-  const sat = card.querySelector('[data-ctrl="saturation"]');
-  const preview = colourPicker?.querySelector('.colour-swatch-preview');
-
-  colourToggle?.addEventListener('click', e => {
-    e.stopPropagation();
-    const isOpen = colourPicker.classList.toggle('open');
-    if (isOpen) openPickerIds.add(dev.device_id);
-    else openPickerIds.delete(dev.device_id);
-  });
-
-  function syncColourUI() {
-    if (!hue || !sat) return;
-    const h = hue.value, s = sat.value;
-    if (preview) preview.style.background = `hsl(${h},${s}%,50%)`;
-    sat.style.background = `linear-gradient(to right,#fff,hsl(${h},100%,50%))`;
-    sat.parentElement?.querySelector('.light-detail-value')?.textContent === `${s}%`;
-    if (colourToggle) colourToggle.style.background = `hsl(${h},${s}%,50%)`;
-  }
-
-  function sendColour() {
-    if (!hue || !sat) return;
-    maybeExclude();
-    const { x, y } = hslToXy(parseInt(hue.value), parseInt(sat.value));
-    devicesMap.set(dev.device_id, { ...dev, color_xy: [x, y] });
-    sendDeviceCommand(dev.device_id, { action: 'color_xy', x, y });
-  }
-
-  if (hue) { lockSliderToThumb(hue); hue.addEventListener('input', syncColourUI); hue.addEventListener('change', sendColour); }
-  if (sat) { lockSliderToThumb(sat); sat.addEventListener('input', syncColourUI); sat.addEventListener('change', sendColour); }
-  if (hue || sat) syncColourUI();
-
-  // ── CT and colour picker — click to reveal, click away to hide ───────────
-  const ctRow     = card.querySelector('[data-ctrl="ct-row"]');
-  const ctToggle  = card.querySelector('[data-ctrl="ct-toggle"]');
-  const pickerEl  = card.querySelector('[data-ctrl="colour-picker"]');
-  const swatchBtn = card.querySelector('[data-ctrl="colour-toggle"]');
-
-  // CT row hidden by default; revealed when ⊹ button is clicked
-  if (ctRow) ctRow.style.display = 'none';
-  if (ctToggle && ctRow) {
-    ctToggle.addEventListener('click', e => {
-      e.stopPropagation();
-      const open = ctRow.style.display !== 'none';
-      ctRow.style.display = open ? 'none' : '';
-      ctToggle.classList.toggle('active', !open);
-    });
-  }
-
-  // Colour picker toggle (existing behaviour — click swatch to open, click away to close)
-  if (swatchBtn && pickerEl) {
-    swatchBtn.addEventListener('click', e => {
-      e.stopPropagation();
-      const isOpen = pickerEl.classList.toggle('open');
-      if (isOpen) openPickerIds.add(dev.device_id);
-      else openPickerIds.delete(dev.device_id);
-    });
-  }
-}
 
 // ── Chip (unassigned strip only) ─────────────────────────────────────────────
 
@@ -2260,7 +2339,8 @@ async function removeEffect(roomId) {
   } catch (e) { showToast(`Effect remove error: ${e.message}`, true); }
 }
 
-async function sendRoomCommand(roomId, body, room) {
+async function sendRoomCommand(roomId, body, room, isGlobal = false) {
+  if (!isGlobal) globalLightState = null;
   clearRoomActiveScene(roomId);
   // Optimistic update
   if (room) {
@@ -2290,6 +2370,7 @@ async function sendRoomCommand(roomId, body, room) {
 }
 
 async function sendDeviceCommand(deviceId, body) {
+  globalLightState = null;
   const owningRoom = roomsData.find(r => r.device_ids.includes(deviceId));
   if (owningRoom) clearRoomActiveScene(owningRoom.id);
   try {
