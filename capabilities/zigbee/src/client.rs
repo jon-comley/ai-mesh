@@ -141,18 +141,11 @@ impl ZigbeeClient {
                         } else if topic == "zigbee2mqtt/bridge/state" {
                             // z2m publishes {"state":"online"} on connect and its Last Will
                             // {"state":"offline"} (or plain "offline") when it disconnects.
-                            let raw = std::str::from_utf8(p.payload.as_ref()).unwrap_or("");
-                            let online = if raw.trim() == "online" {
-                                true
-                            } else if raw.trim() == "offline" {
-                                false
-                            } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
-                                v.get("state").and_then(|s| s.as_str()) == Some("online")
-                            } else {
+                            let Some(online) = parse_bridge_online(p.payload.as_ref()) else {
                                 continue;
                             };
                             info!(
-                                "zigbee: bridge state → {}",
+                                "zigbee: bridge state -> {}",
                                 if online { "online" } else { "offline" }
                             );
                             let _ = tx_loop.send(ZigbeeEvent::BridgeState { online });
@@ -266,6 +259,24 @@ fn parse_group_names(payload: &[u8]) -> Vec<String> {
         .iter()
         .filter_map(|e| e.get("friendly_name")?.as_str().map(String::from))
         .collect()
+}
+
+/// Parse a `zigbee2mqtt/bridge/state` payload into an online flag.
+/// Accepts plain `online`/`offline` or `{"state":"online"|"offline"}`.
+/// Returns `None` for unrecognised payloads (caller skips them).
+fn parse_bridge_online(payload: &[u8]) -> Option<bool> {
+    let raw = std::str::from_utf8(payload).unwrap_or("").trim();
+    match raw {
+        "online" => Some(true),
+        "offline" => Some(false),
+        _ => serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|v| {
+                v.get("state")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "online")
+            }),
+    }
 }
 
 fn parse_state_report(topic: &str, payload: &[u8], node_id: &str) -> Option<LightStateReport> {
@@ -442,6 +453,26 @@ mod tests {
             parse_state_report("zigbee2mqtt/bridge/state", br#"{"state":"online"}"#, "pi1")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn parse_bridge_online_plain_strings() {
+        assert_eq!(parse_bridge_online(b"online"), Some(true));
+        assert_eq!(parse_bridge_online(b"offline"), Some(false));
+        assert_eq!(parse_bridge_online(b"  online  "), Some(true)); // trimmed
+    }
+
+    #[test]
+    fn parse_bridge_online_json_forms() {
+        assert_eq!(parse_bridge_online(br#"{"state":"online"}"#), Some(true));
+        assert_eq!(parse_bridge_online(br#"{"state":"offline"}"#), Some(false));
+    }
+
+    #[test]
+    fn parse_bridge_online_unrecognised_is_none() {
+        assert_eq!(parse_bridge_online(b"garbage"), None);
+        assert_eq!(parse_bridge_online(br#"{"foo":"bar"}"#), None);
+        assert_eq!(parse_bridge_online(b""), None);
     }
 
     #[test]

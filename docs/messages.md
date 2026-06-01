@@ -82,6 +82,17 @@ Pushed by the coordinator when the operator calls `POST /api/nodes/{id}/heartbea
 
 ---
 
+## ZigbeeStatus { online: bool }
+Sent **lighting node → coordinator** when the Zigbee bridge (zigbee2mqtt) goes up or down.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `online` | bool | `true` when zigbee2mqtt is connected, `false` when it disconnects/crashes |
+
+The lighting capability emits this from two signals: the `zigbee2mqtt/bridge/state` MQTT topic (z2m's own online/offline Last Will — see `parse_bridge_online`), and an MQTT-broker connection loss (`ConnectionLost`). The coordinator forwards it to dashboard clients as `DashboardEvent::ZigbeeStatus`, which drives the offline banner and disables all light controls. Note: when zigbee2mqtt crashes *before* ever connecting to the broker, no bridge/state Last Will is published, so the dashboard additionally infers "offline" client-side when rooms exist but no devices have reported (`inferZigbeeStatus` in `rooms.js`).
+
+---
+
 ## HardwareReport(HardwareSpec)
 Sent once at agent startup.
 
