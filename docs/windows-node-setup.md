@@ -398,6 +398,8 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 **✅ CONFIRMED ROOT CAUSE (2026-05-28):** AMD fTPM (firmware TPM) — see incident entry below. Fix: disable fTPM in BIOS.
 
+**⚠️ REGRESSED 2026-06-02:** the `0x133`/`param2=0x1e00` storm returned (5 dumps) — fTPM appears to have re-enabled itself (BIOS defaults restored after a power event / suspected weak CMOS battery). Re-disable fTPM in BIOS. See 2026-06-02 entry.
+
 **Diagnostics — run after any recovery:**
 ```bash
 ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
@@ -502,6 +504,33 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
   1. Get machine stable long enough to install AMD Adrenalin 26.5.2 + chipset 8.05.04.516
   2. Verify `Security Device Support` is Disabled in BIOS after every reinstall
   3. Run `install-node-windows.ps1` once SSH is stable to apply all hardening settings
+
+---
+
+#### 2026-06-02 — fTPM DPC_WATCHDOG storm RETURNS (regression) + household power cut
+
+- **Two distinct events today, do not conflate them:**
+
+  **(A) DPC_WATCHDOG crash storm — regression of the 2026-05-28 fTPM fix.** Five `0x00000133` bugchecks since the previous evening, all with the fTPM signature `param2 = 0x1e00` (sampled two; identical to every Type A crash):
+    | Local time (BST) | Minidump |
+    |------------------|----------|
+    | 2026-06-01 22:17:53 | `060126-8640-01.dmp` |
+    | 2026-06-02 06:10:50 | `060226-8531-01.dmp` |
+    | 2026-06-02 06:33:04 | `060226-8671-01.dmp` (0x133, param2 `0x1e00` confirmed) |
+    | 2026-06-02 06:55:19 | `060226-8500-01.dmp` (0x133, param2 `0x1e00` confirmed) |
+    | 2026-06-02 07:01:40 | `060226-8687-01.dmp` |
+
+    Same code path, same param2, idle-triggered — textbook fTPM. The 2026-05-28 BIOS fix has come undone. Most likely **fTPM got re-enabled in BIOS** (BIOS defaults restored — the documented trigger is a CMOS reset; a power event or a weakening CMOS battery is the prime suspect here since no one touched the BIOS). The 2026-05-31 note already warned that "Security Device Support = Disabled" may only hide TPM from Windows while the AMD PSP keeps running at firmware level — consistent with crashes resuming despite that setting appearing disabled.
+
+  **(B) Household power cut — separate, not a crash.** `Event 41` + `6008` at **16:36:43**, with **no `1001` bugcheck** = clean power loss, not a BSOD. This matches the whole-house power cut (pi1 also lost power but recovered cleanly). After power returned the machine **did not auto-recover** — down ~56 min until a physical power-button reset at **17:32:45**. Either the BIOS power-state-after-AC-loss is set to "stay off," or it hung on the first post-cut boot. Worth setting BIOS "Restore on AC Power Loss = Power On" so an always-on compute node self-heals after a cut without a house call.
+
+- **Driver at time:** still `32.0.31007.5012` (2026-05-12). The Adrenalin 26.5.2 upgrade attempted 2026-05-31 **still has not persisted** — but per established root cause the driver is innocent for `0x133`; fTPM is the cause.
+- **Current state (post physical reset 17:32:45):** stable, agent reconnected to coordinator, `qwen2.5:7b` Ready, heartbeat ~220 ms. Healthy for now — but it **will** storm again until fTPM is genuinely disabled.
+- **Action required (in priority order):**
+  1. **Re-enter BIOS and verify/disable fTPM** — Advanced → AMD PBS → fTPM Switch = Disabled (and Trusted Computing → Security Device Support = Disabled). This is the actual fix; everything else is secondary.
+  2. Set BIOS **Restore on AC Power Loss = Power On** so the node recovers itself after a power cut.
+  3. Re-attempt the Adrenalin 26.5.2 + chipset 8.05.04.516 upgrade (clean-utility first) while it's stable.
+  4. Reinforces the standing plan to rebuild beelink on a leaner OS (Win IoT Enterprise LTSC) or move it to Linux to escape the Windows/AMD-PSP problem class entirely.
 
 ---
 
