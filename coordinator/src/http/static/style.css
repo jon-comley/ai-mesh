@@ -1168,7 +1168,8 @@ body {
   border-color: var(--accent);
 }
 /* Trigger shows the room's colour as a filled dot when all bulbs match */
-.room-ctrl-trigger.room-colour-dot {
+.room-ctrl-trigger.room-colour-dot,
+.room-ctrl-trigger.room-temp-dot {
   border-radius: 50%;
   border: 2px solid var(--border);
   min-width: 24px;
@@ -1177,7 +1178,9 @@ body {
   padding: 0;
 }
 .room-ctrl-trigger.room-colour-dot:hover,
-.room-ctrl-trigger.room-colour-dot.active {
+.room-ctrl-trigger.room-colour-dot.active,
+.room-ctrl-trigger.room-temp-dot:hover,
+.room-ctrl-trigger.room-temp-dot.active {
   border-color: var(--accent);
 }
 .room-ctrl-mode-btn {
@@ -1664,20 +1667,27 @@ body {
   align-items: center;
   flex-shrink: 0;
 }
+/* A mode button is either a glyph ICON (inactive domain) or a filled DOT
+   (active domain — background set inline). The ring marks the open control. */
 .lc-mode-btn {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  border: 2px solid var(--border);
+  border: 2px solid transparent;
   padding: 0;
   cursor: pointer;
   flex-shrink: 0;
-  opacity: 0.55;
-  transition: opacity 0.15s, box-shadow 0.15s, transform 0.1s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  background: none;
+  transition: box-shadow 0.15s, transform 0.1s, border-color 0.15s;
 }
-.lc-mode-btn:hover { opacity: 0.85; }
+.lc-mode-btn:hover { transform: scale(1.1); }
+.lc-mode-btn.lc-mode-dot { border-color: var(--border); }
 .lc-mode-btn.active {
-  opacity: 1;
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent);
 }
