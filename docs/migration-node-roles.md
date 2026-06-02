@@ -27,7 +27,9 @@ AGENT_ROLE=compute ./agent
 
 Suitable for: medium CPU-bound models.
 
-## Mac mini M4 (Compute)
+## Mac mini M4 (Compute — planned, not yet configured)
+
+> Future node (targeted ~end of July 2026). No `nodes/mac1.env` exists yet; the config below is the intended setup once it joins.
 
 ```
 AGENT_ROLE=compute ./agent

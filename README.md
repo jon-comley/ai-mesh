@@ -54,18 +54,18 @@ the node automatically at the end of provisioning — no separate `set-fingerpri
 just start-cluster
 ```
 
-Starts your laptop's agent (compute role), pushes TLS fingerprint + auth token to all remote nodes, and loads the best-fit model on each compute node. The coordinator on pi1 was already started by `deploy-coordinator` and keeps running whether your laptop is on or off.
+Starts your laptop's local agent (**controller role**, pointed at the coordinator on pi1), pushes TLS fingerprint + auth token to all remote nodes, and loads the best-fit model on each compute node. Model loads are **retried automatically until every compute node reports `Ready`** — a load issued while an agent is still reconnecting after the credential-push restart can otherwise be dropped on the torn connection. The coordinator on pi1 was already started by `deploy-coordinator` and keeps running whether your laptop is on or off.
 
 Credentials are written to `~/.bashrc` automatically.
 
-### 4. Check mesh state
+### 5. Check mesh state
 
 ```
 just nodes          # current node table
 just validate-routing   # confirm inference routes to correct nodes
 ```
 
-### 5. Day-to-day
+### 6. Day-to-day
 
 ```
 just restart-coordinator        # after waking laptop or any coordinator restart
@@ -91,6 +91,8 @@ http://192.168.1.11:9001/?token=<auth-token>
 http://100.100.100.100:9001/?token=<auth-token>
 http://pi1:9001/?token=<auth-token>              (once MagicDNS propagates)
 ```
+
+> **If `pi1:9001` won't load:** the `pi1` and `100.x` addresses only resolve/route when that device is connected to the tailnet. Check that **Tailscale is on** (and the device shows online in `tailscale status` on pi1). On the home LAN you can always fall back to the direct `http://192.168.1.11:9001/` — no token needed there.
 
 A Progressive Web App — open in Chrome/Safari and use "Add to Home Screen" to install it on mobile. Bookmark the remote URL for one-tap access from anywhere (cellular, public WiFi, etc.). Six panels: Nodes, Health, Models, Lighting, Security, Errors. Real-time data via WebSocket (Phase 11.B); the full lighting UI is live (rooms, effects, scenes, device control).
 
@@ -157,8 +159,9 @@ The coordinator schedules inference requests to whichever node has the requested
 | `just update-node <node>` | OTA binary update only (no reprovisioning) |
 | `just load-model <node> <model>` | Load a specific model on a node (e.g. `qwen2.5:7b`); coordinator also accepts `mesh load <model> <size_mb>` with no node — picks best-fit automatically |
 | `just auto-load-model <node>` | Detect node hardware and load the best-fit model automatically |
-| `just start-cluster` | Bring the full cluster up and load the best model on each compute node |
-| `just restart-coordinator` | Post-suspend recovery — restart coordinator + controller, reload models (use after opening laptop) |
+| `just load-models-retry` | Load each compute node's best-fit model, retrying any node that doesn't reach `Ready` (shared by `start-cluster` / `restart-coordinator`) |
+| `just start-cluster` | Bring the full cluster up and load the best model on each compute node (retries each load until `Ready`) |
+| `just restart-coordinator` | Post-suspend recovery — restart coordinator + controller, reload models with retry (use after opening laptop) |
 | `just stop-cluster` | Stop all remote agents and the local coordinator/controller |
 | `just uninstall-node <node>` | Remove agent service from a node |
 | `just sanity-node <node>` | Check service state + node table |

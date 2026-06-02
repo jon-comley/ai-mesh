@@ -4,7 +4,7 @@
 /// one is correctly rejected. Requires a running, TLS-enabled coordinator.
 ///
 /// Environment variables:
-///   MESH_COORDINATOR     host:port (default: 192.168.1.15:9000)
+///   MESH_COORDINATOR     host:port (default: 192.168.1.11:9000 — pi1)
 ///   MESH_TLS_FINGERPRINT SHA-256 cert fingerprint (required unless MESH_INSECURE=1)
 ///   MESH_AUTH_TOKEN      the current valid token (required — chaos tests HMAC)
 ///   MESH_INSECURE        set to "1" to skip TLS cert verification
@@ -392,7 +392,7 @@ async fn main() {
         .expect("failed to install ring crypto provider");
 
     let coordinator =
-        std::env::var("MESH_COORDINATOR").unwrap_or_else(|_| "192.168.1.15:9000".to_string());
+        std::env::var("MESH_COORDINATOR").unwrap_or_else(|_| "192.168.1.11:9000".to_string());
     let token = std::env::var("MESH_AUTH_TOKEN").unwrap_or_default();
     let token = token.trim().to_string();
     let http_port = std::env::var("MESH_HTTP_PORT").unwrap_or_else(|_| "9001".to_string());

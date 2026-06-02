@@ -1173,6 +1173,60 @@ start-agents:
     done
     wait "${pids[@]}"
 
+# Load each compute node's hardware-selected model, retrying any that don't reach Ready.
+# A LoadModel issued while an agent is still (re)connecting after a credential-push
+# restart can be dropped on the torn connection, leaving the node stuck and never
+# Ready — re-issuing the load recovers it. Attempt 1 waits long enough for a fresh
+# model download; the shorter retries target only the nodes still missing.
+# Usage: just load-models-retry
+load-models-retry:
+    #!/usr/bin/env bash
+    set -e
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    [ -f "$STATE" ] && source "$STATE" && export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
+    COORD="{{coordinator_ip}}:{{coordinator_port}}"
+
+    # Build the compute-node list (name:ip pairs).
+    COMPUTE_NODES=()
+    for f in nodes/*.env; do
+        source "$f"
+        NODE_NAME=$(basename "$f" .env)
+        [ "${NODE_ROLE}" = "compute" ] || continue
+        COMPUTE_NODES+=("${NODE_NAME}:${NODE_HOST}")
+    done
+    if [ ${#COMPUTE_NODES[@]} -eq 0 ]; then echo ">>> No compute nodes configured."; exit 0; fi
+
+    for attempt in 1 2 3; do
+        # Match each node's IP against the live node table; a row with "Ready" is done.
+        NODES_OUT=$(cargo run -q -p cli -- --coordinator "${COORD}" nodes 2>/dev/null || true)
+        PENDING=()
+        for entry in "${COMPUTE_NODES[@]}"; do
+            echo "${NODES_OUT}" | grep "${entry##*:}" | grep -q "Ready" || PENDING+=("${entry}")
+        done
+        if [ ${#PENDING[@]} -eq 0 ]; then echo ">>> All compute models Ready."; exit 0; fi
+
+        echo ">>> Load attempt ${attempt}/3 — loading on: ${PENDING[*]%%:*}"
+        for entry in "${PENDING[@]}"; do
+            just auto-load-model "${entry%%:*}" \
+                || echo ">>> Warning: could not load model on ${entry%%:*} (will retry)"
+        done
+
+        PENDING_IPS=()
+        for entry in "${PENDING[@]}"; do PENDING_IPS+=("${entry##*:}"); done
+        if [ "${attempt}" -eq 1 ]; then WAIT_TIMEOUT=300; else WAIT_TIMEOUT=120; fi
+        cargo run -q -p cli -- --coordinator "${COORD}" \
+            wait-ready "${PENDING_IPS[@]}" --timeout "${WAIT_TIMEOUT}" \
+            || echo ">>> Attempt ${attempt}: some models not Ready yet"
+    done
+
+    # Final status after all attempts.
+    NODES_OUT=$(cargo run -q -p cli -- --coordinator "${COORD}" nodes 2>/dev/null || true)
+    STILL=()
+    for entry in "${COMPUTE_NODES[@]}"; do
+        echo "${NODES_OUT}" | grep "${entry##*:}" | grep -q "Ready" || STILL+=("${entry%%:*}")
+    done
+    if [ ${#STILL[@]} -ne 0 ]; then echo ">>> Warning: still not Ready after 3 attempts: ${STILL[*]}"; fi
+
 # Bring the full cluster up and load the best model on each compute node.
 # Leaves everything running — coordinator, controller, and remote agents stay up after the script exits.
 # Usage: just start-cluster
@@ -1275,32 +1329,17 @@ start-cluster: update-portproxy
     done
 
     echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
-    AGENT_ROLE=controller COORDINATOR_IP=127.0.0.1 cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
+    # Point the local controller at the real coordinator — {{coordinator_ip}} is
+    # 127.0.0.1 in local mode and pi1's IP in remote mode.  Hardcoding 127.0.0.1
+    # left this node (OmniLink1) connecting to nothing when the coordinator runs
+    # remotely, so it showed offline/red in the Nodes view.
+    AGENT_ROLE=controller COORDINATOR_IP={{coordinator_ip}} cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
 
     echo ">>> Starting remote compute agents..."
     just start-agents
 
     echo ">>> Loading hardware-selected models on compute nodes..."
-    COMPUTE_NODES=()   # "name:ip" pairs for the wait loop below
-    for f in nodes/*.env; do
-        source "$f"
-        NODE_NAME=$(basename "$f" .env)
-        [ "${NODE_ROLE}" = "compute" ] || continue
-        just auto-load-model ${NODE_NAME} \
-            || echo ">>> Warning: could not load model on ${NODE_NAME} (skipping)"
-        COMPUTE_NODES+=("${NODE_NAME}:${NODE_HOST}")
-    done
-
-    # Collect compute IPs for the live-table wait
-    WAIT_IPS=()
-    for entry in "${COMPUTE_NODES[@]}"; do
-        WAIT_IPS+=("${entry##*:}")
-    done
-
-    echo ""
-    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
-        wait-ready "${WAIT_IPS[@]}" --timeout 600 \
-        || echo ">>> Warning: timed out or aborted before all models were Ready"
+    just load-models-retry
 
     echo ""
     echo ">>> Cluster ready. Run: just validate-routing"
@@ -1416,27 +1455,14 @@ restart-coordinator: update-portproxy
     done
 
     echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
-    AGENT_ROLE=controller COORDINATOR_IP=127.0.0.1 cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
+    # Point the local controller at the real coordinator — {{coordinator_ip}} is
+    # 127.0.0.1 in local mode and pi1's IP in remote mode.  Hardcoding 127.0.0.1
+    # left this node (OmniLink1) connecting to nothing when the coordinator runs
+    # remotely, so it showed offline/red in the Nodes view.
+    AGENT_ROLE=controller COORDINATOR_IP={{coordinator_ip}} cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
 
     echo ">>> Reloading hardware-selected models on compute nodes..."
-    COMPUTE_NODES=()
-    for f in nodes/*.env; do
-        source "$f"
-        NODE_NAME=$(basename "$f" .env)
-        [ "${NODE_ROLE}" = "compute" ] || continue
-        just auto-load-model ${NODE_NAME} \
-            || echo ">>> Warning: could not load model on ${NODE_NAME} (skipping)"
-        COMPUTE_NODES+=("${NODE_NAME}:${NODE_HOST}")
-    done
-
-    WAIT_IPS=()
-    for entry in "${COMPUTE_NODES[@]}"; do
-        WAIT_IPS+=("${entry##*:}")
-    done
-
-    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
-        wait-ready "${WAIT_IPS[@]}" --timeout 120 \
-        || { echo ">>> Nodes did not come Ready in time. Try: just start-cluster"; exit 1; }
+    just load-models-retry
 
     echo ">>> Cluster reconnected. Run: just validate-routing"
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes
