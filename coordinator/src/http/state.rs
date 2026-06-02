@@ -3,7 +3,7 @@ use serde::Serialize;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
 use shared::messages::{LightAction, LightStateReport, NodeRecordLite};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, broadcast, mpsc};
@@ -268,6 +268,11 @@ impl DashboardState {
     /// Availability-only reports (online=false, all payload fields null) only flip the `online`
     /// flag on the existing record to avoid clobbering brightness/colour with nulls.
     pub fn push_lighting_update(&self, report: LightStateReport) {
+        // A Zigbee group publishes state on its base topic exactly like a device.
+        // Never let a known group masquerade as a device in the snapshot.
+        if self.is_known_group(&report.device_id) {
+            return;
+        }
         let devices = {
             let mut snap = self.light_snapshot.lock().unwrap();
             let availability_only = !report.online
@@ -299,10 +304,22 @@ impl DashboardState {
     /// Add placeholder entries for discovered devices that haven't yet reported state.
     /// Broadcasts a LightingUpdate if any new placeholders were added and `emit` is true.
     pub fn push_device_discovery(&self, node_id: &str, devices: Vec<String>, emit: bool) {
+        // Snapshot the group set first (separate lock, released before we take
+        // the light-snapshot lock) so a group name never gets a device placeholder.
+        let groups: HashSet<String> = self
+            .group_snapshot
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         let mut updated = false;
         {
             let mut snap = self.light_snapshot.lock().unwrap();
             for id in devices {
+                if groups.contains(&id) {
+                    continue;
+                }
                 if !snap.contains_key(&id) {
                     snap.insert(
                         id.clone(),
@@ -361,12 +378,19 @@ impl DashboardState {
 
     /// Store groups for a node and broadcast a LightingUpdate with all devices + new groups.
     pub fn push_group_update(&self, node_id: &str, groups: Vec<String>) {
-        {
+        let group_names: HashSet<String> = {
             let mut snap = self.group_snapshot.lock().unwrap();
             snap.retain(|_, v| v != node_id);
             for g in groups {
                 snap.insert(g, node_id.to_owned());
             }
+            snap.keys().cloned().collect()
+        };
+        // Self-heal: a group whose retained state was ingested as a device before
+        // this list arrived now resolves to a group — drop any such device entry.
+        {
+            let mut snap = self.light_snapshot.lock().unwrap();
+            snap.retain(|id, _| !group_names.contains(id));
         }
         if self.tx.receiver_count() > 0 {
             let devices = self.get_light_snapshot();
@@ -409,6 +433,12 @@ impl DashboardState {
     /// Return the node_id responsible for a given group — used to route group commands.
     pub fn get_node_for_group(&self, name: &str) -> Option<String> {
         self.group_snapshot.lock().unwrap().get(name).cloned()
+    }
+
+    /// True if `name` is currently a known Zigbee group (not a device). Used to
+    /// stop a group's base-topic state report from masquerading as a device.
+    pub fn is_known_group(&self, name: &str) -> bool {
+        self.group_snapshot.lock().unwrap().contains_key(name)
     }
 
     /// Store and broadcast the current rooms state.

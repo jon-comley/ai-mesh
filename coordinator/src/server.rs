@@ -647,6 +647,14 @@ async fn process_message(
             None
         }
         MeshMessage::LightState(report) => {
+            // A Zigbee group publishes state on its base topic exactly like a
+            // device. If one slipped past the capability's group filter (a group's
+            // retained state can arrive before its group list on (re)connect),
+            // don't persist or surface it — and scrub any row an earlier slip left.
+            if dashboard.is_some_and(|d| d.is_known_group(&report.device_id)) {
+                registry.lock().unwrap().delete_device(&report.device_id);
+                return None;
+            }
             info!(
                 node_id = %report.node_id,
                 device_id = %report.device_id,
@@ -700,11 +708,16 @@ async fn process_message(
                 dash.push_group_update(&report.node_id, report.groups.clone());
                 dash.push_device_discovery(&report.node_id, report.devices.clone(), true);
             }
-            registry.lock().unwrap().update_light_devices(
-                &report.node_id,
-                report.devices,
-                report.groups,
-            );
+            {
+                let mut reg = registry.lock().unwrap();
+                // Scrub any persisted device rows that are actually groups — a
+                // group's retained state can be saved as a device before its group
+                // list arrives, and that row would otherwise reload every restart.
+                for g in &report.groups {
+                    reg.delete_device(g);
+                }
+                reg.update_light_devices(&report.node_id, report.devices, report.groups);
+            }
             None
         }
         MeshMessage::ZigbeeStatus { online } => {

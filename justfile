@@ -2046,12 +2046,15 @@ deploy-coordinator target_host:
         echo ">>> Warning: State directory $STATE_DIR does not exist or is empty (will be created on first run)"
     fi
 
-    # Step 4: Copy database
-    echo ">>> Step 4: Copying ai_mesh.db to ${TARGET_HOST}..."
-    if [ -f "ai_mesh.db" ]; then
+    # Step 4: Seed database (only if the target has none — never clobber live state)
+    echo ">>> Step 4: Seeding ai_mesh.db on ${TARGET_HOST} (only if absent)..."
+    if ssh ${NODE_USER}@${NODE_HOST} "[ -f /var/lib/ai-mesh/ai_mesh.db ]"; then
+        echo ">>> Live database already present — leaving it untouched (rooms/scenes preserved)"
+    elif [ -f "ai_mesh.db" ]; then
         scp ai_mesh.db ${NODE_USER}@${NODE_HOST}:/var/lib/ai-mesh/
+        echo ">>> Seeded fresh database from repo root"
     else
-        echo ">>> Warning: ai_mesh.db not found in repo root (will be created on first run)"
+        echo ">>> No repo ai_mesh.db and no live DB (will be created on first run)"
     fi
 
     # Step 5: Copy binary
