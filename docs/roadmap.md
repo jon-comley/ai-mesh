@@ -6,9 +6,9 @@
 
 Whole-codebase adversarial bug audit (all Rust crates + frontend JS, partitioned
 into 15 review units; each finding independently verified by a skeptic pass).
-**16 confirmed findings: 2 critical, 4 high, 8 medium, 2 low.** Recorded here for
-triage — not yet fixed. `shared`, `cli`, `capabilities`, `coord-effects-b`, and
-`js-misc` came back clean.
+**15 confirmed findings: 2 critical, 3 high, 8 medium, 2 low — all fixed (2026-06-02).**
+(The original tally said 16/4-high; reconciled to the 15 items actually listed below.)
+`shared`, `cli`, `capabilities`, `coord-effects-b`, and `js-misc` came back clean.
 
 ### 🔴 Critical — unauthenticated DoS (do first)
 
@@ -35,7 +35,7 @@ triage — not yet fixed. `shared`, `cli`, `capabilities`, `coord-effects-b`, an
 - [x] **Partial scene apply returns success** (`coordinator/src/http/api.rs:776,790,805` vs `:817`). color_xy/color_temp/brightness send failures are `let _`-discarded; only the final on/off sets `any_unavailable`, so a partially-applied scene still returns 204. *Fix:* track all four sends.
 - [x] **Optimistic snapshot not rolled back on send failure** (`coordinator/src/http/api.rs:217,223-227`). Snapshot updated before send; on send-fail returns 503 but leaves mutated state, which a later broadcast pushes to clients. *Fix:* roll back on failure, or update only after send succeeds.
 - [x] **WebSocket recv-error busy loop** (`coordinator/src/http/ws.rs:158-162`). `Some(Err(_))` falls into the `_ => {}` arm; a persistent socket error spins `recv()` at 100% CPU. *Fix:* break on `Some(Err(_))` like the send path does.
-- [ ] **Effect `tick()`/`on_handoff()` run while holding runner-state lock** (`coordinator/src/effects/runner.rs:321-326`) — **DEFERRED**. A panicking/slow effect poisons/holds the lock and freezes the runner + HTTP handlers. Safely moving the tick outside the lock needs the effect to be extractable from the instance map (Option-swap or sentinel) with a re-check on relock to handle a concurrent instance removal — a structural refactor, not an in-place edit, so deferred to avoid introducing a worse concurrency bug. The misleading "outside the lock" comment has been corrected in code to state the tick runs *inside* the lock.
+- [x] **Effect `tick()`/`on_handoff()` run while holding runner-state lock** (`coordinator/src/effects/runner.rs`). A panicking/slow effect poisoned/held the lock and froze the runner + HTTP handlers. *Fixed (2026-06-02):* `tick_one` now `Option::take`s the effect out of the instance under the lock, runs `tick()`/`on_handoff()`/`serialize_internal_state()` **outside** the lock, then re-locks to apply schedule + drift bookkeeping and put the effect back — discarding the output if the instance was cleared or its effect replaced mid-tick. `ActiveEffectInstance` gained a cached `effect_id` so concurrent lock-holders never touch the (transiently absent) boxed effect. All effect calls are now off the lock; 104 effects + 14 runner tests green.
 - [x] **Aurora seed can be ≥ 1.0** (`coordinator/src/effects/aurora.rs:64`). `raw / u32::MAX` in f32 can round to ≥ 1.0 near `u32::MAX`, breaking the documented `[0,1)` phase (~1 in 14M). *Fix:* divide by `4294967296.0`.
 - [x] **color_temp divide-by-zero → inf cast** (`coordinator/src/intent.rs:307`). Untrusted `value:0` → `1e6/0 = inf` cast to u16 = 65535 (nonsensical command; not UB but bad input accepted). *Fix:* clamp/validate Kelvin range before dividing.
 - [x] **Document pointerdown listener leak in light popover** (`coordinator/src/http/static/rooms.js:847`). If a card is re-rendered (`render()` → `innerHTML=''`) while a temp/colour section is open, `_lcOpenDismiss`/`lcOutside` is never disarmed; listeners accumulate. *Fix:* guard `render()` against open popovers, or disarm on detach.
@@ -44,6 +44,9 @@ triage — not yet fixed. `shared`, `cli`, `capabilities`, `coord-effects-b`, an
 
 - [x] **`updateOpeningCone(id)` ignores its arg** (`coordinator/src/http/static/layout.js:3060`). Callers pass an id; definition takes none (redraws all). Harmless but misleading API. *Fix:* drop the param or use it.
 - [x] **Popover scroll-offset inconsistency** (`coordinator/src/http/static/layout.js`). The audit flagged the *bulb* popover for omitting `window.scrollX/scrollY` — but `.layout-popover` is `position: fixed`, so viewport coords (getScreenCTM) are correct and the bulb popover was right. The real (inverted) bug was the *opening* popover (`:3620-3621`) **adding** scroll offsets to a fixed element, mis-positioning it when scrolled. *Fixed:* removed the scroll offsets from the opening popover to match the bulb one.
+
+> _Operational finding (2026-06-02, not part of the 16-bug code audit):_
+- [ ] **Live pi1 DB retains the purged `rooms.solar_enabled` column** — F-Effects-2 dropped `rooms.solar_enabled` (and `light_states.solar_enabled`) from the schema, but pi1's live `/var/lib/ai-mesh/ai_mesh.db` still has `rooms.solar_enabled` (verified 2026-06-02). The live DB predates that migration. Harmless today (named-column queries ignore the extra column, and the coordinator runs fine against it), so deferred. Only matters if a future migration assumes the column is gone, or do a clean rebuild of the live DB. Rooms/scenes data itself is intact and consistent.
 
 ---
 

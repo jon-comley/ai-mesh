@@ -54,7 +54,11 @@ const DRIFT_WARN_THROTTLE_MS: u64 = 60_000;
 /// One live effect on one room.
 struct ActiveEffectInstance {
     room_id: String,
-    effect: Box<dyn Effect>,
+    /// `None` only transiently while the runner has taken the effect out to run
+    /// its `tick()` outside the state lock (see `tick_one`). `effect_id` holds
+    /// the identity so other lock-holders never need the boxed effect itself.
+    effect: Option<Box<dyn Effect>>,
+    effect_id: String,
     params: serde_json::Value,
     /// Device IDs the user has manually overridden out of this effect.
     overrides: std::collections::HashSet<String>,
@@ -202,7 +206,7 @@ impl EffectRunner {
         // changed effect_id (effect swap).
         for row in live_rows {
             let needs_construct = match state.instances.get(&row.room_id) {
-                Some(inst) => inst.effect.id() != row.effect_id,
+                Some(inst) => inst.effect_id != row.effect_id,
                 None => true,
             };
             if !needs_construct {
@@ -237,7 +241,8 @@ impl EffectRunner {
             let started_at_ms = row.started_at_ms.max(0) as u64;
             let instance = ActiveEffectInstance {
                 room_id: row.room_id.clone(),
-                effect,
+                effect: Some(effect),
+                effect_id: row.effect_id.clone(),
                 params,
                 overrides,
                 started_at_ms,
@@ -290,17 +295,22 @@ impl EffectRunner {
             .build_ctx_inputs(room_id)
             .ok_or_else(|| "room/devices not available".to_string())?;
 
-        // Snapshot what the dispatch/persist steps need under the runner-state
-        // lock, then do the persistence and command dispatch *outside* it.
-        // NOTE: effect.tick()/on_handoff() still run inside the lock below — a
-        // panicking or slow effect therefore poisons/holds it and stalls the
-        // runner. Moving the tick out needs the effect to be extractable from the
-        // instance map with a re-check on relock; tracked in roadmap
-        // ("effect tick/on_handoff run while holding runner-state lock").
-        let (commands, internal_state, persist_cadence, effect_id_owned) = {
+        // Phase 1 — under the runner-state lock, TAKE the effect out of the
+        // instance (`Option::take`) and snapshot everything the tick needs.
+        // Removing the effect lets us run the potentially-slow-or-panicking
+        // tick()/on_handoff()/serialize() *outside* the lock, so a misbehaving
+        // effect can no longer poison or hold the lock and stall the runner +
+        // HTTP handlers. The instance keeps `effect: None` for the duration;
+        // `effect_id` still identifies it for any concurrent lock-holder.
+        let (mut effect, params, active_bulbs, started_at_ms, handoff) = {
             let mut state = self.state.lock().unwrap();
             let Some(inst) = state.instances.get_mut(room_id) else {
                 return Err("instance gone".into());
+            };
+            let Some(effect) = inst.effect.take() else {
+                // Only this single runner task takes the effect, and it always
+                // puts it back before the next tick — so this should not happen.
+                return Err("effect already taken (concurrent tick?)".into());
             };
             // Filter out bulbs the user has manually overridden.
             let active_bulbs: Vec<BulbInRoom> = if inst.overrides.is_empty() {
@@ -312,69 +322,101 @@ impl EffectRunner {
                     .cloned()
                     .collect()
             };
+            let handoff = inst.handoff_pending;
+            inst.handoff_pending = false;
+            (
+                effect,
+                inst.params.clone(),
+                active_bulbs,
+                inst.started_at_ms,
+                handoff,
+            )
+        };
+
+        // Phase 2 — run the effect with NO lock held.
+        let effect_id_owned = effect.id().to_string();
+        let period = effect.cadence().period_ms();
+        let commands = {
             let ctx = EffectCtx {
                 room: &room_ctx,
                 bulbs: &active_bulbs,
                 openings: &openings,
                 solar: *solar,
                 now_ms,
-                started_at_ms: inst.started_at_ms,
-                params: &inst.params,
+                started_at_ms,
+                params: &params,
                 spatial: SpatialHelpers::new(&room_ctx, &openings),
             };
-            let commands = if inst.handoff_pending {
-                inst.handoff_pending = false;
-                inst.effect.on_handoff(&ctx)
+            if handoff {
+                effect.on_handoff(&ctx)
             } else {
-                inst.effect.tick(&ctx)
-            };
-            let internal_state = match inst.persist_cadence {
-                PersistCadence::OnEnableOnly if inst.last_persist_ms.is_none() => {
-                    inst.effect.serialize_internal_state()
-                }
-                PersistCadence::Periodic(d) => {
-                    let since = inst
-                        .last_persist_ms
-                        .map(|t| now_ms.saturating_sub(t))
-                        .unwrap_or(u64::MAX);
-                    if since >= d.as_millis() as u64 {
-                        inst.effect.serialize_internal_state()
-                    } else {
-                        None
+                effect.tick(&ctx)
+            }
+        };
+        // `serialize_internal_state()` is a cheap pure getter; calling it every
+        // tick (off the lock) keeps *all* effect calls off the lock. Whether we
+        // actually persist the result is decided under the lock below.
+        let serialized = effect.serialize_internal_state();
+
+        // Phase 3 — relock, apply schedule + drift bookkeeping, and put the
+        // effect back. Re-check the slot first: while we ticked unlocked, the
+        // instance may have been cleared (removed) or its effect replaced (a new
+        // `Some`) by an HTTP handler or a DB reconcile. In either case we drop
+        // our now-stale effect and discard its output.
+        let internal_state = {
+            let mut state = self.state.lock().unwrap();
+            match state.instances.get_mut(room_id) {
+                None => return Ok(()),                                // cleared mid-tick
+                Some(inst) if inst.effect.is_some() => return Ok(()), // replaced mid-tick
+                Some(inst) => {
+                    let internal_state = match inst.persist_cadence {
+                        PersistCadence::OnEnableOnly if inst.last_persist_ms.is_none() => {
+                            serialized
+                        }
+                        PersistCadence::Periodic(d) => {
+                            let since = inst
+                                .last_persist_ms
+                                .map(|t| now_ms.saturating_sub(t))
+                                .unwrap_or(u64::MAX);
+                            if since >= d.as_millis() as u64 {
+                                serialized
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    inst.next_tick_at_ms = now_ms + period;
+                    if internal_state.is_some() {
+                        inst.last_persist_ms = Some(now_ms);
                     }
+
+                    // Cadence drift EWMA — warn if observed inter-tick interval
+                    // sustains >20% drift from the declared cadence for 30 s.
+                    if let Some(report) = update_drift_state(DriftInputs {
+                        now_ms,
+                        declared_ms: period,
+                        last_tick_at_ms: inst.last_tick_at_ms,
+                        ewma_interval_ms: &mut inst.ewma_interval_ms,
+                        drifted_since_ms: &mut inst.drifted_since_ms,
+                        last_warned_ms: &mut inst.last_warned_ms,
+                    }) {
+                        warn!(
+                            room_id = %inst.room_id,
+                            effect_id = %effect_id_owned,
+                            declared_ms = report.declared_ms,
+                            observed_ewma_ms = report.observed_ms,
+                            drift_frac = report.drift_frac,
+                            "effect cadence drift sustained for 30 s — Zigbee backpressure or runner overload",
+                        );
+                    }
+                    inst.last_tick_at_ms = Some(now_ms);
+
+                    // Put the effect back now that bookkeeping is done.
+                    inst.effect = Some(effect);
+                    internal_state
                 }
-                _ => None,
-            };
-            let persist_cadence = inst.persist_cadence;
-            let effect_id_owned = inst.effect.id().to_string();
-            let period = inst.effect.cadence().period_ms();
-            inst.next_tick_at_ms = now_ms + period;
-            if internal_state.is_some() {
-                inst.last_persist_ms = Some(now_ms);
             }
-
-            // Cadence drift EWMA — warn if observed inter-tick interval
-            // sustains >20% drift from the effect's declared cadence for 30 s.
-            if let Some(report) = update_drift_state(DriftInputs {
-                now_ms,
-                declared_ms: period,
-                last_tick_at_ms: inst.last_tick_at_ms,
-                ewma_interval_ms: &mut inst.ewma_interval_ms,
-                drifted_since_ms: &mut inst.drifted_since_ms,
-                last_warned_ms: &mut inst.last_warned_ms,
-            }) {
-                warn!(
-                    room_id = %inst.room_id,
-                    effect_id = %effect_id_owned,
-                    declared_ms = report.declared_ms,
-                    observed_ewma_ms = report.observed_ms,
-                    drift_frac = report.drift_frac,
-                    "effect cadence drift sustained for 30 s — Zigbee backpressure or runner overload",
-                );
-            }
-            inst.last_tick_at_ms = Some(now_ms);
-
-            (commands, internal_state, persist_cadence, effect_id_owned)
         };
 
         // Persist internal state outside the runner lock.
@@ -383,7 +425,6 @@ impl EffectRunner {
             let mut reg = self.registry.lock().unwrap();
             reg.update_effect_internal_state(room_id, &effect_id_owned, Some(&json));
         }
-        let _ = persist_cadence; // future: drive PersistCadence::Periodic schedule
 
         // Dispatch commands with dedup.
         self.dispatch(room_id, &effect_id_owned, &bulbs, commands);
@@ -570,7 +611,7 @@ impl EffectRunner {
             let overrides: Vec<String> = inst.overrides.iter().cloned().collect();
             self.dashboard.push_effect_update(
                 inst.room_id.clone(),
-                Some(inst.effect.id().to_string()),
+                Some(inst.effect_id.clone()),
                 inst.params.clone(),
                 overrides,
             );
