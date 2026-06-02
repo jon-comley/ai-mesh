@@ -34,32 +34,14 @@ Add your WSL public key to `C:\Users\<user>\.ssh\authorized_keys` so that SSH fr
 
 ## 1. Network Setup
 
-### Firewall — allow port 9000 inbound (Windows)
-
-The agent connects *outbound* from the Windows machine to the coordinator, but the coordinator lives in WSL2 and must be reachable from the LAN. Windows exposes it via a portproxy rule. Allow the port through the Windows firewall first:
+The agent connects **outbound** from the Windows machine to the coordinator on **pi1** (`192.168.1.11:9000`). Outbound connections are allowed by default, so **no inbound firewall rule or portproxy is required on the Windows node**. Just confirm the node can reach pi1:
 
 ```powershell
-# Run in elevated PowerShell on the Windows machine
-netsh advfirewall firewall add rule `
-    name="ai-mesh coordinator" dir=in action=allow protocol=TCP localport=9000
+# Run on the Windows machine
+Test-NetConnection 192.168.1.11 -Port 9000   # expect TcpTestSucceeded : True
 ```
 
-### Portproxy — forward LAN:9000 → WSL2:9000
-
-WSL2 gets a new internal IP every time Windows restarts, so the portproxy rule goes stale. Run this from WSL whenever you need to update it:
-
-```bash
-just update-portproxy   # updates automatically if IP has changed, no-op if current
-```
-
-Or manually in elevated PowerShell:
-```powershell
-$wslIp = (wsl hostname -I).Trim().Split()[0]
-netsh interface portproxy delete v4tov4 listenport=9000 listenaddress=0.0.0.0
-netsh interface portproxy add    v4tov4 listenport=9000 listenaddress=0.0.0.0 connectport=9000 connectaddress=$wslIp
-```
-
-`update-portproxy` is a dependency of `just run-coordinator` and `just sanity-node beelink1`, so it runs automatically for those recipes.
+> **Legacy:** earlier versions ran the coordinator in WSL2 on the laptop, which required a Windows firewall rule plus a `netsh` portproxy (`just update-portproxy`) to expose it on the LAN. With the coordinator on pi1 that setup is no longer needed for compute nodes.
 
 ---
 
@@ -109,7 +91,7 @@ This step **must be done locally on the Windows machine** (not over SSH) because
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp 192.168.1.15
+& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp 192.168.1.11
 ```
 
 The provision script does:
@@ -243,8 +225,8 @@ Prevention: the agent must **not spawn child processes** during normal operation
 
 Check in order:
 1. Is the service RUNNING? `ssh user@host "sc.exe query ai-mesh-agent"`
-2. Is the portproxy current? `just update-portproxy`
-3. Can the Windows machine reach the coordinator? On the Windows machine: `Test-NetConnection 192.168.1.15 -Port 9000`
+2. Can the Windows machine reach the coordinator on pi1? On the Windows machine: `Test-NetConnection 192.168.1.11 -Port 9000`
+3. Is the service env pointed at pi1? `COORDINATOR_IP` should be `192.168.1.11` (see "Service environment variables" below).
 4. Are there stale registry entries obscuring the new entry? `just reset` clears them.
 5. Check the agent log: `just logs-node beelink1`
 
@@ -265,13 +247,9 @@ ssh user@host "sc.exe start ai-mesh-agent"
 
 `LocalAccountTokenFilterPolicy` is not set. Run step 2 of provisioning locally on the Windows machine (elevated PowerShell), then retry.
 
-### Portproxy stale after WSL2 restart
+### (Legacy) Portproxy stale after WSL2 restart
 
-WSL2 gets a new internal IP every time Windows restarts. The portproxy rule points to the old IP. Run:
-```bash
-just update-portproxy
-```
-A UAC prompt will appear on the Windows host to allow the elevation needed to update the netsh rule.
+No longer relevant for compute nodes — they connect directly to pi1. This only applied when the coordinator ran in WSL2 on the laptop, where the portproxy rule went stale on each Windows restart (`just update-portproxy` refreshed it).
 
 ### Stale node entries accumulating in the registry
 
@@ -307,10 +285,10 @@ idempotent (llama-server and other already-present steps are skipped).
 NSSM `AppEnvironmentExtra` requires each variable as a **separate argument**, not semicolon-separated:
 ```powershell
 # CORRECT
-nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.15" "AGENT_ROLE=compute"
+nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.11" "AGENT_ROLE=compute"
 
 # WRONG — produces a single malformed variable
-nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.15;AGENT_ROLE=compute"
+nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.11;AGENT_ROLE=compute"
 ```
 
 Verify what NSSM has stored:
@@ -322,11 +300,11 @@ nssm get ai-mesh-agent AppEnvironmentExtra
 
 When setting env vars inline in cmd.exe, it is easy to include a trailing space:
 ```cmd
-REM WRONG — COORDINATOR_IP = "192.168.1.15 " (note trailing space)
-set COORDINATOR_IP=192.168.1.15 && agent.exe
+REM WRONG — COORDINATOR_IP = "192.168.1.11 " (note trailing space)
+set COORDINATOR_IP=192.168.1.11 && agent.exe
 
 REM RIGHT — quotes prevent trailing space
-set "COORDINATOR_IP=192.168.1.15" && agent.exe
+set "COORDINATOR_IP=192.168.1.11" && agent.exe
 ```
 
 ### AMD GPU not detected / llama-server crashes during inference

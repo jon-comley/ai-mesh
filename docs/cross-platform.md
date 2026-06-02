@@ -27,12 +27,12 @@ required — only the compute nodes must match the platform-specific agent.
 
 ## 2. Cluster Composition (Current Hardware)
 
-| Node        | OS                | Role       | Notes |
-|-------------|-------------------|------------|-------|
-| OmniBook7   | WSL Ubuntu        | Controller | Runs coordinator + CLI only |
-| beelink1    | Windows 11 Pro    | Compute    | Windows agent + llama-server (Vulkan, AMD Radeon 780M) |
-| pi1         | Ubuntu (ARM64)    | Compute    | Linux ARM64 agent + llama-server |
-| mac1        | macOS (Apple)     | Compute    | Pending (~end of July 2026) |
+| Node        | OS                | Role                  | Notes |
+|-------------|-------------------|-----------------------|-------|
+| pi1         | Ubuntu (ARM64)    | **Coordinator** + Compute | Runs the always-on coordinator (systemd) + Linux ARM64 agent + llama-server |
+| OmniBook7   | WSL Ubuntu        | Controller            | Local agent + CLI; connects to the coordinator on pi1 |
+| beelink1    | Windows 11 Pro    | Compute               | Windows agent + llama-server (Vulkan, AMD Radeon 780M) |
+| mac1        | macOS (Apple)     | Compute (planned)     | Not yet configured — targeted ~end of July 2026 |
 
 This mixed-OS cluster is **intentional** and fully supported.
 

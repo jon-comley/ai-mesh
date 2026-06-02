@@ -35,11 +35,11 @@ What it does:
 
 After setup:
 ```bash
-just provision-all    # deploy agent to all nodes with this machine's coordinator IP
+just provision-all    # deploy agent to all nodes, pointed at pi1 (the coordinator, 192.168.1.11)
 just start-cluster    # bring the full cluster up
 ```
 
-**When moving to a new laptop:** update `coordinator_ip` at the top of `justfile` to the new machine's LAN IP, then run `just setup-controller` and `just provision-all`.
+**When moving to a new laptop:** `coordinator_ip` is pi1's IP, not the laptop's — leave it unchanged. Just run `just setup-controller` on the new machine. (Only update `coordinator_ip` and re-run `just provision-all` if **pi1's** IP changes.)
 
 ---
 
@@ -192,7 +192,7 @@ Defined at the top of `justfile`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `coordinator_ip` | `192.168.1.15` | Windows host LAN IP — remote nodes connect here via portproxy. Update when moving to a new machine, then run `just provision-all` |
+| `coordinator_ip` | `192.168.1.11` | pi1's LAN IP — where the coordinator runs (always-on systemd service); all nodes connect here. This is pi1's IP, **not** the laptop's; only change it if pi1's IP changes, then run `just provision-all` |
 | `coordinator_port` | `9000` | Coordinator TCP port |
 | `MESH_HTTP_PORT` | `9001` | Dashboard HTTP port (env var, not a justfile variable) |
 
