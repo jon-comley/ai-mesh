@@ -1103,16 +1103,24 @@ impl Registry {
     }
 
     pub fn reorder_room_devices(&mut self, room_id: &str, ids: &[String]) {
-        let Ok(tx) = self.conn.transaction() else {
-            return;
+        let tx = match self.conn.transaction() {
+            Ok(tx) => tx,
+            Err(e) => {
+                warn!(error = %e, "reorder_room_devices: could not open transaction");
+                return;
+            }
         };
         for (i, device_id) in ids.iter().enumerate() {
-            let _ = tx.execute(
+            if let Err(e) = tx.execute(
                 "UPDATE room_devices SET position = ?1 WHERE room_id = ?2 AND device_id = ?3",
                 params![i as i64, room_id, device_id],
-            );
+            ) {
+                warn!(error = %e, "reorder_room_devices update failed");
+            }
         }
-        let _ = tx.commit();
+        if let Err(e) = tx.commit() {
+            warn!(error = %e, "reorder_room_devices commit failed");
+        }
     }
 
     pub fn remove_device_from_room(&mut self, room_id: &str, device_id: &str) {
@@ -1125,12 +1133,26 @@ impl Registry {
     }
 
     /// Sets `position` for each room id in order (position = index in slice).
+    /// All updates run in one transaction so an ungraceful shutdown can't leave
+    /// the room ordering half-applied (gaps/duplicate positions).
     pub fn set_room_positions(&mut self, ordered_ids: &[&str]) {
+        let tx = match self.conn.transaction() {
+            Ok(tx) => tx,
+            Err(e) => {
+                warn!(error = %e, "set_room_positions: could not open transaction");
+                return;
+            }
+        };
         for (i, id) in ordered_ids.iter().enumerate() {
-            let _ = self.conn.execute(
+            if let Err(e) = tx.execute(
                 "UPDATE rooms SET position = ?1 WHERE id = ?2",
                 params![i as i64, id],
-            );
+            ) {
+                warn!(error = %e, "set_room_positions update failed");
+            }
+        }
+        if let Err(e) = tx.commit() {
+            warn!(error = %e, "set_room_positions commit failed");
         }
     }
 

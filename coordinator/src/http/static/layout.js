@@ -2995,7 +2995,7 @@ function renderOpening(o) {
 
   layer.appendChild(g);
   placedOpenings[o.id] = { ...o, el: g };
-  updateOpeningCone(o.id);
+  updateOpeningCone();
   syncOpeningToThree(o);
   rebuildPlacedPanel();
 }
@@ -3021,7 +3021,7 @@ function updateOpeningRectAttrs(openingId) {
       handles[i].setAttribute('cursor', hCursor);
     }
   }
-  updateOpeningCone(openingId);
+  updateOpeningCone();
   if (threeIs3D) syncOpeningToThree(placedOpenings[openingId]);
 
   // Keep the sidebar inputs in sync without a full panel rebuild.
@@ -3574,7 +3574,7 @@ function openOpeningPopover(openingId, anchorEl) {
   slider.addEventListener('input', () => {
     o.transmission = parseInt(slider.value) / 100;
     transLabel.textContent = `Transmission: ${slider.value}%`;
-    updateOpeningCone(openingId);
+    updateOpeningCone();
   });
   slider.addEventListener('change', () => {
     patchOpening(openingId, { transmission: o.transmission });
@@ -3595,7 +3595,7 @@ function openOpeningPopover(openingId, anchorEl) {
       slider.value = Math.round(p.v * 100);
       transLabel.textContent = `Transmission: ${Math.round(p.v * 100)}%`;
       patchOpening(openingId, { transmission: p.v });
-      updateOpeningCone(openingId);
+      updateOpeningCone();
     });
     presetRow.appendChild(btn);
   }
@@ -3617,8 +3617,11 @@ function openOpeningPopover(openingId, anchorEl) {
   pt.x = r.x + r.w / 2;
   pt.y = r.y + r.h / 2;
   const sp = pt.matrixTransform(svg.getScreenCTM());
-  pop.style.left = `${Math.min(sp.x + window.scrollX + 12, window.innerWidth - 220)}px`;
-  pop.style.top  = `${Math.min(sp.y + window.scrollY + 12, window.innerHeight - 300)}px`;
+  // .layout-popover is position:fixed, so getScreenCTM's viewport coords are
+  // already correct — do NOT add window.scrollX/scrollY (that would shift the
+  // popover off the opening by the scroll amount). Matches the bulb popover.
+  pop.style.left = `${Math.min(sp.x + 12, window.innerWidth - 220)}px`;
+  pop.style.top  = `${Math.min(sp.y + 12, window.innerHeight - 300)}px`;
   document.body.appendChild(pop);
 }
 

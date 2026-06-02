@@ -303,8 +303,11 @@ fn build_light_command(
         // Zigbee brightness range is 0–254; 255 is reserved by the spec.
         "brightness" => LightAction::Brightness(value.unwrap_or(128.0).clamp(0.0, 254.0) as u8),
         "color_temp" => {
-            // Convert Kelvin → mireds (1_000_000 / K)
-            let mireds = (1_000_000.0 / value.unwrap_or(4000.0)) as u16;
+            // Convert Kelvin → mireds (1_000_000 / K). Guard the denominator
+            // against zero/negative input (which would yield inf/garbage on the
+            // u16 cast) and clamp to the Zigbee mired range (153≈6500K … 500≈2000K).
+            let kelvin = value.unwrap_or(4000.0).max(1.0);
+            let mireds = (1_000_000.0 / kelvin).clamp(153.0, 500.0) as u16;
             LightAction::ColorTemp(mireds)
         }
         "color" => {

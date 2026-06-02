@@ -157,7 +157,14 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
             },
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Close(_))) | None => break,
-                _ => {}
+                // A persistent recv error returns immediately every poll; without
+                // breaking, the select! loop would spin at 100% CPU. Treat it as a
+                // disconnect.
+                Some(Err(e)) => {
+                    debug!("dashboard WS read error: {e}");
+                    break;
+                }
+                Some(Ok(_)) => {}
             }
         }
     }

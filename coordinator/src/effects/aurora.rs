@@ -61,7 +61,10 @@ impl AuroraEffect {
             bytes = ns.to_le_bytes();
         }
         let raw = u32::from_le_bytes(bytes);
-        let s = (raw as f32) / (u32::MAX as f32);
+        // Divide by 2^32 (not u32::MAX) so the result stays strictly < 1.0: in f32
+        // a raw value near u32::MAX rounds up to 2^32, and raw/u32::MAX would then
+        // yield ≥ 1.0, breaking the documented [0.0, 1.0) seed range.
+        let s = (raw as f32) / 4_294_967_296.0;
         self.seed = Some(s);
         s
     }

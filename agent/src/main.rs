@@ -6,11 +6,13 @@ use agent::tls::make_connector;
 use rustls::crypto::ring;
 use rustls::pki_types::ServerName;
 use shared::MeshMessage;
-use shared::frame::{FrameVerifyError, SignedFrame, derive_hmac_key};
+use shared::frame::{
+    FrameReadError, FrameVerifyError, SignedFrame, derive_hmac_key, read_bounded_frame,
+};
 use shared::hardware::NodeRole;
 use socket2::{SockRef, TcpKeepalive};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -144,15 +146,16 @@ async fn main() {
         tokio::spawn(async move {
             use std::sync::atomic::Ordering;
             loop {
-                let mut len_buf = [0u8; 4];
-                if reader.read_exact(&mut len_buf).await.is_err() {
-                    break;
-                }
-                let msg_len = u32::from_le_bytes(len_buf) as usize;
-                let mut buf = vec![0u8; msg_len];
-                if reader.read_exact(&mut buf).await.is_err() {
-                    break;
-                }
+                let buf = match read_bounded_frame(&mut reader).await {
+                    Ok(buf) => buf,
+                    Err(FrameReadError::Closed) => break,
+                    Err(FrameReadError::TooLarge(n)) => {
+                        warn!(
+                            "dropping coordinator connection: frame length {n} exceeds MAX_FRAME_LEN"
+                        );
+                        break;
+                    }
+                };
                 let msg: MeshMessage = if let Some(key) = &reader_key {
                     match serde_json::from_slice::<SignedFrame>(&buf) {
                         Ok(frame) => match frame.verify(key) {

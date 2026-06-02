@@ -490,6 +490,11 @@ function render() {
   const assigned = new Set(roomsData.flatMap(r => r.device_ids));
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
 
+  // An open temp/colour section has a document-level pointerdown listener bound
+  // to a card we're about to remove. Disarm it before wiping, or it leaks (and
+  // keeps firing against a detached card) until another section happens to open.
+  if (_lcOpenDismiss) _lcOpenDismiss();
+
   container.innerHTML = '';
   if (!zigbeeOnline) {
     const banner = document.createElement('div');
