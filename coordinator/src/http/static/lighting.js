@@ -1,7 +1,7 @@
 // ── Lighting panel ──────────────────────────────────────────────────────────
 // Renders per-device light state cards with interactive controls.
 
-import { buildLightControls } from '/static/rooms.js';
+import { buildLightControls, repaintModeDots } from '/static/rooms.js';
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
@@ -53,12 +53,8 @@ function patchCards() {
       if (label) label.textContent = `${kelvin} K`;
     }
 
-    const colourToggle = card.querySelector('[data-ctrl="colour-toggle"]');
-    if (colourToggle && dev.color_xy) {
-      const [x, y] = dev.color_xy;
-      const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
-      colourToggle.style.background = `rgb(${r},${g},${b})`;
-    }
+    // Repaint the active-domain dot from current state (colour tint or CCT tint).
+    repaintModeDots(card, dev);
   }
 }
 
