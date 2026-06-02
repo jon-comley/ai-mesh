@@ -1991,6 +1991,64 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // Reproduces the user reports "scenes not saving" and "rooms not staying
+    // deleted": both are DB writes, so this exercises them against a real file DB
+    // across reopen (the unit tests elsewhere use an in-memory :memory: DB).
+    #[test]
+    fn rooms_and_scenes_persist_and_delete_across_restart() {
+        let path = "/tmp/ai_mesh_rooms_scenes_persistence_test.db";
+        let _ = std::fs::remove_file(path);
+
+        let room_id;
+        {
+            let mut reg = Registry::open(path).expect("open db");
+            room_id = reg.create_room("Lounge").id;
+            reg.save_scene("Movie", Some(&room_id), Vec::new());
+            reg.save_scene("Global", None, Vec::new());
+        } // dropped — connection closed
+
+        // Reopen: the room and both scenes must still be there ("saving").
+        {
+            let reg = Registry::open(path).expect("reopen db");
+            assert!(
+                reg.list_rooms().iter().any(|r| r.id == room_id),
+                "room should persist across restart"
+            );
+            assert!(
+                reg.list_scenes().iter().any(|s| s.name == "Movie"),
+                "room scene should persist across restart"
+            );
+            assert!(
+                reg.list_scenes().iter().any(|s| s.name == "Global"),
+                "global scene should persist across restart"
+            );
+        }
+
+        // Delete the room, reopen: it must STAY deleted, its scene cascade-deleted,
+        // and the unrelated global scene must remain.
+        {
+            let mut reg = Registry::open(path).expect("reopen db");
+            reg.delete_room(&room_id);
+        }
+        {
+            let reg = Registry::open(path).expect("reopen db");
+            assert!(
+                !reg.list_rooms().iter().any(|r| r.id == room_id),
+                "room should STAY deleted across restart"
+            );
+            assert!(
+                !reg.list_scenes().iter().any(|s| s.name == "Movie"),
+                "deleted room's scene should be cascade-removed"
+            );
+            assert!(
+                reg.list_scenes().iter().any(|s| s.name == "Global"),
+                "unrelated global scene should remain"
+            );
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
     // Regression test for the rotate-token bug: after a coordinator restart the
     // SQLite-persisted Ready state makes select_node_for_inference return a node
     // whose llama-server is not actually running.  clear_all() (called via
