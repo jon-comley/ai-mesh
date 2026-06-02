@@ -646,7 +646,7 @@ async fn process_message(
             }
             None
         }
-        MeshMessage::LightState(report) => {
+        MeshMessage::LightState(mut report) => {
             // A Zigbee group publishes state on its base topic exactly like a
             // device. If one slipped past the capability's group filter (a group's
             // retained state can arrive before its group list on (re)connect),
@@ -654,6 +654,13 @@ async fn process_message(
             if dashboard.is_some_and(|d| d.is_known_group(&report.device_id)) {
                 registry.lock().unwrap().delete_device(&report.device_id);
                 return None;
+            }
+            // The authenticated connection IS the owning node — trust its id over
+            // the report payload. A stale/'unknown' node_id (e.g. from a seeded DB)
+            // would otherwise route device commands to a non-existent connection
+            // (HTTP 503, lights dead until a state change re-reports them).
+            if let Some(id) = node_id.as_deref() {
+                report.node_id = id.to_string();
             }
             info!(
                 node_id = %report.node_id,
@@ -697,7 +704,12 @@ async fn process_message(
             }
             None
         }
-        MeshMessage::LightDeviceList(report) => {
+        MeshMessage::LightDeviceList(mut report) => {
+            // Trust the authenticated connection's id (see LightState above) so a
+            // stale payload id can't create a phantom light_devices row.
+            if let Some(id) = node_id.as_deref() {
+                report.node_id = id.to_string();
+            }
             info!(
                 node_id = %report.node_id,
                 devices = ?report.devices,

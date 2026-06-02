@@ -69,8 +69,10 @@ function render() {
 
   container.innerHTML = '';
 
-  // Group cards first
+  // Group cards first — skip the zigbee catch-all 'all' group: it duplicates
+  // whole-house control and showed up as an undeletable, bulb-like card.
   for (const name of [...groupsSet].sort()) {
+    if (name.toLowerCase() === 'all') continue;
     const card = document.createElement('div');
     card.className = 'light-card light-group-card';
     card.innerHTML = groupCard(name);
