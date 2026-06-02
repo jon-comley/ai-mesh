@@ -758,8 +758,110 @@ async fn process_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::{HeartbeatPayload, NodeIdentity, NodeRole};
+    use crate::http::state::DashboardState;
+    use shared::{HeartbeatPayload, LightStateReport, NodeIdentity, NodeRole};
     use tokio::net::TcpStream;
+
+    // Build the process_message arg set with an empty registry + dashboard, no TCP.
+    #[allow(clippy::type_complexity)]
+    fn test_deps() -> (
+        Arc<Mutex<Registry>>,
+        Connections,
+        PendingInferences,
+        PendingIntents,
+        mpsc::Sender<MeshMessage>,
+        Arc<Vec<String>>,
+        Arc<DashboardState>,
+    ) {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_inferences: PendingInferences = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::channel(8);
+        let auth_tokens = Arc::new(vec![]);
+        let dashboard = DashboardState::new(Arc::new(vec![]), Arc::new(Mutex::new(HashMap::new())));
+        (
+            registry,
+            connections,
+            pending_inferences,
+            pending_intents,
+            tx,
+            auth_tokens,
+            dashboard,
+        )
+    }
+
+    // A light report carrying a stale/'unknown' node_id must be routed by the
+    // authenticated connection's id, not the payload — otherwise commands 503.
+    #[tokio::test]
+    async fn light_state_routes_on_connection_id_not_payload() {
+        let (registry, connections, pi, pin, tx, tokens, dashboard) = test_deps();
+        let mut node_id = Some("pi1-real".to_string());
+
+        let report = LightStateReport {
+            node_id: "unknown".into(), // stale payload — must be ignored
+            device_id: "bulb1".into(),
+            on: true,
+            brightness: Some(200),
+            color_xy: None,
+            color_temp: Some(370),
+            online: true,
+        };
+
+        let reply = process_message(
+            MeshMessage::LightState(report),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+        )
+        .await;
+
+        assert!(reply.is_none(), "light state report produces no reply");
+        assert_eq!(
+            dashboard.get_node_for_device("bulb1"),
+            Some("pi1-real".to_string()),
+            "command routing must use the connection node_id, not the report payload",
+        );
+    }
+
+    // Same invariant for the device-list report: a stale node_id must not create
+    // a phantom light_devices row / mis-key group routing.
+    #[tokio::test]
+    async fn light_device_list_keys_on_connection_id_not_payload() {
+        let (registry, connections, pi, pin, tx, tokens, dashboard) = test_deps();
+        let mut node_id = Some("pi1-real".to_string());
+
+        let report = shared::LightDeviceListReport {
+            node_id: "unknown".into(), // stale payload — must be ignored
+            devices: vec!["bulb1".into()],
+            groups: vec!["all".into()],
+        };
+
+        let reply = process_message(
+            MeshMessage::LightDeviceList(report),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+        )
+        .await;
+
+        assert!(reply.is_none());
+        assert_eq!(
+            dashboard.get_node_for_group("all"),
+            Some("pi1-real".to_string()),
+            "group routing must use the connection node_id, not the report payload",
+        );
+    }
 
     async fn send_message(addr: &str, msg: &MeshMessage) -> Option<MeshMessage> {
         let mut stream = TcpStream::connect(addr).await.unwrap();

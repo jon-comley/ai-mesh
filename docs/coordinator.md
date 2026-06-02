@@ -50,14 +50,25 @@ Each inbound connection passes through three layers before any message is proces
 | `ModelStatus` | Calls `registry.update_model_status()`; updates allocation state |
 | `ModelUnload` | Forwards to target agent via connections map; agent kills llama-server |
 | `RequestModelInference` | Runs `select_node_for_inference`; forwards to agent; awaits result via oneshot channel (up to 300 s) |
-| `LightCommand` | Forwards to the registered lighting node's tx channel |
-| `LightState` | Stores device state in registry |
-| `LightDeviceList` | Persists device/group names to SQLite; injected into LLM system prompt |
+| `LightCommand` | Resolves the device's node via `get_node_for_device` (the live snapshot's `node_id`), then forwards to that node's tx channel; `503` if no live connection |
+| `LightState` | Stamps the **connection's** authenticated `node_id` onto the report (source of truth — not the payload), then stores device state in registry + dashboard snapshot |
+| `LightDeviceList` | Stamps the connection `node_id`; persists device/group names to SQLite; injected into LLM system prompt |
 | `SceneLoad` | Forwards to lighting node |
 | `SceneLoaded` | Stored; forwarded to pending intent response if applicable |
 | `IntentRequest` | Selects largest ready LLM node; sends `RequestModelInference`; handles tool-call dispatch (lighting, etc.) |
 | `IntentResponse` | Resolved from pending oneshot; returned to CLI |
 | `Admin(ResetRegistry)` | Clears all nodes from the registry |
+
+**Lighting routing invariant.** A device command can only reach a bulb if the
+device's `node_id` in the live snapshot matches a key in the connections map.
+The owning node is the authenticated TCP connection, so the coordinator stamps
+that connection's `node_id` onto every incoming `LightState`/`LightDeviceList`
+report rather than trusting the value in the payload. This prevents a stale or
+`unknown` persisted `node_id` (e.g. from a seeded/cloned DB) from routing
+commands to a non-existent connection — which would surface as a silent `503`
+on every command (lights unresponsive from the dashboard) until a device
+happened to change state and re-report. Regression test:
+`light_state_routes_on_connection_id_not_payload` in `server.rs`.
 
 ## Registry Methods
 
