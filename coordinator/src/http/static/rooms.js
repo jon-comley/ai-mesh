@@ -354,106 +354,76 @@ export function notifyDevices(devices) {
     layout.notifyDeviceUpdate(dev.device_id, reconciled);
   }
   inferZigbeeStatus();
-  // Skip full re-render while a slider is being dragged to prevent mid-drag jumps
-  if (document.querySelector('.slider-active')) return;
+  // Skip full re-render while a slider/wheel/temp-bar is being dragged to prevent
+  // mid-drag jumps (and so the live colour/temp dot isn't reset to its icon).
+  if (document.querySelector('.slider-active, .colour-wheel.dragging, .temp-bar.dragging')) return;
   patchDeviceCards();
   refreshRoomTriggers();
 }
 
 // ── Colour/temperature indicator model (shared by device + room cards) ───────
-// The ACTIVE domain shows as a coloured/tinted DOT reflecting live state; the
-// INACTIVE domain shows as its glyph ICON (🎨 colour / 🌡 temperature). Exactly
-// one dot per dual-capable card. A missing/invalid (or, for rooms, non-uniform)
-// value falls back to the icon — never a dot.
+// At REST every colour/temperature control shows its glyph ICON (🎨 colour /
+// 🌡 temperature). A live DOT appears ONLY while that domain's control is being
+// dragged: it tracks the value under the finger and reverts to the icon on
+// release. Dual-capable cards show both controls (two icons / two dots); a
+// single-capability card shows just the one. No state-derived dot is ever
+// painted at rest — that flicker ("icon → snaps blue/orange") is gone.
 const COLOUR_ICON = '🎨', TEMP_ICON = '🌡';
 
-// Paint one device mode button as a dot (active + valid value) or an icon.
-function paintModeButton(btn, domain, active, dev) {
+// Resting state: paint a device mode button as its glyph icon.
+function paintModeIcon(btn, domain) {
   if (!btn) return;
   btn.classList.remove('lc-mode-dot');
   btn.style.background = '';
-  if (domain === 'colour') {
-    btn.title = 'Colour';
-    if (active && dev.color_xy) {
-      const [x, y] = dev.color_xy;
-      const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
-      const { h, s } = rgbToHsl(r, g, b);
-      btn.classList.add('lc-mode-dot');
-      btn.textContent = '';
-      btn.style.background = `hsl(${h},${s}%,50%)`;
-    } else {
-      btn.textContent = COLOUR_ICON;
-    }
-  } else {
-    btn.title = 'Temperature';
-    if (active && dev.color_temp != null) {
-      btn.classList.add('lc-mode-dot');
-      btn.textContent = '';
-      btn.style.background = layout.ctToHex(dev.color_temp);
-    } else {
-      btn.textContent = TEMP_ICON;
-    }
-  }
+  btn.textContent = domain === 'colour' ? COLOUR_ICON : TEMP_ICON;
+  btn.title = domain === 'colour' ? 'Colour' : 'Temperature';
 }
 
-// Repaint a device card's mode dots from current state — used by the live-patch
-// paths so an external update (scene/automation) moves/retints the active dot.
-// Reads the persisted active mode so the dot tracks the active domain.
+// Active drag: paint a device mode button as a live dot of the given colour.
+function paintModeDot(btn, bg) {
+  if (!btn) return;
+  btn.classList.add('lc-mode-dot');
+  btn.textContent = '';
+  btn.style.background = bg;
+}
+
+// Repaint a device card's colour/temp buttons to their resting icons — used by
+// the live-patch paths after an external update (scene/automation). There is no
+// resting dot; a dot exists only transiently while a control is being dragged.
 export function repaintModeDots(card, dev) {
-  const supportsTemp = dev.color_temp != null;
-  const supportsColour = dev.color_xy != null;
-  let mode = localStorage.getItem('mesh-mode-' + dev.device_id)
-    || (supportsTemp ? 'temp' : 'colour');
-  if (mode === 'temp'   && !supportsTemp)   mode = 'colour';
-  if (mode === 'colour' && !supportsColour) mode = 'temp';
-  paintModeButton(card.querySelector('.lc-mode-btn[data-domain="temp"]'),   'temp',   mode === 'temp',   dev);
-  paintModeButton(card.querySelector('.lc-mode-btn[data-domain="colour"]'), 'colour', mode === 'colour', dev);
+  if (dev.color_temp != null)
+    paintModeIcon(card.querySelector('.lc-mode-btn[data-domain="temp"]'), 'temp');
+  if (dev.color_xy != null)
+    paintModeIcon(card.querySelector('.lc-mode-btn[data-domain="colour"]'), 'colour');
 }
 
-// Paint a room trigger. The active domain becomes a dot only when the room's
-// bulbs share one value in that domain; otherwise (mixed/missing) it's the icon.
-function paintRoomTrigger(btn, domain, devices, mode) {
+// Resting state: paint a room colour/temp trigger as its glyph icon.
+function paintRoomTrigger(btn, domain) {
   if (!btn) return;
   btn.classList.remove('room-colour-dot', 'room-temp-dot');
   btn.style.background = '';
-  if (domain === 'colour') {
-    btn.title = 'Colour';
-    const uniform = mode === 'colour' ? roomUniformColour(devices) : null;
-    if (uniform) {
-      btn.classList.add('room-colour-dot');
-      btn.style.background = `hsl(${uniform.h},${uniform.s}%,50%)`;
-      btn.textContent = '';
-    } else {
-      btn.textContent = COLOUR_ICON;
-    }
-  } else {
-    btn.title = 'Temperature';
-    const mireds = mode === 'temp' ? roomUniformTemp(devices) : null;
-    if (mireds != null) {
-      btn.classList.add('room-temp-dot');
-      btn.style.background = layout.ctToHex(mireds);
-      btn.textContent = '';
-    } else {
-      btn.textContent = TEMP_ICON;
-    }
-  }
+  btn.textContent = domain === 'colour' ? COLOUR_ICON : TEMP_ICON;
+  btn.title = domain === 'colour' ? 'Colour' : 'Temperature';
 }
 
-// Keep each room's colour + temperature triggers in sync without a full render:
-// after a scene/automation the active domain's dot retints (or falls back to its
-// icon if the room is no longer uniform).
+// Active drag: paint a room trigger as a live dot tracking the value under the
+// finger. Reverts to the icon (via paintRoomTrigger) on the next render.
+function paintRoomDot(btn, domain, bg) {
+  if (!btn) return;
+  btn.classList.remove('room-colour-dot', 'room-temp-dot');
+  btn.classList.add(domain === 'colour' ? 'room-colour-dot' : 'room-temp-dot');
+  btn.textContent = '';
+  btn.style.background = bg;
+}
+
+// Keep each room's colour + temperature triggers at their resting icons after a
+// live patch (a dot only appears while the matching control is being dragged).
 function refreshRoomTriggers() {
   for (const room of roomsData) {
     const card = document.querySelector(`.room-card[data-room-id="${CSS.escape(room.id)}"]`);
     if (!card) continue;
-    const devs = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
-    const hasTemp = devs.some(d => d.color_temp != null);
-    const hasColour = devs.some(d => d.color_xy != null);
-    let mode = localStorage.getItem('mesh-room-mode-' + room.id) || (hasTemp ? 'temp' : 'colour');
-    if (mode === 'temp'   && !hasTemp)   mode = 'colour';
-    if (mode === 'colour' && !hasColour) mode = 'temp';
-    paintRoomTrigger(card.querySelector('.room-ctrl-trigger[data-role="room-colour"]'), 'colour', devs, mode);
-    paintRoomTrigger(card.querySelector('.room-ctrl-trigger[data-role="room-temp"]'),   'temp',   devs, mode);
+    paintRoomTrigger(card.querySelector('.room-ctrl-trigger[data-role="room-colour"]'), 'colour');
+    paintRoomTrigger(card.querySelector('.room-ctrl-trigger[data-role="room-temp"]'),   'temp');
   }
 }
 
@@ -548,6 +518,7 @@ function render() {
   if (container.querySelector('.layout-view')) return; // layout open — don't wipe
   if (container.querySelector('.room-slider-input.slider-active')) return; // room slider thumb being dragged — don't wipe it out
   if (container.querySelector('.colour-wheel.dragging')) return; // colour wheel being dragged — don't wipe it out
+  if (container.querySelector('.temp-bar.dragging')) return; // temp bar being dragged — don't wipe it out
   // NOTE: device-card sliders (.lc-slider) are not guarded here — the common
   // WS-update path (notifyDevices) already bails on any .slider-active before
   // patchDeviceCards. Only a rare full render() mid-device-drag is unguarded;
@@ -757,14 +728,15 @@ export function wireDeviceSlider(slider, opts) {
 // ── Common light control card ─────────────────────────────────────────────────
 // Renders a standardised control block usable in both the lighting panel and
 // room device cards:
-//   Row 1 (always): [On] [Off]  ───────────────────────────────  [● mode dot]
+//   Row 1 (always): [On] [Off]  ──────────────────────────  [🌡][🎨 icons]
 //   Row 2 (always): Brightness   ──────────●──────  78%
-//   Row 3 (one of): Temperature OR Hue+Saturation — chosen by the mode dot
+//   Row 3 (one of): Temperature OR Hue+Saturation — opened by tapping an icon
 //
-// The dot toggles between Temperature and Colour. Mode is persisted per device
-// in localStorage (`mesh-mode-<id>`) — it can't be inferred from state because
-// Hue bulbs always report both color_xy and color_temp. Adjusting either slider
-// pins its mode so the card stays put across the next render.
+// Each supported domain gets a button that shows its glyph icon (🌡/🎨) at rest
+// and becomes a live dot only while its control is dragged. Tapping a button
+// opens that domain's control. Which domain's control is open is persisted per
+// device in localStorage (`mesh-mode-<id>`) — it can't be inferred from state
+// because Hue bulbs always report both color_xy and color_temp.
 //
 // dev: LightStateReport-shaped object
 // cb:  { onOn, onOff, onBrightness(v), onTemp(v), onColorXY(x,y) }
@@ -797,14 +769,13 @@ export function buildLightControls(dev, cb) {
   spacer.style.flex = '1';
   row1.appendChild(spacer);
 
-  // ── Single colour dot — switches between temperature and colour mode ─────
-  // Hue bulbs always report BOTH color_xy and color_temp, so the active mode
+  // ── Colour/temperature icons — one per supported domain ──────────────────
+  // Hue bulbs always report BOTH color_xy and color_temp, so the open domain
   // can't be inferred from state — it's persisted per device in localStorage
-  // (default Temperature). Adjusting a slider also pins that mode so the card
+  // (default Temperature). Adjusting a slider also pins that domain so the card
   // stays put after the next render.
   const supportsTemp   = hasTemp;
   const supportsColour = dev.color_xy != null;
-  const supportsBoth   = supportsTemp && supportsColour;
 
   const modeKey = 'mesh-mode-' + dev.device_id;
   let lcMode = (!supportsTemp && !supportsColour) ? null
@@ -820,10 +791,9 @@ export function buildLightControls(dev, cb) {
       const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
       ({ h, s } = rgbToHsl(r, g, b));
     }
-    // One mode button per supported domain. The active domain renders as a dot
-    // (live state), the inactive as its glyph icon — painted by applyMode() via
-    // paintModeButton(). A single-capability bulb gets a single dot that
-    // opens/closes its control.
+    // One button per supported domain. At rest each shows its glyph icon; the
+    // matching wheel/temp-bar drag handler turns it into a live dot and
+    // applyMode() restores the icon. Tapping a button opens/closes its control.
     let tempBtn = null, colourBtn = null;
     const modeGroup = document.createElement('div');
     modeGroup.className = 'lc-mode-group';
@@ -856,7 +826,7 @@ export function buildLightControls(dev, cb) {
       tempVal.textContent = fmtK(dev.color_temp ?? 370);
       const tempBar = buildTempBar({
         mireds: dev.color_temp ?? 370,
-        onInput: v => { tempVal.textContent = fmtK(v); },
+        onInput: v => { tempVal.textContent = fmtK(v); paintModeDot(tempBtn, layout.ctToHex(v)); },
         onChange: v => { tempVal.textContent = fmtK(v); setMode('temp'); applyMode(); cb.onTemp?.(v); },
       });
       tempRow.append(tempLabel, tempBar, tempVal);
@@ -867,10 +837,9 @@ export function buildLightControls(dev, cb) {
       colourRows.className = 'lc-colour-wheel-wrap';
       colourRows.appendChild(buildColourWheel({
         hue: h, sat: s,
-        onInput: (hh, ss) => { if (colourBtn) colourBtn.style.background = `hsl(${hh},${ss}%,50%)`; },
+        onInput: (hh, ss) => paintModeDot(colourBtn, `hsl(${hh},${ss}%,50%)`),
         onChange: (hh, ss) => {
-          setMode('colour'); applyMode();
-          if (colourBtn) colourBtn.style.background = `hsl(${hh},${ss}%,50%)`;
+          setMode('colour'); applyMode();   // applyMode reverts the dot to the 🎨 icon
           const { x, y } = hslToXy(hh, ss);
           cb.onColorXY?.(x, y);
         },
@@ -890,9 +859,10 @@ export function buildLightControls(dev, cb) {
       const showColour = supportsColour && lcMode === 'colour' && lcExpanded;
       if (tempRow)    tempRow.style.display    = showTemp   ? '' : 'none';
       if (colourRows) colourRows.style.display = showColour ? '' : 'none';
-      // Active domain → dot, inactive → icon (exactly one dot).
-      paintModeButton(tempBtn,   'temp',   lcMode === 'temp',   dev);
-      paintModeButton(colourBtn, 'colour', lcMode === 'colour', dev);
+      // Resting state: both controls show their glyph icon. A dot is painted
+      // only transiently by the wheel/temp-bar drag handlers above.
+      paintModeIcon(tempBtn,   'temp');
+      paintModeIcon(colourBtn, 'colour');
       // Ring the trigger whose control is currently open.
       tempBtn?.classList.toggle('active', showTemp);
       colourBtn?.classList.toggle('active', showColour);
@@ -1412,6 +1382,12 @@ function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose)
   if (mode === 'colour' && !hasColourXY)    mode = 'temp';
   const setMode = (m) => { mode = m; localStorage.setItem(modeKey, m); };
 
+  // Locate this room's colour/temp trigger buttons lazily — the card is always
+  // attached by the time a drag fires (even if not when the panel is first built
+  // during a render). Used to flash a live dot on the trigger while dragging.
+  const trigger = (role) => document.querySelector(
+    `.room-card[data-room-id="${CSS.escape(room.id)}"] .room-ctrl-trigger[data-role="${role}"]`);
+
   const panel = document.createElement('div');
   panel.className = 'room-ctrl-panel';
 
@@ -1442,8 +1418,10 @@ function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose)
     label: 'Temperature',
     min: 154, max: 500, value: avgCT,
     format: v => Math.round(1e6 / v) + 'K',
+    onInput: v => paintRoomDot(trigger('room-temp'), 'temp', layout.ctToHex(v)),
     onCommit: async v => {
       setMode('temp');
+      paintRoomTrigger(trigger('room-temp'), 'temp');   // revert dot → icon on release
       if (activeEffect) await clearEffect(room.id);
       sendRoomCommand(room.id, { action: 'color_temp', value: v }, room);
     },
@@ -1459,8 +1437,10 @@ function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose)
     const { h, s } = getRoomColourHsl(devices);
     colourSliderEl.appendChild(buildColourWheel({
       hue: h, sat: s,
+      onInput: (hh, ss) => paintRoomDot(trigger('room-colour'), 'colour', `hsl(${hh},${ss}%,50%)`),
       onChange: (hh, ss) => {
         setMode('colour');
+        paintRoomTrigger(trigger('room-colour'), 'colour');   // revert dot → icon on release
         const { x, y } = hslToXy(hh, ss);
         sendRoomCommand(room.id, { action: 'color_xy', x, y }, room);
       },
@@ -1836,23 +1816,20 @@ function renderRoomCard(room) {
   const hasTempDevices = roomDevicesAll.some(d => d.color_temp != null);
   const roomModeKey = 'mesh-room-mode-' + room.id;
 
-  // Active domain → dot (only when the room is uniform), inactive → glyph icon.
-  let roomMode = localStorage.getItem(roomModeKey) || (hasTempDevices ? 'temp' : 'colour');
-  if (roomMode === 'temp'   && !hasTempDevices) roomMode = 'colour';
-  if (roomMode === 'colour' && !hasColour)      roomMode = 'temp';
-
+  // Each domain gets a trigger showing its glyph icon at rest (a live dot
+  // appears only while its control in the panel below is being dragged).
   let colourBtn = null, tempBtn = null;
   if (!empty && hasColour) {
     colourBtn = document.createElement('button');
     colourBtn.className = 'room-action-btn room-ctrl-trigger';
     colourBtn.dataset.role = 'room-colour';
-    paintRoomTrigger(colourBtn, 'colour', roomDevicesAll, roomMode);
+    paintRoomTrigger(colourBtn, 'colour');
   }
   if (!empty && hasTempDevices) {
     tempBtn = document.createElement('button');
     tempBtn.className = 'room-action-btn room-ctrl-trigger';
     tempBtn.dataset.role = 'room-temp';
-    paintRoomTrigger(tempBtn, 'temp', roomDevicesAll, roomMode);
+    paintRoomTrigger(tempBtn, 'temp');
   }
 
   const layoutBtn = document.createElement('button');
@@ -1910,9 +1887,9 @@ function renderRoomCard(room) {
 
     const syncButtons = () => {
       const m = curMode();
-      // Active domain → dot, inactive → icon (the dot moves when mode switches).
-      paintRoomTrigger(colourBtn, 'colour', roomDevicesAll, m);
-      paintRoomTrigger(tempBtn, 'temp', roomDevicesAll, m);
+      // Resting glyph icons; the open trigger gets the ring below.
+      paintRoomTrigger(colourBtn, 'colour');
+      paintRoomTrigger(tempBtn, 'temp');
       // Ring the trigger whose panel is open.
       colourBtn?.classList.toggle('active', !!ctPanel && m === 'colour');
       tempBtn?.classList.toggle('active', !!ctPanel && m === 'temp');
@@ -2191,29 +2168,6 @@ function getRoomColourHsl(roomDevices) {
     return { h, s };
   }
   return { h: 30, s: 80 };
-}
-
-// Returns { h, s } only when EVERY colour-capable bulb in the room shares the
-// same colour (within tolerance) — so the room can show a single colour dot.
-// Returns null when bulbs disagree or none are colour-capable.
-function roomUniformColour(roomDevices) {
-  const cols = roomDevices.filter(d => d.color_xy != null).map(d => d.color_xy);
-  if (cols.length === 0) return null;
-  const [x0, y0] = cols[0];
-  const same = cols.every(([x, y]) => Math.abs(x - x0) < 0.02 && Math.abs(y - y0) < 0.02);
-  if (!same) return null;
-  const { r, g, b } = xyToRgb(x0, y0, 254);
-  return rgbToHsl(r, g, b);
-}
-
-// Mireds shared by every temperature-capable bulb in the room (within a few
-// mireds), or null when they disagree — so the room can show a single temp dot.
-function roomUniformTemp(roomDevices) {
-  const temps = roomDevices.filter(d => d.color_temp != null).map(d => d.color_temp);
-  if (temps.length === 0) return null;
-  const t0 = temps[0];
-  const same = temps.every(t => Math.abs(t - t0) <= 6);
-  return same ? t0 : null;
 }
 
 // ── Device card inside a room ────────────────────────────────────────────────
