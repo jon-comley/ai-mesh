@@ -290,9 +290,13 @@ impl EffectRunner {
             .build_ctx_inputs(room_id)
             .ok_or_else(|| "room/devices not available".to_string())?;
 
-        // Build the effect call frame (params + started_at + spatial). We do
-        // the actual tick + dispatch outside the runner-state lock so the
-        // effect can panic-safely.
+        // Snapshot what the dispatch/persist steps need under the runner-state
+        // lock, then do the persistence and command dispatch *outside* it.
+        // NOTE: effect.tick()/on_handoff() still run inside the lock below — a
+        // panicking or slow effect therefore poisons/holds it and stalls the
+        // runner. Moving the tick out needs the effect to be extractable from the
+        // instance map with a re-check on relock; tracked in roadmap
+        // ("effect tick/on_handoff run while holding runner-state lock").
         let (commands, internal_state, persist_cadence, effect_id_owned) = {
             let mut state = self.state.lock().unwrap();
             let Some(inst) = state.instances.get_mut(room_id) else {

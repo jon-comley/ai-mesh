@@ -33,7 +33,15 @@ pub fn detect_hardware() -> Result<HardwareSpec, HardwareError> {
 
     let cpu_model = cpus[0].brand().trim().to_string();
     let cpu_threads = cpus.len() as u32;
-    let cpu_cores = cpu_threads;
+    // `cpus()` counts logical CPUs (hyperthreads included); use the true physical
+    // core count so a 4-core/8-thread machine reports 4 cores, not 8, and the
+    // coordinator doesn't over-estimate its compute capacity. Fall back to the
+    // thread count if the physical count is unavailable.
+    let cpu_cores = sys
+        .physical_core_count()
+        .filter(|&c| c > 0)
+        .map(|c| c as u32)
+        .unwrap_or(cpu_threads);
     let ram_gb = sys.total_memory() as f32 / 1_073_741_824.0;
 
     Ok(HardwareSpec {

@@ -2,7 +2,9 @@ use crate::http::state::{DashboardState, ModelEntry, NodeModelInfo};
 use crate::intent::PendingIntents;
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
-use shared::frame::{FrameVerifyError, SignedFrame, derive_hmac_key};
+use shared::frame::{
+    FrameReadError, FrameVerifyError, SignedFrame, derive_hmac_key, read_bounded_frame,
+};
 use shared::{
     AdminMessage, HeartbeatPayload, MeshMessage, ModelLifecycleState, NodeRecordFull, NodeRole,
 };
@@ -10,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -126,15 +128,14 @@ where
     // On success, derive the per-connection HMAC key from the validated token.
     // All subsequent frames in both directions are HMAC-signed SignedFrames.
     let hmac_key: Option<[u8; 32]> = if !auth_tokens.is_empty() {
-        let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).await.is_err() {
-            return Ok(());
-        }
-        let msg_len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; msg_len];
-        if reader.read_exact(&mut buf).await.is_err() {
-            return Ok(());
-        }
+        let buf = match read_bounded_frame(&mut reader).await {
+            Ok(buf) => buf,
+            Err(FrameReadError::Closed) => return Ok(()),
+            Err(FrameReadError::TooLarge(n)) => {
+                warn!("rejected connection: auth frame length {n} exceeds MAX_FRAME_LEN");
+                return Ok(());
+            }
+        };
         match serde_json::from_slice::<MeshMessage>(&buf) {
             Ok(MeshMessage::AuthToken(token)) if auth_tokens.contains(&token) => {
                 Some(derive_hmac_key(&token))
@@ -191,15 +192,14 @@ where
     });
 
     loop {
-        let mut len_buf = [0u8; 4];
-        if reader.read_exact(&mut len_buf).await.is_err() {
-            break;
-        }
-        let msg_len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; msg_len];
-        if reader.read_exact(&mut buf).await.is_err() {
-            break;
-        }
+        let buf = match read_bounded_frame(&mut reader).await {
+            Ok(buf) => buf,
+            Err(FrameReadError::Closed) => break,
+            Err(FrameReadError::TooLarge(n)) => {
+                warn!("dropping connection: frame length {n} exceeds MAX_FRAME_LEN");
+                break;
+            }
+        };
         let msg: MeshMessage = if let Some(key) = &hmac_key {
             match serde_json::from_slice::<SignedFrame>(&buf) {
                 Ok(frame) => match frame.verify(key) {
@@ -747,11 +747,7 @@ mod tests {
 
         // Some messages generate no reply — use a short timeout instead of blocking forever.
         let read_reply = async {
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await.ok()?;
-            let msg_len = u32::from_le_bytes(len_buf) as usize;
-            let mut buf = vec![0u8; msg_len];
-            stream.read_exact(&mut buf).await.ok()?;
+            let buf = read_bounded_frame(&mut stream).await.ok()?;
             serde_json::from_slice(&buf).ok()
         };
 
@@ -999,11 +995,7 @@ mod tests {
 
         // Some messages generate no reply — use a short timeout instead of blocking forever.
         let read_reply = async {
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await.ok()?;
-            let msg_len = u32::from_le_bytes(len_buf) as usize;
-            let mut buf = vec![0u8; msg_len];
-            stream.read_exact(&mut buf).await.ok()?;
+            let buf = read_bounded_frame(&mut stream).await.ok()?;
             let frame: SignedFrame = serde_json::from_slice(&buf).ok()?;
             let payload = frame.verify(&key).ok()?;
             serde_json::from_slice(payload).ok()

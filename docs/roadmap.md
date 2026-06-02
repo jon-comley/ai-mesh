@@ -2,6 +2,51 @@
 
 ---
 
+## Code Audit — Findings to Action (2026-06-02)
+
+Whole-codebase adversarial bug audit (all Rust crates + frontend JS, partitioned
+into 15 review units; each finding independently verified by a skeptic pass).
+**16 confirmed findings: 2 critical, 4 high, 8 medium, 2 low.** Recorded here for
+triage — not yet fixed. `shared`, `cli`, `capabilities`, `coord-effects-b`, and
+`js-misc` came back clean.
+
+### 🔴 Critical — unauthenticated DoS (do first)
+
+> Both fixed via a single shared `shared::frame::read_bounded_frame()` (length
+> checked against `MAX_FRAME_LEN` before allocation) — the one framed-read path
+> for coordinator + agent (incl. test helpers), so the bound can't be forgotten.
+> Covered by unit tests in `shared/src/frame.rs`.
+> _Deferred follow-up (Bing review):_ log the peer address on an oversized frame
+> for forensics — needs threading `SocketAddr` through `handle_connection` (the
+> accept site currently drops it); low value, not done.
+
+- [x] **Unbounded allocation from untrusted length prefix — coordinator** (`coordinator/src/server.rs:133-134` auth phase, `:198-199` main loop). A 4-byte length prefix is read and `vec![0u8; msg_len]` allocated with no bound — `0xFFFFFFFF` → 4 GB alloc → OOM crash. The auth-phase one runs **before** token validation (unauthenticated). *Fix:* add `MAX_MSG_SIZE` (e.g. 64–100 MB), reject oversized lengths before allocating. Apply to all length reads (incl. test helpers at `:752-753`, `:1004-1005`).
+- [x] **Same unbounded allocation — agent** (`agent/src/main.rs:151-152`). A malicious/compromised coordinator can OOM-crash the agent the same way (length read before HMAC verify). *Fix:* same `MAX_MSG_SIZE` guard. **(Single shared fix: factor a bounded frame-read helper used by both sides.)**
+
+### 🟠 High
+
+- [x] **TOCTOU in `rename_device`** (`coordinator/src/http/api.rs:880-882`). Lock acquired/released separately for `set_device_name`, then `get_all_device_names`, then `rooms_from_registry` — a concurrent handler can interleave, returning state that never existed atomically. *Fix:* one lock scope spanning the write + both reads.
+- [x] **Commit error silently swallowed in `reorder_room_devices`** (`coordinator/src/registry.rs:1105-1116`). `let _ = tx.commit()` and per-row `let _ =` drop all errors; HTTP handler always returns 204. UI shows success while DB keeps old order. *Fix:* check/log commit + update errors (sibling fns already `warn!`).
+- [x] **No transaction in `set_room_positions`** (`coordinator/src/registry.rs:1128-1135`). Loop of UPDATEs in autocommit; a crash mid-loop leaves gaps/dupes in room ordering. *Fix:* wrap in a transaction (as `reorder_room_devices`/`set_active_effect` already do).
+
+### 🟡 Medium
+
+- [x] **Windows CPU cores = threads** (`agent/src/hardware.rs:34-36`). `cpu_cores = cpu_threads` over-reports physical cores on hyperthreaded Windows (4c/8t → reports 8 cores), inflating scheduling capacity. *Fix:* use `sysinfo::System::physical_core_count()`.
+- [x] **Partial scene apply returns success** (`coordinator/src/http/api.rs:776,790,805` vs `:817`). color_xy/color_temp/brightness send failures are `let _`-discarded; only the final on/off sets `any_unavailable`, so a partially-applied scene still returns 204. *Fix:* track all four sends.
+- [x] **Optimistic snapshot not rolled back on send failure** (`coordinator/src/http/api.rs:217,223-227`). Snapshot updated before send; on send-fail returns 503 but leaves mutated state, which a later broadcast pushes to clients. *Fix:* roll back on failure, or update only after send succeeds.
+- [x] **WebSocket recv-error busy loop** (`coordinator/src/http/ws.rs:158-162`). `Some(Err(_))` falls into the `_ => {}` arm; a persistent socket error spins `recv()` at 100% CPU. *Fix:* break on `Some(Err(_))` like the send path does.
+- [ ] **Effect `tick()`/`on_handoff()` run while holding runner-state lock** (`coordinator/src/effects/runner.rs:321-326`) — **DEFERRED**. A panicking/slow effect poisons/holds the lock and freezes the runner + HTTP handlers. Safely moving the tick outside the lock needs the effect to be extractable from the instance map (Option-swap or sentinel) with a re-check on relock to handle a concurrent instance removal — a structural refactor, not an in-place edit, so deferred to avoid introducing a worse concurrency bug. The misleading "outside the lock" comment has been corrected in code to state the tick runs *inside* the lock.
+- [x] **Aurora seed can be ≥ 1.0** (`coordinator/src/effects/aurora.rs:64`). `raw / u32::MAX` in f32 can round to ≥ 1.0 near `u32::MAX`, breaking the documented `[0,1)` phase (~1 in 14M). *Fix:* divide by `4294967296.0`.
+- [x] **color_temp divide-by-zero → inf cast** (`coordinator/src/intent.rs:307`). Untrusted `value:0` → `1e6/0 = inf` cast to u16 = 65535 (nonsensical command; not UB but bad input accepted). *Fix:* clamp/validate Kelvin range before dividing.
+- [x] **Document pointerdown listener leak in light popover** (`coordinator/src/http/static/rooms.js:847`). If a card is re-rendered (`render()` → `innerHTML=''`) while a temp/colour section is open, `_lcOpenDismiss`/`lcOutside` is never disarmed; listeners accumulate. *Fix:* guard `render()` against open popovers, or disarm on detach.
+
+### 🟢 Low
+
+- [x] **`updateOpeningCone(id)` ignores its arg** (`coordinator/src/http/static/layout.js:3060`). Callers pass an id; definition takes none (redraws all). Harmless but misleading API. *Fix:* drop the param or use it.
+- [x] **Popover scroll-offset inconsistency** (`coordinator/src/http/static/layout.js`). The audit flagged the *bulb* popover for omitting `window.scrollX/scrollY` — but `.layout-popover` is `position: fixed`, so viewport coords (getScreenCTM) are correct and the bulb popover was right. The real (inverted) bug was the *opening* popover (`:3620-3621`) **adding** scroll offsets to a fixed element, mis-positioning it when scrolled. *Fixed:* removed the scroll offsets from the opening popover to match the bulb one.
+
+---
+
 ## Phase 6 — Model Scheduling ✓ Complete
 
 - Model registry (`ModelAllocation` + `update_model_status`)

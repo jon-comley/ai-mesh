@@ -211,17 +211,18 @@ pub async fn light_command(
             .into_response();
     };
 
-    // Optimistically update the snapshot so subsequent broadcasts (triggered by
-    // any other device's status report) carry the intended value, not the stale
-    // pre-command value that would otherwise snap UI sliders back.
-    state.apply_command_to_snapshot(&device, &command);
     let cmd = LightCommandRequest {
         request_id: gen_request_id(),
         target: LightTarget::Device(device.clone()),
-        command,
+        command: command.clone(),
     };
     let sent = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
     if sent {
+        // Optimistically update the snapshot only after a successful send, so
+        // subsequent broadcasts (triggered by any other device's status report)
+        // carry the intended value rather than snapping UI sliders back — but a
+        // failed send leaves no phantom value for a later broadcast to push out.
+        state.apply_command_to_snapshot(&device, &command);
         StatusCode::NO_CONTENT.into_response()
     } else {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
@@ -773,7 +774,9 @@ pub async fn recall_scene(
                 target: LightTarget::Device(snap.device_id.clone()),
                 command,
             };
-            let _ = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
+            if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+                any_unavailable = true;
+            }
         } else if let Some(ct) = snap.color_temp {
             let command = match transition_secs {
                 Some(t) if t > 0.0 => LightAction::ColorTempTransition {
@@ -787,7 +790,9 @@ pub async fn recall_scene(
                 target: LightTarget::Device(snap.device_id.clone()),
                 command,
             };
-            let _ = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
+            if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+                any_unavailable = true;
+            }
         }
         if let Some(brightness) = snap.brightness {
             let command = match transition_secs {
@@ -802,7 +807,9 @@ pub async fn recall_scene(
                 target: LightTarget::Device(snap.device_id.clone()),
                 command,
             };
-            let _ = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
+            if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+                any_unavailable = true;
+            }
         }
         let on_off = if snap.on {
             LightAction::On
@@ -877,9 +884,16 @@ pub async fn rename_device(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
     }
-    registry.lock().unwrap().set_device_name(&device_id, &name);
-    let names = registry.lock().unwrap().get_all_device_names();
-    let rooms = rooms_from_registry(&registry);
+    // One lock scope for the write and both reads, so the pushed snapshot is a
+    // single consistent view — a concurrent handler can't interleave between the
+    // rename and the names/rooms it's bundled with.
+    let (names, rooms) = {
+        let mut reg = registry.lock().unwrap();
+        reg.set_device_name(&device_id, &name);
+        let names = reg.get_all_device_names();
+        let rooms: Vec<RoomInfo> = reg.list_rooms().into_iter().map(RoomInfo::from).collect();
+        (names, rooms)
+    };
     state.push_rooms_update_with_names(rooms, names);
     StatusCode::NO_CONTENT.into_response()
 }
