@@ -1608,10 +1608,11 @@ impl Registry {
             "INSERT INTO room_effects (room_id, effect_id, enabled, params_json, snapshot_json, started_at)
              VALUES (?1, ?2, 1, ?3, ?4, ?5)
              ON CONFLICT(room_id, effect_id) DO UPDATE SET
-                 enabled       = 1,
-                 params_json   = excluded.params_json,
-                 snapshot_json = COALESCE(excluded.snapshot_json, room_effects.snapshot_json),
-                 started_at    = excluded.started_at",
+                 enabled        = 1,
+                 params_json    = excluded.params_json,
+                 snapshot_json  = COALESCE(excluded.snapshot_json, room_effects.snapshot_json),
+                 started_at     = excluded.started_at,
+                 overrides_json = '[]'",
             params![room_id, effect_id, params_json, snapshot_json, started_at_ms],
         )?;
         tx.commit()
@@ -3059,10 +3060,10 @@ mod tests {
 
     #[test]
     fn overrides_cleared_per_activation() {
-        // Overrides are NOT reset on re-activation via set_active_effect (the SQL
-        // ON CONFLICT clause doesn't touch overrides_json). This is intentional —
-        // the API handler is responsible for clearing them when needed.
-        // This test documents the current contract.
+        // Re-activating an effect (e.g. dragging it onto the room again) starts
+        // fresh — every light participates. set_active_effect resets overrides_json
+        // so stale exclusions from a previous activation can't silently persist
+        // (the bug where a freshly-dropped effect showed most bulbs greyed/excluded).
         let mut reg = Registry::new();
         let room = reg.create_room("Lounge");
         reg.set_active_effect(&room.id, "breathing", "{}", None, 1_000)
@@ -3074,13 +3075,12 @@ mod tests {
         reg.set_active_effect(&room.id, "breathing", "{}", None, 2_000)
             .unwrap();
 
-        // overrides_json is preserved across the re-activation.
+        // overrides_json is reset on re-activation → all lights back in.
         let active = reg.get_active_effect(&room.id).unwrap();
         let stored: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
-        assert_eq!(
-            stored,
-            vec!["bulb-1"],
-            "overrides persist on re-activation — clear them explicitly if needed"
+        assert!(
+            stored.is_empty(),
+            "re-activation must clear stale overrides; got {stored:?}"
         );
     }
 
