@@ -29,6 +29,10 @@ pub async fn dispatch(
             return;
         }
     }
+    // Acknowledge is sent by the coordinator to confirm a heartbeat — nothing to do.
+    if matches!(msg, MeshMessage::Acknowledge) {
+        return;
+    }
     warn!("no capability handles: {:?}", msg);
 }
 

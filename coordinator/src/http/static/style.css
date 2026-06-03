@@ -433,6 +433,8 @@ body {
   flex-direction: column;
   gap: 2px;
   overflow: hidden;
+  flex: 1;
+  min-width: 0;   /* let long (hex) names ellipsis instead of forcing card width */
 }
 
 .light-name {
@@ -814,7 +816,7 @@ body {
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
-  touch-action: none;            /* a finger-drag drags the chip, not the page */
+  touch-action: none;            /* capture pointer for drag-to-room; palette scrolls in gaps */
   transition: opacity 0.15s;
   flex-shrink: 0;
   white-space: nowrap;
@@ -960,12 +962,14 @@ body {
   flex-direction: column;
   gap: 6px;
   margin-bottom: 10px;
+  min-width: 0;   /* flex children may shrink; long names ellipsis, no overflow */
 }
 
 .room-header-name-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .room-header-controls-row {
@@ -1519,6 +1523,9 @@ body {
   margin-bottom: 0;
 }
 
+/* Per-light effect + scene participation markers.
+   Lit (participating): amber tint matches the room badge, clearly "active".
+   Paused: greyed + desaturated — unmistakably off. */
 .device-effect-btn {
   background: none;
   border: none;
@@ -1526,15 +1533,31 @@ body {
   font-size: 13px;
   padding: 1px 3px;
   line-height: 1;
-  opacity: 0.85;
-  transition: opacity 0.15s;
+  color: var(--amber);      /* matches .badge-effect on the room card */
+  opacity: 1;
+  transition: opacity 0.15s, filter 0.15s;
 }
-.device-effect-btn:hover { opacity: 1; }
-.device-effect-btn.device-effect-overridden {
+.device-scene-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 1px 3px;
+  line-height: 1;
+  color: var(--accent);
+  opacity: 1;
+  transition: opacity 0.15s, filter 0.15s;
+}
+.device-effect-btn:hover,
+.device-scene-btn:hover { transform: scale(1.1); }
+.device-effect-btn.device-effect-overridden,
+.device-scene-btn.device-scene-paused {
   opacity: 0.3;
   filter: grayscale(1);
+  color: inherit;
 }
-.device-effect-btn.device-effect-overridden:hover { opacity: 0.65; }
+.device-effect-btn.device-effect-overridden:hover,
+.device-scene-btn.device-scene-paused:hover { opacity: 0.65; }
 
 /* Sliders are effect-driven — mute them visually but keep them interactive
    (touching one ejects the device from the effect). */
@@ -2645,6 +2668,20 @@ body {
   vertical-align: middle;
   opacity: 0.75;
 }
+/* Some member lights paused out of the active scene → dim the chip; all paused →
+   grey it (echoes the effect ghost badge). */
+.room-quick-scene-chip.active.partly-paused {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--scene-chip-color) 25%, transparent);
+  opacity: 0.85;
+}
+.room-quick-scene-chip.active.all-paused {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text-muted);
+  font-weight: 500;
+  box-shadow: none;
+}
+.room-quick-scene-chip.active.all-paused::before { opacity: 0.4; }
 
 /* ── Unassigned drop hint when empty ────────────────────────────────────────── */
 .room-unassigned-drop-hint {

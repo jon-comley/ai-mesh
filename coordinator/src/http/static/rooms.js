@@ -34,6 +34,45 @@ const openPickerIds = new Set();      // device IDs whose colour picker is curre
 const openRoomCtrlIds = new Set();    // room IDs whose 🎨 colour/temp panel is open (survives render)
 const activeSceneByRoom = new Map();      // roomId → sceneId of last-recalled scene
 const preSceneStateByRoom = new Map();    // roomId → Map<deviceId, snapshot> before last recall
+// Devices the user has paused out of the room's active scene (session-only). The
+// scene stays active for the rest; a paused light reverts to pre-scene (or warm
+// white), and clicking its greyed scene icon resumes it. Mirrors effect overrides.
+const pausedSceneDevices = new Map();     // roomId → Set<deviceId>
+
+// Which colour/temp domain currently shows a live DOT (vs its glyph icon), per
+// target. A dot appears when you set a colour/temperature and PERSISTS, showing
+// the live value. Brightness changes leave it alone; setting the other domain
+// moves the dot there; on/off (of the target, a member bulb, or the whole room)
+// or a scene clears it back to an icon. Session-only — both icons on a fresh load.
+const deviceDotDomain = new Map(); // device_id → 'colour' | 'temp'
+const roomDotDomain = new Map();   // room_id   → 'colour' | 'temp'
+
+function roomIdForDevice(deviceId) {
+  for (const r of roomsData) if (r.device_ids?.includes(deviceId)) return r.id;
+  return null;
+}
+// on/off of a bulb clears its own dot and its room's (the room is no longer the
+// single colour/temperature the user last set).
+function clearDotForDevice(deviceId) {
+  deviceDotDomain.delete(deviceId);
+  const rid = roomIdForDevice(deviceId);
+  if (rid) roomDotDomain.delete(rid);
+}
+// on/off or a scene at room level clears the room dot and every member bulb's.
+function clearDotForRoom(room) {
+  roomDotDomain.delete(room.id);
+  for (const id of (room.device_ids ?? [])) deviceDotDomain.delete(id);
+}
+
+// "On" powers a room OR a single bulb up to a consistent Hue default warm white
+// (≈2700K), so on/off is predictable. Users wanting a soft on/off use brightness
+// instead. Order matters: brightness/temp before the on flag. Shared by the room
+// and device handlers (lighting.js imports it).
+export const HUE_DEFAULT_ON = [
+  { action: 'brightness', value: 200 },
+  { action: 'color_temp', value: 370 },
+  { action: 'on' },
+];
 
 // ── F-Effects-2: effects catalogue + active-effect map ──────────────────────
 // Catalogue is fetched once on dashboard load from GET /api/effects and never
@@ -52,6 +91,7 @@ const EFFECT_ICONS = {                         // static icon per effect_id; fal
   snake: '\u{1F40D}',        // 🐍
 };
 const DEFAULT_EFFECT_ICON = '✨';          // ✨
+const SCENE_ICON = '\u{1F3AD}';            // 🎭 — per-light "in scene" marker (generic; tweakable)
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
 let _lcOpenDismiss = null;            // collapse fn of the currently-open temp/colour section (only one at a time)
 let _sceneReorderTimer = null;
@@ -96,14 +136,23 @@ function updateSceneChipStates(roomId) {
   const card = document.querySelector(`[data-room-id="${CSS.escape(roomId)}"]`);
   if (!card) return;
   const activeId = activeSceneByRoom.get(roomId);
+  // Pause coverage drives the active chip's dim/grey look (mirrors effect ghost):
+  // none paused → solid active; some → partly-paused; all members → all-paused.
+  const room = roomsData.find(r => r.id === roomId);
+  const memberCount = room?.device_ids?.length ?? 0;
+  const pausedCount = pausedSceneDevices.get(roomId)?.size ?? 0;
   card.querySelectorAll('.room-quick-scene-chip[data-scene-id]').forEach(chip => {
-    chip.classList.toggle('active', chip.dataset.sceneId === activeId);
+    const active = chip.dataset.sceneId === activeId;
+    chip.classList.toggle('active', active);
+    chip.classList.toggle('partly-paused', active && pausedCount > 0 && pausedCount < memberCount);
+    chip.classList.toggle('all-paused', active && memberCount > 0 && pausedCount >= memberCount);
   });
 }
 
 function clearRoomActiveScene(roomId) {
   if (!activeSceneByRoom.has(roomId)) return;
   activeSceneByRoom.delete(roomId);
+  pausedSceneDevices.delete(roomId);
   updateSceneChipStates(roomId);
 }
 
@@ -362,15 +411,15 @@ export function notifyDevices(devices) {
 }
 
 // ── Colour/temperature indicator model (shared by device + room cards) ───────
-// At REST every colour/temperature control shows its glyph ICON (🎨 colour /
-// 🌡 temperature). A live DOT appears ONLY while that domain's control is being
-// dragged: it tracks the value under the finger and reverts to the icon on
-// release. Dual-capable cards show both controls (two icons / two dots); a
-// single-capability card shows just the one. No state-derived dot is ever
-// painted at rest — that flicker ("icon → snaps blue/orange") is gone.
+// Each colour/temp control shows its glyph ICON (🎨 colour / 🌡 temperature) by
+// default. When you SET a colour or temperature, that domain becomes a live DOT
+// showing the current value and PERSISTS (tracked in deviceDotDomain /
+// roomDotDomain). Brightness changes leave it; setting the other domain moves
+// the dot there; on/off or a scene clears it back to an icon. While a control is
+// actively dragged it shows the live value under the finger too.
 const COLOUR_ICON = '🎨', TEMP_ICON = '🌡';
 
-// Resting state: paint a device mode button as its glyph icon.
+// Paint a device mode button as its glyph icon.
 function paintModeIcon(btn, domain) {
   if (!btn) return;
   btn.classList.remove('lc-mode-dot');
@@ -379,7 +428,7 @@ function paintModeIcon(btn, domain) {
   btn.title = domain === 'colour' ? 'Colour' : 'Temperature';
 }
 
-// Active drag: paint a device mode button as a live dot of the given colour.
+// Paint a device mode button as a live dot of the given colour.
 function paintModeDot(btn, bg) {
   if (!btn) return;
   btn.classList.add('lc-mode-dot');
@@ -387,17 +436,33 @@ function paintModeDot(btn, bg) {
   btn.style.background = bg;
 }
 
-// Repaint a device card's colour/temp buttons to their resting icons — used by
-// the live-patch paths after an external update (scene/automation). There is no
-// resting dot; a dot exists only transiently while a control is being dragged.
-export function repaintModeDots(card, dev) {
-  if (dev.color_temp != null)
-    paintModeIcon(card.querySelector('.lc-mode-btn[data-domain="temp"]'), 'temp');
-  if (dev.color_xy != null)
-    paintModeIcon(card.querySelector('.lc-mode-btn[data-domain="colour"]'), 'colour');
+// Paint a device button: a live dot (from current state) when that domain is the
+// one last set for this device, otherwise its glyph icon.
+function paintDeviceButton(btn, domain, dev) {
+  if (!btn) return;
+  const active = deviceDotDomain.get(dev.device_id) === domain;
+  if (active && domain === 'colour' && dev.color_xy) {
+    const [x, y] = dev.color_xy;
+    const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
+    const { h, s } = rgbToHsl(r, g, b);
+    paintModeDot(btn, `hsl(${h},${s}%,50%)`);
+  } else if (active && domain === 'temp' && dev.color_temp != null) {
+    paintModeDot(btn, layout.ctToHex(dev.color_temp));
+  } else {
+    paintModeIcon(btn, domain);
+  }
 }
 
-// Resting state: paint a room colour/temp trigger as its glyph icon.
+// Repaint a device card's colour/temp buttons from the persisted dot domain —
+// used by the live-patch paths so the dot re-tints when state changes.
+export function repaintModeDots(card, dev) {
+  if (dev.color_temp != null)
+    paintDeviceButton(card.querySelector('.lc-mode-btn[data-domain="temp"]'), 'temp', dev);
+  if (dev.color_xy != null)
+    paintDeviceButton(card.querySelector('.lc-mode-btn[data-domain="colour"]'), 'colour', dev);
+}
+
+// Paint a room colour/temp trigger as its glyph icon.
 function paintRoomTrigger(btn, domain) {
   if (!btn) return;
   btn.classList.remove('room-colour-dot', 'room-temp-dot');
@@ -406,8 +471,7 @@ function paintRoomTrigger(btn, domain) {
   btn.title = domain === 'colour' ? 'Colour' : 'Temperature';
 }
 
-// Active drag: paint a room trigger as a live dot tracking the value under the
-// finger. Reverts to the icon (via paintRoomTrigger) on the next render.
+// Paint a room trigger as a live dot tracking the given colour.
 function paintRoomDot(btn, domain, bg) {
   if (!btn) return;
   btn.classList.remove('room-colour-dot', 'room-temp-dot');
@@ -416,14 +480,36 @@ function paintRoomDot(btn, domain, bg) {
   btn.style.background = bg;
 }
 
-// Keep each room's colour + temperature triggers at their resting icons after a
-// live patch (a dot only appears while the matching control is being dragged).
+// Paint a room trigger: a live dot (from the room's representative value) when
+// that domain is the one last set for this room, otherwise its glyph icon.
+function paintRoomButton(btn, domain, devices, roomId) {
+  if (!btn) return;
+  const active = roomDotDomain.get(roomId) === domain;
+  if (active && domain === 'colour') {
+    const { h, s } = getRoomColourHsl(devices);
+    paintRoomDot(btn, 'colour', `hsl(${h},${s}%,50%)`);
+  } else if (active && domain === 'temp') {
+    const temps = devices.filter(d => d.color_temp != null).map(d => d.color_temp);
+    if (temps.length) {
+      const avg = Math.round(temps.reduce((a, b) => a + b, 0) / temps.length);
+      paintRoomDot(btn, 'temp', layout.ctToHex(avg));
+    } else {
+      paintRoomTrigger(btn, 'temp');
+    }
+  } else {
+    paintRoomTrigger(btn, domain);
+  }
+}
+
+// Re-tint each room's colour + temperature triggers from the persisted dot
+// domain after a live patch.
 function refreshRoomTriggers() {
   for (const room of roomsData) {
     const card = document.querySelector(`.room-card[data-room-id="${CSS.escape(room.id)}"]`);
     if (!card) continue;
-    paintRoomTrigger(card.querySelector('.room-ctrl-trigger[data-role="room-colour"]'), 'colour');
-    paintRoomTrigger(card.querySelector('.room-ctrl-trigger[data-role="room-temp"]'),   'temp');
+    const devs = (room.device_ids ?? []).map(id => devicesMap.get(id)).filter(Boolean);
+    paintRoomButton(card.querySelector('.room-ctrl-trigger[data-role="room-colour"]'), 'colour', devs, room.id);
+    paintRoomButton(card.querySelector('.room-ctrl-trigger[data-role="room-temp"]'),   'temp',   devs, room.id);
   }
 }
 
@@ -542,8 +628,8 @@ function render() {
     container.appendChild(banner);
   }
   if (roomsData.length > 0) container.appendChild(renderGlobalControls());
-  container.appendChild(renderEffectsPalette());
   container.appendChild(renderNewRoomBtn());
+  container.appendChild(renderEffectsPalette());
   container.appendChild(renderUnassigned(unassigned));
 
   const roomList = document.createElement('div');
@@ -694,6 +780,7 @@ export function buildSlider(opts) {
   slider.max = String(max);
   slider.value = String(value);
   slider.className = 'light-slider room-slider-input';
+  slider.autocomplete = 'off';
   slider.title = label;
 
   attachThumbSlider(slider, {
@@ -732,11 +819,12 @@ export function wireDeviceSlider(slider, opts) {
 //   Row 2 (always): Brightness   ──────────●──────  78%
 //   Row 3 (one of): Temperature OR Hue+Saturation — opened by tapping an icon
 //
-// Each supported domain gets a button that shows its glyph icon (🌡/🎨) at rest
-// and becomes a live dot only while its control is dragged. Tapping a button
-// opens that domain's control. Which domain's control is open is persisted per
-// device in localStorage (`mesh-mode-<id>`) — it can't be inferred from state
-// because Hue bulbs always report both color_xy and color_temp.
+// Each supported domain gets a button: a glyph icon (🌡/🎨), or a live dot once
+// you set that domain's value — the dot persists (see deviceDotDomain) showing
+// the current value until brightness-aside changes clear it. Tapping a button
+// opens that domain's control. Which control is open is persisted per device in
+// localStorage (`mesh-mode-<id>`) — it can't be inferred from state because Hue
+// bulbs always report both color_xy and color_temp.
 //
 // dev: LightStateReport-shaped object
 // cb:  { onOn, onOff, onBrightness(v), onTemp(v), onColorXY(x,y) }
@@ -747,6 +835,11 @@ export function buildLightControls(dev, cb) {
   const wrap = document.createElement('div');
   wrap.className = 'lc-wrap';
 
+  // Repaints the colour/temp buttons from the current dot domain. Assigned to
+  // applyMode() below for dual/single-capability bulbs; a no-op otherwise so the
+  // on/off handlers can call it unconditionally.
+  let refreshDots = () => {};
+
   // ── Row 1: on/off + toggle buttons ───────────────────────────────────────
   const row1 = document.createElement('div');
   row1.className = 'lc-row lc-row-controls';
@@ -754,12 +847,13 @@ export function buildLightControls(dev, cb) {
   const onBtn = document.createElement('button');
   onBtn.className = 'light-toggle-btn';
   onBtn.innerHTML = `<span class="badge ${dev.on ? 'badge-green' : 'badge-muted'}">On</span>`;
-  onBtn.addEventListener('click', e => { e.stopPropagation(); cb.onOn?.(); });
+  // on/off clears this bulb's (and its room's) colour/temp dot back to an icon.
+  onBtn.addEventListener('click', e => { e.stopPropagation(); clearDotForDevice(dev.device_id); refreshDots(); cb.onOn?.(); });
 
   const offBtn = document.createElement('button');
   offBtn.className = 'light-toggle-btn';
   offBtn.innerHTML = `<span class="badge ${!dev.on ? 'badge-red' : 'badge-muted'}">Off</span>`;
-  offBtn.addEventListener('click', e => { e.stopPropagation(); cb.onOff?.(); });
+  offBtn.addEventListener('click', e => { e.stopPropagation(); clearDotForDevice(dev.device_id); refreshDots(); cb.onOff?.(); });
 
   row1.appendChild(onBtn);
   row1.appendChild(offBtn);
@@ -827,7 +921,7 @@ export function buildLightControls(dev, cb) {
       const tempBar = buildTempBar({
         mireds: dev.color_temp ?? 370,
         onInput: v => { tempVal.textContent = fmtK(v); paintModeDot(tempBtn, layout.ctToHex(v)); },
-        onChange: v => { tempVal.textContent = fmtK(v); setMode('temp'); applyMode(); cb.onTemp?.(v); },
+        onChange: v => { tempVal.textContent = fmtK(v); setMode('temp'); deviceDotDomain.set(dev.device_id, 'temp'); dev.color_temp = v; applyMode(); cb.onTemp?.(v); },
       });
       tempRow.append(tempLabel, tempBar, tempVal);
     }
@@ -839,8 +933,10 @@ export function buildLightControls(dev, cb) {
         hue: h, sat: s,
         onInput: (hh, ss) => paintModeDot(colourBtn, `hsl(${hh},${ss}%,50%)`),
         onChange: (hh, ss) => {
-          setMode('colour'); applyMode();   // applyMode reverts the dot to the 🎨 icon
+          setMode('colour'); deviceDotDomain.set(dev.device_id, 'colour');
           const { x, y } = hslToXy(hh, ss);
+          dev.color_xy = [x, y];   // optimistic so the dot tints to the set colour now
+          applyMode();
           cb.onColorXY?.(x, y);
         },
       }));
@@ -859,14 +955,15 @@ export function buildLightControls(dev, cb) {
       const showColour = supportsColour && lcMode === 'colour' && lcExpanded;
       if (tempRow)    tempRow.style.display    = showTemp   ? '' : 'none';
       if (colourRows) colourRows.style.display = showColour ? '' : 'none';
-      // Resting state: both controls show their glyph icon. A dot is painted
-      // only transiently by the wheel/temp-bar drag handlers above.
-      paintModeIcon(tempBtn,   'temp');
-      paintModeIcon(colourBtn, 'colour');
+      // Each button shows its glyph icon, or a live dot if its domain is the one
+      // last set for this bulb (persists until brightness-aside changes clear it).
+      paintDeviceButton(tempBtn,   'temp',   dev);
+      paintDeviceButton(colourBtn, 'colour', dev);
       // Ring the trigger whose control is currently open.
       tempBtn?.classList.toggle('active', showTemp);
       colourBtn?.classList.toggle('active', showColour);
     };
+    refreshDots = applyMode;
     const collapse = () => {
       if (!lcExpanded) return;
       lcExpanded = false;
@@ -938,6 +1035,7 @@ function makeLcSliderRow(label, min, max, value, format, onCommit) {
   slider.max = String(max);
   slider.value = String(value);
   slider.className = 'light-slider lc-slider';
+  slider.autocomplete = 'off';
 
   wireDeviceSlider(slider, {
     format,
@@ -1142,7 +1240,7 @@ function buildEffectBadge(room, activeEffect) {
   const name = meta?.display_name || activeEffect.effect_id;
   badge.textContent = `${icon} ${name}`;
   badge.style.cursor = 'pointer';
-  badge.title = `${name} active — click for options`;
+  badge.title = `${name} active — click for options, drag off to remove`;
   badge.addEventListener('click', e => {
     e.stopPropagation();
     openEffectEditorRoomId = openEffectEditorRoomId === room.id ? null : room.id;
@@ -1151,7 +1249,7 @@ function buildEffectBadge(room, activeEffect) {
   badge.addEventListener('dragstart', e => {
     e.stopPropagation();
     effectRemoveRoomId = room.id;
-    effectDragIsPermanent = false; // drag active badge = pause
+    effectDragIsPermanent = true; // drag active badge off = permanent remove
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', `effect-remove:${room.id}`);
     requestAnimationFrame(() => badge.classList.add('dragging'));
@@ -1319,6 +1417,7 @@ function buildSchemaField(key, spec, paramsObj, onChange) {
     if (hi != null) input.max = hi;
     input.step = spec.type === 'integer' ? 1 : 0.01;
     input.value = current ?? spec.default ?? lo ?? 0;
+    input.autocomplete = 'off';
     const valueEl = document.createElement('span');
     valueEl.className = 'effect-editor-value';
     valueEl.textContent = formatSliderValue(input.value, spec.type);
@@ -1359,6 +1458,7 @@ function buildSchemaField(key, spec, paramsObj, onChange) {
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = !!current;
+    cb.autocomplete = 'off';
     cb.addEventListener('change', () => { paramsObj[key] = cb.checked; onChange(); });
     row.appendChild(cb);
     paramsObj[key] = !!current;
@@ -1421,7 +1521,8 @@ function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose)
     onInput: v => paintRoomDot(trigger('room-temp'), 'temp', layout.ctToHex(v)),
     onCommit: async v => {
       setMode('temp');
-      paintRoomTrigger(trigger('room-temp'), 'temp');   // revert dot → icon on release
+      roomDotDomain.set(room.id, 'temp');   // temp becomes the persistent dot
+      paintRoomDot(trigger('room-temp'), 'temp', layout.ctToHex(v));
       if (activeEffect) await clearEffect(room.id);
       sendRoomCommand(room.id, { action: 'color_temp', value: v }, room);
     },
@@ -1440,7 +1541,8 @@ function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose)
       onInput: (hh, ss) => paintRoomDot(trigger('room-colour'), 'colour', `hsl(${hh},${ss}%,50%)`),
       onChange: (hh, ss) => {
         setMode('colour');
-        paintRoomTrigger(trigger('room-colour'), 'colour');   // revert dot → icon on release
+        roomDotDomain.set(room.id, 'colour');   // colour becomes the persistent dot
+        paintRoomDot(trigger('room-colour'), 'colour', `hsl(${hh},${ss}%,50%)`);
         const { x, y } = hslToXy(hh, ss);
         sendRoomCommand(room.id, { action: 'color_xy', x, y }, room);
       },
@@ -1533,7 +1635,8 @@ function wireEffectChipTouchDrag(chip, effectId) {
     startX = e.clientX; startY = e.clientY;
     pointerId = e.pointerId;
     dragging = false;
-    chip.setPointerCapture(e.pointerId);
+    chip.setPointerCapture(e.pointerId);  // capture immediately so pointermove fires
+                                          // even when finger is over a room card
   });
 
   chip.addEventListener('pointermove', e => {
@@ -1585,6 +1688,8 @@ function renderNewRoomBtn() {
     wrap.innerHTML = '';
     const input = document.createElement('input');
     input.className = 'room-name-input';
+    input.name = 'room-name';
+    input.autocomplete = 'off';
     input.placeholder = 'Room name…';
     let confirmed = false;
     const confirm = () => {
@@ -1790,11 +1895,10 @@ function renderRoomCard(room) {
   if (!empty) onBtn.addEventListener('click', async e => {
     e.stopPropagation();
     setRoomOnOff(true);
-    // Power on with sensible defaults so the light is visibly on
+    clearDotForRoom(room);   // on/off resets colour/temp dots to icons
+    // Power on at the Hue default warm white so on/off is consistent.
     if (activeEffect) await clearEffect(room.id);
-    await sendRoomCommand(room.id, { action: 'brightness', value: 200 }, room);
-    await sendRoomCommand(room.id, { action: 'color_temp', value: 370 }, room);
-    await sendRoomCommand(room.id, { action: 'on' }, room);
+    for (const c of HUE_DEFAULT_ON) await sendRoomCommand(room.id, c, room);
   });
   offBtn.className = 'room-onoff-btn room-onoff-off';
   offBtn.textContent = 'Off';
@@ -1802,6 +1906,7 @@ function renderRoomCard(room) {
   if (!empty) offBtn.addEventListener('click', async e => {
     e.stopPropagation();
     setRoomOnOff(false);
+    clearDotForRoom(room);   // on/off resets colour/temp dots to icons
     if (activeEffect) await clearEffect(room.id);
     sendRoomCommand(room.id, { action: 'off' }, room);
   });
@@ -1816,20 +1921,20 @@ function renderRoomCard(room) {
   const hasTempDevices = roomDevicesAll.some(d => d.color_temp != null);
   const roomModeKey = 'mesh-room-mode-' + room.id;
 
-  // Each domain gets a trigger showing its glyph icon at rest (a live dot
-  // appears only while its control in the panel below is being dragged).
+  // Each domain gets a trigger showing its glyph icon, or a live dot if that
+  // domain is the one last set for this room (persists until cleared).
   let colourBtn = null, tempBtn = null;
   if (!empty && hasColour) {
     colourBtn = document.createElement('button');
     colourBtn.className = 'room-action-btn room-ctrl-trigger';
     colourBtn.dataset.role = 'room-colour';
-    paintRoomTrigger(colourBtn, 'colour');
+    paintRoomButton(colourBtn, 'colour', roomDevicesAll, room.id);
   }
   if (!empty && hasTempDevices) {
     tempBtn = document.createElement('button');
     tempBtn.className = 'room-action-btn room-ctrl-trigger';
     tempBtn.dataset.role = 'room-temp';
-    paintRoomTrigger(tempBtn, 'temp');
+    paintRoomButton(tempBtn, 'temp', roomDevicesAll, room.id);
   }
 
   const layoutBtn = document.createElement('button');
@@ -1887,9 +1992,9 @@ function renderRoomCard(room) {
 
     const syncButtons = () => {
       const m = curMode();
-      // Resting glyph icons; the open trigger gets the ring below.
-      paintRoomTrigger(colourBtn, 'colour');
-      paintRoomTrigger(tempBtn, 'temp');
+      // Glyph icon, or a live dot for the domain last set for this room.
+      paintRoomButton(colourBtn, 'colour', roomDevicesAll, room.id);
+      paintRoomButton(tempBtn, 'temp', roomDevicesAll, room.id);
       // Ring the trigger whose panel is open.
       colourBtn?.classList.toggle('active', !!ctPanel && m === 'colour');
       tempBtn?.classList.toggle('active', !!ctPanel && m === 'temp');
@@ -1903,11 +2008,16 @@ function renderRoomCard(room) {
       }
       syncButtons();
     };
+    let outsideDismiss = null;
+    const disarmOutside = () => {
+      if (outsideDismiss) { document.removeEventListener('pointerdown', outsideDismiss, true); outsideDismiss = null; }
+    };
     const closePanel = () => {
       openRoomCtrlIds.delete(room.id);
       ctPanel?.remove();
       ctPanel = null;
       card.classList.remove('room-wheel-open');
+      disarmOutside();
       syncButtons();
     };
     const selectMode = (mode) => {
@@ -1916,13 +2026,35 @@ function renderRoomCard(room) {
       openRoomCtrlIds.add(room.id);
       ctPanel?.remove(); ctPanel = null;   // rebuild in the chosen mode
       openPanel();
+      // Arm outside-click dismissal after the current event settles.
+      disarmOutside();
+      outsideDismiss = (e) => {
+        if (!ctPanel) return;
+        // Allow taps on the panel itself, the colour/temp trigger buttons, and
+        // the temp/colour wheel (which uses capture-phase stopPropagation).
+        if (ctPanel.contains(e.target)) return;
+        if (colourBtn?.contains(e.target) || tempBtn?.contains(e.target)) return;
+        closePanel();
+      };
+      // Use setTimeout so the tap that opened the panel doesn't immediately close it.
+      setTimeout(() => { if (ctPanel) document.addEventListener('pointerdown', outsideDismiss, true); }, 0);
     };
 
     colourBtn?.addEventListener('click', e => { e.stopPropagation(); selectMode('colour'); });
     tempBtn?.addEventListener('click', e => { e.stopPropagation(); selectMode('temp'); });
 
-    // Restore on render if it was open before
-    if (openRoomCtrlIds.has(room.id)) openPanel();
+    // Restore on render if it was open before, and re-arm the outside-click dismiss.
+    if (openRoomCtrlIds.has(room.id)) {
+      openPanel();
+      disarmOutside();
+      outsideDismiss = (e) => {
+        if (!ctPanel) return;
+        if (ctPanel.contains(e.target)) return;
+        if (colourBtn?.contains(e.target) || tempBtn?.contains(e.target)) return;
+        closePanel();
+      };
+      setTimeout(() => { if (ctPanel) document.addEventListener('pointerdown', outsideDismiss, true); }, 0);
+    }
   }
 
   // Hide room controls when the effect editor is open
@@ -1954,15 +2086,22 @@ function renderRoomCard(room) {
       const chip = document.createElement('button');
       chip.className = 'room-quick-scene-chip';
       chip.dataset.sceneId = scene.id;
-      chip.setAttribute('draggable', 'true');
+      chip.setAttribute('draggable', 'true');   // mouse only; touch uses wireSceneChipTouchDrag
       chip.textContent = scene.name;
       chip.title = `Recall "${scene.name}"`;
       if (scene.preview_color) {
         const { r, g, b } = xyToRgb(scene.preview_color[0], scene.preview_color[1], 180);
         chip.style.setProperty('--scene-chip-color', `rgb(${r},${g},${b})`);
       }
-      if (activeSceneByRoom.get(room.id) === scene.id) chip.classList.add('active');
+      if (activeSceneByRoom.get(room.id) === scene.id) {
+        chip.classList.add('active');
+        const memberCount = room.device_ids?.length ?? 0;
+        const pausedCount = pausedSceneDevices.get(room.id)?.size ?? 0;
+        if (pausedCount > 0 && pausedCount < memberCount) chip.classList.add('partly-paused');
+        if (memberCount > 0 && pausedCount >= memberCount) chip.classList.add('all-paused');
+      }
       chip.addEventListener('click', e => { e.stopPropagation(); recallScene(scene.id); });
+      wireSceneChipTouchDrag(chip, sceneBar);
       sceneBar.appendChild(chip);
     }
     wireSceneBarDrag(sceneBar, room.id);
@@ -2082,6 +2221,8 @@ function buildScenesSection(roomId) {
   const nameInput = document.createElement('input');
   nameInput.type = 'text';
   nameInput.className = 'room-scene-name-input';
+  nameInput.name = 'scene-name';
+  nameInput.autocomplete = 'off';
   nameInput.placeholder = 'Scene name…';
   nameInput.style.display = 'none';
   saveRow.appendChild(nameInput);
@@ -2210,13 +2351,13 @@ function buildDeviceCard(dev, roomId) {
     e.stopPropagation(); removeDeviceFromRoom(roomId, dev.device_id);
   });
 
-  // Per-bulb effect indicator
+  // Per-bulb effect indicator — lit when participating, greyed when paused.
   if (eff) {
     const overridden = eff.overrides.has(dev.device_id);
     const icon = EFFECT_ICONS[eff.effect_id] || DEFAULT_EFFECT_ICON;
     const btn = document.createElement('button');
     btn.className = 'device-effect-btn' + (overridden ? ' device-effect-overridden' : '');
-    btn.title = overridden ? 'Excluded from effect — click to re-include' : 'In effect';
+    btn.title = overridden ? 'Paused from effect — click to resume' : 'In effect — click to pause';
     btn.textContent = icon;
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -2226,6 +2367,22 @@ function buildDeviceCard(dev, roomId) {
     card.querySelector('.light-card-header-right')?.prepend(btn);
   }
 
+  // Per-bulb scene indicator — present whenever the room has an active scene;
+  // lit when this light follows it, greyed when paused. Same model as effects.
+  const activeSceneId = activeSceneByRoom.get(roomId);
+  if (activeSceneId) {
+    const paused = pausedSceneDevices.get(roomId)?.has(dev.device_id) ?? false;
+    const sbtn = document.createElement('button');
+    sbtn.className = 'device-scene-btn' + (paused ? ' device-scene-paused' : '');
+    sbtn.title = paused ? 'Paused from scene — click to resume' : 'In scene — click to pause';
+    sbtn.textContent = SCENE_ICON;
+    sbtn.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleSceneDevice(roomId, dev.device_id);
+    });
+    card.querySelector('.light-card-header-right')?.prepend(sbtn);
+  }
+
   // Controls — only if online and has brightness
   if (!offline && dev.brightness != null) {
     const maybeExclude = () => {
@@ -2233,19 +2390,19 @@ function buildDeviceCard(dev, roomId) {
       if (!e2 || e2.overrides.has(dev.device_id)) return;
       e2.overrides.add(dev.device_id);
       const btn2 = card.querySelector('.device-effect-btn');
-      if (btn2) { btn2.classList.add('device-effect-overridden'); btn2.title = 'Excluded from effect — click to re-include'; }
+      if (btn2) { btn2.classList.add('device-effect-overridden'); btn2.title = 'Paused from effect — click to resume'; }
       fetch(`/api/rooms/${encodeURIComponent(roomId)}/effect/override?token=${encodeURIComponent(tok())}`,
         { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ device_id: dev.device_id, excluded: true }) })
         .catch(err => {
           e2.overrides.delete(dev.device_id);
-          if (btn2) { btn2.classList.remove('device-effect-overridden'); btn2.title = 'In effect'; }
+          if (btn2) { btn2.classList.remove('device-effect-overridden'); btn2.title = 'In effect — click to pause'; }
           showToast(`Override error: ${err.message}`, true);
         });
     };
 
     const controls = buildLightControls(dev, {
-      onOn:  () => { maybeExclude(); sendDeviceCommand(dev.device_id, { action: 'on' }); },
+      onOn:  () => { maybeExclude(); for (const c of HUE_DEFAULT_ON) sendDeviceCommand(dev.device_id, c); },
       onOff: () => { maybeExclude(); sendDeviceCommand(dev.device_id, { action: 'off' }); },
       onBrightness: v => {
         maybeExclude();
@@ -2514,6 +2671,8 @@ function saveRoomOrder() {
 function startRename(nameEl, room) {
   const input = document.createElement('input');
   input.className = 'room-name-input room-name-input-inline';
+  input.name = 'room-rename';
+  input.autocomplete = 'off';
   input.value = room.name;
   nameEl.replaceWith(input);
   input.focus();
@@ -2597,6 +2756,82 @@ async function deleteDevice(deviceId) {
 // ── Scene bar drag-to-reorder ─────────────────────────────────────────────────
 
 let sceneDragId = null; // sceneId being dragged within the bar
+
+// Touch drag-to-reorder for scene chips. Native HTML5 drag never fires on mobile,
+// so this mirrors wireEffectChipTouchDrag: past an 8 px threshold a ghost follows
+// the finger, reorder inserts the chip live, commit saves on release.
+// Mouse falls through to the native DnD path in wireSceneBarDrag.
+// Touch drag-to-reorder for scene chips. A quick swipe scrolls the bar;
+// a deliberate press-hold (150 ms) activates drag-to-reorder. Mouse falls
+// through to the native DnD path in wireSceneBarDrag.
+function wireSceneChipTouchDrag(chip, bar) {
+  let startX = 0, startY = 0, dragging = false, ghost = null, pointerId = null;
+  let holdTimer = null;
+  let dragReady = false;   // true once the 150 ms hold fires
+
+  const cancelHold = () => { clearTimeout(holdTimer); holdTimer = null; dragReady = false; };
+
+  chip.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse') return;
+    startX = e.clientX; startY = e.clientY;
+    pointerId = e.pointerId;
+    dragging = false; dragReady = false;
+    // Arm a 150 ms timer — if the finger is still down and hasn't scrolled far,
+    // we switch into drag mode. A quick swipe cancels the timer and scrolls.
+    holdTimer = setTimeout(() => {
+      dragReady = true;
+    }, 150);
+  });
+
+  chip.addEventListener('pointermove', e => {
+    if (e.pointerType === 'mouse' || e.pointerId !== pointerId) return;
+    const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
+    if (!dragging) {
+      // If the finger moved >8 px before the hold timer fired, it's a scroll.
+      if (!dragReady && dist > 8) { cancelHold(); return; }
+      // Hold timer fired and finger has moved enough to start dragging.
+      if (!dragReady || dist < 4) return;
+      dragging = true;
+      chip.setPointerCapture(e.pointerId);
+      sceneDragId = chip.dataset.sceneId;
+      chip.classList.add('dragging');
+      ghost = chip.cloneNode(true);
+      ghost.style.cssText = 'position:fixed;pointer-events:none;opacity:0.85;z-index:9999;transform:translate(-50%,-50%);box-shadow:0 4px 16px rgba(0,0,0,0.4)';
+      document.body.appendChild(ghost);
+      e.preventDefault();
+    }
+    if (!ghost) return;
+    ghost.style.left = `${e.clientX}px`;
+    ghost.style.top = `${e.clientY}px`;
+    const others = [...bar.querySelectorAll('.room-quick-scene-chip:not(.dragging)')];
+    const after = others.reduce((closest, c) => {
+      const box = c.getBoundingClientRect();
+      const offset = e.clientX - box.left - box.width / 2;
+      if (offset < 0 && offset > closest.offset) return { offset, element: c };
+      return closest;
+    }, { offset: Number.NEGATIVE_INFINITY }).element;
+    if (after == null) bar.appendChild(chip);
+    else bar.insertBefore(chip, after);
+  });
+
+  const finish = e => {
+    if (e.pointerType === 'mouse' || e.pointerId !== pointerId) return;
+    cancelHold();
+    if (chip.hasPointerCapture(e.pointerId)) chip.releasePointerCapture(e.pointerId);
+    if (ghost) { ghost.remove(); ghost = null; }
+    chip.classList.remove('dragging');
+    if (dragging) {
+      const ids = [...bar.querySelectorAll('.room-quick-scene-chip[data-scene-id]')]
+        .map(c => c.dataset.sceneId);
+      clearTimeout(_sceneReorderTimer);
+      _sceneReorderTimer = setTimeout(() => reorderScenes(ids), 80);
+    }
+    dragging = false; dragReady = false;
+    sceneDragId = null; pointerId = null;
+  };
+  chip.addEventListener('pointerup', finish);
+  chip.addEventListener('pointercancel', finish);
+}
 
 function wireSceneBarDrag(bar, roomId) {
   bar.addEventListener('dragstart', e => {
@@ -2694,6 +2929,63 @@ async function setEffectOverride(roomId, deviceId, excluded) {
 function excludeFromEffect(roomId, deviceId) { return setEffectOverride(roomId, deviceId, true);  }
 function includeInEffect(roomId, deviceId)  { return setEffectOverride(roomId, deviceId, false); }
 
+// ── Per-bulb scene pause/resume ───────────────────────────────────────────────
+
+// Pausing a light out of the active scene reverts it to its pre-scene state, or —
+// if that snapshot isn't available (e.g. after an app reload) — the Hue default
+// warm white. keepScene:true so the room's scene stays active for the others.
+function applyPreSceneOrWarmWhite(roomId, deviceId) {
+  const snap = preSceneStateByRoom.get(roomId)?.get(deviceId);
+  if (!snap) {
+    for (const c of HUE_DEFAULT_ON) sendDeviceCommand(deviceId, c, { keepScene: true });
+    return;
+  }
+  if (!snap.on) { sendDeviceCommand(deviceId, { action: 'off' }, { keepScene: true }); return; }
+  if (snap.brightness != null)
+    sendDeviceCommand(deviceId, { action: 'brightness', value: snap.brightness, transition_secs: 0.8 }, { keepScene: true });
+  else
+    sendDeviceCommand(deviceId, { action: 'on' }, { keepScene: true });
+  if (snap.color_xy != null)
+    sendDeviceCommand(deviceId, { action: 'color_xy', x: snap.color_xy[0], y: snap.color_xy[1], transition_secs: 0.8 }, { keepScene: true });
+  else if (snap.color_temp != null)
+    sendDeviceCommand(deviceId, { action: 'color_temp', value: snap.color_temp, transition_secs: 0.8 }, { keepScene: true });
+}
+
+function pauseSceneDevice(roomId, deviceId) {
+  let set = pausedSceneDevices.get(roomId);
+  if (!set) { set = new Set(); pausedSceneDevices.set(roomId, set); }
+  set.add(deviceId);
+  render();
+  applyPreSceneOrWarmWhite(roomId, deviceId);
+}
+
+// Resume re-applies the scene's stored value to just this device (server filters
+// the recall to the one device_id). Optimistic + rollback, mirroring overrides.
+async function resumeSceneDevice(roomId, deviceId) {
+  const sceneId = activeSceneByRoom.get(roomId);
+  if (!sceneId) return;
+  const set = pausedSceneDevices.get(roomId);
+  set?.delete(deviceId);
+  render();
+  try {
+    const res = await fetch(
+      `/api/scenes/${encodeURIComponent(sceneId)}/recall?token=${encodeURIComponent(tok())}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transition_secs: 0.8, device_id: deviceId }) },
+    );
+    if (!res.ok) throw new Error(`${res.status}`);
+  } catch (e) {
+    set?.add(deviceId);
+    render();
+    showToast(`Resume error: ${e.message}`, true);
+  }
+}
+
+function toggleSceneDevice(roomId, deviceId) {
+  if (pausedSceneDevices.get(roomId)?.has(deviceId)) resumeSceneDevice(roomId, deviceId);
+  else pauseSceneDevice(roomId, deviceId);
+}
+
 async function activateEffect(roomId, effectId, params = null) {
   const room = roomsData.find(r => r.id === roomId);
   if (!room) return;
@@ -2784,10 +3076,14 @@ async function sendRoomCommand(roomId, body, room, isGlobal = false) {
   } catch (e) { showToast(`Room command error: ${e.message}`, true); }
 }
 
-async function sendDeviceCommand(deviceId, body) {
+async function sendDeviceCommand(deviceId, body, opts = {}) {
   globalLightState = null;
-  const owningRoom = roomsData.find(r => r.device_ids.includes(deviceId));
-  if (owningRoom) clearRoomActiveScene(owningRoom.id);
+  // Per-device scene pause/resume keeps the room's scene active for other lights,
+  // so it must NOT clear the active scene the way a manual command does.
+  if (!opts.keepScene) {
+    const owningRoom = roomsData.find(r => r.device_ids.includes(deviceId));
+    if (owningRoom) clearRoomActiveScene(owningRoom.id);
+  }
   try {
     const res = await fetch(
       `/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(tok())}`,
@@ -2814,6 +3110,14 @@ async function saveScene(name, roomId) {
 async function recallScene(id) {
   const scene = scenesData.find(s => s.id === id);
   const roomId = scene?.room_id;
+
+  // A scene sets colour/temp wholesale — reset the room + member dots to icons,
+  // and clear any per-light scene pauses (a fresh recall/revert re-includes all).
+  if (roomId) {
+    const room = roomsData.find(r => r.id === roomId);
+    if (room) clearDotForRoom(room);
+    pausedSceneDevices.delete(roomId);
+  }
 
   // Toggle: clicking the active scene reverts to pre-scene state.
   if (roomId && activeSceneByRoom.get(roomId) === id) {
@@ -2945,6 +3249,8 @@ function startDeviceRename(nameEl, deviceId) {
   const input = document.createElement('input');
   input.value = current;
   input.className = 'room-rename-input';
+  input.name = 'device-rename';
+  input.autocomplete = 'off';
   nameEl.replaceWith(input);
   input.focus();
   input.select();

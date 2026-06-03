@@ -218,7 +218,14 @@ lint:
     cargo clippy --all-targets --all-features -- -D warnings
 
 run-agent:
-    cargo run -p agent
+    #!/usr/bin/env bash
+    set -e
+    cargo build -p agent
+    LOG="$HOME/.local/share/ai-mesh/agent.log"
+    mkdir -p "$(dirname "$LOG")"
+    COORDINATOR_IP={{coordinator_ip}} COORDINATOR_PORT={{coordinator_port}} \
+        nohup target/debug/agent >> "$LOG" 2>&1 &
+    echo ">>> Agent started (PID $!) — logs at $LOG"
 
 run-coordinator: update-portproxy
     #!/usr/bin/env bash
@@ -232,7 +239,14 @@ run-coordinator: update-portproxy
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -p coordinator
 
 run-controller:
-    AGENT_ROLE=compute cargo run -p agent
+    #!/usr/bin/env bash
+    set -e
+    cargo build -p agent
+    LOG="$HOME/.local/share/ai-mesh/agent.log"
+    mkdir -p "$(dirname "$LOG")"
+    COORDINATOR_IP={{coordinator_ip}} COORDINATOR_PORT={{coordinator_port}} AGENT_ROLE=compute \
+        nohup target/debug/agent >> "$LOG" 2>&1 &
+    echo ">>> Controller agent started (PID $!) — logs at $LOG"
 
 reset: update-portproxy
     #!/usr/bin/env bash

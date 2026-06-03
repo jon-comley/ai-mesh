@@ -723,6 +723,10 @@ pub async fn save_scene(
 pub struct RecallBody {
     #[serde(default)]
     transition_secs: Option<f32>,
+    /// When set, recall the scene to ONLY this device (used to resume a single
+    /// light that was paused from an active scene). Absent ⇒ whole-scene recall.
+    #[serde(default)]
+    device_id: Option<String>,
 }
 
 pub async fn recall_scene(
@@ -732,18 +736,17 @@ pub async fn recall_scene(
     State(state): State<Arc<DashboardState>>,
     req: axum::extract::Request,
 ) -> impl IntoResponse {
-    let transition_secs = {
+    let body: RecallBody = {
         let bytes = axum::body::to_bytes(req.into_body(), 4096)
             .await
             .unwrap_or_default();
         if bytes.is_empty() {
-            None
+            RecallBody::default()
         } else {
-            serde_json::from_slice::<RecallBody>(&bytes)
-                .ok()
-                .and_then(|b| b.transition_secs)
+            serde_json::from_slice::<RecallBody>(&bytes).unwrap_or_default()
         }
     };
+    let transition_secs = body.transition_secs;
     if !state.auth_ok(&q.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -753,6 +756,12 @@ pub async fn recall_scene(
     };
     let mut any_unavailable = false;
     for snap in &scene.states {
+        // Single-device recall (resume one paused light) skips all other devices.
+        if let Some(only) = &body.device_id
+            && &snap.device_id != only
+        {
+            continue;
+        }
         let node_id = match state.get_node_for_device(&snap.device_id) {
             Some(n) => n,
             None => {
@@ -2463,6 +2472,57 @@ mod tests {
         // Expect ColorTemp, Brightness, On — 3 commands
         let msgs: Vec<MeshMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(msgs.len(), 3, "should fan out 3 commands: {msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn recall_scene_with_device_id_targets_only_that_device() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(16);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+        seed_light(&state, "bulb2", "pi1");
+
+        let registry = make_registry();
+        let mk = |id: &str| crate::registry::DeviceSnapshot {
+            device_id: id.into(),
+            node_id: "pi1".into(),
+            on: true,
+            brightness: Some(255),
+            color_xy: None,
+            color_temp: Some(370),
+        };
+        let scene_id = {
+            let mut reg = registry.lock().unwrap();
+            reg.save_scene("Test", None, vec![mk("bulb1"), mk("bulb2")])
+                .id
+        };
+
+        // Recall to only bulb1.
+        let status = send(
+            scenes_router(state, registry),
+            "POST",
+            &format!("/api/scenes/{scene_id}/recall?token="),
+            r#"{"device_id":"bulb1"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let msgs: Vec<MeshMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(
+            msgs.len(),
+            3,
+            "only bulb1's 3 commands should fire: {msgs:?}"
+        );
+        for m in &msgs {
+            if let MeshMessage::LightCommand(req) = m {
+                assert!(
+                    matches!(&req.target, LightTarget::Device(d) if d == "bulb1"),
+                    "every command must target bulb1, got {:?}",
+                    req.target
+                );
+            }
+        }
     }
 
     #[tokio::test]

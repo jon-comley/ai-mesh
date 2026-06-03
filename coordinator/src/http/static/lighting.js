@@ -1,7 +1,7 @@
 // ── Lighting panel ──────────────────────────────────────────────────────────
 // Renders per-device light state cards with interactive controls.
 
-import { buildLightControls, repaintModeDots } from '/static/rooms.js';
+import { buildLightControls, repaintModeDots, HUE_DEFAULT_ON } from '/static/rooms.js';
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
@@ -105,7 +105,7 @@ function render() {
     if (dev.brightness != null) {
       const patch = fields => { const c = devicesMap.get(dev.device_id); if (c) devicesMap.set(dev.device_id, { ...c, ...fields }); };
       const controls = buildLightControls(dev, {
-        onOn:  () => { patch({ on: true  }); render(); sendCommand(dev.device_id, { action: 'on' }); },
+        onOn:  () => { patch({ on: true, brightness: 200, color_temp: 370 }); render(); for (const c of HUE_DEFAULT_ON) sendCommand(dev.device_id, c); },
         onOff: () => { patch({ on: false }); render(); sendCommand(dev.device_id, { action: 'off' }); },
         onBrightness: v => { patch({ brightness: v }); sendCommand(dev.device_id, { action: 'brightness', value: v }); },
         onTemp:       v => { patch({ color_temp: v }); sendCommand(dev.device_id, { action: 'color_temp', value: v }); },

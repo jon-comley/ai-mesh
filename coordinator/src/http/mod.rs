@@ -4,7 +4,7 @@ mod ws;
 
 use axum::{
     Router,
-    http::header,
+    http::{StatusCode, header},
     response::Html,
     routing::{delete, get, patch, post},
 };
@@ -36,11 +36,15 @@ pub fn router(
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/", get(|| async { Html(INDEX_HTML) }))
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .route(
             "/static/style.css",
             get(|| async {
                 (
-                    [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+                    [
+                        (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     STYLE_CSS,
                 )
             }),
@@ -49,10 +53,13 @@ pub fn router(
             "/static/dashboard.js",
             get(|| async {
                 (
-                    [(
-                        header::CONTENT_TYPE,
-                        "application/javascript; charset=utf-8",
-                    )],
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     DASHBOARD_JS,
                 )
             }),
@@ -61,10 +68,13 @@ pub fn router(
             "/static/topology.js",
             get(|| async {
                 (
-                    [(
-                        header::CONTENT_TYPE,
-                        "application/javascript; charset=utf-8",
-                    )],
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     TOPOLOGY_JS,
                 )
             }),
@@ -73,10 +83,13 @@ pub fn router(
             "/static/health.js",
             get(|| async {
                 (
-                    [(
-                        header::CONTENT_TYPE,
-                        "application/javascript; charset=utf-8",
-                    )],
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     HEALTH_JS,
                 )
             }),
@@ -85,10 +98,13 @@ pub fn router(
             "/static/models.js",
             get(|| async {
                 (
-                    [(
-                        header::CONTENT_TYPE,
-                        "application/javascript; charset=utf-8",
-                    )],
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     MODELS_JS,
                 )
             }),
@@ -97,10 +113,13 @@ pub fn router(
             "/static/lighting.js",
             get(|| async {
                 (
-                    [(
-                        header::CONTENT_TYPE,
-                        "application/javascript; charset=utf-8",
-                    )],
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     LIGHTING_JS,
                 )
             }),
@@ -109,10 +128,13 @@ pub fn router(
             "/static/rooms.js",
             get(|| async {
                 (
-                    [(
-                        header::CONTENT_TYPE,
-                        "application/javascript; charset=utf-8",
-                    )],
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     ROOMS_JS,
                 )
             }),
@@ -121,10 +143,13 @@ pub fn router(
             "/static/layout.js",
             get(|| async {
                 (
-                    [(
-                        header::CONTENT_TYPE,
-                        "application/javascript; charset=utf-8",
-                    )],
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     LAYOUT_JS,
                 )
             }),
@@ -133,7 +158,10 @@ pub fn router(
             "/manifest.json",
             get(|| async {
                 (
-                    [(header::CONTENT_TYPE, "application/manifest+json")],
+                    [
+                        (header::CONTENT_TYPE, "application/manifest+json"),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     MANIFEST_JSON,
                 )
             }),
@@ -142,10 +170,13 @@ pub fn router(
             "/service-worker.js",
             get(|| async {
                 (
-                    [(
-                        header::CONTENT_TYPE,
-                        "application/javascript; charset=utf-8",
-                    )],
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
                     SERVICE_WORKER_JS,
                 )
             }),
