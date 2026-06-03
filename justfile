@@ -213,6 +213,14 @@ build:
 test:
     cargo test
 
+# Frontend (dashboard ES module) unit tests — Vitest + jsdom. Dev-only.
+test-ui:
+    #!/usr/bin/env bash
+    set -e
+    cd frontend
+    [ -d node_modules ] || npm install
+    npm test
+
 lint:
     cargo fmt --all
     cargo clippy --all-targets --all-features -- -D warnings

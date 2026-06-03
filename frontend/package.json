@@ -1,0 +1,13 @@
+{
+  "name": "ai-mesh-frontend-tests",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only test harness for the dashboard ES modules in coordinator/src/http/static. Not bundled or shipped — the coordinator serves the raw .js via include_str!.",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.8"
+  }
+}
