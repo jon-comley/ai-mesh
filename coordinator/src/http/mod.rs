@@ -24,6 +24,7 @@ const HEALTH_JS: &str = include_str!("static/health.js");
 const MODELS_JS: &str = include_str!("static/models.js");
 const LIGHTING_JS: &str = include_str!("static/lighting.js");
 const ROOMS_JS: &str = include_str!("static/rooms.js");
+const DRAG_JS: &str = include_str!("static/drag.js");
 const LAYOUT_JS: &str = include_str!("static/layout.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
@@ -136,6 +137,21 @@ pub fn router(
                         (header::CACHE_CONTROL, "no-cache"),
                     ],
                     ROOMS_JS,
+                )
+            }),
+        )
+        .route(
+            "/static/drag.js",
+            get(|| async {
+                (
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            "application/javascript; charset=utf-8",
+                        ),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
+                    DRAG_JS,
                 )
             }),
         )

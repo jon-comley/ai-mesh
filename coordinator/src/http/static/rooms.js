@@ -18,6 +18,7 @@ export function lockSliderToThumb(slider) {
 }
 
 import * as layout from '/static/layout.js';
+import { createPointerDrag, makeGhost, moveGhost, insertionBefore } from '/static/drag.js';
 
 let roomsData = [];
 let devicesMap = new Map();
@@ -1581,13 +1582,10 @@ function buildEffectChip(meta) {
 // (used for bulbs): past an 8px threshold a floating ghost follows the finger,
 // the room card under it highlights, and releasing over a room applies the
 // effect. Mouse falls through to the native DnD path already wired above.
+// Touch drag of an effect chip onto a room card. Mouse uses native HTML5 DnD.
 function wireEffectChipTouchDrag(chip, effectId) {
   const EDGE = 80, MAX_SPEED = 16;                  // edge auto-scroll, mirrors the native-drag one
-  let startX = 0, startY = 0;
-  let dragging = false;
-  let ghost = null;
-  let pointerId = null;
-  let lastCard = null;
+  let ghost = null, lastCard = null;
   let scrollRaf = null, scrollSpeed = 0, scrollTarget = null;
 
   const cardUnder = (x, y) => {
@@ -1601,9 +1599,8 @@ function wireEffectChipTouchDrag(chip, effectId) {
     card?.classList.add('room-drop-active');
     lastCard = card;
   };
-  // Auto-scroll the room list when the finger nears the top/bottom edge, so a
-  // target card below the fold can be reached (the native-drag autoscroller
-  // keys off dragover events, which pointer drags never fire).
+  // Auto-scroll the room list when the finger nears the top/bottom edge so a
+  // target card below the fold can still be reached.
   const stopScroll = () => { if (scrollRaf) cancelAnimationFrame(scrollRaf); scrollRaf = null; scrollSpeed = 0; scrollTarget = null; };
   const edgeScroll = (y) => {
     const h = window.innerHeight;
@@ -1620,60 +1617,24 @@ function wireEffectChipTouchDrag(chip, effectId) {
       scrollRaf = requestAnimationFrame(tick);
     }
   };
-  const cleanup = () => {
-    if (ghost) { ghost.remove(); ghost = null; }
-    highlight(null);
-    stopScroll();
-    effectDragSrc = null;
-    dragging = false;
-    pointerId = null;
-  };
 
-  chip.addEventListener('pointerdown', e => {
-    if (e.pointerType === 'mouse') return;            // mouse uses native HTML5 DnD
-    if (e.button !== 0 && e.button !== -1) return;
-    startX = e.clientX; startY = e.clientY;
-    pointerId = e.pointerId;
-    dragging = false;
-    chip.setPointerCapture(e.pointerId);  // capture immediately so pointermove fires
-                                          // even when finger is over a room card
-  });
-
-  chip.addEventListener('pointermove', e => {
-    if (e.pointerType === 'mouse') return;
-    if (e.pointerId !== pointerId) return;
-    if (!dragging) {
-      if (Math.hypot(e.clientX - startX, e.clientY - startY) < 8) return;
-      dragging = true;
-      effectDragSrc = effectId;
-      ghost = chip.cloneNode(true);
-      ghost.style.position = 'fixed';
-      ghost.style.transform = 'translate(-50%, -50%)';
-      ghost.style.pointerEvents = 'none';
-      ghost.style.opacity = '0.85';
-      ghost.style.zIndex = '9999';
-      ghost.style.boxShadow = '0 4px 16px rgba(0,0,0,0.4)';
-      document.body.appendChild(ghost);
-      e.preventDefault();
-    }
-    ghost.style.left = `${e.clientX}px`;
-    ghost.style.top = `${e.clientY}px`;
-    highlight(cardUnder(e.clientX, e.clientY));
-    edgeScroll(e.clientY);
-  });
-
-  const finish = e => {
-    if (e.pointerType === 'mouse') return;
-    if (e.pointerId !== pointerId) return;
-    if (chip.hasPointerCapture(e.pointerId)) chip.releasePointerCapture(e.pointerId);
-    if (dragging) {
+  createPointerDrag(chip, {
+    distance: 8,
+    onStart: () => { effectDragSrc = effectId; ghost = makeGhost(chip); },
+    onMove: (e) => {
+      moveGhost(ghost, e.clientX, e.clientY);
+      highlight(cardUnder(e.clientX, e.clientY));
+      edgeScroll(e.clientY);
+    },
+    onEnd: (e) => {
       const card = cardUnder(e.clientX, e.clientY);
       if (card) activateEffect(card.dataset.roomId, effectId);
-    }
-    cleanup();
-  };
-  chip.addEventListener('pointerup', finish);
-  chip.addEventListener('pointercancel', finish);
+      ghost?.remove(); ghost = null;
+      highlight(null);
+      stopScroll();
+      effectDragSrc = null;
+    },
+  });
 }
 
 // ── New Room button ──────────────────────────────────────────────────────────
@@ -2764,73 +2725,33 @@ let sceneDragId = null; // sceneId being dragged within the bar
 // Touch drag-to-reorder for scene chips. A quick swipe scrolls the bar;
 // a deliberate press-hold (150 ms) activates drag-to-reorder. Mouse falls
 // through to the native DnD path in wireSceneBarDrag.
+// Touch reorder of scene chips: quick swipe scrolls the row, press-hold drags.
+// Mouse uses the native HTML5 path in wireSceneBarDrag.
 function wireSceneChipTouchDrag(chip, bar) {
-  let startX = 0, startY = 0, dragging = false, ghost = null, pointerId = null;
-  let holdTimer = null;
-  let dragReady = false;   // true once the 150 ms hold fires
-
-  const cancelHold = () => { clearTimeout(holdTimer); holdTimer = null; dragReady = false; };
-
-  chip.addEventListener('pointerdown', e => {
-    if (e.pointerType === 'mouse') return;
-    startX = e.clientX; startY = e.clientY;
-    pointerId = e.pointerId;
-    dragging = false; dragReady = false;
-    // Arm a 150 ms timer — if the finger is still down and hasn't scrolled far,
-    // we switch into drag mode. A quick swipe cancels the timer and scrolls.
-    holdTimer = setTimeout(() => {
-      dragReady = true;
-    }, 150);
-  });
-
-  chip.addEventListener('pointermove', e => {
-    if (e.pointerType === 'mouse' || e.pointerId !== pointerId) return;
-    const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
-    if (!dragging) {
-      // If the finger moved >8 px before the hold timer fired, it's a scroll.
-      if (!dragReady && dist > 8) { cancelHold(); return; }
-      // Hold timer fired and finger has moved enough to start dragging.
-      if (!dragReady || dist < 4) return;
-      dragging = true;
-      chip.setPointerCapture(e.pointerId);
+  let ghost = null;
+  createPointerDrag(chip, {
+    holdMs: 150, distance: 8,
+    onStart: () => {
       sceneDragId = chip.dataset.sceneId;
       chip.classList.add('dragging');
-      ghost = chip.cloneNode(true);
-      ghost.style.cssText = 'position:fixed;pointer-events:none;opacity:0.85;z-index:9999;transform:translate(-50%,-50%);box-shadow:0 4px 16px rgba(0,0,0,0.4)';
-      document.body.appendChild(ghost);
-      e.preventDefault();
-    }
-    if (!ghost) return;
-    ghost.style.left = `${e.clientX}px`;
-    ghost.style.top = `${e.clientY}px`;
-    const others = [...bar.querySelectorAll('.room-quick-scene-chip:not(.dragging)')];
-    const after = others.reduce((closest, c) => {
-      const box = c.getBoundingClientRect();
-      const offset = e.clientX - box.left - box.width / 2;
-      if (offset < 0 && offset > closest.offset) return { offset, element: c };
-      return closest;
-    }, { offset: Number.NEGATIVE_INFINITY }).element;
-    if (after == null) bar.appendChild(chip);
-    else bar.insertBefore(chip, after);
-  });
-
-  const finish = e => {
-    if (e.pointerType === 'mouse' || e.pointerId !== pointerId) return;
-    cancelHold();
-    if (chip.hasPointerCapture(e.pointerId)) chip.releasePointerCapture(e.pointerId);
-    if (ghost) { ghost.remove(); ghost = null; }
-    chip.classList.remove('dragging');
-    if (dragging) {
+      ghost = makeGhost(chip);
+    },
+    onMove: (e) => {
+      moveGhost(ghost, e.clientX, e.clientY);
+      const after = insertionBefore(bar, '.room-quick-scene-chip:not(.dragging)', e.clientX);
+      if (after == null) bar.appendChild(chip);
+      else bar.insertBefore(chip, after);
+    },
+    onEnd: () => {
+      ghost?.remove(); ghost = null;
+      chip.classList.remove('dragging');
       const ids = [...bar.querySelectorAll('.room-quick-scene-chip[data-scene-id]')]
         .map(c => c.dataset.sceneId);
       clearTimeout(_sceneReorderTimer);
       _sceneReorderTimer = setTimeout(() => reorderScenes(ids), 80);
-    }
-    dragging = false; dragReady = false;
-    sceneDragId = null; pointerId = null;
-  };
-  chip.addEventListener('pointerup', finish);
-  chip.addEventListener('pointercancel', finish);
+      sceneDragId = null;
+    },
+  });
 }
 
 function wireSceneBarDrag(bar, roomId) {
