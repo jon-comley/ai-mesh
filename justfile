@@ -1,4 +1,6 @@
-coordinator_ip   := "192.168.1.11"
+# Coordinator host is derived from whichever nodes/*.env carries NODE_COORDINATOR=true
+# (single source of truth). Falls back to pi1's IP if no marker is found.
+coordinator_ip   := `f=$(grep -l "^NODE_COORDINATOR=true" nodes/*.env 2>/dev/null | head -1); if [ -n "$f" ]; then grep -h "^NODE_HOST=" "$f" | head -1 | cut -d= -f2; else echo 192.168.1.11; fi`
 coordinator_port := "9000"
 
 export PATH := env_var("HOME") / ".cargo/bin" + ":" + env_var("PATH")
@@ -2047,6 +2049,29 @@ test-inference: update-portproxy
     echo "=== Step 6: Final cluster state ==="
     MESH_INSECURE=1 cargo run -q -p cli -- nodes
 
+# One command to (re)deploy the whole cluster end to end: build + install every
+# node agent, deploy the coordinator (the node marked NODE_COORDINATOR=true),
+# start everything, then validate model routing.
+# Usage: just deploy-all
+deploy-all:
+    #!/usr/bin/env bash
+    set -e
+    COORD=$(grep -l '^NODE_COORDINATOR=true' nodes/*.env 2>/dev/null | head -1 | xargs -r -n1 basename | sed 's/\.env$//')
+    if [ -z "$COORD" ]; then
+        echo ">>> Error: no nodes/*.env has NODE_COORDINATOR=true — cannot pick a coordinator"
+        exit 1
+    fi
+    echo "=== deploy-all: coordinator node = ${COORD} ==="
+    echo ">>> [1/4] Provisioning all node agents..."
+    just provision-all
+    echo ">>> [2/4] Deploying coordinator to ${COORD}..."
+    just deploy-coordinator "${COORD}"
+    echo ">>> [3/4] Starting cluster..."
+    just start-cluster
+    echo ">>> [4/4] Validating routing..."
+    just validate-routing
+    echo "=== deploy-all complete ==="
+
 # Deploy coordinator to a remote host (pi1) as a systemd service.
 # Idempotent: safe to re-run. Handles state file + cert/key migration.
 # Usage: just deploy-coordinator pi1
@@ -2213,13 +2238,13 @@ rollback-coordinator:
     echo "=== Emergency rollback: reverting coordinator to laptop ==="
     echo ""
 
-    # Find pi1 host from nodes/
-    PI1_FILE="nodes/pi1.env"
-    if [ ! -f "$PI1_FILE" ]; then
-        echo ">>> Error: $PI1_FILE not found"
+    # Find the coordinator node from nodes/ (NODE_COORDINATOR=true).
+    COORD_FILE=$(grep -l '^NODE_COORDINATOR=true' nodes/*.env 2>/dev/null | head -1)
+    if [ -z "$COORD_FILE" ]; then
+        echo ">>> Error: no nodes/*.env has NODE_COORDINATOR=true"
         exit 1
     fi
-    source "$PI1_FILE"
+    source "$COORD_FILE"
 
     # Stop the remote service
     echo ">>> Stopping coordinator service on ${NODE_HOST}..."
