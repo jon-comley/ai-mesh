@@ -2,7 +2,7 @@
 // SVG top-down floor plan for placing bulbs and (Phase B) windows/doors.
 // Coordinates are always 0–1 normalised; the SVG scales to any screen size.
 
-import { buildSlider, lockSliderToThumb } from '/static/rooms.js';
+import { buildSlider, lockSliderToThumb } from '/static/controls.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
