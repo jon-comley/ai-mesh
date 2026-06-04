@@ -70,12 +70,16 @@ export const pendingCommands = new Map();
 export const PENDING_TTL_MS = 2000;
 
 // ── Static display constants ───────────────────────────────────────────────────
-export const COLOUR_ICON = '🎨', TEMP_ICON = '🌡';
+// 🎨 (U+1F3A8) defaults to emoji (colour) presentation; 🌡 (U+1F321 THERMOMETER)
+// defaults to TEXT presentation, so without an explicit U+FE0F variation selector
+// it renders as a dark monochrome glyph. Force emoji presentation on the
+// thermometer so the temperature icon shows in colour like the palette.
+export const COLOUR_ICON = '🎨', TEMP_ICON = '\u{1F321}\u{FE0F}';
 export const EFFECT_ICONS = {                  // static icon per effect_id; falls back to ✨ for unknown
-  solar: '☀',
+  solar: '\u{2600}\u{FE0F}', // ☀️ — U+2600 is text-default; FE0F forces colour
   sunset: '\u{1F305}',       // 🌅
   sunrise: '\u{1F304}',      // 🌄
-  candlelight: '\u{1F56F}',  // 🕯
+  candlelight: '\u{1F56F}\u{FE0F}', // 🕯️ — U+1F56F is text-default; FE0F forces colour
   aurora: '\u{1F30C}',       // 🌌
   breathing: '\u{1FAC1}',    // 🫁
   snake: '\u{1F40D}',        // 🐍
