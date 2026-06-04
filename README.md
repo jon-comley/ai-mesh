@@ -33,7 +33,7 @@ just deploy-coordinator pi1
 
 Cross-builds coordinator for ARM64, copies state/DB from laptop, installs as systemd service on pi1 (192.168.1.11:9001). The coordinator now runs 24/7 independent of laptop power. Verify with `just verify-coordinator pi1`.
 
-For remote phone access, install Tailscale on pi1 + phone; dashboard is then accessible at `http://100.100.100.100:9001/?token=...` or `http://pi1:9001/?token=...` (once MagicDNS propagates).
+For remote phone access, install Tailscale on pi1 + phone; dashboard is then accessible at `http://100.100.100.100:9001/?token=...` or `http://pi1:9001/?token=...` (once the built-in DNS propagates).
 
 ### 3. Provision compute nodes
 
@@ -89,7 +89,7 @@ http://192.168.1.11:9001/?token=<auth-token>
 **Remote access (Tailscale, anywhere):**
 ```
 http://100.100.100.100:9001/?token=<auth-token>
-http://pi1:9001/?token=<auth-token>              (once MagicDNS propagates)
+http://pi1:9001/?token=<auth-token>              (once built-in DNS propagates)
 ```
 
 > **If `pi1:9001` won't load:** the `pi1` and `100.x` addresses only resolve/route when that device is connected to the tailnet. Check that **Tailscale is on** (and the device shows online in `tailscale status` on pi1). On the home LAN you can always fall back to the direct `http://192.168.1.11:9001/` — no token needed there.

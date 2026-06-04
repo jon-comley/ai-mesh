@@ -46,3 +46,26 @@ Build targets:
 - `target/aarch64-unknown-linux-gnu/release/agent`
 
 See `docs/windows-node-setup.md` for the full Windows provisioning guide.
+
+## Adding New Models
+
+The agent downloads GGUF models from Hugging Face on demand. To add support for a new model, you must update the `resolve_gguf` function in `capabilities/llm/src/llama.rs`.
+
+### Sharding Requirements
+Large models (like 7b and above) are usually distributed as multiple `.gguf` shards.
+1. **Identify the Repo**: Use the standard Hugging Face repo format (e.g., `Qwen/Qwen2.5-7B-Instruct-GGUF`).
+2. **List All Shards**: The `shards` array must contain the filenames of every shard in the correct numerical order.
+3. **The `00001` Rule**: `llama-server` is instructed to load the first shard (e.g., `...-00001-of-00002.gguf`). It will automatically find and load the subsequent shards in the same directory.
+4. **Update the Map**: Add your new entry to the `match` block in `resolve_gguf`.
+
+```rust
+"my-model:7b" => Ok(GgufSpec {
+    repo: "user/my-model-GGUF",
+    shards: &[
+        "my-model-q4_k_m-00001-of-00002.gguf",
+        "my-model-q4_k_m-00002-of-00002.gguf",
+    ],
+}),
+```
+
+After updating the code, run the unit tests in `capabilities/llm/src/llama.rs` to verify the new resolution logic.

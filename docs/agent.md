@@ -54,59 +54,25 @@ Implements:
 
 ---
 
-## 2. Testing Strategy
+## 4. Internal llama-server Management
 
-- Unit tests for each module
-- Mocked tests for agent loop
-- Round-trip tests for messages
-- Hardware detection tests use controlled fixtures
+The agent manages `llama-server` (llama.cpp) as a child process. It does not use the system PATH; it expects the binary at `%LOCALAPPDATA%\Programs\llama.cpp\llama-server.exe` (Windows) or `/opt/llama.cpp/llama-server` (Linux).
 
----
+### CLI Flags
+When the agent starts a model, it executes `llama-server` with the following hardcoded flags:
+- `--model <path>`: Path to the first GGUF shard.
+- `--host 127.0.0.1`: Binds to localhost for security (agent acts as the proxy).
+- `--port 8080`: Default port for the llama.cpp HTTP API.
+- `--ctx-size 4096`: Default context window.
+- `--n-gpu-layers <N>`: Offloads $N$ layers to GPU (set via `LLAMA_GPU_LAYERS` env).
+- `--flash-attn on`: Enabled if `LLAMA_FLASH_ATTN=1` is set in the environment.
 
-## 3. Future Extensions
-
-- Update system (OTA manifest distribution)
-- GPU benchmarking (inference tokens/sec reporting)
-
----
-
-This document will evolve as the agent crate grows.
-
----
-
-## 4. Current Implementation Status
-
-As of this stage of development, the agent crate includes fully implemented and tested subsystems:
-
-### ✔ Hardware Detection
-- CPU model, cores, threads
-- RAM detection
-- OS and architecture
-- GPU detection (NVIDIA via nvidia-smi; VGA via lspci on Linux; AMD iGPU on Windows not yet detected)
-- Cross-platform: Windows uses `sysinfo` crate (brand strings are trimmed); Linux/macOS use `/proc`
-- Fully tested with round‑trip and basic invariants
-
-### ✔ Identity Detection
-- Node ID generation — UUID v4 persisted to `~/.ai-mesh/node-id`; stable across restarts
-- Hostname detection — Windows reads `COMPUTERNAME`; Linux reads `/etc/hostname`
-- Local IP detection via UDP socket trick (cross-platform)
-- Fully tested
-
-### ✔ Capability Detection
-- CPU inference support (always true)
-- GPU inference support (based on hardware detection)
-- ANE inference (stubbed false on Linux)
-- Max model size heuristic (50% of RAM)
-- Fully tested
-
-### ✔ Agent Runtime
-- Async heartbeat loop (Tokio)
-- Sends:
-  - Heartbeat
-  - HardwareReport
-  - Capabilities
-- Configurable heartbeat interval
-- Fully tested using mocked channels
+### Environment Variables
+The agent's behavior can be tuned via these environment variables:
+- `LLAMA_GPU_LAYERS`: (Default: `0`) Number of layers to offload. Set to `99` for full offload on SER8.
+- `LLAMA_FLASH_ATTN`: (Default: `0`) Set to `1` to enable Flash Attention.
+- `LLAMA_HEALTH_TIMEOUT_SECS`: (Default: `180`) How long to wait for the `/health` endpoint after starting the process.
+- `LLAMA_HOST`: (Default: `http://127.0.0.1:8080`) The URL the agent uses to talk to its local child process.
 
 ---
 
@@ -123,37 +89,21 @@ The agent emits the following sequence when started:
 
 When `MESH_AUTH_TOKEN` is unset (dev mode), plain `MeshMessage` JSON is sent without a `SignedFrame` wrapper.
 
-This flow is validated by async unit tests.
+---
+
+## 6. Testing Strategy
+
+- Unit tests for each module
+- Mocked tests for agent loop
+- Round-trip tests for messages
+- Hardware detection tests use controlled fixtures
+- `llama.rs` tests for GGUF resolution and chat response parsing
 
 ---
 
-## 6. Runtime Behaviour
+## 7. Future Extensions
 
-- The agent runs on a Tokio async runtime.
-- Heartbeat interval is configurable via `Agent::new()`.
-- All outbound messages are sent through an async MPSC channel.
-- Coordinator discovery is currently stubbed and will be implemented in Phase 4.
+- Update system (OTA manifest distribution)
+- GPU benchmarking (inference tokens/sec reporting)
+- mDNS or broadcast discovery
 
----
-
-## 7. Next Steps
-
-- Implement coordinator crate (registry, server, orchestration)
-- Add real networking (TCP/QUIC)
-- Add update manifest handling
-- Add CLI integration
-- Add mDNS or broadcast discovery
-
----
-
-## 8. Coordinator Integration
-
-The agent is now fully integrated with the coordinator:
-
-- Sends heartbeats, hardware reports, and capabilities
-- Coordinator receives and acknowledges messages
-- End‑to‑end tests confirm full communication path
-
-This completes the agent's core responsibilities.
-
----
