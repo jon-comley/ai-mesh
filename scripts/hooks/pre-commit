@@ -6,8 +6,19 @@ set -e
 
 echo "Running pre-commit checks..."
 
+# Format the tree, then re-stage ONLY the files that were already staged. This
+# keeps `cargo fmt` fixes in the commit without pulling unrelated working-tree
+# changes in — the old `git add -u` staged every modified tracked file, forcing
+# each commit to swallow the whole tree and making it impossible to split work
+# into separate commits.
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACM)
 cargo fmt --all
-git add -u
+for f in "${STAGED[@]}"; do
+    [ -f "$f" ] && git add -- "$f"
+done
+
+# clippy + tests still run against the whole working tree, so a commit can never
+# leave the tree non-building even when only some files are staged.
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 
