@@ -28,6 +28,7 @@ const DRAG_JS: &str = include_str!("static/drag.js");
 const COLORMATH_JS: &str = include_str!("static/colormath.js");
 const CONTROLS_JS: &str = include_str!("static/controls.js");
 const LIGHTCONTROLS_JS: &str = include_str!("static/lightcontrols.js");
+const ACTIONS_JS: &str = include_str!("static/actions.js");
 const UTIL_JS: &str = include_str!("static/util.js");
 const API_JS: &str = include_str!("static/api.js");
 const STATE_JS: &str = include_str!("static/state.js");
@@ -128,6 +129,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/colormath.js", COLORMATH_JS, JS),
         ("/static/controls.js", CONTROLS_JS, JS),
         ("/static/lightcontrols.js", LIGHTCONTROLS_JS, JS),
+        ("/static/actions.js", ACTIONS_JS, JS),
         ("/static/util.js", UTIL_JS, JS),
         ("/static/api.js", API_JS, JS),
         ("/static/state.js", STATE_JS, JS),

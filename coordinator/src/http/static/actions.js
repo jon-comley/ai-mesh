@@ -1,0 +1,96 @@
+// ── REST actions ─────────────────────────────────────────────────────────────
+// Thin fire-and-forget wrappers over the room/device/scene REST endpoints. Each
+// posts a mutation and surfaces failures as a toast; the resulting state change
+// arrives back over the WS channel and drives the re-render, so none of these
+// touch the DOM, shared state, or render() — keeping this a pure leaf module.
+
+import { api } from '/static/api.js';
+import { showToast } from '/static/util.js';
+
+// ── Rooms ──────────────────────────────────────────────────────────────────
+export async function createRoom(name) {
+  try {
+    const res = await api('/rooms', { method: 'POST', body: { name } });
+    if (!res.ok) showToast(`Create room failed (${res.status})`, true);
+  } catch (e) { showToast(`Create room error: ${e.message}`, true); }
+}
+
+export async function deleteRoom(id) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) showToast(`Delete room failed (${res.status})`, true);
+  } catch (e) { showToast(`Delete room error: ${e.message}`, true); }
+}
+
+export async function renameRoom(id, name) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(id)}/name`, { method: 'PATCH', body: { name } });
+    if (!res.ok) showToast(`Rename failed (${res.status})`, true);
+  } catch (e) { showToast(`Rename error: ${e.message}`, true); }
+}
+
+export async function reorderRooms(ids) {
+  try {
+    const res = await api('/rooms/reorder', { method: 'POST', body: { ids } });
+    if (!res.ok) showToast(`Reorder failed (${res.status})`, true);
+  } catch (e) { showToast(`Reorder error: ${e.message}`, true); }
+}
+
+// ── Devices in a room ────────────────────────────────────────────────────────
+export async function addDeviceToRoom(roomId, deviceId) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices`, { method: 'PATCH', body: { add: [deviceId], remove: [] } });
+    if (!res.ok) showToast(`Add device failed (${res.status})`, true);
+  } catch (e) { showToast(`Add device error: ${e.message}`, true); }
+}
+
+export async function removeDeviceFromRoom(roomId, deviceId) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices`, { method: 'PATCH', body: { add: [], remove: [deviceId] } });
+    if (!res.ok) showToast(`Remove device failed (${res.status})`, true);
+  } catch (e) { showToast(`Remove device error: ${e.message}`, true); }
+}
+
+export async function reorderRoomDevices(roomId, ids) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices/reorder`, { method: 'POST', body: { ids } });
+    if (!res.ok) showToast(`Device reorder failed (${res.status})`, true);
+  } catch (e) { showToast(`Device reorder error: ${e.message}`, true); }
+}
+
+// ── Devices ──────────────────────────────────────────────────────────────────
+export async function deleteDevice(deviceId) {
+  try {
+    const res = await api(`/lights/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+    if (!res.ok) showToast(`Delete device failed (${res.status})`, true);
+  } catch (e) { showToast(`Delete device error: ${e.message}`, true); }
+}
+
+export async function patchDeviceName(deviceId, name) {
+  try {
+    await api(`/lights/${encodeURIComponent(deviceId)}/name`, { method: 'PATCH', body: { name } });
+  } catch (e) { showToast(`Rename error: ${e.message}`, true); }
+}
+
+// ── Scenes ───────────────────────────────────────────────────────────────────
+export async function saveScene(name, roomId) {
+  try {
+    const body = roomId ? { name, room_id: roomId } : { name };
+    const res = await api('/scenes', { method: 'POST', body });
+    if (!res.ok) showToast(`Save scene failed (${res.status})`, true);
+  } catch (e) { showToast(`Save scene error: ${e.message}`, true); }
+}
+
+export async function deleteSceneApi(id) {
+  try {
+    const res = await api(`/scenes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) showToast(`Delete scene failed (${res.status})`, true);
+  } catch (e) { showToast(`Delete scene error: ${e.message}`, true); }
+}
+
+export async function reorderScenes(ids) {
+  try {
+    const res = await api('/scenes/reorder', { method: 'POST', body: { ids } });
+    if (!res.ok) showToast(`Scene reorder failed (${res.status})`, true);
+  } catch (e) { showToast(`Scene reorder error: ${e.message}`, true); }
+}

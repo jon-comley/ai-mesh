@@ -7,6 +7,12 @@ import { createPointerDrag, makeGhost, moveGhost, insertionBefore } from '/stati
 import { xyToRgb, hslToXy } from '/static/colormath.js';
 import { buildSlider, buildColourWheel } from '/static/controls.js';
 import { buildLightControls, dismissOpenLightControl } from '/static/lightcontrols.js';
+import {
+  createRoom, deleteRoom, renameRoom, reorderRooms,
+  addDeviceToRoom, removeDeviceFromRoom, reorderRoomDevices,
+  deleteDevice, patchDeviceName,
+  saveScene, deleteSceneApi, reorderScenes,
+} from '/static/actions.js';
 import { esc, showToast } from '/static/util.js';
 import { tok, api } from '/static/api.js';
 import {
@@ -1975,48 +1981,6 @@ function startRename(nameEl, room) {
 // The tok()/api() primitives live in api.js; the wrappers below add per-action
 // toasts on failure.
 
-async function createRoom(name) {
-  try {
-    const res = await api('/rooms', { method: 'POST', body: { name } });
-    if (!res.ok) showToast(`Create room failed (${res.status})`, true);
-  } catch (e) { showToast(`Create room error: ${e.message}`, true); }
-}
-
-async function deleteRoom(id) {
-  try {
-    const res = await api(`/rooms/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!res.ok && res.status !== 404) showToast(`Delete room failed (${res.status})`, true);
-  } catch (e) { showToast(`Delete room error: ${e.message}`, true); }
-}
-
-async function renameRoom(id, name) {
-  try {
-    const res = await api(`/rooms/${encodeURIComponent(id)}/name`, { method: 'PATCH', body: { name } });
-    if (!res.ok) showToast(`Rename failed (${res.status})`, true);
-  } catch (e) { showToast(`Rename error: ${e.message}`, true); }
-}
-
-async function addDeviceToRoom(roomId, deviceId) {
-  try {
-    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices`, { method: 'PATCH', body: { add: [deviceId], remove: [] } });
-    if (!res.ok) showToast(`Add device failed (${res.status})`, true);
-  } catch (e) { showToast(`Add device error: ${e.message}`, true); }
-}
-
-async function removeDeviceFromRoom(roomId, deviceId) {
-  try {
-    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices`, { method: 'PATCH', body: { add: [], remove: [deviceId] } });
-    if (!res.ok) showToast(`Remove device failed (${res.status})`, true);
-  } catch (e) { showToast(`Remove device error: ${e.message}`, true); }
-}
-
-async function deleteDevice(deviceId) {
-  try {
-    const res = await api(`/lights/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
-    if (!res.ok) showToast(`Delete device failed (${res.status})`, true);
-  } catch (e) { showToast(`Delete device error: ${e.message}`, true); }
-}
-
 // ── Scene bar drag-to-reorder ─────────────────────────────────────────────────
 
 let sceneDragId = null; // sceneId being dragged within the bar
@@ -2095,27 +2059,6 @@ function wireSceneBarDrag(bar, roomId) {
     if (after == null) bar.appendChild(dragging);
     else bar.insertBefore(dragging, after);
   });
-}
-
-async function reorderScenes(ids) {
-  try {
-    const res = await api('/scenes/reorder', { method: 'POST', body: { ids } });
-    if (!res.ok) showToast(`Scene reorder failed (${res.status})`, true);
-  } catch (e) { showToast(`Scene reorder error: ${e.message}`, true); }
-}
-
-async function reorderRoomDevices(roomId, ids) {
-  try {
-    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices/reorder`, { method: 'POST', body: { ids } });
-    if (!res.ok) showToast(`Device reorder failed (${res.status})`, true);
-  } catch (e) { showToast(`Device reorder error: ${e.message}`, true); }
-}
-
-async function reorderRooms(ids) {
-  try {
-    const res = await api('/rooms/reorder', { method: 'POST', body: { ids } });
-    if (!res.ok) showToast(`Reorder failed (${res.status})`, true);
-  } catch (e) { showToast(`Reorder error: ${e.message}`, true); }
 }
 
 // ── Per-bulb effect overrides ─────────────────────────────────────────────────
@@ -2294,14 +2237,6 @@ async function sendDeviceCommand(deviceId, body, opts = {}) {
   } catch (e) { showToast(`Command error: ${e.message}`, true); }
 }
 
-async function saveScene(name, roomId) {
-  try {
-    const body = roomId ? { name, room_id: roomId } : { name };
-    const res = await api('/scenes', { method: 'POST', body });
-    if (!res.ok) showToast(`Save scene failed (${res.status})`, true);
-  } catch (e) { showToast(`Save scene error: ${e.message}`, true); }
-}
-
 async function recallScene(id) {
   const scene = model.scenes.find(s => s.id === id);
   const roomId = scene?.room_id;
@@ -2378,13 +2313,6 @@ async function recallScene(id) {
   }
 }
 
-async function deleteSceneApi(id) {
-  try {
-    const res = await api(`/scenes/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!res.ok && res.status !== 404) showToast(`Delete scene failed (${res.status})`, true);
-  } catch (e) { showToast(`Delete scene error: ${e.message}`, true); }
-}
-
 // ── Utilities ────────────────────────────────────────────────────────────────
 
 function formatDeviceName(id) {
@@ -2420,11 +2348,5 @@ function startDeviceRename(nameEl, deviceId) {
     if (e.key === 'Escape') { saved = true; input.replaceWith(nameEl); }
   });
   input.addEventListener('blur', save);
-}
-
-async function patchDeviceName(deviceId, name) {
-  try {
-    await api(`/lights/${encodeURIComponent(deviceId)}/name`, { method: 'PATCH', body: { name } });
-  } catch (e) { showToast(`Rename error: ${e.message}`, true); }
 }
 
