@@ -9,8 +9,8 @@ import { solarPosition, todaySunriseSunset, calculateSolarState } from '/static/
 import { layoutState, WALL_THICKNESS } from '/static/layoutstate.js';
 import {
   initThree, teardownThree, syncBulbToThree, syncOpeningToThree,
-  removeOpeningFromThree, threeUpdateSun, threeUpdateBulbColor, setView3D,
-  is3DActive, initLayout3d,
+  removeBulbFromThree, removeOpeningFromThree, threeUpdateSun, threeUpdateBulbColor,
+  setView3D, is3DActive, initLayout3d,
 } from '/static/layout3d.js';
 import {
   initSunModels,
@@ -1063,16 +1063,16 @@ function buildActionBar(sidebar) {
   // Room lighting controls (brightness / colour / temp) — both 2D and 3D.
   bar.appendChild(buildRoomLightControls());
 
-  // Undo / Redo — editing only, hidden in the view-only 3D mode.
+  // Undo / Redo — shown in both 2D and 3D (undo a move and see it in the 3D view).
   const undoBtn = document.createElement('button');
-  undoBtn.className = 'layout-act-btn layout-edit-only';
+  undoBtn.className = 'layout-act-btn';
   undoBtn.textContent = '↩';
   undoBtn.title = 'Undo';
   undoBtn.addEventListener('click', undo);
   bar.appendChild(undoBtn);
 
   const redoBtn = document.createElement('button');
-  redoBtn.className = 'layout-act-btn layout-edit-only';
+  redoBtn.className = 'layout-act-btn';
   redoBtn.textContent = '↪';
   redoBtn.title = 'Redo';
   redoBtn.addEventListener('click', redo);
@@ -2679,11 +2679,16 @@ function restoreSnapshot(snapshot) {
   // Clear current canvas bulbs
   const layer = document.getElementById('lc-bulbs');
   if (layer) layer.innerHTML = '';
+  const oldIds = Object.keys(layoutState.bulbs);
   layoutState.bulbs = {};
 
   for (const [id, pos] of Object.entries(snapshot)) {
     placeBulb(id, pos.x, pos.y, pos.z, pos.fixture_type, true);
   }
+  // placeBulb re-syncs the bulbs it re-places, but a bulb present before and
+  // absent from the snapshot (e.g. undoing an add) would otherwise leave a stale
+  // 3D mesh floating. Prune those. (no-op in 2D — its 3D meshes are torn down.)
+  for (const id of oldIds) if (!(id in snapshot)) removeBulbFromThree(id);
 }
 
 function undo() {

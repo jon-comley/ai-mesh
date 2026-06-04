@@ -263,7 +263,7 @@ export function syncBulbToThree(deviceId, entry, dev) {
   threeMarkDirty();
 }
 
-function removeBulbFromThree(deviceId) {
+export function removeBulbFromThree(deviceId) {
   const b = threeBulbMeshes[deviceId];
   if (!b) return;
   b.mesh.removeFromParent();
