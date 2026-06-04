@@ -131,6 +131,23 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Push the current zigbee bridge status so a dashboard that connects while
+    // the bridge is already down shows the offline banner immediately — the
+    // ZigbeeStatus event is otherwise only broadcast on change.
+    {
+        let evt = DashboardEvent::ZigbeeStatus {
+            online: state.get_zigbee_status(),
+        };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot ZigbeeStatus: {e}"),
+        }
+    }
+
     loop {
         tokio::select! {
             event = rx.recv() => match event {
