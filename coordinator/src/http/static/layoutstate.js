@@ -12,3 +12,7 @@ export const layoutState = {
   openings: {},        // opening_id → { opening_type, wall_edge, x_norm, width_norm, transmission, el }
   devices: new Map(),  // reference to rooms.js devicesMap — set via layout.init()
 };
+
+// Wall thickness in canvas units (1000 = room span). Shared by the 2D opening
+// rendering (layout.js) and the sun-effect models (sunmodels.js).
+export const WALL_THICKNESS = 18;
