@@ -2109,7 +2109,10 @@ body {
   background: var(--surface-2, #1e1e2e);
   border: 1px solid var(--border);
   border-radius: 12px;
+  overflow-x: auto;            /* too many buttons to fit on a phone — scroll the row */
+  scrollbar-width: none;       /* hide the scrollbar (Firefox) */
 }
+.layout-action-bar::-webkit-scrollbar { display: none; }   /* hide (WebKit) */
 .layout-act-spacer { flex: 1; }
 
 .layout-seg {
@@ -2160,10 +2163,10 @@ body {
   flex-shrink: 0;
 }
 .layout-light-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 50;
+  position: fixed;             /* viewport-positioned by JS (from the icon's rect),
+                                  so the action bar's overflow can't clip it and it
+                                  stays on-screen above the bottom action bar */
+  z-index: 70;
   width: 210px;
   max-width: calc(100vw - 24px);
   padding: 10px 12px;

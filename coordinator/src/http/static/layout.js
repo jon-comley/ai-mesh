@@ -967,6 +967,14 @@ function buildRoomLightControls() {
     btn.classList.add('active');
     pop.appendChild(buildControl());
     pop.style.display = '';
+    // Position above the icon (the action bar sits at the bottom of the layout
+    // view), clamped to the viewport so it's never off-screen on laptop or mobile.
+    const r = btn.getBoundingClientRect();
+    const pw = pop.offsetWidth, ph = pop.offsetHeight;
+    let top = r.top - ph - 8;
+    if (top < 8) top = Math.min(r.bottom + 8, window.innerHeight - ph - 8); // flip below if no room above
+    pop.style.left = `${Math.min(Math.max(r.left, 8), window.innerWidth - pw - 8)}px`;
+    pop.style.top = `${Math.max(8, top)}px`;
     // Capture-phase outside-pointerdown dismiss (one open at a time).
     outside = (e) => {
       if (pop.contains(e.target) || e.target.closest?.('.layout-light-btn')) return;
