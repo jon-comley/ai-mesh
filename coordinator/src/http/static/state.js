@@ -45,6 +45,18 @@ export const roomDotDomain = new Map();   // room_id   → 'colour' | 'temp'
 export const effectsById = new Map();
 export const roomEffectsMap = new Map();         // room_id → { effect_id, params }
 
+// Transient effect UI state that straddles the effects module and the room-card
+// renderer in rooms.js. Holder objects (not bare `let`s) so both modules mutate
+// the same reference — ES-module imports are read-only bindings, so a plain
+// exported `let` couldn't be reassigned from the importing module.
+//   • effectDrag  — in-flight palette/badge drag: src set by the dragged chip,
+//     read by the room-card drop zones; removeRoomId/isPermanent drive the
+//     badge drag-to-remove document handlers.
+//   • effectEditor.openRoomId — room whose param-editor popover is open; written
+//     by the effects builders/recallScene, read by renderRoomCard.
+export const effectDrag = { src: null, removeRoomId: null, isPermanent: false };
+export const effectEditor = { openRoomId: null };
+
 // Pending optimistic command values per (deviceId, field). Each entry { value, ts }.
 // Overlaid onto incoming WS snapshots so the slider doesn't snap back to the
 // pre-command server value while the round-trip is still in flight.
