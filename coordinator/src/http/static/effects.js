@@ -182,7 +182,7 @@ function wireEffectChipTouchDrag(chip, effectId) {
   };
 
   createPointerDrag(chip, {
-    distance: 8,
+    holdMs: 150, distance: 8,   // press-hold to drag; a quick swipe scrolls the palette
     onStart: () => { effectDrag.src = effectId; ghost = makeGhost(chip); },
     onMove: (e) => {
       moveGhost(ghost, e.clientX, e.clientY);
