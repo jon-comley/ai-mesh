@@ -4047,7 +4047,6 @@ function wireThreeInteractions(_container) {
   el.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
     dismissPopover();
-    document.getElementById('three-opening-menu')?.remove();
 
     const ndc = threeMouseNDC(e, el);
     threeRaycaster.setFromCamera(ndc, threePerspCamera);
@@ -4062,48 +4061,8 @@ function wireThreeInteractions(_container) {
       return;
     }
 
-    // Opening tap → context menu (toggle window/door state)
-    const openingMeshList = Object.values(threeOpeningMeshes);
-    const openingHits = threeRaycaster.intersectObjects(openingMeshList);
-    if (openingHits.length > 0) {
-      e.stopPropagation();
-      const mesh = openingHits[0].object;
-      const id = Object.keys(threeOpeningMeshes).find(k => threeOpeningMeshes[k] === mesh);
-      if (id) showOpeningContextMenu(id, e.clientX, e.clientY);
-    }
+    // Openings are view-only in 3D — adding/removing/editing them happens in the
+    // 2D view, so a tap on an opening here does nothing (orbit controls handle it).
   });
-}
-
-function showOpeningContextMenu(openingId, screenX, screenY) {
-  // Dismiss any existing menu
-  document.getElementById('three-opening-menu')?.remove();
-
-  const menu = document.createElement('div');
-  menu.id = 'three-opening-menu';
-  menu.className = 'layout-popover';
-  menu.style.left = `${Math.min(screenX + 8, window.innerWidth - 160)}px`;
-  menu.style.top  = `${Math.min(screenY - 8, window.innerHeight - 80)}px`;
-
-  const o = placedOpenings[openingId];
-  const label = document.createElement('div');
-  label.className = 'layout-popover-label';
-  label.textContent = o ? `${o.opening_type === 'window' ? 'Window' : 'Door'}` : 'Opening';
-  menu.appendChild(label);
-
-  const removeBtn = document.createElement('button');
-  removeBtn.className = 'layout-popover-remove';
-  removeBtn.textContent = 'Remove';
-  removeBtn.addEventListener('click', () => {
-    menu.remove();
-    removeOpening(openingId);
-  });
-  menu.appendChild(removeBtn);
-
-  document.body.appendChild(menu);
-
-  const dismiss = e => {
-    if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('pointerdown', dismiss); }
-  };
-  setTimeout(() => document.addEventListener('pointerdown', dismiss), 0);
 }
 
