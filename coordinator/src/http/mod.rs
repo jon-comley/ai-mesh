@@ -38,165 +38,7 @@ pub fn router(
         .route("/ws", get(ws::ws_handler))
         .route("/", get(|| async { Html(INDEX_HTML) }))
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
-        .route(
-            "/static/style.css",
-            get(|| async {
-                (
-                    [
-                        (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    STYLE_CSS,
-                )
-            }),
-        )
-        .route(
-            "/static/dashboard.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    DASHBOARD_JS,
-                )
-            }),
-        )
-        .route(
-            "/static/topology.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    TOPOLOGY_JS,
-                )
-            }),
-        )
-        .route(
-            "/static/health.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    HEALTH_JS,
-                )
-            }),
-        )
-        .route(
-            "/static/models.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    MODELS_JS,
-                )
-            }),
-        )
-        .route(
-            "/static/lighting.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    LIGHTING_JS,
-                )
-            }),
-        )
-        .route(
-            "/static/rooms.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    ROOMS_JS,
-                )
-            }),
-        )
-        .route(
-            "/static/drag.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    DRAG_JS,
-                )
-            }),
-        )
-        .route(
-            "/static/layout.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    LAYOUT_JS,
-                )
-            }),
-        )
-        .route(
-            "/manifest.json",
-            get(|| async {
-                (
-                    [
-                        (header::CONTENT_TYPE, "application/manifest+json"),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    MANIFEST_JSON,
-                )
-            }),
-        )
-        .route(
-            "/service-worker.js",
-            get(|| async {
-                (
-                    [
-                        (
-                            header::CONTENT_TYPE,
-                            "application/javascript; charset=utf-8",
-                        ),
-                        (header::CACHE_CONTROL, "no-cache"),
-                    ],
-                    SERVICE_WORKER_JS,
-                )
-            }),
-        )
+        .merge(static_asset_routes())
         .route(
             "/api/nodes/{id}/heartbeat-interval",
             post(api::set_heartbeat_interval),
@@ -260,6 +102,42 @@ pub fn router(
         .layer(axum::Extension(registry))
         .layer(axum::Extension(effects))
         .with_state(dashboard)
+}
+
+// All embedded static assets, served with their MIME type and a no-cache header.
+// One table instead of a dozen near-identical route closures — add a new asset
+// by adding a row. (Kept generic over the router state so it merges into router().)
+fn static_asset_routes() -> Router<Arc<DashboardState>> {
+    const JS: &str = "application/javascript; charset=utf-8";
+    const ASSETS: &[(&str, &str, &str)] = &[
+        ("/static/style.css", STYLE_CSS, "text/css; charset=utf-8"),
+        ("/static/dashboard.js", DASHBOARD_JS, JS),
+        ("/static/topology.js", TOPOLOGY_JS, JS),
+        ("/static/health.js", HEALTH_JS, JS),
+        ("/static/models.js", MODELS_JS, JS),
+        ("/static/lighting.js", LIGHTING_JS, JS),
+        ("/static/rooms.js", ROOMS_JS, JS),
+        ("/static/drag.js", DRAG_JS, JS),
+        ("/static/layout.js", LAYOUT_JS, JS),
+        ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
+        ("/service-worker.js", SERVICE_WORKER_JS, JS),
+    ];
+    let mut r = Router::new();
+    for &(path, body, mime) in ASSETS {
+        r = r.route(
+            path,
+            get(move || async move {
+                (
+                    [
+                        (header::CONTENT_TYPE, mime),
+                        (header::CACHE_CONTROL, "no-cache"),
+                    ],
+                    body,
+                )
+            }),
+        );
+    }
+    r
 }
 
 pub async fn start(
