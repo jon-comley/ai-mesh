@@ -8,6 +8,8 @@ import { xyToRgb, rgbToHsl, hslToXy } from '/static/colormath.js';
 import {
   buildSlider, makeLcSliderRow, buildColourWheel, wireDragSurface,
 } from '/static/controls.js';
+import { esc, showToast } from '/static/util.js';
+import { tok, api } from '/static/api.js';
 
 let roomsData = [];
 let devicesMap = new Map();
@@ -2392,23 +2394,8 @@ function startRename(nameEl, room) {
 }
 
 // ── API calls ────────────────────────────────────────────────────────────────
-
-function tok() { return localStorage.getItem('meshToken') ?? ''; }
-
-// One place for authenticated JSON API calls: builds `/api<path>` with the token,
-// JSON-encodes an optional body, and returns the Response (callers check res.ok /
-// handle errors as they need). `path` is everything after `/api`, e.g. '/rooms'
-// or `/rooms/${encodeURIComponent(id)}/name`.
-function api(path, { method = 'GET', body } = {}) {
-  const sep = path.includes('?') ? '&' : '?';
-  const url = `/api${path}${sep}token=${encodeURIComponent(tok())}`;
-  const opts = { method };
-  if (body !== undefined) {
-    opts.headers = { 'Content-Type': 'application/json' };
-    opts.body = JSON.stringify(body);
-  }
-  return fetch(url, opts);
-}
+// The tok()/api() primitives live in api.js; the wrappers below add per-action
+// toasts on failure.
 
 async function createRoom(name) {
   try {
@@ -2820,8 +2807,6 @@ async function deleteSceneApi(id) {
   } catch (e) { showToast(`Delete scene error: ${e.message}`, true); }
 }
 
-// ── Colour math ──────────────────────────────────────────────────────────────
-
 // ── Utilities ────────────────────────────────────────────────────────────────
 
 function formatDeviceName(id) {
@@ -2865,20 +2850,3 @@ async function patchDeviceName(deviceId, name) {
   } catch (e) { showToast(`Rename error: ${e.message}`, true); }
 }
 
-function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-function showToast(msg, isError = false) {
-  let el = document.getElementById('light-toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'light-toast';
-    document.body.appendChild(el);
-  }
-  el.textContent = msg;
-  el.className = 'light-toast' + (isError ? ' light-toast-error' : '');
-  el.style.opacity = '1';
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => { el.style.opacity = '0'; }, 4000);
-}
