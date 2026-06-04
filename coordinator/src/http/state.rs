@@ -179,6 +179,10 @@ pub struct DashboardState {
     /// Per-room currently-active effect (if any). Mirrors `room_effects` rows
     /// where `enabled = 1`. Pushed to new WS clients on connect.
     effect_snapshot: Mutex<HashMap<String, RoomEffectInfo>>,
+    /// Last-known zigbee bridge up/down status. `ZigbeeStatus` is otherwise only
+    /// broadcast on change, so a dashboard that connects while the bridge is
+    /// already down would never learn it — this is replayed to new WS clients.
+    zigbee_online: std::sync::atomic::AtomicBool,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
     /// Wakes the EffectRunner for an immediate tick — used by activation /
@@ -211,6 +215,7 @@ impl DashboardState {
             room_snapshot: Mutex::new(Vec::new()),
             scene_snapshot: Mutex::new(Vec::new()),
             effect_snapshot: Mutex::new(HashMap::new()),
+            zigbee_online: std::sync::atomic::AtomicBool::new(true),
             connections,
             solar_sweep_notify: Arc::new(Notify::new()),
             lat,
@@ -524,9 +529,18 @@ impl DashboardState {
             .collect()
     }
 
-    /// Broadcast zigbee bridge up/down status to all connected clients.
+    /// Broadcast zigbee bridge up/down status to all connected clients, and
+    /// remember it so a dashboard connecting later (while still down) is told.
     pub fn push_zigbee_status(&self, online: bool) {
+        self.zigbee_online
+            .store(online, std::sync::atomic::Ordering::Relaxed);
         let _ = self.tx.send(DashboardEvent::ZigbeeStatus { online });
+    }
+
+    /// Last-known zigbee bridge status — used by `ws.rs` to hydrate a new client.
+    pub fn get_zigbee_status(&self) -> bool {
+        self.zigbee_online
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Broadcast the current solar position to all connected clients.
@@ -1044,6 +1058,24 @@ mod tests {
         // device online (otherwise the dashboard shows controls for bulbs the
         // zigbee bridge has never actually reported).
         assert!(!snap[0].online);
+    }
+
+    #[test]
+    fn zigbee_status_defaults_online_and_persists() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        // Defaults to online — a healthy bridge needs no event for the replay
+        // path (ws.rs) to report the right state to a freshly-connected client.
+        assert!(state.get_zigbee_status());
+        // push_zigbee_status must STORE the value (not just broadcast it) so a
+        // dashboard connecting after the bridge already went down is told it's
+        // offline via the on-connect replay, instead of defaulting to online.
+        state.push_zigbee_status(false);
+        assert!(!state.get_zigbee_status());
+        state.push_zigbee_status(true);
+        assert!(state.get_zigbee_status());
     }
 
     #[test]
