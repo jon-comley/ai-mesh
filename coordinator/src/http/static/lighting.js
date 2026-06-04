@@ -1,7 +1,8 @@
 // ── Lighting panel ──────────────────────────────────────────────────────────
 // Renders per-device light state cards with interactive controls.
 
-import { buildLightControls, repaintModeDots } from '/static/rooms.js';
+import { buildLightControls } from '/static/rooms.js';
+import { repaintModeDots } from '/static/indicators.js';
 import { esc, showToast } from '/static/util.js';
 import { HUE_DEFAULT_ON } from '/static/state.js';
 

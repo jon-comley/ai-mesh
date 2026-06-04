@@ -30,6 +30,7 @@ const CONTROLS_JS: &str = include_str!("static/controls.js");
 const UTIL_JS: &str = include_str!("static/util.js");
 const API_JS: &str = include_str!("static/api.js");
 const STATE_JS: &str = include_str!("static/state.js");
+const INDICATORS_JS: &str = include_str!("static/indicators.js");
 const LAYOUT_JS: &str = include_str!("static/layout.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
@@ -128,6 +129,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/util.js", UTIL_JS, JS),
         ("/static/api.js", API_JS, JS),
         ("/static/state.js", STATE_JS, JS),
+        ("/static/indicators.js", INDICATORS_JS, JS),
         ("/static/layout.js", LAYOUT_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
