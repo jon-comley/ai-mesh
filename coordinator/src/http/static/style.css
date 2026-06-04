@@ -1019,6 +1019,17 @@ body {
   padding-top: 22px;
 }
 
+/* Inset the ROOM brightness track so its thumb lines up with the per-device
+   brightness sliders below it (whose tracks are inset by the device card's 14px
+   padding + the .lc-label/.lc-value + gaps). Values tuned in-browser (incl. mobile)
+   to align the thumbs — a hair off the geometric 102/66 to account for the room
+   vs device slider thumb-width difference. Scoped to the header's direct brightness
+   slider so the colour/temp popup slider (also .room-slider) keeps full width. */
+.room-header-controls-row > .room-slider > .room-slider-track {
+  padding-left: 101px;
+  padding-right: 67px;
+}
+
 .room-slider-input {
   width: 100%;
   display: block;
