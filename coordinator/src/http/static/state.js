@@ -57,6 +57,12 @@ export const roomEffectsMap = new Map();         // room_id → { effect_id, par
 export const effectDrag = { src: null, removeRoomId: null, isPermanent: false };
 export const effectEditor = { openRoomId: null };
 
+// Open scene-name editor, straddling the scenes module (builders + the
+// Escape/click document listeners) and rooms.js's render() (which restores the
+// open input after a rebuild). Holder object for the same read-only-binding
+// reason as the effect holders above. `active` is { roomId, value } | null.
+export const sceneEdit = { active: null };
+
 // Pending optimistic command values per (deviceId, field). Each entry { value, ts }.
 // Overlaid onto incoming WS snapshots so the slider doesn't snap back to the
 // pre-command server value while the round-trip is still in flight.
