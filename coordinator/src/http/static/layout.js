@@ -4,6 +4,7 @@
 
 import { buildSlider, lockSliderToThumb } from '/static/controls.js';
 import { tok } from '/static/api.js';
+import { solarPosition, todaySunriseSunset, calculateSolarState } from '/static/solar.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -157,7 +158,7 @@ export async function openLayout(room) {
     } catch (_) {}
   }
   // Seed lastSolar from the JS calculator so the canvas looks correct before the first WS push
-  { const s = solarPosition(Date.now()); lastSolar = { azimuth: s.azimuth, elevation: s.elevation }; }
+  { const s = solarPosition(Date.now(), meshLat, meshLon); lastSolar = { azimuth: s.azimuth, elevation: s.elevation }; }
 
   loadPlacedBulbs(room.id);
   loadPlacedOpenings(room.id);
@@ -607,56 +608,6 @@ function showCompassWizard() {
 
 // ── Phase D: Sun arc overlay ──────────────────────────────────────────────────
 
-// NOAA simplified solar position (±1-2° accuracy — sufficient for arc preview).
-// Returns { azimuth: 0-360, elevation: -90..90 }.
-function solarPosition(dateUtc) {
-  const lat = meshLat * Math.PI / 180;
-  const lon = meshLon;
-  const jd = dateUtc / 86400000 + 2440587.5;
-  const n = jd - 2451545.0;
-  const L = (280.46 + 0.9856474 * n) % 360;
-  const g = (357.528 + 0.9856003 * n) % 360;
-  const gr = g * Math.PI / 180;
-  const lambda = (L + 1.915 * Math.sin(gr) + 0.020 * Math.sin(2 * gr)) * Math.PI / 180;
-  const eps = 23.439 * Math.PI / 180;
-  const sinDec = Math.sin(eps) * Math.sin(lambda);
-  const dec = Math.asin(sinDec);
-  const cosDec = Math.cos(dec);
-  // Greenwich Mean Sidereal Time → hour angle
-  const gmst = (18.697374558 + 24.06570982441908 * n) % 24;
-  const lst = ((gmst + lon / 15) % 24 + 24) % 24;
-  const ha = (lst - (Math.atan2(Math.sin(lambda), Math.cos(lambda) * Math.cos(eps)) * 12 / Math.PI) + 24) % 24;
-  const haRad = ha * Math.PI / 12;
-  const sinAlt = Math.sin(lat) * sinDec + Math.cos(lat) * cosDec * Math.cos(haRad);
-  const elevation = Math.asin(Math.max(-1, Math.min(1, sinAlt))) * 180 / Math.PI;
-  const cosAz = (sinDec - Math.sin(lat) * sinAlt) / (Math.cos(lat) * Math.cos(Math.asin(sinAlt)));
-  let az = Math.acos(Math.max(-1, Math.min(1, cosAz))) * 180 / Math.PI;
-  if (Math.sin(haRad) > 0) az = 360 - az;
-  return { azimuth: az, elevation };
-}
-
-function todaySunriseSunset() {
-  const base = new Date(); base.setHours(0, 0, 0, 0);
-  let riseAz = null, setAz = null, wasUp = null;
-  for (let m = 0; m <= 1440; m += 5) {
-    const d = new Date(base.getTime() + m * 60000);
-    const { azimuth, elevation } = solarPosition(d.getTime());
-    const up = elevation > 0;
-    if (wasUp === false && up)  riseAz = azimuth;
-    if (wasUp === true  && !up) setAz  = azimuth;
-    wasUp = up;
-  }
-  const polarDay   = riseAz == null && wasUp === true;
-  const polarNight = riseAz == null && wasUp === false;
-  return { sunriseAz: riseAz ?? 90, sunsetAz: setAz ?? 270, polarDay, polarNight };
-}
-
-function azimuthToCanvasPoint(az, orientDeg) {
-  const adjusted = ((az - orientDeg) % 360 + 360) % 360;
-  const rad = (adjusted - 90) * Math.PI / 180;
-  return { x: 500 + 570 * Math.cos(rad), y: 500 + 570 * Math.sin(rad) };
-}
-
 function redrawSolarOverlay(azimuth, elevation) {
   // Compass sun dot — absolute bearing on the compass ring, hidden below civil twilight
   const sunDot = document.getElementById('lc-compass-sun');
@@ -671,30 +622,6 @@ function redrawSolarOverlay(azimuth, elevation) {
     sunDot.setAttribute('cx', (925 + 42 * Math.cos(rad)).toFixed(1));
     sunDot.setAttribute('cy', (75  + 42 * Math.sin(rad)).toFixed(1));
   }
-}
-
-// ── Phase D: client-side solar state (matches Rust calculate_solar_state) ────
-
-function calculateSolarState(elevation, params = {}) {
-  const minBri    = params.min_brightness ?? 1;
-  const maxBri    = Math.max(minBri, params.max_brightness ?? 254);
-  const ctWarmth  = Math.max(0, Math.min(1, params.ct_warmth ?? 1.0));
-
-  let bri, ct;
-  if (elevation <= 0) {
-    const t = Math.max(0, Math.min(1, (elevation + 18) / 18));
-    bri = Math.round(1 + t * 29);
-    ct  = 500;
-  } else {
-    const t = Math.min(1, elevation / 90);
-    bri = Math.round(30 + t * 225);
-    ct  = Math.round(454 - t * 301);
-  }
-
-  bri = Math.max(minBri, Math.min(maxBri, bri));
-  ct  = Math.round(153 + ctWarmth * (ct - 153));
-
-  return { bri, ct };
 }
 
 function previewSolarState(azimuth, elevation) {
@@ -748,7 +675,7 @@ function wireScrubber() {
       scrubberRafPending = false;
       const mins = parseInt(scrubber.value);
       const base = new Date(); base.setHours(0, mins, 0, 0);
-      const { azimuth, elevation } = solarPosition(base.getTime());
+      const { azimuth, elevation } = solarPosition(base.getTime(), meshLat, meshLon);
       const hh = String(Math.floor(mins / 60)).padStart(2, '0');
       const mm = String(mins % 60).padStart(2, '0');
       timeEl.textContent = `${hh}:${mm}`;
@@ -786,7 +713,7 @@ function wireScrubber() {
     scrubber.value = now.getHours() * 60 + now.getMinutes();
 
     // Use the real current position
-    const s = solarPosition(now.getTime());
+    const s = solarPosition(now.getTime(), meshLat, meshLon);
     lastSolar = { azimuth: s.azimuth, elevation: s.elevation };
 
     redrawSolarOverlay(lastSolar.azimuth, lastSolar.elevation);
@@ -816,7 +743,7 @@ function wireScrubber() {
         const mins = (parseInt(scrubber.value) + 5) % 1440;
         scrubber.value = mins;
         const base = new Date(); base.setHours(0, mins, 0, 0);
-        const { azimuth, elevation } = solarPosition(base.getTime());
+        const { azimuth, elevation } = solarPosition(base.getTime(), meshLat, meshLon);
         const hh = String(Math.floor(mins / 60)).padStart(2, '0');
         const mm = String(mins % 60).padStart(2, '0');
         timeEl.textContent = `${hh}:${mm}`;
@@ -3386,7 +3313,7 @@ function renderWallGlowModel(layer, azimuth, elevation) {
 // ── Model 6: Sun arc ──────────────────────────────────────────────────────────
 function renderSunArcModel(layer, azimuth, elevation) {
   if (!layer) return;
-  const { sunriseAz, sunsetAz, polarDay, polarNight } = todaySunriseSunset();
+  const { sunriseAz, sunsetAz, polarDay, polarNight } = todaySunriseSunset(meshLat, meshLon);
   if (polarNight) return;
   const R = 490;
   const isDaytime = elevation > 0;
