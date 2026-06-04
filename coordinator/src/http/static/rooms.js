@@ -326,7 +326,7 @@ fetchEffectsCatalog();
 
 async function fetchEffectsCatalog() {
   try {
-    const res = await fetch(`/api/effects?token=${encodeURIComponent(tok())}`);
+    const res = await api('/effects');
     if (!res.ok) return;
     const list = await res.json();
     effectsCatalog = Array.isArray(list) ? list : [];
@@ -388,7 +388,7 @@ export function notifyDeviceNames(names) {
 
 async function fetchDeviceNames() {
   try {
-    const res = await fetch(`/api/lights/names?token=${encodeURIComponent(tok())}`);
+    const res = await api('/lights/names');
     if (res.ok) notifyDeviceNames(await res.json());
   } catch (_) {}
 }
@@ -2354,9 +2354,8 @@ function buildDeviceCard(dev, roomId) {
       e2.overrides.add(dev.device_id);
       const btn2 = card.querySelector('.device-effect-btn');
       if (btn2) { btn2.classList.add('device-effect-overridden'); btn2.title = 'Paused from effect — click to resume'; }
-      fetch(`/api/rooms/${encodeURIComponent(roomId)}/effect/override?token=${encodeURIComponent(tok())}`,
-        { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ device_id: dev.device_id, excluded: true }) })
+      api(`/rooms/${encodeURIComponent(roomId)}/effect/override`,
+        { method: 'PATCH', body: { device_id: dev.device_id, excluded: true } })
         .catch(err => {
           e2.overrides.delete(dev.device_id);
           if (btn2) { btn2.classList.remove('device-effect-overridden'); btn2.title = 'In effect — click to pause'; }
@@ -2660,58 +2659,59 @@ function startRename(nameEl, room) {
 
 function tok() { return localStorage.getItem('meshToken') ?? ''; }
 
+// One place for authenticated JSON API calls: builds `/api<path>` with the token,
+// JSON-encodes an optional body, and returns the Response (callers check res.ok /
+// handle errors as they need). `path` is everything after `/api`, e.g. '/rooms'
+// or `/rooms/${encodeURIComponent(id)}/name`.
+function api(path, { method = 'GET', body } = {}) {
+  const sep = path.includes('?') ? '&' : '?';
+  const url = `/api${path}${sep}token=${encodeURIComponent(tok())}`;
+  const opts = { method };
+  if (body !== undefined) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(url, opts);
+}
+
 async function createRoom(name) {
   try {
-    const res = await fetch(`/api/rooms?token=${encodeURIComponent(tok())}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
+    const res = await api('/rooms', { method: 'POST', body: { name } });
     if (!res.ok) showToast(`Create room failed (${res.status})`, true);
   } catch (e) { showToast(`Create room error: ${e.message}`, true); }
 }
 
 async function deleteRoom(id) {
   try {
-    const res = await fetch(`/api/rooms/${id}?token=${encodeURIComponent(tok())}`, { method: 'DELETE' });
+    const res = await api(`/rooms/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!res.ok && res.status !== 404) showToast(`Delete room failed (${res.status})`, true);
   } catch (e) { showToast(`Delete room error: ${e.message}`, true); }
 }
 
 async function renameRoom(id, name) {
   try {
-    const res = await fetch(`/api/rooms/${id}/name?token=${encodeURIComponent(tok())}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
+    const res = await api(`/rooms/${encodeURIComponent(id)}/name`, { method: 'PATCH', body: { name } });
     if (!res.ok) showToast(`Rename failed (${res.status})`, true);
   } catch (e) { showToast(`Rename error: ${e.message}`, true); }
 }
 
 async function addDeviceToRoom(roomId, deviceId) {
   try {
-    const res = await fetch(`/api/rooms/${roomId}/devices?token=${encodeURIComponent(tok())}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ add: [deviceId], remove: [] }),
-    });
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices`, { method: 'PATCH', body: { add: [deviceId], remove: [] } });
     if (!res.ok) showToast(`Add device failed (${res.status})`, true);
   } catch (e) { showToast(`Add device error: ${e.message}`, true); }
 }
 
 async function removeDeviceFromRoom(roomId, deviceId) {
   try {
-    const res = await fetch(`/api/rooms/${roomId}/devices?token=${encodeURIComponent(tok())}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ add: [], remove: [deviceId] }),
-    });
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices`, { method: 'PATCH', body: { add: [], remove: [deviceId] } });
     if (!res.ok) showToast(`Remove device failed (${res.status})`, true);
   } catch (e) { showToast(`Remove device error: ${e.message}`, true); }
 }
 
 async function deleteDevice(deviceId) {
   try {
-    const res = await fetch(`/api/lights/${encodeURIComponent(deviceId)}?token=${encodeURIComponent(tok())}`, {
-      method: 'DELETE',
-    });
+    const res = await api(`/lights/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
     if (!res.ok) showToast(`Delete device failed (${res.status})`, true);
   } catch (e) { showToast(`Delete device error: ${e.message}`, true); }
 }
@@ -2798,30 +2798,21 @@ function wireSceneBarDrag(bar, roomId) {
 
 async function reorderScenes(ids) {
   try {
-    const res = await fetch(`/api/scenes/reorder?token=${encodeURIComponent(tok())}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
-    });
+    const res = await api('/scenes/reorder', { method: 'POST', body: { ids } });
     if (!res.ok) showToast(`Scene reorder failed (${res.status})`, true);
   } catch (e) { showToast(`Scene reorder error: ${e.message}`, true); }
 }
 
 async function reorderRoomDevices(roomId, ids) {
   try {
-    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/devices/reorder?token=${encodeURIComponent(tok())}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
-    });
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices/reorder`, { method: 'POST', body: { ids } });
     if (!res.ok) showToast(`Device reorder failed (${res.status})`, true);
   } catch (e) { showToast(`Device reorder error: ${e.message}`, true); }
 }
 
 async function reorderRooms(ids) {
   try {
-    const res = await fetch(`/api/rooms/reorder?token=${encodeURIComponent(tok())}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids }),
-    });
+    const res = await api('/rooms/reorder', { method: 'POST', body: { ids } });
     if (!res.ok) showToast(`Reorder failed (${res.status})`, true);
   } catch (e) { showToast(`Reorder error: ${e.message}`, true); }
 }
@@ -2835,11 +2826,9 @@ async function setEffectOverride(roomId, deviceId, excluded) {
   if (excluded) eff.overrides.add(deviceId); else eff.overrides.delete(deviceId);
   render();
   try {
-    const res = await fetch(
-      `/api/rooms/${encodeURIComponent(roomId)}/effect/override?token=${encodeURIComponent(tok())}`,
-      { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ device_id: deviceId, excluded }) },
-    );
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/effect/override`, {
+      method: 'PATCH', body: { device_id: deviceId, excluded },
+    });
     if (!res.ok) throw new Error(`${res.status}`);
   } catch (e) {
     // Roll back the optimistic change.
@@ -2891,11 +2880,9 @@ async function resumeSceneDevice(roomId, deviceId) {
   set?.delete(deviceId);
   render();
   try {
-    const res = await fetch(
-      `/api/scenes/${encodeURIComponent(sceneId)}/recall?token=${encodeURIComponent(tok())}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transition_secs: 0.8, device_id: deviceId }) },
-    );
+    const res = await api(`/scenes/${encodeURIComponent(sceneId)}/recall`, {
+      method: 'POST', body: { transition_secs: 0.8, device_id: deviceId },
+    });
     if (!res.ok) throw new Error(`${res.status}`);
   } catch (e) {
     set?.add(deviceId);
@@ -2924,10 +2911,7 @@ async function activateEffect(roomId, effectId, params = null) {
     const body = params != null
       ? { effect_id: effectId, params }
       : { effect_id: effectId };
-    const res = await fetch(`/api/rooms/${roomId}/effect?token=${encodeURIComponent(tok())}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/effect`, { method: 'POST', body });
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
       showToast(`Effect failed (${res.status}) ${detail}`.trim(), true);
@@ -2944,9 +2928,7 @@ async function clearEffect(roomId) {
   render();
 
   try {
-    const res = await fetch(`/api/rooms/${roomId}/effect?token=${encodeURIComponent(tok())}`, {
-      method: 'DELETE',
-    });
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/effect`, { method: 'DELETE' });
     if (!res.ok) showToast(`Effect disable failed (${res.status})`, true);
   } catch (e) { showToast(`Effect disable error: ${e.message}`, true); }
 }
@@ -2957,9 +2939,7 @@ async function removeEffect(roomId) {
   openEffectEditorRoomId = null;
   render();
   try {
-    const res = await fetch(`/api/rooms/${roomId}/effect?token=${encodeURIComponent(tok())}`, {
-      method: 'DELETE',
-    });
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/effect`, { method: 'DELETE' });
     if (!res.ok) showToast(`Effect remove failed (${res.status})`, true);
   } catch (e) { showToast(`Effect remove error: ${e.message}`, true); }
 }
@@ -2988,10 +2968,7 @@ async function sendRoomCommand(roomId, body, room, isGlobal = false) {
     if (body.action !== 'color_xy') render();
   }
   try {
-    const res = await fetch(`/api/rooms/${roomId}/command?token=${encodeURIComponent(tok())}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/command`, { method: 'POST', body });
     if (!res.ok) {
       if (res.status === 503) showToast('Some devices offline — others updated', false);
       else showToast(`Room command failed (${res.status})`, true);
@@ -3008,10 +2985,7 @@ async function sendDeviceCommand(deviceId, body, opts = {}) {
     if (owningRoom) clearRoomActiveScene(owningRoom.id);
   }
   try {
-    const res = await fetch(
-      `/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(tok())}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-    );
+    const res = await api(`/lights/${encodeURIComponent(deviceId)}/command`, { method: 'POST', body });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       showToast(`Command failed (${res.status})${text ? ': ' + text : ''}`, true);
@@ -3022,10 +2996,7 @@ async function sendDeviceCommand(deviceId, body, opts = {}) {
 async function saveScene(name, roomId) {
   try {
     const body = roomId ? { name, room_id: roomId } : { name };
-    const res = await fetch(`/api/scenes?token=${encodeURIComponent(tok())}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const res = await api('/scenes', { method: 'POST', body });
     if (!res.ok) showToast(`Save scene failed (${res.status})`, true);
   } catch (e) { showToast(`Save scene error: ${e.message}`, true); }
 }
@@ -3089,11 +3060,7 @@ async function recallScene(id) {
   }
 
   try {
-    const res = await fetch(`/api/scenes/${id}/recall?token=${encodeURIComponent(tok())}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transition_secs: 1.0 }),
-    });
+    const res = await api(`/scenes/${encodeURIComponent(id)}/recall`, { method: 'POST', body: { transition_secs: 1.0 } });
     if (res.ok || res.status === 503) {
       if (roomId) {
         activeSceneByRoom.set(roomId, id);
@@ -3112,9 +3079,7 @@ async function recallScene(id) {
 
 async function deleteSceneApi(id) {
   try {
-    const res = await fetch(`/api/scenes/${id}?token=${encodeURIComponent(tok())}`, {
-      method: 'DELETE',
-    });
+    const res = await api(`/scenes/${encodeURIComponent(id)}`, { method: 'DELETE' });
     if (!res.ok && res.status !== 404) showToast(`Delete scene failed (${res.status})`, true);
   } catch (e) { showToast(`Delete scene error: ${e.message}`, true); }
 }
@@ -3160,11 +3125,7 @@ function startDeviceRename(nameEl, deviceId) {
 
 async function patchDeviceName(deviceId, name) {
   try {
-    await fetch(`/api/lights/${encodeURIComponent(deviceId)}/name?token=${encodeURIComponent(tok())}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
+    await api(`/lights/${encodeURIComponent(deviceId)}/name`, { method: 'PATCH', body: { name } });
   } catch (e) { showToast(`Rename error: ${e.message}`, true); }
 }
 
