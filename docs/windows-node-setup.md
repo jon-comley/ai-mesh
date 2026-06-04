@@ -443,18 +443,23 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 - **Critical finding:** Both the May 2026 driver and the Aug 2025 driver produced identical crash signatures. Machine crashed during plain idle desktop use with no GPU activity. Root cause is not the GPU driver at all.
 - **ULPS investigated (red herring):** `EnableUlps=0` and `PP_SclkDeepSleepDisable=1` were applied and baked into `install-node-windows.ps1`. Machine still crashed. ULPS is harmless to leave disabled but was not the cause.
 - **✅ Actual root cause: AMD fTPM (firmware TPM).** Event log showed `Microsoft-Windows-TPM-WMI` re-provisioning the TPM after every single crash. The AMD PSP (Platform Security Processor — a separate ARM core on the Ryzen die) implements fTPM by periodically writing to SPI flash. During that write it holds a bus lock on the SPI interface, stalling all CPU cores. Windows sees a DPC that cannot complete within `0x1e00` clock intervals and fires `0x00000133`. This is an AMD-acknowledged bug present since Ryzen 5000, not fixed on the SER8's Ryzen 8000 series.
-- **Fix applied (2026-05-28 ~20:00):** fTPM **disabled in BIOS** (AMI BIOS → Advanced → AMD PBS → fTPM Switch → Disabled). Machine stable immediately after.
+- **Fix applied (2026-05-28 ~20:00):** fTPM **disabled in BIOS** (Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor). Machine stable immediately after.
 - **What is lost by disabling fTPM:** Nothing relevant to this use case. BitLocker not enabled, no Windows Hello, no MDM attestation. Machine boots and runs identically.
 
-> **BIOS navigation (confirmed on AMI v2.22.1293, 2025):**
-> 1. Enter BIOS (spam Delete on boot)
+> **BIOS navigation (confirmed on Beelink SER8 / AMI v2.22.1293, 2025):**
+> 1. Enter BIOS (spam **Delete** on boot)
 > 2. **Advanced → Trusted Computing → Security Device Support → Disabled**
 >    - Confirms as disabled when it shows "No Security Device Found"
-> 3. Optional: **Advanced → AMD CBS → CPU Common Options → Global C-state Control → Disabled**
-> 4. F10 → Save & Exit
+> 3. **Find the hardware-level switch (Crucial — hiding from Windows is not enough):**
+>    On the SER8 (Ryzen 8000), "fTPM" is replaced by **Microsoft Pluton**. You must disable the hardware processor here:
+>    - **Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor**
+>    - **Advanced → SOC Misc Control → Pluton Security Processor → Disabled**
+>    - *Note: If these aren't visible, press **Ctrl + F1** on the main screen to reveal hidden menus.*
+> 4. Optional: **Advanced → AMD CBS → CPU Common Options → Global C-state Control → Disabled**
+> 5. F10 → Save & Exit
 >
 > Note: "Secure Boot" (Boot menu) is a completely separate setting — does NOT fix the crashes.
-> After any CMOS reset, Security Device Support reverts to Enabled — always re-disable before booting Windows.
+> After any CMOS reset, both switches revert to Enabled — always re-disable before booting Windows.
 
 ---
 
@@ -527,7 +532,7 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 - **Driver at time:** still `32.0.31007.5012` (2026-05-12). The Adrenalin 26.5.2 upgrade attempted 2026-05-31 **still has not persisted** — but per established root cause the driver is innocent for `0x133`; fTPM is the cause.
 - **Current state (post physical reset 17:32:45):** stable, agent reconnected to coordinator, `qwen2.5:7b` Ready, heartbeat ~220 ms. Healthy for now — but it **will** storm again until fTPM is genuinely disabled.
 - **Action required (in priority order):**
-  1. **Re-enter BIOS and verify/disable fTPM** — Advanced → AMD PBS → fTPM Switch = Disabled (and Trusted Computing → Security Device Support = Disabled). This is the actual fix; everything else is secondary.
+  1. **Re-enter BIOS and verify/disable fTPM** — Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor (and Pluton Security Processor → Disabled) (and Trusted Computing → Security Device Support = Disabled). This is the actual fix; everything else is secondary.
   2. Set BIOS **Restore on AC Power Loss = Power On** so the node recovers itself after a power cut.
   3. Re-attempt the Adrenalin 26.5.2 + chipset 8.05.04.516 upgrade (clean-utility first) while it's stable.
   4. Reinforces the standing plan to rebuild beelink on a leaner OS (Win IoT Enterprise LTSC) or move it to Linux to escape the Windows/AMD-PSP problem class entirely.
@@ -539,7 +544,7 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 ```bash
 # 1. fTPM disabled — MOST IMPORTANT. CMOS reset restores BIOS defaults (fTPM enabled).
 #    After any CMOS reset, go back into BIOS and disable fTPM before booting Windows.
-#    No software check for this — verify in BIOS: Advanced → AMD PBS → fTPM Switch = Disabled
+#    No software check for this — verify in BIOS: Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor (and Pluton Security Processor → Disabled)
 
 # 2. ULPS disabled (harmless belt-and-braces, baked into boot task)
 ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
@@ -572,6 +577,6 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxE
 
 #### DO NOTs
 
-- **Never leave fTPM enabled.** AMD PSP holds a SPI bus lock during flash writes, stalling all CPU cores and triggering `0x00000133` at idle. Disable in BIOS: Advanced → AMD PBS → fTPM Switch = Disabled. **This is reset by a CMOS clear** — always re-disable after any CMOS reset.
+- **Never leave fTPM enabled.** AMD PSP holds a SPI bus lock during flash writes, stalling all CPU cores and triggering `0x00000133` at idle. Disable in BIOS: Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor (and Pluton Security Processor → Disabled). **This is reset by a CMOS clear** — always re-disable after any CMOS reset.
 - **Never set `TdrDelay` > 2s.** Caused GPU to overheat in May 2026 — let Windows reset a stuck GPU quickly rather than waiting. Documented in `install-node-windows.ps1`.
 - **Never enable ULPS** (`EnableUlps=1`) — belt-and-braces, leave disabled via boot task.

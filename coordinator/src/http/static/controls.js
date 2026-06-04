@@ -2,8 +2,9 @@
 // Pure, state-free DOM controls shared across the lighting UI: thumb-only range
 // sliders, the hue/saturation colour wheel, and the pointer machinery they share.
 // No imports, no module-level state — every widget is driven entirely by the
-// caller's options/callbacks. (The temperature bar lives in rooms.js because it
-// needs layout.ctToHex for its gradient.)
+// caller's options/callbacks. (The temperature bar lives in lightcontrols.js
+// because it needs layout.ctToHex for its gradient, and importing layout here
+// would form a cycle with layout.js.)
 
 // Prevent click-to-jump on any range slider — user must grab the thumb.
 // Standalone helper for sliders not built via attachThumbSlider (e.g. the
