@@ -1021,13 +1021,14 @@ body {
 
 /* Inset the ROOM brightness track so its thumb lines up with the per-device
    brightness sliders below it (whose tracks are inset by the device card's 14px
-   padding + the .lc-label/.lc-value + gaps). Values tuned in-browser (incl. mobile)
-   to align the thumbs — a hair off the geometric 102/66 to account for the room
-   vs device slider thumb-width difference. Scoped to the header's direct brightness
-   slider so the colour/temp popup slider (also .room-slider) keeps full width. */
+   padding + the .lc-label/.lc-value + gaps): 14 + 80 + 8 = 102 left, 14 + 44 + 8
+   = 66 right. Requires the room thumb to match the device thumb width (see the
+   coarse-pointer override below) or the thumbs diverge at the track ends on
+   mobile. Scoped to the header's direct brightness slider so the colour/temp
+   popup slider (also .room-slider) keeps full width. */
 .room-header-controls-row > .room-slider > .room-slider-track {
-  padding-left: 101px;
-  padding-right: 67px;
+  padding-left: 102px;
+  padding-right: 66px;
 }
 
 .room-slider-input {
@@ -2984,6 +2985,11 @@ body {
   .light-slider::-webkit-slider-thumb { width: 22px; height: 22px; }
   .light-slider::-moz-range-thumb { width: 22px; height: 22px; }
   .light-slider { height: 6px; }
+  /* Match the room brightness thumb to the device thumb size here too, or the
+     two diverge at the track ends on mobile (device 22px vs room 18px). margin
+     re-centres the larger thumb on the 6px track: (6 − 22) / 2 = −8px. */
+  .room-slider-input::-webkit-slider-thumb { width: 22px; height: 22px; margin-top: -8px; }
+  .room-slider-input::-moz-range-thumb { width: 22px; height: 22px; }
   /* Layout view controls — make compass + scrubber thumbs grabbable */
   #lc-scrubber { height: 24px; }
   .lc-scrub-btn-row > button,
