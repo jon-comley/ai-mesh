@@ -2148,6 +2148,30 @@ body {
 }
 .layout-act-btn:hover { background: var(--border); }
 .layout-act-btn.active { color: var(--accent); border-color: var(--accent); }
+
+/* Room lighting controls (brightness/colour/temp) — icon group + drop-down
+   control popover. The group is the positioning context; the popover drops below
+   the icons and is clamped to the viewport so it can't run off a phone screen. */
+.layout-light-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.layout-light-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  width: 210px;
+  max-width: calc(100vw - 24px);
+  padding: 10px 12px;
+  background: var(--surface-2, #1e1e2e);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
 .layout-add-btn {
   font-size: 14px;
   font-weight: 600;

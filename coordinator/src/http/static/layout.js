@@ -2,8 +2,9 @@
 // SVG top-down floor plan for placing bulbs and (Phase B) windows/doors.
 // Coordinates are always 0–1 normalised; the SVG scales to any screen size.
 
-import { buildSlider, lockSliderToThumb } from '/static/controls.js';
+import { buildSlider, buildColourWheel, lockSliderToThumb } from '/static/controls.js';
 import { tok } from '/static/api.js';
+import { hslToXy, xyToRgb, rgbToHsl } from '/static/colormath.js';
 import { solarPosition, todaySunriseSunset, calculateSolarState } from '/static/solar.js';
 import { layoutState, WALL_THICKNESS } from '/static/layoutstate.js';
 import {
@@ -936,6 +937,103 @@ function buildLayoutView(room) {
 // The phone-first control strip at the bottom of the layout view. On desktop the
 // same bar still works but the sidebar is shown inline (see CSS), so ＋ Add is a
 // no-op convenience there.
+// Room lighting controls for the action bar: brightness / colour / temperature
+// icons that reveal their control (slider / wheel) one at a time. Commands the
+// whole room; the 2D icons + 3D render update live via the WS round-trip
+// (notifyDeviceUpdate). Shown in both 2D and 3D.
+function buildRoomLightControls() {
+  const wrap = document.createElement('div');
+  wrap.className = 'layout-light-group';
+
+  const pop = document.createElement('div');
+  pop.className = 'layout-light-popover';
+  pop.style.display = 'none';
+
+  const roomDevices = () => (layoutState.room?.device_ids ?? [])
+    .map(id => layoutState.devices.get(id)).filter(Boolean);
+
+  let openKind = null, outside = null;
+  const close = () => {
+    openKind = null;
+    pop.style.display = 'none';
+    pop.innerHTML = '';
+    wrap.querySelectorAll('.layout-light-btn').forEach(b => b.classList.remove('active'));
+    if (outside) { document.removeEventListener('pointerdown', outside, true); outside = null; }
+  };
+  const open = (kind, btn, buildControl) => {
+    if (openKind === kind) { close(); return; }   // tap active again → hide
+    close();
+    openKind = kind;
+    btn.classList.add('active');
+    pop.appendChild(buildControl());
+    pop.style.display = '';
+    // Capture-phase outside-pointerdown dismiss (one open at a time).
+    outside = (e) => {
+      if (pop.contains(e.target) || e.target.closest?.('.layout-light-btn')) return;
+      close();
+    };
+    document.addEventListener('pointerdown', outside, true);
+  };
+  const icon = (glyph, title, kind, buildControl) => {
+    const btn = document.createElement('button');
+    btn.className = 'layout-act-btn layout-light-btn';
+    btn.textContent = glyph;
+    btn.title = title;
+    btn.addEventListener('click', e => { e.stopPropagation(); open(kind, btn, buildControl); });
+    wrap.appendChild(btn);
+  };
+
+  // Brightness — always available.
+  icon('🔆', 'Room brightness', 'bri', () => {
+    const ds = roomDevices().filter(d => d.brightness != null);
+    const avg = ds.length ? Math.round(ds.reduce((s, d) => s + (d.brightness ?? 0), 0) / ds.length) : 200;
+    return buildSlider({
+      label: 'Brightness', min: 1, max: 254, value: avg,
+      format: v => Math.round(v / 254 * 100) + '%',
+      onCommit: v => sendLayoutRoomCommand({ action: 'brightness', value: v }),
+    });
+  });
+
+  // Colour — only if some bulb reports colour.
+  if (roomDevices().some(d => d.color_xy != null)) {
+    icon('🎨', 'Room colour', 'colour', () => {
+      const wheelWrap = document.createElement('div');
+      wheelWrap.className = 'lc-colour-wheel-wrap';
+      const dev = roomDevices().find(d => d.color_xy != null);
+      let h = 30, s = 80;
+      if (dev) {
+        const [x, y] = dev.color_xy;
+        const { r, g, b } = xyToRgb(x, y, dev.brightness ?? 254);
+        ({ h, s } = rgbToHsl(r, g, b));
+      }
+      wheelWrap.appendChild(buildColourWheel({
+        hue: h, sat: s,
+        onChange: (hh, ss) => {
+          const { x, y } = hslToXy(hh, ss);
+          sendLayoutRoomCommand({ action: 'color_xy', x, y });
+        },
+      }));
+      return wheelWrap;
+    });
+  }
+
+  // Temperature — only if some bulb reports colour temp.
+  if (roomDevices().some(d => d.color_temp != null)) {
+    icon('\u{1F321}\u{FE0F}', 'Room temperature', 'temp', () => {
+      const ds = roomDevices().filter(d => d.color_temp != null);
+      const avg = ds.length ? Math.round(ds.reduce((s, d) => s + (d.color_temp ?? 0), 0) / ds.length) : 370;
+      return buildSlider({
+        label: 'Temperature', min: 154, max: 500, value: avg,
+        format: v => Math.round(1e6 / v) + 'K',
+        onCommit: v => sendLayoutRoomCommand({ action: 'color_temp', value: v }),
+      });
+    });
+  }
+
+  wrap.appendChild(pop);
+  return wrap;
+}
+
 function buildActionBar(sidebar) {
   const bar = document.createElement('div');
   bar.className = 'layout-action-bar';
@@ -953,6 +1051,9 @@ function buildActionBar(sidebar) {
   seg3d.addEventListener('click', () => setView3D(true, seg2d, seg3d));
   seg.append(seg2d, seg3d);
   bar.appendChild(seg);
+
+  // Room lighting controls (brightness / colour / temp) — both 2D and 3D.
+  bar.appendChild(buildRoomLightControls());
 
   // Undo / Redo — editing only, hidden in the view-only 3D mode.
   const undoBtn = document.createElement('button');
@@ -2287,6 +2388,18 @@ function updateBulbIcon(entry, state) {
 function sendLayoutDeviceCommand(deviceId, body) {
   return fetch(
     `/api/lights/${encodeURIComponent(deviceId)}/command?token=${encodeURIComponent(tok())}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  ).catch(() => {});
+}
+
+// Whole-room command (all bulbs) for the action-bar lighting controls. POSTs to
+// the room endpoint directly so layout.js needn't import rooms.js (which imports
+// layout.js — that would be a cycle).
+function sendLayoutRoomCommand(body) {
+  const id = layoutState.room?.id;
+  if (!id) return;
+  return fetch(
+    `/api/rooms/${encodeURIComponent(id)}/command?token=${encodeURIComponent(tok())}`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
   ).catch(() => {});
 }
