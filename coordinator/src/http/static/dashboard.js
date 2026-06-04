@@ -3,6 +3,7 @@ import * as health from '/static/health.js';
 import * as models from '/static/models.js';
 import * as lighting from '/static/lighting.js';
 import * as rooms from '/static/rooms.js';
+import * as effects from '/static/effects.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -67,7 +68,7 @@ const handlers = {
   RoomsUpdate: evt => rooms.handleRoomsUpdate(evt),
   ScenesUpdate: evt => rooms.handleScenesUpdate(evt),
   SolarUpdate: evt => rooms.notifySolar(evt.azimuth, evt.elevation),
-  EffectUpdate: evt => rooms.handleEffectUpdate(evt),
+  EffectUpdate: evt => effects.handleEffectUpdate(evt),
   ZigbeeStatus: evt => rooms.handleZigbeeStatus(evt.online),
 };
 
