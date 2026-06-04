@@ -5,13 +5,12 @@
 import { buildSlider, lockSliderToThumb } from '/static/controls.js';
 import { tok } from '/static/api.js';
 import { solarPosition, todaySunriseSunset, calculateSolarState } from '/static/solar.js';
+import { layoutState } from '/static/layoutstate.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-let layoutRoom = null;          // RoomRecord currently in view
-let devicesRef = new Map();     // reference to rooms.js devicesMap — set via init()
-let placedBulbs = {};           // device_id → { x, y, z, fixture_type, el, labelEl }
-let placedOpenings = {};        // opening_id → { opening_type, wall_edge, x_norm, width_norm, transmission, el }
+// Shared canvas state (room, placed bulbs/openings, device map) lives in
+// layoutstate.js so the extracted layout modules can mutate the same references.
 let lastSolar = { azimuth: 180, elevation: -90 };
 let undoStack = [];             // position snapshots for Ctrl+Z
 let redoStack = [];
@@ -124,17 +123,17 @@ const FIXTURE_TYPES = [
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function init(devicesMap) {
-  devicesRef = devicesMap;
+  layoutState.devices = devicesMap;
 }
 
 export function currentLayoutRoomId() {
-  return layoutRoom?.id ?? null;
+  return layoutState.room?.id ?? null;
 }
 
 export async function openLayout(room) {
-  layoutRoom = room;
-  placedBulbs = {};
-  placedOpenings = {};
+  layoutState.room = room;
+  layoutState.bulbs = {};
+  layoutState.openings = {};
   undoStack = [];
   redoStack = [];
   scrubberLive = true;
@@ -202,14 +201,14 @@ export function closeLayout() {
 
   for (const child of container.children) child.style.display = '';
 
-  layoutRoom = null;
-  placedBulbs = {};
-  placedOpenings = {};
+  layoutState.room = null;
+  layoutState.bulbs = {};
+  layoutState.openings = {};
 }
 
 // Called by rooms.js when a LightingUpdate WS event arrives so canvas icons stay live.
 export function notifyDeviceUpdate(deviceId, state) {
-  const entry = placedBulbs[deviceId];
+  const entry = layoutState.bulbs[deviceId];
   if (!entry || !scrubberLive || iconUpdatesFrozen) return;
   updateBulbIcon(entry, state);
   threeUpdateBulbColor(deviceId, state);
@@ -232,8 +231,8 @@ const activeEffectByRoom = new Map(); // roomId → { effectId, params }
 
 // Called by rooms.js when a RoomsUpdate WS event arrives — updates the active room object.
 export function notifyRoomUpdate(room) {
-  if (layoutRoom && layoutRoom.id === room.id) {
-    layoutRoom = room;
+  if (layoutState.room && layoutState.room.id === room.id) {
+    layoutState.room = room;
     redrawLightEffect(lastSolar.azimuth, lastSolar.elevation);
     renderCrosshair(room);
     renderWallDims(room);
@@ -248,12 +247,12 @@ export function notifyEffectActive(roomId, effectId, params = {}) {
 }
 
 function isSolarActiveHere() {
-  return layoutRoom != null && activeEffectByRoom.get(layoutRoom.id)?.effectId === 'solar';
+  return layoutState.room != null && activeEffectByRoom.get(layoutState.room.id)?.effectId === 'solar';
 }
 
 function getSolarParams() {
-  if (!layoutRoom) return {};
-  const entry = activeEffectByRoom.get(layoutRoom.id);
+  if (!layoutState.room) return {};
+  const entry = activeEffectByRoom.get(layoutState.room.id);
   if (!entry || entry.effectId !== 'solar') return {};
   return entry.params ?? {};
 }
@@ -378,7 +377,7 @@ function wireCompass() {
     const handle = document.getElementById('lc-compass-handle');
     if (handle) handle.style.cursor = 'grab';
     clearTimeout(compassOrientTimer);
-    compassOrientTimer = setTimeout(() => patchOrientation(layoutRoom?.id, compassDeg), 400);
+    compassOrientTimer = setTimeout(() => patchOrientation(layoutState.room?.id, compassDeg), 400);
     freezeCompassUpdate(2000);
   });
 
@@ -540,7 +539,7 @@ function showCompassWizard() {
         const dial = document.getElementById('lc-compass-dial');
         if (dial) dial.setAttribute('transform', `rotate(${dialAngle(compassDeg)},925,75)`);
         previewSolarState(lastSolar.azimuth, lastSolar.elevation);
-        patchOrientation(layoutRoom?.id, compassDeg);
+        patchOrientation(layoutState.room?.id, compassDeg);
         closeWizard();
       });
       footer.appendChild(backBtn);
@@ -627,7 +626,7 @@ function redrawSolarOverlay(azimuth, elevation) {
 function previewSolarState(azimuth, elevation) {
   lastSolar = { azimuth, elevation };  // keep in sync so model-change redraws use correct position
   const { bri, ct } = calculateSolarState(elevation, getSolarParams());
-  for (const [id, entry] of Object.entries(placedBulbs)) {
+  for (const [id, entry] of Object.entries(layoutState.bulbs)) {
     const state = { on: true, brightness: bri, color_temp: ct, color_xy: null };
     updateBulbIcon(entry, state);
     threeUpdateBulbColor(id, state);
@@ -720,8 +719,8 @@ function wireScrubber() {
     redrawLightEffect(lastSolar.azimuth, lastSolar.elevation);
 
     // Restore bulb icons to real states and push current solar to physical bulbs
-    for (const [deviceId, entry] of Object.entries(placedBulbs)) {
-      updateBulbIcon(entry, devicesRef.get(deviceId));
+    for (const [deviceId, entry] of Object.entries(layoutState.bulbs)) {
+      updateBulbIcon(entry, layoutState.devices.get(deviceId));
     }
     sendSimSolarCommands(lastSolar.elevation);
   });
@@ -766,12 +765,12 @@ function wireScrubber() {
 // drag tick — to avoid flooding the Zigbee bus.
 // Optional onlyDeviceIds: if provided, only these IDs are processed.
 async function sendSimSolarCommands(elevation, onlyDeviceIds = null) {
-  const room = layoutRoom;
+  const room = layoutState.room;
   if (!room || !room.device_ids) return;
   const { bri, ct } = calculateSolarState(elevation, getSolarParams());
   const t = tok();
 
-  const targetIds = (onlyDeviceIds || room.device_ids).filter(id => placedBulbs[id]);
+  const targetIds = (onlyDeviceIds || room.device_ids).filter(id => layoutState.bulbs[id]);
 
   for (const deviceId of targetIds) {
     // Match the successful "grab" sequence from rooms.js: ON, then color_temp, then brightness.
@@ -845,7 +844,7 @@ function enterSunCalibMode() {
       const dial = document.getElementById('lc-compass-dial');
       if (dial) dial.setAttribute('transform', `rotate(${dialAngle(compassDeg)},925,75)`);
       redrawSolarOverlay(lastSolar.azimuth, lastSolar.elevation);
-      patchOrientation(layoutRoom?.id, compassDeg);
+      patchOrientation(layoutState.room?.id, compassDeg);
     });
     preview.appendChild(rect);
     preview.appendChild(lbl);
@@ -883,19 +882,19 @@ function buildLayoutView(room) {
   title.addEventListener('click', () => {
     const inp = document.createElement('input');
     inp.className = 'layout-title-input';
-    inp.value = layoutRoom?.name ?? title.textContent;
+    inp.value = layoutState.room?.name ?? title.textContent;
     title.replaceWith(inp);
     inp.select();
     const commit = () => {
       const name = inp.value.trim();
-      if (name && layoutRoom && name !== layoutRoom.name) {
-        layoutRoom.name = name;
-        fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/name?token=${encodeURIComponent(tok())}`, {
+      if (name && layoutState.room && name !== layoutState.room.name) {
+        layoutState.room.name = name;
+        fetch(`/api/rooms/${encodeURIComponent(layoutState.room.id)}/name?token=${encodeURIComponent(tok())}`, {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name }),
         }).catch(() => {});
       }
-      title.textContent = layoutRoom?.name ?? name;
+      title.textContent = layoutState.room?.name ?? name;
       inp.replaceWith(title);
     };
     inp.addEventListener('blur', commit);
@@ -998,7 +997,7 @@ function buildActionBar(sidebar) {
 // toggle is hidden there).
 function setShowLabels(v) {
   showLabels = v;
-  Object.values(placedBulbs).forEach(e => {
+  Object.values(layoutState.bulbs).forEach(e => {
     if (!e.el) return;
     e.el.querySelectorAll('text, rect[fill="rgba(0,0,0,0.55)"]').forEach(el => {
       el.style.display = showLabels ? '' : 'none';
@@ -1128,7 +1127,7 @@ function showLightsDropzone() {
 
 function hideLightsDropzone() {
   document.getElementById('layout-chips-dropzone')?.remove();
-  const unplaced = (layoutRoom?.device_ids || []).filter(id => !placedBulbs[id]);
+  const unplaced = (layoutState.room?.device_ids || []).filter(id => !layoutState.bulbs[id]);
   const section = document.getElementById('layout-lights-section');
   if (section) section.style.display = unplaced.length === 0 ? 'none' : '';
 }
@@ -1218,12 +1217,12 @@ function buildSidebar(room) {
     inp.addEventListener('change', () => {
       const val = parseFloat(inp.value);
       if (!isFinite(val) || val < 0.1) return;
-      if (layoutRoom) {
-        layoutRoom[key] = val;
-        renderWallDims(layoutRoom);
+      if (layoutState.room) {
+        layoutState.room[key] = val;
+        renderWallDims(layoutState.room);
         const body = {};
         body[key] = val;
-        fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/dimensions?token=${encodeURIComponent(tok())}`, {
+        fetch(`/api/rooms/${encodeURIComponent(layoutState.room.id)}/dimensions?token=${encodeURIComponent(tok())}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -1255,8 +1254,8 @@ function rebuildSidebar() {
   if (!chips) return;
   chips.innerHTML = '';
 
-  const room = layoutRoom;
-  const unplaced = (room.device_ids || []).filter(id => !placedBulbs[id]);
+  const room = layoutState.room;
+  const unplaced = (room.device_ids || []).filter(id => !layoutState.bulbs[id]);
 
   const lightsSection = document.getElementById('layout-lights-section');
   if (unplaced.length === 0) {
@@ -1277,13 +1276,13 @@ function rebuildPlacedPanel() {
   // Remove previous entries (keep the header)
   [...body.children].forEach(c => { if (!c.classList.contains('layout-placed-header')) c.remove(); });
 
-  const room = layoutRoom;
+  const room = layoutState.room;
   if (!room) return;
   const W = room.width_m || 3;
   const D = room.depth_m || 6;
 
-  for (const [deviceId, entry] of Object.entries(placedBulbs)) {
-    const dev = devicesRef.get(deviceId);
+  for (const [deviceId, entry] of Object.entries(layoutState.bulbs)) {
+    const dev = layoutState.devices.get(deviceId);
     const name = dev?.friendly_name ?? deviceId;
 
     const row = document.createElement('div');
@@ -1325,7 +1324,7 @@ function rebuildPlacedPanel() {
   }
 
   // ── Openings (doors & windows) ──────────────────────────────────────────────
-  const openingEntries = Object.entries(placedOpenings);
+  const openingEntries = Object.entries(layoutState.openings);
   if (openingEntries.length > 0) {
     const divider = document.createElement('div');
     divider.className = 'layout-placed-divider';
@@ -1448,9 +1447,9 @@ function renderWallDims(room) {
       const commit = () => {
         const v = parseFloat(inp.value);
         overlay.remove();
-        if (!isFinite(v) || v < 0.1 || !layoutRoom) return;
+        if (!isFinite(v) || v < 0.1 || !layoutState.room) return;
         const body = {}; body[key + '_m'] = v;
-        fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/dimensions?token=${encodeURIComponent(tok())}`, {
+        fetch(`/api/rooms/${encodeURIComponent(layoutState.room.id)}/dimensions?token=${encodeURIComponent(tok())}`, {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         }).catch(() => {});
@@ -1469,7 +1468,7 @@ function renderWallDims(room) {
 }
 
 function makeSidebarChip(deviceId) {
-  const dev = devicesRef.get(deviceId);
+  const dev = layoutState.devices.get(deviceId);
   const chip = document.createElement('div');
   chip.className = 'layout-chip';
   chip.draggable = true;
@@ -1609,16 +1608,16 @@ function snapTo(v, length_m) {
 // Radius is generous so touch users can reliably hit the target.
 const CROSSHAIR_MAGNET_RADIUS = 40 / 1000;
 function magnetToOrigin(nx, ny) {
-  if (!layoutRoom) return null;
-  const ox = layoutRoom.origin_x ?? 0.5;
-  const oy = layoutRoom.origin_y ?? 0.5;
+  if (!layoutState.room) return null;
+  const ox = layoutState.room.origin_x ?? 0.5;
+  const oy = layoutState.room.origin_y ?? 0.5;
   if (Math.hypot(nx - ox, ny - oy) < CROSSHAIR_MAGNET_RADIUS) {
     return { nx: ox, ny: oy };
   }
   return null;
 }
-function snapX(v) { return snapTo(v, layoutRoom?.width_m ?? 3); }
-function snapY(v) { return snapTo(v, layoutRoom?.depth_m ?? 6); }
+function snapX(v) { return snapTo(v, layoutState.room?.width_m ?? 3); }
+function snapY(v) { return snapTo(v, layoutState.room?.depth_m ?? 6); }
 // Walls run along one room axis: top/bottom along width, left/right along depth.
 function snapAlongWall(v, wall) {
   return isHorizontalWall(wall) ? snapX(v) : snapY(v);
@@ -1632,7 +1631,7 @@ function snapCrosshairToBulbs(nx, ny) {
   let sx = snapX(nx), sy = snapY(ny);
   let snapXId = null, snapYId = null;
   let bestDx = BULB_ALIGN_THRESHOLD, bestDy = BULB_ALIGN_THRESHOLD;
-  for (const [id, entry] of Object.entries(placedBulbs)) {
+  for (const [id, entry] of Object.entries(layoutState.bulbs)) {
     const dx = Math.abs(nx - entry.x);
     const dy = Math.abs(ny - entry.y);
     if (dx < bestDx) { bestDx = dx; sx = entry.x; snapXId = id; }
@@ -1700,18 +1699,18 @@ function onCanvasDragLeave() {
 function commitDropAt(kind, payload, nx, ny) {
   if (kind === 'opening') {
     const wall = detectWall(nx, ny);
-    if (!wall || !layoutRoom) return;
+    if (!wall || !layoutState.room) return;
     const rawPos = isHorizontalWall(wall) ? nx : ny;
     const xNorm = Math.abs(rawPos - 0.5) < 0.06 ? 0.5 : snapAlongWall(rawPos, wall);
     const transmission = payload === 'window' ? 1.0 : 0.1;
-    postCreateOpening(layoutRoom.id, payload, wall, xNorm, 0.3, transmission);
+    postCreateOpening(layoutState.room.id, payload, wall, xNorm, 0.3, transmission);
     return;
   }
   if (kind === 'bulb') {
     const magnet = magnetToOrigin(nx, ny);
     const x = magnet ? magnet.nx : snapX(nx);
     const y = magnet ? magnet.ny : snapY(ny);
-    const existing = placedBulbs[payload];
+    const existing = layoutState.bulbs[payload];
     const fixtureType = existing?.fixture_type ?? 'ceiling_spot';
     const z = existing?.z ?? defaultZ(fixtureType);
     pushUndo();
@@ -1847,9 +1846,9 @@ function placeBulb(deviceId, x, y, z, fixtureType, postToServer) {
   if (!svg || !layer) return;
 
   // Remove existing element if re-placing
-  if (placedBulbs[deviceId]?.el) {
-    placedBulbs[deviceId].el.remove();
-    placedBulbs[deviceId].labelEl?.remove();
+  if (layoutState.bulbs[deviceId]?.el) {
+    layoutState.bulbs[deviceId].el.remove();
+    layoutState.bulbs[deviceId].labelEl?.remove();
   }
 
   const cx = x * 1000;
@@ -1861,10 +1860,10 @@ function placeBulb(deviceId, x, y, z, fixtureType, postToServer) {
   g.addEventListener('click', e => e.stopPropagation());
   makeBulbDraggable(g, deviceId);
 
-  drawFixtureIcon(g, cx, cy, z, fixtureType, devicesRef.get(deviceId));
+  drawFixtureIcon(g, cx, cy, z, fixtureType, layoutState.devices.get(deviceId));
 
   // Label: background pill + text, clear of the icon
-  const dev = devicesRef.get(deviceId);
+  const dev = layoutState.devices.get(deviceId);
   const name = dev?.friendly_name ?? deviceId;
   const labelText = name.length > 14 ? name.slice(0, 13) + '…' : name;
   const labelY = cy + 58;
@@ -1892,8 +1891,8 @@ function placeBulb(deviceId, x, y, z, fixtureType, postToServer) {
 
   layer.appendChild(g);
 
-  placedBulbs[deviceId] = { x, y, z, fixture_type: fixtureType, el: g, labelEl };
-  syncBulbToThree(deviceId, placedBulbs[deviceId], devicesRef.get(deviceId));
+  layoutState.bulbs[deviceId] = { x, y, z, fixture_type: fixtureType, el: g, labelEl };
+  syncBulbToThree(deviceId, layoutState.bulbs[deviceId], layoutState.devices.get(deviceId));
 
   if (postToServer) {
     postPosition(deviceId, x, y, z, fixtureType);
@@ -2078,7 +2077,7 @@ function makeBulbDraggable(g, deviceId) {
       dropzoneShown = true;
       showLightsDropzone();
 
-      const gDev = devicesRef.get(deviceId);
+      const gDev = layoutState.devices.get(deviceId);
       const gName = gDev?.friendly_name ?? deviceId;
       ghost = document.createElement('div');
       ghost.className = 'layout-drag-ghost';
@@ -2107,7 +2106,7 @@ function makeBulbDraggable(g, deviceId) {
     const magnet = magnetToOrigin(candidateX, candidateY);
     const newX = magnet ? magnet.nx : Math.max(0, Math.min(1, snapX(candidateX)));
     const newY = magnet ? magnet.ny : Math.max(0, Math.min(1, snapY(candidateY)));
-    const entry = placedBulbs[deviceId];
+    const entry = layoutState.bulbs[deviceId];
     const tx = (newX - entry.x) * 1000;
     const ty = (newY - entry.y) * 1000;
     g.setAttribute('transform', `translate(${tx},${ty})`);
@@ -2138,7 +2137,7 @@ function makeBulbDraggable(g, deviceId) {
     cleanup();
 
     if (!wasMoved) {
-      const entry = placedBulbs[deviceId];
+      const entry = layoutState.bulbs[deviceId];
       if (tapTarget && entry && tapTarget === entry.labelEl) {
         if (typeof window.__roomsStopPulse === 'function') window.__roomsStopPulse(false);
         startInlineRename(deviceId, entry);
@@ -2194,7 +2193,7 @@ function makeBulbDraggable(g, deviceId) {
     const newX = magnet ? magnet.nx : Math.max(0, Math.min(1, snapX(candidateX)));
     const newY = magnet ? magnet.ny : Math.max(0, Math.min(1, snapY(candidateY)));
 
-    const entry = placedBulbs[deviceId];
+    const entry = layoutState.bulbs[deviceId];
     if (newX !== entry.x || newY !== entry.y) {
       pushUndo();
       placeBulb(deviceId, newX, newY, entry.z, entry.fixture_type, true);
@@ -2215,7 +2214,7 @@ function makeBulbDraggable(g, deviceId) {
   function beginDrag(e) {
     const svg = document.getElementById('layout-canvas');
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-    const entry = placedBulbs[deviceId];
+    const entry = layoutState.bulbs[deviceId];
     if (!entry) return;
 
     try { svg.setPointerCapture(e.pointerId); } catch (_) {}
@@ -2255,8 +2254,8 @@ function makeBulbDraggable(g, deviceId) {
 }
 
 function updateBulbIcon(entry, state) {
-  const deviceId = Object.entries(placedBulbs).find(([, v]) => v === entry)?.[0] ?? '';
-  const dev = devicesRef.get(deviceId);
+  const deviceId = Object.entries(layoutState.bulbs).find(([, v]) => v === entry)?.[0] ?? '';
+  const dev = layoutState.devices.get(deviceId);
   if (!entry.el) return;
 
   const color = devStateColor(state ?? dev);
@@ -2292,7 +2291,7 @@ function sendLayoutDeviceCommand(deviceId, body) {
 
 function startInlineRename(deviceId, entry) {
   const labelEl = entry?.labelEl;
-  const dev = devicesRef.get(deviceId);
+  const dev = layoutState.devices.get(deviceId);
   const currentName = dev?.friendly_name ?? deviceId;
 
   let cx = window.innerWidth / 2 - 80, cy = window.innerHeight / 2 - 16;
@@ -2345,9 +2344,9 @@ function startInlineRename(deviceId, entry) {
 function openPopover(deviceId, anchorEl, screenX, screenY) {
   dismissPopover();
 
-  const entry = placedBulbs[deviceId];
+  const entry = layoutState.bulbs[deviceId];
   if (!entry) return;
-  let dev = devicesRef.get(deviceId);
+  let dev = layoutState.devices.get(deviceId);
 
   const pop = document.createElement('div');
   pop.className = 'layout-popover';
@@ -2373,7 +2372,7 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
   pop.appendChild(header);
 
   // Helper: refresh dot colour after state changes
-  function refreshDot() { dot.style.background = devStateColor(devicesRef.get(deviceId)); }
+  function refreshDot() { dot.style.background = devStateColor(layoutState.devices.get(deviceId)); }
 
   // ── On / Off toggle ───────────────────────────────────────────────────────
   const toggleBtn = document.createElement('button');
@@ -2382,11 +2381,11 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
   toggleBtn.textContent = isOn ? '● On' : '○ Off';
   toggleBtn.addEventListener('click', () => {
     isOn = !isOn;
-    const cur = devicesRef.get(deviceId) ?? {};
-    devicesRef.set(deviceId, { ...cur, on: isOn });
+    const cur = layoutState.devices.get(deviceId) ?? {};
+    layoutState.devices.set(deviceId, { ...cur, on: isOn });
     toggleBtn.className = `layout-popover-toggle ${isOn ? 'is-on' : 'is-off'}`;
     toggleBtn.textContent = isOn ? '● On' : '○ Off';
-    updateBulbIcon(entry, devicesRef.get(deviceId));
+    updateBulbIcon(entry, layoutState.devices.get(deviceId));
     refreshDot();
     if (briSlider) briSlider.disabled = !isOn;
     sendLayoutDeviceCommand(deviceId, { action: isOn ? 'on' : 'off' });
@@ -2403,9 +2402,9 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
       value: dev.brightness,
       format: v => Math.round((v / 255) * 100) + '%',
       onInput: v => {
-        const cur = devicesRef.get(deviceId) ?? {};
-        devicesRef.set(deviceId, { ...cur, brightness: v, on: true });
-        updateBulbIcon(entry, devicesRef.get(deviceId));
+        const cur = layoutState.devices.get(deviceId) ?? {};
+        layoutState.devices.set(deviceId, { ...cur, brightness: v, on: true });
+        updateBulbIcon(entry, layoutState.devices.get(deviceId));
         refreshDot();
         clearTimeout(briTimer);
         briTimer = setTimeout(() =>
@@ -2430,9 +2429,9 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
       value: dev.color_temp,
       format: v => Math.round(1e6 / v) + 'K',
       onInput: v => {
-        const cur = devicesRef.get(deviceId) ?? {};
-        devicesRef.set(deviceId, { ...cur, color_temp: v });
-        updateBulbIcon(entry, devicesRef.get(deviceId));
+        const cur = layoutState.devices.get(deviceId) ?? {};
+        layoutState.devices.set(deviceId, { ...cur, color_temp: v });
+        updateBulbIcon(entry, layoutState.devices.get(deviceId));
         refreshDot();
         clearTimeout(ctTimer);
         ctTimer = setTimeout(() =>
@@ -2469,7 +2468,7 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
     pushUndo();
     const newType = typeSelect.value;
     entry.fixture_type = newType;
-    drawFixtureIcon(entry.el, entry.x * 1000, entry.y * 1000, entry.z, newType, devicesRef.get(deviceId));
+    drawFixtureIcon(entry.el, entry.x * 1000, entry.y * 1000, entry.z, newType, layoutState.devices.get(deviceId));
     postPosition(deviceId, entry.x, entry.y, entry.z, newType);
   });
   pop.appendChild(typeSelect);
@@ -2482,8 +2481,8 @@ function openPopover(deviceId, anchorEl, screenX, screenY) {
     format: v => v + '%',
     onInput: v => {
       entry.z = v / 100;
-      drawFixtureIcon(entry.el, entry.x * 1000, entry.y * 1000, entry.z, entry.fixture_type, devicesRef.get(deviceId));
-      syncBulbToThree(deviceId, entry, devicesRef.get(deviceId));
+      drawFixtureIcon(entry.el, entry.x * 1000, entry.y * 1000, entry.z, entry.fixture_type, layoutState.devices.get(deviceId));
+      syncBulbToThree(deviceId, entry, layoutState.devices.get(deviceId));
     },
     onCommit: () => {
       pushUndo();
@@ -2524,11 +2523,11 @@ function dismissPopover() {
 // ── Remove bulb ───────────────────────────────────────────────────────────────
 
 function removeBulb(deviceId) {
-  const entry = placedBulbs[deviceId];
+  const entry = layoutState.bulbs[deviceId];
   if (!entry) return;
   entry.el?.remove();
   entry.labelEl?.remove();
-  delete placedBulbs[deviceId];
+  delete layoutState.bulbs[deviceId];
   rebuildSidebar();
   // Server: post zero coords so the position record is cleared
   postPosition(deviceId, 0, 0, 0, null);
@@ -2542,7 +2541,7 @@ function defaultZ(fixtureType) {
 
 function snapshotPositions() {
   const snap = {};
-  for (const [id, e] of Object.entries(placedBulbs)) {
+  for (const [id, e] of Object.entries(layoutState.bulbs)) {
     snap[id] = { x: e.x, y: e.y, z: e.z, fixture_type: e.fixture_type };
   }
   return snap;
@@ -2557,7 +2556,7 @@ function restoreSnapshot(snapshot) {
   // Clear current canvas bulbs
   const layer = document.getElementById('lc-bulbs');
   if (layer) layer.innerHTML = '';
-  placedBulbs = {};
+  layoutState.bulbs = {};
 
   for (const [id, pos] of Object.entries(snapshot)) {
     placeBulb(id, pos.x, pos.y, pos.z, pos.fixture_type, true);
@@ -2850,14 +2849,14 @@ function renderCrosshair(room) {
     vLine.setAttribute('stroke', snapXId ? '#ffdd00' : '#0ff');
 
     // Show reference dot on the snapping bulb
-    if (snapXId && placedBulbs[snapXId]) {
-      const b = placedBulbs[snapXId];
+    if (snapXId && layoutState.bulbs[snapXId]) {
+      const b = layoutState.bulbs[snapXId];
       xSnapDot.setAttribute('cx', b.x * 1000); xSnapDot.setAttribute('cy', b.y * 1000);
       xSnapDot.setAttribute('opacity', 1);
     } else { xSnapDot.setAttribute('opacity', 0); }
 
-    if (snapYId && placedBulbs[snapYId]) {
-      const b = placedBulbs[snapYId];
+    if (snapYId && layoutState.bulbs[snapYId]) {
+      const b = layoutState.bulbs[snapYId];
       ySnapDot.setAttribute('cx', b.x * 1000); ySnapDot.setAttribute('cy', b.y * 1000);
       ySnapDot.setAttribute('opacity', snapYId === snapXId ? 0 : 1);
     } else { ySnapDot.setAttribute('opacity', 0); }
@@ -2868,10 +2867,10 @@ function renderCrosshair(room) {
     const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
     const { sx: ox, sy: oy } = snapCrosshairToBulbs(nx, ny);
     exitDrag(e.pointerId);
-    if (layoutRoom) {
-      layoutRoom.origin_x = ox;
-      layoutRoom.origin_y = oy;
-      fetch(`/api/rooms/${encodeURIComponent(layoutRoom.id)}/origin?token=${encodeURIComponent(tok())}`, {
+    if (layoutState.room) {
+      layoutState.room.origin_x = ox;
+      layoutState.room.origin_y = oy;
+      fetch(`/api/rooms/${encodeURIComponent(layoutState.room.id)}/origin?token=${encodeURIComponent(tok())}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ origin_x: ox, origin_y: oy }),
@@ -2894,7 +2893,7 @@ function renderOpening(o) {
   if (!layer) return;
 
   // Remove previous element for this opening
-  placedOpenings[o.id]?.el?.remove();
+  layoutState.openings[o.id]?.el?.remove();
 
   const rect = openingToSvgRect(o);
   const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -2921,14 +2920,14 @@ function renderOpening(o) {
   }
 
   layer.appendChild(g);
-  placedOpenings[o.id] = { ...o, el: g };
+  layoutState.openings[o.id] = { ...o, el: g };
   updateOpeningCone();
   syncOpeningToThree(o);
   rebuildPlacedPanel();
 }
 
 function updateOpeningRectAttrs(openingId) {
-  const o = placedOpenings[openingId];
+  const o = layoutState.openings[openingId];
   if (!o?.el) return;
   const rect = openingToSvgRect(o);
   const body = o.el.querySelector('rect');
@@ -2949,12 +2948,12 @@ function updateOpeningRectAttrs(openingId) {
     }
   }
   updateOpeningCone();
-  if (threeIs3D) syncOpeningToThree(placedOpenings[openingId]);
+  if (threeIs3D) syncOpeningToThree(layoutState.openings[openingId]);
 
   // Keep the sidebar inputs in sync without a full panel rebuild.
-  if (!layoutRoom) return;
-  const W = layoutRoom.width_m || 3;
-  const D = layoutRoom.depth_m || 6;
+  if (!layoutState.room) return;
+  const W = layoutState.room.width_m || 3;
+  const D = layoutState.room.depth_m || 6;
   const wallLen = (o.wall_edge === 'N' || o.wall_edge === 'S') ? W : D;
   const posInp = document.querySelector(`[data-opening-pos="${CSS.escape(openingId)}"]`);
   if (posInp) posInp.value = (o.x_norm * wallLen).toFixed(2);
@@ -3059,7 +3058,7 @@ function mkRadialGrad(id, stops) {
 // ── Model 1: Cone ─────────────────────────────────────────────────────────────
 function renderConesModel(layer, azimuth, elevation) {
   if (!layer) return;
-  for (const [id, o] of Object.entries(placedOpenings)) {
+  for (const [id, o] of Object.entries(layoutState.openings)) {
     const c = openingCtx(o, azimuth, elevation);
     if (!c) continue;
     const { ox, oy, inwardAngle, elevFactor, dirFactor } = c;
@@ -3082,7 +3081,7 @@ function renderConesModel(layer, azimuth, elevation) {
 function renderGradientConesModel(layer, azimuth, elevation) {
   if (!layer) return;
   const defs = layerDefs(layer);
-  for (const [id, o] of Object.entries(placedOpenings)) {
+  for (const [id, o] of Object.entries(layoutState.openings)) {
     const c = openingCtx(o, azimuth, elevation);
     if (!c) continue;
     const { ox, oy, inwardAngle, elevFactor, dirFactor } = c;
@@ -3111,7 +3110,7 @@ function renderGradientConesModel(layer, azimuth, elevation) {
 function renderCausticModel(layer, azimuth, elevation) {
   if (!layer) return;
   const defs = layerDefs(layer);
-  for (const [id, o] of Object.entries(placedOpenings)) {
+  for (const [id, o] of Object.entries(layoutState.openings)) {
     const c = openingCtx(o, azimuth, elevation);
     if (!c) continue;
     const { ox, oy, inwardAngle, canvasInwardDeg, elevFactor, dirFactor } = c;
@@ -3143,7 +3142,7 @@ function renderCausticModel(layer, azimuth, elevation) {
 function renderBrightPatchModel(layer, azimuth, elevation) {
   if (!layer) return;
   const defs = layerDefs(layer);
-  for (const [id, o] of Object.entries(placedOpenings)) {
+  for (const [id, o] of Object.entries(layoutState.openings)) {
     const c = openingCtx(o, azimuth, elevation);
     if (!c) continue;
     const { ox, oy, inwardAngle, elevFactor, dirFactor, wallTangent } = c;
@@ -3170,7 +3169,7 @@ function renderBrightPatchModel(layer, azimuth, elevation) {
 function renderParallelBeamModel(layer, azimuth, elevation) {
   if (!layer) return;
   const defs = layerDefs(layer);
-  for (const [id, o] of Object.entries(placedOpenings)) {
+  for (const [id, o] of Object.entries(layoutState.openings)) {
     const c = openingCtx(o, azimuth, elevation);
     if (!c) continue;
     const { ox, oy, inwardAngle, elevFactor, dirFactor, wallTangent } = c;
@@ -3198,7 +3197,7 @@ function renderParallelBeamModel(layer, azimuth, elevation) {
 function renderBeamFootprintModel(layer, azimuth, elevation) {
   if (!layer) return;
   const defs = layerDefs(layer);
-  for (const [id, o] of Object.entries(placedOpenings)) {
+  for (const [id, o] of Object.entries(layoutState.openings)) {
     const c = openingCtx(o, azimuth, elevation);
     if (!c) continue;
     const { ox, oy, inwardAngle, canvasInwardDeg, elevFactor, dirFactor, wallTangent } = c;
@@ -3256,7 +3255,7 @@ function renderSoftBeamModel(layer, azimuth, elevation) {
   filter.appendChild(blur);
   defs.appendChild(filter);
 
-  for (const [id, o] of Object.entries(placedOpenings)) {
+  for (const [id, o] of Object.entries(layoutState.openings)) {
     const c = openingCtx(o, azimuth, elevation);
     if (!c) continue;
     const { ox, oy, inwardAngle, elevFactor, dirFactor, wallTangent } = c;
@@ -3385,7 +3384,7 @@ function makeMoveDraggable(body, openingId) {
       body.style.cursor = 'grabbing';
     }
 
-    const o = placedOpenings[openingId];
+    const o = layoutState.openings[openingId];
     if (!o) return;
     const svg = document.getElementById('layout-canvas');
     const pt = svgPoint(svg, e.clientX, e.clientY);
@@ -3408,7 +3407,7 @@ function makeMoveDraggable(body, openingId) {
       openOpeningPopover(openingId, body);
       return;
     }
-    const o = placedOpenings[openingId];
+    const o = layoutState.openings[openingId];
     if (o) patchOpening(openingId, { wall_edge: o.wall_edge, x_norm: o.x_norm });
   });
 
@@ -3425,7 +3424,7 @@ function makeResizeDraggable(handle, openingId, side) {
 
   handle.addEventListener('pointerdown', e => {
     e.stopPropagation(); e.preventDefault();
-    const o = placedOpenings[openingId];
+    const o = layoutState.openings[openingId];
     if (!o) return;
     dragging = true;
     const svg = document.getElementById('layout-canvas');
@@ -3438,7 +3437,7 @@ function makeResizeDraggable(handle, openingId, side) {
 
   handle.addEventListener('pointermove', e => {
     if (!dragging) return;
-    const o = placedOpenings[openingId];
+    const o = layoutState.openings[openingId];
     if (!o) return;
     const svg = document.getElementById('layout-canvas');
     const pt = svgPoint(svg, e.clientX, e.clientY);
@@ -3465,7 +3464,7 @@ function makeResizeDraggable(handle, openingId, side) {
     if (!dragging) return;
     dragging = false;
     handle.releasePointerCapture(e.pointerId);
-    const o = placedOpenings[openingId];
+    const o = layoutState.openings[openingId];
     if (o) patchOpening(openingId, { x_norm: o.x_norm, width_norm: o.width_norm });
   });
 
@@ -3476,7 +3475,7 @@ function makeResizeDraggable(handle, openingId, side) {
 
 function openOpeningPopover(openingId, anchorEl) {
   dismissPopover();
-  const o = placedOpenings[openingId];
+  const o = layoutState.openings[openingId];
   if (!o) return;
 
   const pop = document.createElement('div');
@@ -3555,14 +3554,14 @@ function openOpeningPopover(openingId, anchorEl) {
 // ── Openings — remove ─────────────────────────────────────────────────────────
 
 async function removeOpening(id) {
-  const entry = placedOpenings[id];
+  const entry = layoutState.openings[id];
   if (!entry) return;
   await apiDeleteOpening(id);
   entry.el?.remove();
   const cone = document.getElementById(`cone-${CSS.escape(id)}`);
   if (cone) cone.remove();
   removeOpeningFromThree(id);
-  delete placedOpenings[id];
+  delete layoutState.openings[id];
   rebuildPlacedPanel();
 }
 
@@ -3605,7 +3604,7 @@ async function postCreateOpening(roomId, openingType, wallEdge, xNorm, widthNorm
 }
 
 async function patchOpening(id, data) {
-  const o = placedOpenings[id];
+  const o = layoutState.openings[id];
   if (!o) return;
   try {
     await fetch(
@@ -3618,7 +3617,7 @@ async function patchOpening(id, data) {
 }
 
 async function apiDeleteOpening(id) {
-  const o = placedOpenings[id] ?? { room_id: layoutRoom?.id };
+  const o = layoutState.openings[id] ?? { room_id: layoutState.room?.id };
   if (!o.room_id) return;
   try {
     await fetch(
@@ -3758,13 +3757,13 @@ async function initThree(room) {
   threeControls.update();
 
   // Sync all already-placed bulbs
-  for (const [id, entry] of Object.entries(placedBulbs)) {
-    syncBulbToThree(id, entry, devicesRef.get(id));
+  for (const [id, entry] of Object.entries(layoutState.bulbs)) {
+    syncBulbToThree(id, entry, layoutState.devices.get(id));
   }
   recomputeRoomAmbient();
 
   // Sync all already-placed openings
-  for (const o of Object.values(placedOpenings)) {
+  for (const o of Object.values(layoutState.openings)) {
     syncOpeningToThree(o);
   }
 
@@ -3810,12 +3809,12 @@ function teardownThree() {
 }
 
 function syncBulbToThree(deviceId, entry, dev) {
-  if (!threeScene || !THREE || !threeRoomGroup || !layoutRoom) return;
+  if (!threeScene || !THREE || !threeRoomGroup || !layoutState.room) return;
   removeBulbFromThree(deviceId);
 
-  const W = layoutRoom.width_m  || 3;
-  const D = layoutRoom.depth_m  || 6;
-  const H = layoutRoom.height_m || 2.5;
+  const W = layoutState.room.width_m  || 3;
+  const D = layoutState.room.depth_m  || 6;
+  const H = layoutState.room.height_m || 2.5;
 
   const x3 = (entry.x - 0.5) * W;
   const y3 = (entry.z ?? 0.9) * H;
@@ -3860,12 +3859,12 @@ function removeBulbFromThree(deviceId) {
 }
 
 function syncOpeningToThree(o) {
-  if (!threeScene || !THREE || !threeRoomGroup || !layoutRoom) return;
+  if (!threeScene || !THREE || !threeRoomGroup || !layoutState.room) return;
   removeOpeningFromThree(o.id);
 
-  const W = layoutRoom.width_m  || 3;
-  const D = layoutRoom.depth_m  || 6;
-  const H = layoutRoom.height_m || 2.5;
+  const W = layoutState.room.width_m  || 3;
+  const D = layoutState.room.depth_m  || 6;
+  const H = layoutState.room.height_m || 2.5;
   const isWindow = o.opening_type === 'window';
 
   // Physical dimensions
@@ -3952,7 +3951,7 @@ function recomputeRoomAmbient() {
   if (!threeAmbientHemi || !THREE) return;
   let r = 0, g = 0, b = 0, wSum = 0;
   for (const id of Object.keys(threeBulbMeshes)) {
-    const dev = devicesRef.get(id);
+    const dev = layoutState.devices.get(id);
     if (!dev || !dev.on) continue;
     const c = new THREE.Color(devStateColor(dev));
     const w = (dev.brightness ?? 200) / 254;
@@ -4001,7 +4000,7 @@ function toggle3D() {
       }
     }
     // Re-sync openings that may have moved while in 2D view
-    for (const o of Object.values(placedOpenings)) {
+    for (const o of Object.values(layoutState.openings)) {
       syncOpeningToThree(o);
     }
   } else {
