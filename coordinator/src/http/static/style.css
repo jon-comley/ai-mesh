@@ -816,7 +816,9 @@ body {
   cursor: grab;
   user-select: none;
   -webkit-user-select: none;
-  touch-action: none;            /* capture pointer for drag-to-room; palette scrolls in gaps */
+  touch-action: pan-x;           /* let the palette scroll horizontally on touch; the
+                                    chip's createPointerDrag uses holdMs to drag-to-room
+                                    only on a press-hold, so a swipe scrolls */
   transition: opacity 0.15s;
   flex-shrink: 0;
   white-space: nowrap;
