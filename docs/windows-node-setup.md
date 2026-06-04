@@ -539,6 +539,54 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 
 ---
 
+#### 2026-06-04 — fTPM storm ACTIVE again after CMOS reset (worst run yet) + Intel AX200 NIC errors
+
+Logs pulled live from BEELINK1 at **2026-06-04 21:15Z** (SSH; ICMP is firewalled but TCP/22 was up — the box looked "down" to ping earlier today but was reachable over SSH). **The machine is in an active `0x00000133` fTPM crash-loop right now.** It had been unreachable earlier; the **CMOS reset done to recover it re-enabled fTPM and it was not re-disabled in BIOS**, so the storm resumed and has been bug-checking every few minutes-to-hours across 06-03 and 06-04. At collection, uptime was **3m45s** (booted 21:11:42, immediately after the 21:11 crash).
+
+**Bugchecks (System Event 1001) — all `0x00000133`, param2 `0x1e00` (the fTPM signature):**
+```
+2026-06-04 21:11:50Z  0x133 (...,0x1e00,...)  Minidump\060426-8718-01.dmp   (latest — 4 min before collection)
+2026-06-04 07:30:09Z  0x133 (...,0x1e00,...)  060426-8765-01.dmp
+2026-06-04 01:38:13Z  0x133 (...,0x1e00,...)  060426-8656-01.dmp
+2026-06-04 01:25:51Z  0x133 (...,0x1e00,...)  060426-9343-01.dmp
+2026-06-04 01:23:30Z  0x133 (...,0x1e00,...)  060426-8640-01.dmp
+2026-06-03 23:59:35Z  0x133 (...,0x1e00,...)  060326-8671-01.dmp
+2026-06-03 10:50:45Z  0x133 ... (+ 8 more 0x133/0x1e00 back to 2026-06-03 03:54)
+```
+All 15 most-recent 1001 events are `0x133`/`0x1e00`. (Prior `0x133` cluster + one `0x9f` on 2026-05-31 also still in the log — see earlier entries.)
+
+**Kernel-Power 41 cascade (06-04):** 01:01, 01:23, 01:25, 01:38, 07:20, 07:30, 09:54, 17:34, 21:11 — ~9 crash-reboots on 06-04 alone (plus a similar run on 06-03). Matching Event 6008 unexpected-shutdown chain confirms none were clean.
+
+**TPM re-provisioning fingerprint (Microsoft-Windows-TPM-WMI) — confirms fTPM is active:**
+```
+2026-06-04 21:11:59Z  id=1025  The TPM was successfully provisioned and is now ready for use.
+2026-06-04 21:04:32Z  id=1025  The TPM was successfully provisioned and is now ready for use.
+```
+TPM re-provisions on every boot after each crash — the exact signature that nailed fTPM as root cause on 2026-05-28.
+
+**Minidumps retained (Windows keeps ~5, ~1.7–3.4 MB each):** `060426-9343-01` (01:25), `-8656-01` (01:38), `-8765-01` (07:30), `-8656-02` (09:52), `-8718-01` (21:11).
+
+**NEW secondary signal — Intel Wi-Fi AX200 NIC instability (2026-05-31 cluster):**
+```
+NDIS    id=10317  Miniport Intel(R) Wi-Fi 6 AX200 ... Fatal error: internal error
+Netwtw10 id=5007  TX/CMD timeout (TfdQueue hanged)
+Netwtw10 id=5032  Driver Miniport reset watchdog
+Netwtw10 id=5002/5005  adapter not functioning / internal error
+```
+The node is on **Intel Wi-Fi AX200 (wireless)**, not wired. These fatal miniport resets coincide with the "no route to host / unreachable" episodes (incl. earlier today) and are a plausible contributor to apparent "down" periods independent of the fTPM BSODs. Candidate mitigations: disable AX200 power management, or move the node to **wired Ethernet**.
+
+**Ruled OUT (confirmed good):**
+- AMD display driver `32.0.31007.5012` (2026-05-12) — innocent per established root cause.
+- Registry hardening intact: `EnableUlps=0`, `PP_SclkDeepSleepDisable=1`, `TdrDelay` absent.
+
+**Agent (`C:\Users\jonno\ai-mesh\logs\agent.log`):** reconnects cleanly every boot (e.g. `2026-06-04T20:08:35`/`20:11:51` → "Connected to coordinator (TLS) … startup sequence complete", node_id `856466cd-…`) — then the box BSODs again. Steady benign `WARN agent::dispatch: no capability handles: Acknowledge` between heartbeats.
+
+**Action — URGENT and unchanged:** fTPM is enabled again and actively storming. **Disable fTPM/Pluton in BIOS now** (Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor; Pluton Security Processor → Disabled; Trusted Computing → Security Device Support → Disabled). Until then it keeps crash-looping. This is the **third** recurrence (05-28 fixed → 06-02 regressed → 06-04 regressed after CMOS reset) — strong case for retiring this Windows config: rebuild on **Win IoT Enterprise LTSC** or **Linux**, and consider **wired Ethernet** to sidestep the AX200 issue.
+
+**Follow-up (same session):** fTPM disable **not yet applied** — user is mid-recovery and will revisit the BIOS shortly. Box was still crash-looping at time of writing (last `0x133` at 21:11Z, then a cleanup SSH failed a few min later — likely another BSOD). Next step is to **re-pull these logs after the BIOS change** to confirm uptime climbs with no new Event 1001 / `0x133`.
+
+---
+
 #### Verification checklist after any reboot, driver change, or CMOS reset
 
 ```bash
