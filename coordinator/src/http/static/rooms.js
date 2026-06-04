@@ -96,6 +96,7 @@ const DEFAULT_EFFECT_ICON = '✨';          // ✨
 const SCENE_ICON = '\u{1F3AD}';            // 🎭 — per-light "in scene" marker (generic; tweakable)
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
 let _lcOpenDismiss = null;            // collapse fn of the currently-open temp/colour section (only one at a time)
+let _roomCtrlDismiss = null;          // document outside-pointerdown listener for the open room colour/temp panel (only one at a time)
 let _sceneReorderTimer = null;
 
 // Pending optimistic command values per (deviceId, field). Each entry { value, ts }.
@@ -1970,9 +1971,11 @@ function renderRoomCard(room) {
       }
       syncButtons();
     };
-    let outsideDismiss = null;
+    // Remove whatever outside-dismiss listener is currently armed (there is only
+    // ever one, module-wide — a fresh render of this or any room reuses it, so we
+    // never leak a pile of stale document listeners that fire on every pointerdown).
     const disarmOutside = () => {
-      if (outsideDismiss) { document.removeEventListener('pointerdown', outsideDismiss, true); outsideDismiss = null; }
+      if (_roomCtrlDismiss) { document.removeEventListener('pointerdown', _roomCtrlDismiss, true); _roomCtrlDismiss = null; }
     };
     const closePanel = () => {
       openRoomCtrlIds.delete(room.id);
@@ -1982,40 +1985,38 @@ function renderRoomCard(room) {
       disarmOutside();
       syncButtons();
     };
+    const armOutside = () => {
+      disarmOutside();
+      const handler = (e) => {
+        if (!ctPanel) return;
+        // Allow taps on the panel (incl. the colour wheel / temp bar inside it)
+        // and on the colour/temp trigger buttons.
+        if (ctPanel.contains(e.target)) return;
+        if (colourBtn?.contains(e.target) || tempBtn?.contains(e.target)) return;
+        closePanel();
+      };
+      _roomCtrlDismiss = handler;
+      // setTimeout so the tap that opened the panel doesn't immediately close it.
+      setTimeout(() => {
+        if (ctPanel && _roomCtrlDismiss === handler) document.addEventListener('pointerdown', handler, true);
+      }, 0);
+    };
     const selectMode = (mode) => {
       if (ctPanel && curMode() === mode) { closePanel(); return; }   // toggle off
       localStorage.setItem(roomModeKey, mode);
       openRoomCtrlIds.add(room.id);
       ctPanel?.remove(); ctPanel = null;   // rebuild in the chosen mode
       openPanel();
-      // Arm outside-click dismissal after the current event settles.
-      disarmOutside();
-      outsideDismiss = (e) => {
-        if (!ctPanel) return;
-        // Allow taps on the panel itself, the colour/temp trigger buttons, and
-        // the temp/colour wheel (which uses capture-phase stopPropagation).
-        if (ctPanel.contains(e.target)) return;
-        if (colourBtn?.contains(e.target) || tempBtn?.contains(e.target)) return;
-        closePanel();
-      };
-      // Use setTimeout so the tap that opened the panel doesn't immediately close it.
-      setTimeout(() => { if (ctPanel) document.addEventListener('pointerdown', outsideDismiss, true); }, 0);
+      armOutside();
     };
 
     colourBtn?.addEventListener('click', e => { e.stopPropagation(); selectMode('colour'); });
     tempBtn?.addEventListener('click', e => { e.stopPropagation(); selectMode('temp'); });
 
-    // Restore on render if it was open before, and re-arm the outside-click dismiss.
+    // Restore on render if it was open before, and re-arm the (single) dismiss.
     if (openRoomCtrlIds.has(room.id)) {
       openPanel();
-      disarmOutside();
-      outsideDismiss = (e) => {
-        if (!ctPanel) return;
-        if (ctPanel.contains(e.target)) return;
-        if (colourBtn?.contains(e.target) || tempBtn?.contains(e.target)) return;
-        closePanel();
-      };
-      setTimeout(() => { if (ctPanel) document.addEventListener('pointerdown', outsideDismiss, true); }, 0);
+      armOutside();
     }
   }
 
