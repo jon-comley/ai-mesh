@@ -3,6 +3,7 @@
 // Coordinates are always 0–1 normalised; the SVG scales to any screen size.
 
 import { buildSlider, lockSliderToThumb } from '/static/controls.js';
+import { tok } from '/static/api.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -2655,8 +2656,7 @@ function onKeyDown(e) {
 }
 
 // ── Server I/O ────────────────────────────────────────────────────────────────
-
-function tok() { return localStorage.getItem('meshToken') ?? ''; }
+// tok() is imported from api.js.
 
 async function loadPlacedBulbs(roomId) {
   try {

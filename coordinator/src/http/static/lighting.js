@@ -2,6 +2,7 @@
 // Renders per-device light state cards with interactive controls.
 
 import { buildLightControls, repaintModeDots, HUE_DEFAULT_ON } from '/static/rooms.js';
+import { esc, showToast } from '/static/util.js';
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
@@ -209,27 +210,8 @@ async function sendCommand(deviceId, body) {
   }
 }
 
-function showToast(msg, isError = false) {
-  let el = document.getElementById('light-toast');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'light-toast';
-    document.body.appendChild(el);
-  }
-  el.textContent = msg;
-  el.className = 'light-toast' + (isError ? ' light-toast-error' : '');
-  el.style.opacity = '1';
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => { el.style.opacity = '0'; }, 4000);
-}
-
-// CIE XY + brightness → approximate sRGB (Philips Hue algorithm)
 function formatDeviceName(id) {
   return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-}
-
-function esc(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // ── Drag-to-reorder (same pattern as models.js / topology.js) ───────────────
