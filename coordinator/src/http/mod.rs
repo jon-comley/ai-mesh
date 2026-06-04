@@ -33,6 +33,7 @@ const EFFECTS_JS: &str = include_str!("static/effects.js");
 const SCENES_JS: &str = include_str!("static/scenes.js");
 const SOLAR_JS: &str = include_str!("static/solar.js");
 const LAYOUTSTATE_JS: &str = include_str!("static/layoutstate.js");
+const LAYOUT3D_JS: &str = include_str!("static/layout3d.js");
 const UTIL_JS: &str = include_str!("static/util.js");
 const API_JS: &str = include_str!("static/api.js");
 const STATE_JS: &str = include_str!("static/state.js");
@@ -138,6 +139,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/scenes.js", SCENES_JS, JS),
         ("/static/solar.js", SOLAR_JS, JS),
         ("/static/layoutstate.js", LAYOUTSTATE_JS, JS),
+        ("/static/layout3d.js", LAYOUT3D_JS, JS),
         ("/static/util.js", UTIL_JS, JS),
         ("/static/api.js", API_JS, JS),
         ("/static/state.js", STATE_JS, JS),
