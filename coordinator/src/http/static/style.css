@@ -2182,6 +2182,10 @@ body {
     bottom: 0;
     width: auto !important;            /* beat any inline width from the resize handle */
     max-height: 60vh;
+    max-height: 60dvh;                 /* dynamic viewport: keep the sheet within the
+                                          VISIBLE area on mobile (with the address bar
+                                          shown) so it isn't anchored below the fold and
+                                          clipped to just its top. vh line is the fallback. */
     border-radius: 16px 16px 0 0;
     transform: translateY(110%);
     transition: transform 0.25s ease;
