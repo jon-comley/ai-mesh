@@ -2140,8 +2140,24 @@ deploy-coordinator target_host:
     cat systemd/ai-mesh-coordinator.service | ssh ${NODE_USER}@${NODE_HOST} "
         set -e
         sudo tee /etc/systemd/system/ai-mesh-coordinator.service > /dev/null
-        sudo systemctl daemon-reload
+        sudo mkdir -p /etc/systemd/system/ai-mesh-coordinator.service.d
     "
+
+    # Step 6b: Host-specific lighting env. The coordinator runs the lighting
+    # feature, which needs the MQTT broker address from nodes/<host>.env. The
+    # static unit carries no MQTT_HOST, so without this drop-in lighting boots in
+    # stub mode and SILENTLY DROPS every light command (UI works, bulbs don't).
+    # Drop-in mirrors the agent tls.conf/auth.conf convention and survives the
+    # unit overwrite above. MQTT_HOST/MQTT_PORT come from the sourced node env.
+    if [ -n "${MQTT_HOST:-}" ]; then
+        echo ">>> Step 6b: Setting MQTT_HOST=${MQTT_HOST}:${MQTT_PORT:-1883} for coordinator lighting..."
+        printf '[Service]\nEnvironment=MQTT_HOST=%s\nEnvironment=MQTT_PORT=%s\n' "${MQTT_HOST}" "${MQTT_PORT:-1883}" \
+            | ssh ${NODE_USER}@${NODE_HOST} "sudo tee /etc/systemd/system/ai-mesh-coordinator.service.d/lighting.conf > /dev/null"
+    else
+        echo ">>> Step 6b: No MQTT_HOST in nodes/${TARGET_HOST}.env — removing any stale lighting drop-in"
+        ssh ${NODE_USER}@${NODE_HOST} "sudo rm -f /etc/systemd/system/ai-mesh-coordinator.service.d/lighting.conf || true"
+    fi
+    ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl daemon-reload"
 
     # Step 7: Enable and start the service
     echo ">>> Step 7: Enabling and starting ai-mesh-coordinator service..."
