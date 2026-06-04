@@ -1,8 +1,9 @@
 // ── Lighting panel ──────────────────────────────────────────────────────────
 // Renders per-device light state cards with interactive controls.
 
-import { buildLightControls, repaintModeDots, HUE_DEFAULT_ON } from '/static/rooms.js';
+import { buildLightControls, repaintModeDots } from '/static/rooms.js';
 import { esc, showToast } from '/static/util.js';
+import { HUE_DEFAULT_ON } from '/static/state.js';
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();

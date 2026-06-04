@@ -10,37 +10,26 @@ import {
 } from '/static/controls.js';
 import { esc, showToast } from '/static/util.js';
 import { tok, api } from '/static/api.js';
+import {
+  model, devicesMap,
+  lastEffectByRoom, openPickerIds, openRoomCtrlIds,
+  activeSceneByRoom, preSceneStateByRoom, pausedSceneDevices,
+  deviceDotDomain, roomDotDomain, effectsById, roomEffectsMap,
+  pendingCommands, PENDING_TTL_MS,
+  COLOUR_ICON, TEMP_ICON, EFFECT_ICONS, DEFAULT_EFFECT_ICON, SCENE_ICON,
+  HUE_DEFAULT_ON,
+} from '/static/state.js';
 
-let roomsData = [];
-let devicesMap = new Map();
-let globalLightState = null;  // 'on' | 'off' | null — tracks last All On/Off press, cleared on any individual change
-let scenesData = [];
-let deviceNamesMap = new Map();
+// Shared state model + collections live in state.js (imported above). The vars
+// below are drag gestures that only rooms.js touches.
 let dragSrc = null;             // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;          // room reorder drag: room id being dragged
 let effectDragSrc = null;       // effect palette drag: effect_id e.g. 'solar'
 let effectRemoveRoomId = null;  // effect badge drag: room id whose effect is being dragged off
 let effectDragIsPermanent = false; // true when dragging a ghost (paused) badge → permanent delete
-const lastEffectByRoom = new Map(); // roomId → { effect_id, params } — paused/remembered state
-const openPickerIds = new Set();      // device IDs whose colour picker is currently open
-const openRoomCtrlIds = new Set();    // room IDs whose 🎨 colour/temp panel is open (survives render)
-const activeSceneByRoom = new Map();      // roomId → sceneId of last-recalled scene
-const preSceneStateByRoom = new Map();    // roomId → Map<deviceId, snapshot> before last recall
-// Devices the user has paused out of the room's active scene (session-only). The
-// scene stays active for the rest; a paused light reverts to pre-scene (or warm
-// white), and clicking its greyed scene icon resumes it. Mirrors effect overrides.
-const pausedSceneDevices = new Map();     // roomId → Set<deviceId>
-
-// Which colour/temp domain currently shows a live DOT (vs its glyph icon), per
-// target. A dot appears when you set a colour/temperature and PERSISTS, showing
-// the live value. Brightness changes leave it alone; setting the other domain
-// moves the dot there; on/off (of the target, a member bulb, or the whole room)
-// or a scene clears it back to an icon. Session-only — both icons on a fresh load.
-const deviceDotDomain = new Map(); // device_id → 'colour' | 'temp'
-const roomDotDomain = new Map();   // room_id   → 'colour' | 'temp'
 
 function roomIdForDevice(deviceId) {
-  for (const r of roomsData) if (r.device_ids?.includes(deviceId)) return r.id;
+  for (const r of model.rooms) if (r.device_ids?.includes(deviceId)) return r.id;
   return null;
 }
 // on/off of a bulb clears its own dot and its room's (the room is no longer the
@@ -56,44 +45,16 @@ function clearDotForRoom(room) {
   for (const id of (room.device_ids ?? [])) deviceDotDomain.delete(id);
 }
 
-// "On" powers a room OR a single bulb up to a consistent Hue default warm white
-// (≈2700K), so on/off is predictable. Users wanting a soft on/off use brightness
-// instead. Order matters: brightness/temp before the on flag. Shared by the room
-// and device handlers (lighting.js imports it).
-export const HUE_DEFAULT_ON = [
-  { action: 'brightness', value: 200 },
-  { action: 'color_temp', value: 370 },
-  { action: 'on' },
-];
-
 // ── F-Effects-2: effects catalogue + active-effect map ──────────────────────
 // Catalogue is fetched once on dashboard load from GET /api/effects and never
-// changes at runtime; the active-effect map is driven by EffectUpdate events.
+// changes at runtime; the active-effect map (effectsById/roomEffectsMap) lives
+// in state.js and is driven by EffectUpdate events.
 let effectsCatalog = [];                       // [{ id, display_name, description, category, params_schema, default_params }, ...]
-const effectsById = new Map();                 // id → metadata
-const roomEffectsMap = new Map();              // room_id → { effect_id, params }
 let openEffectEditorRoomId = null;             // id of room whose param editor popover is open
-const EFFECT_ICONS = {                         // static icon per effect_id; falls back to ✦ for unknown
-  solar: '☀',           // ☀
-  sunset: '\u{1F305}',       // 🌅
-  sunrise: '\u{1F304}',      // 🌄
-  candlelight: '\u{1F56F}',  // 🕯
-  aurora: '\u{1F30C}',       // 🌌
-  breathing: '\u{1FAC1}',    // 🫁
-  snake: '\u{1F40D}',        // 🐍
-};
-const DEFAULT_EFFECT_ICON = '✨';          // ✨
-const SCENE_ICON = '\u{1F3AD}';            // 🎭 — per-light "in scene" marker (generic; tweakable)
 let activeSceneEdit = null;           // { roomId, value } when a scene name input is open
 let _lcOpenDismiss = null;            // collapse fn of the currently-open temp/colour section (only one at a time)
 let _roomCtrlDismiss = null;          // document outside-pointerdown listener for the open room colour/temp panel (only one at a time)
 let _sceneReorderTimer = null;
-
-// Pending optimistic command values per (deviceId, field). Each entry { value, ts }.
-// Overlaid onto incoming WS snapshots so the slider doesn't snap back to the
-// pre-command server value while the round-trip is still in flight.
-const pendingCommands = new Map();
-const PENDING_TTL_MS = 2000;
 
 function markPending(deviceId, field, value) {
   let fields = pendingCommands.get(deviceId);
@@ -131,7 +92,7 @@ function updateSceneChipStates(roomId) {
   const activeId = activeSceneByRoom.get(roomId);
   // Pause coverage drives the active chip's dim/grey look (mirrors effect ghost):
   // none paused → solid active; some → partly-paused; all members → all-paused.
-  const room = roomsData.find(r => r.id === roomId);
+  const room = model.rooms.find(r => r.id === roomId);
   const memberCount = room?.device_ids?.length ?? 0;
   const pausedCount = pausedSceneDevices.get(roomId)?.size ?? 0;
   card.querySelectorAll('.room-quick-scene-chip[data-scene-id]').forEach(chip => {
@@ -357,7 +318,7 @@ export function handleEffectUpdate(evt) {
 }
 
 export function handleRoomsUpdate(evt) {
-  roomsData = evt.rooms ?? [];
+  model.rooms = evt.rooms ?? [];
   if (evt.device_names) notifyDeviceNames(evt.device_names);
   inferZigbeeStatus();
   
@@ -373,7 +334,7 @@ export function handleRoomsUpdate(evt) {
 }
 
 export function notifyDeviceNames(names) {
-  deviceNamesMap = new Map(Object.entries(names));
+  model.names = new Map(Object.entries(names));
 }
 
 async function fetchDeviceNames() {
@@ -384,7 +345,7 @@ async function fetchDeviceNames() {
 }
 
 export function handleScenesUpdate(evt) {
-  scenesData = evt.scenes ?? [];
+  model.scenes = evt.scenes ?? [];
   render();
 }
 
@@ -410,7 +371,7 @@ export function notifyDevices(devices) {
 // roomDotDomain). Brightness changes leave it; setting the other domain moves
 // the dot there; on/off or a scene clears it back to an icon. While a control is
 // actively dragged it shows the live value under the finger too.
-const COLOUR_ICON = '🎨', TEMP_ICON = '🌡';
+// COLOUR_ICON / TEMP_ICON live in state.js.
 
 // Paint a device mode button as its glyph icon.
 function paintModeIcon(btn, domain) {
@@ -497,7 +458,7 @@ function paintRoomButton(btn, domain, devices, roomId) {
 // Re-tint each room's colour + temperature triggers from the persisted dot
 // domain after a live patch.
 function refreshRoomTriggers() {
-  for (const room of roomsData) {
+  for (const room of model.rooms) {
     const card = document.querySelector(`.room-card[data-room-id="${CSS.escape(room.id)}"]`);
     if (!card) continue;
     const devs = (room.device_ids ?? []).map(id => devicesMap.get(id)).filter(Boolean);
@@ -570,7 +531,7 @@ export function handleZigbeeStatus(online) {
 function inferZigbeeStatus() {
   // If we have rooms but zero devices have ever arrived, zigbee2mqtt never
   // connected — treat as offline.
-  if (roomsData.length > 0 && devicesMap.size === 0) {
+  if (model.rooms.length > 0 && devicesMap.size === 0) {
     zigbeeOnline = false;
     return;
   }
@@ -604,7 +565,7 @@ function render() {
   // widen this selector to `.slider-active` if that edge case ever bites.
   inferZigbeeStatus();
 
-  const assigned = new Set(roomsData.flatMap(r => r.device_ids));
+  const assigned = new Set(model.rooms.flatMap(r => r.device_ids));
   const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
 
   // An open temp/colour section has a document-level pointerdown listener bound
@@ -620,7 +581,7 @@ function render() {
     banner.textContent = '⚠ Zigbee bridge offline — lights unavailable';
     container.appendChild(banner);
   }
-  if (roomsData.length > 0) container.appendChild(renderGlobalControls());
+  if (model.rooms.length > 0) container.appendChild(renderGlobalControls());
   container.appendChild(renderNewRoomBtn());
   container.appendChild(renderEffectsPalette());
   container.appendChild(renderUnassigned(unassigned));
@@ -628,7 +589,7 @@ function render() {
   const roomList = document.createElement('div');
   roomList.className = 'room-list rooms-layout-root' + (zigbeeOnline ? '' : ' zigbee-offline');
 
-  const sorted = [...roomsData].sort((a, b) => a.position - b.position);
+  const sorted = [...model.rooms].sort((a, b) => a.position - b.position);
   for (const room of sorted) {
     roomList.appendChild(renderRoomCard(room));
   }
@@ -668,21 +629,21 @@ function renderGlobalControls() {
   bar.className = 'room-global-controls';
 
   const allOnBtn = document.createElement('button');
-  allOnBtn.className = 'room-action-btn' + (globalLightState === 'on' ? ' room-action-active-on' : '');
+  allOnBtn.className = 'room-action-btn' + (model.globalLight === 'on' ? ' room-action-active-on' : '');
   allOnBtn.textContent = 'All On';
   allOnBtn.addEventListener('click', () => {
-    globalLightState = 'on';
+    model.globalLight = 'on';
     layout.freezeIconUpdates(3000);
-    for (const r of roomsData) sendRoomCommand(r.id, { action: 'on' }, r, true);
+    for (const r of model.rooms) sendRoomCommand(r.id, { action: 'on' }, r, true);
   });
 
   const allOffBtn = document.createElement('button');
-  allOffBtn.className = 'room-action-btn' + (globalLightState === 'off' ? ' room-action-active-off' : '');
+  allOffBtn.className = 'room-action-btn' + (model.globalLight === 'off' ? ' room-action-active-off' : '');
   allOffBtn.textContent = 'All Off';
   allOffBtn.addEventListener('click', () => {
-    globalLightState = 'off';
+    model.globalLight = 'off';
     layout.freezeIconUpdates(3000);
-    for (const r of roomsData) sendRoomCommand(r.id, { action: 'off' }, r, true);
+    for (const r of model.rooms) sendRoomCommand(r.id, { action: 'off' }, r, true);
   });
 
   bar.appendChild(allOnBtn);
@@ -1459,7 +1420,7 @@ function renderUnassigned(deviceIds) {
     strip.classList.remove('room-delete-drop-active');
     const id = roomDragId;
     roomDragId = null;
-    const room = roomsData.find(r => r.id === id);
+    const room = model.rooms.find(r => r.id === id);
     const name = room?.name || 'this room';
     const count = room?.device_ids?.length ?? 0;
     const msg = count > 0
@@ -1772,7 +1733,7 @@ function renderRoomCard(room) {
   }
 
   // Quick scenes bar — always visible, horizontal scroll (primary casual control)
-  const roomScenesList = scenesData.filter(s => s.room_id === room.id).sort((a, b) => (a.position - b.position) || (b.created_at - a.created_at));
+  const roomScenesList = model.scenes.filter(s => s.room_id === room.id).sort((a, b) => (a.position - b.position) || (b.created_at - a.created_at));
   if (roomScenesList.length > 0) {
     const sceneWrap = document.createElement('div');
     sceneWrap.className = 'room-scenes-wrap';
@@ -1960,7 +1921,7 @@ function buildScenesSection(roomId) {
   });
 
   // Scene list
-  const roomScenes = scenesData
+  const roomScenes = model.scenes
     .filter(s => s.room_id === roomId)
     .sort((a, b) => (a.position - b.position) || (b.created_at - a.created_at));
 
@@ -2620,7 +2581,7 @@ function toggleSceneDevice(roomId, deviceId) {
 }
 
 async function activateEffect(roomId, effectId, params = null) {
-  const room = roomsData.find(r => r.id === roomId);
+  const room = model.rooms.find(r => r.id === roomId);
   if (!room) return;
 
   lastEffectByRoom.delete(roomId); // resuming or fresh activation — clear paused state
@@ -2668,7 +2629,7 @@ async function removeEffect(roomId) {
 }
 
 async function sendRoomCommand(roomId, body, room, isGlobal = false) {
-  if (!isGlobal) globalLightState = null;
+  if (!isGlobal) model.globalLight = null;
   clearRoomActiveScene(roomId);
   // Optimistic update
   if (room) {
@@ -2700,11 +2661,11 @@ async function sendRoomCommand(roomId, body, room, isGlobal = false) {
 }
 
 async function sendDeviceCommand(deviceId, body, opts = {}) {
-  globalLightState = null;
+  model.globalLight = null;
   // Per-device scene pause/resume keeps the room's scene active for other lights,
   // so it must NOT clear the active scene the way a manual command does.
   if (!opts.keepScene) {
-    const owningRoom = roomsData.find(r => r.device_ids.includes(deviceId));
+    const owningRoom = model.rooms.find(r => r.device_ids.includes(deviceId));
     if (owningRoom) clearRoomActiveScene(owningRoom.id);
   }
   try {
@@ -2725,13 +2686,13 @@ async function saveScene(name, roomId) {
 }
 
 async function recallScene(id) {
-  const scene = scenesData.find(s => s.id === id);
+  const scene = model.scenes.find(s => s.id === id);
   const roomId = scene?.room_id;
 
   // A scene sets colour/temp wholesale — reset the room + member dots to icons,
   // and clear any per-light scene pauses (a fresh recall/revert re-includes all).
   if (roomId) {
-    const room = roomsData.find(r => r.id === roomId);
+    const room = model.rooms.find(r => r.id === roomId);
     if (room) clearDotForRoom(room);
     pausedSceneDevices.delete(roomId);
   }
@@ -2745,7 +2706,7 @@ async function recallScene(id) {
     preSceneStateByRoom.delete(roomId);
     updateSceneChipStates(roomId);
     if (preState) {
-      const room = roomsData.find(r => r.id === roomId);
+      const room = model.rooms.find(r => r.id === roomId);
       for (const deviceId of (room?.device_ids ?? [])) {
         const snap = preState.get(deviceId);
         if (!snap) continue;
@@ -2766,7 +2727,7 @@ async function recallScene(id) {
   // Snapshot BEFORE cancelling the effect so we capture the true pre-effect
   // light state, not the effect's last output which is still in devicesMap.
   if (roomId) {
-    const room = roomsData.find(r => r.id === roomId);
+    const room = model.rooms.find(r => r.id === roomId);
     const snap = new Map();
     for (const deviceId of (room?.device_ids ?? [])) {
       const dev = devicesMap.get(deviceId);
@@ -2810,11 +2771,11 @@ async function deleteSceneApi(id) {
 // ── Utilities ────────────────────────────────────────────────────────────────
 
 function formatDeviceName(id) {
-  return deviceNamesMap.get(id) ?? id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return model.names.get(id) ?? id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function startDeviceRename(nameEl, deviceId) {
-  const current = deviceNamesMap.get(deviceId) ?? formatDeviceName(deviceId);
+  const current = model.names.get(deviceId) ?? formatDeviceName(deviceId);
   const input = document.createElement('input');
   input.value = current;
   input.className = 'room-rename-input';
@@ -2831,7 +2792,7 @@ function startDeviceRename(nameEl, deviceId) {
     const name = input.value.trim();
     input.replaceWith(nameEl);
     if (name && name !== current) {
-      deviceNamesMap.set(deviceId, name);
+      model.names.set(deviceId, name);
       nameEl.textContent = name;
       patchDeviceName(deviceId, name);
     }
