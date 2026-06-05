@@ -31,6 +31,8 @@ const LIGHTCONTROLS_JS: &str = include_str!("static/lightcontrols.js");
 const ACTIONS_JS: &str = include_str!("static/actions.js");
 const EFFECTS_JS: &str = include_str!("static/effects.js");
 const SCENES_JS: &str = include_str!("static/scenes.js");
+const ERRORS_JS: &str = include_str!("static/errors.js");
+const SECURITY_JS: &str = include_str!("static/security.js");
 const SOLAR_JS: &str = include_str!("static/solar.js");
 const LAYOUTSTATE_JS: &str = include_str!("static/layoutstate.js");
 const LAYOUT3D_JS: &str = include_str!("static/layout3d.js");
@@ -138,6 +140,8 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/actions.js", ACTIONS_JS, JS),
         ("/static/effects.js", EFFECTS_JS, JS),
         ("/static/scenes.js", SCENES_JS, JS),
+        ("/static/errors.js", ERRORS_JS, JS),
+        ("/static/security.js", SECURITY_JS, JS),
         ("/static/solar.js", SOLAR_JS, JS),
         ("/static/layoutstate.js", LAYOUTSTATE_JS, JS),
         ("/static/layout3d.js", LAYOUT3D_JS, JS),

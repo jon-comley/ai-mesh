@@ -5,6 +5,8 @@ import * as lighting from '/static/lighting.js';
 import * as rooms from '/static/rooms.js';
 import * as effects from '/static/effects.js';
 import * as scenes from '/static/scenes.js';
+import * as errors from '/static/errors.js';
+import * as security from '/static/security.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -71,6 +73,8 @@ const handlers = {
   SolarUpdate: evt => rooms.notifySolar(evt.azimuth, evt.elevation),
   EffectUpdate: evt => effects.handleEffectUpdate(evt),
   ZigbeeStatus: evt => rooms.handleZigbeeStatus(evt.online),
+  ErrorUpdate: evt => errors.handleErrorUpdate(evt),
+  SecurityUpdate: evt => security.handleSecurityUpdate(evt),
 };
 
 function dispatch(evt) {
@@ -117,6 +121,8 @@ function connect() {
 
 // ── Init ────────────────────────────────────────────────────────────────────
 topology.init(document.getElementById('node-list'));
+errors.init(document.getElementById('error-feed'));
+security.init(document.getElementById('security-table'));
 lighting.setRoomsActive();
 
 // Ask for token on very first visit when auth is likely needed.

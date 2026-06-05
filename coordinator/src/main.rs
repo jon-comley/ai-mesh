@@ -10,7 +10,13 @@ async fn main() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install ring crypto provider");
-    tracing_subscriber::fmt().init();
+    {
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(coordinator::logging::ErrorCaptureLayer)
+            .init();
+    }
     println!("Starting AI Mesh Coordinator on 0.0.0.0:9000...");
 
     // Free any stale processes holding our ports before we try to bind.
@@ -25,6 +31,7 @@ async fn main() {
 
     let coord = Coordinator::new_persistent("0.0.0.0:9000", "ai_mesh.db");
     let (_handle, dashboard) = coord.start().await;
+    coordinator::logging::bind(dashboard.clone());
 
     let _mdns = coordinator::mdns::advertise(9000);
 

@@ -3029,3 +3029,96 @@ body {
   .lc-scrub-btn-row > select,
   #lc-scrubber-play { min-height: 36px; }
 }
+
+/* ── Security tab ──────────────────────────────────────────────────────────── */
+.security-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.security-table th {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.security-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.security-table td:first-child {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  width: 1%;
+}
+
+.security-table td:nth-child(2) {
+  white-space: nowrap;
+  width: 1%;
+}
+
+.sec-join td:nth-child(2)        { color: var(--green); }
+.sec-leave td:nth-child(2)       { color: var(--text-muted); }
+.sec-fail td:nth-child(2)        { color: var(--red); }
+.sec-dash td:nth-child(2)        { color: var(--accent); }
+
+.security-table td:nth-child(3) {
+  font-family: monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Errors tab ────────────────────────────────────────────────────────────── */
+.error-feed-list {
+  list-style: none;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.error-entry {
+  display: grid;
+  grid-template-columns: 70px 50px minmax(120px, 1fr) 3fr;
+  gap: 0 10px;
+  padding: 5px 2px;
+  border-bottom: 1px solid var(--border);
+  align-items: baseline;
+  line-height: 1.4;
+}
+
+.error-entry + .error-entry { }
+
+.err-time {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.err-level {
+  font-weight: 700;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.err-level.warn  { color: var(--amber); }
+.err-level.error { color: var(--red); }
+
+.err-target {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.err-msg {
+  color: var(--text);
+  word-break: break-word;
+}

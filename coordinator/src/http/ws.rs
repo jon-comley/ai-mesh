@@ -6,10 +6,11 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tracing::debug;
 
-use super::state::{DashboardEvent, DashboardState};
+use super::state::{DashboardEvent, DashboardState, SecurityEvent, SecurityEventKind};
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -25,6 +26,21 @@ pub async fn ws_handler(
     if !state.auth_ok(&q.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let auth_detail = if state.auth_tokens.is_empty() {
+        "no auth (dev)".into()
+    } else {
+        "token auth".into()
+    };
+    state.push_security(SecurityEvent {
+        ts_ms,
+        kind: SecurityEventKind::DashboardConnect,
+        source: "dashboard".into(),
+        detail: auth_detail,
+    });
     ws.on_upgrade(move |socket| handle_socket(socket, state))
         .into_response()
 }
@@ -145,6 +161,34 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
                 }
             }
             Err(e) => debug!("failed to serialise snapshot ZigbeeStatus: {e}"),
+        }
+    }
+
+    // Push error log snapshot so the Errors panel populates immediately on connect.
+    let errors = state.get_error_snapshot();
+    if !errors.is_empty() {
+        let evt = DashboardEvent::ErrorUpdate { errors };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot ErrorUpdate: {e}"),
+        }
+    }
+
+    // Push security log snapshot so the Security panel populates immediately on connect.
+    let events = state.get_security_snapshot();
+    if !events.is_empty() {
+        let evt = DashboardEvent::SecurityUpdate { events };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot SecurityUpdate: {e}"),
         }
     }
 
