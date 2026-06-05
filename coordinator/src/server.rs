@@ -1,4 +1,6 @@
-use crate::http::state::{DashboardState, ModelEntry, NodeModelInfo};
+use crate::http::state::{
+    DashboardState, ModelEntry, NodeModelInfo, SecurityEvent, SecurityEventKind,
+};
 use crate::intent::PendingIntents;
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
@@ -11,6 +13,7 @@ use shared::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -20,6 +23,13 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 pub use crate::http::state::NodeConnections as Connections;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 /// Maps request_id → (reply_channel, node_id_that_was_selected)
 pub type PendingInferences = Arc<Mutex<HashMap<String, (oneshot::Sender<MeshMessage>, String)>>>;
 
@@ -142,6 +152,14 @@ where
             }
             Ok(MeshMessage::AuthToken(_)) => {
                 warn!("rejected connection: invalid auth token");
+                if let Some(ref dash) = dashboard {
+                    dash.push_security(SecurityEvent {
+                        ts_ms: now_ms(),
+                        kind: SecurityEventKind::NodeAuthFailed,
+                        source: "unknown".into(),
+                        detail: "invalid auth token on connect".into(),
+                    });
+                }
                 return Ok(());
             }
             Ok(other) => {
@@ -159,6 +177,11 @@ where
 
     // Tracks the node ID once a Heartbeat has been received, for cleanup on disconnect.
     let mut node_id: Option<String> = None;
+    let auth_tag: &'static str = if hmac_key.is_some() {
+        "TLS+HMAC"
+    } else {
+        "no auth"
+    };
 
     // Writer task: drain the outbound channel onto the TCP write half.
     // When HMAC is active, every outgoing message is wrapped in a SignedFrame.
@@ -238,6 +261,7 @@ where
             &mut node_id,
             &auth_tokens,
             dashboard.as_deref(),
+            auth_tag,
         )
         .await;
 
@@ -246,6 +270,16 @@ where
         {
             break;
         }
+    }
+
+    // Security event: node disconnected.
+    if let (Some(id), Some(dash)) = (&node_id, &dashboard) {
+        dash.push_security(SecurityEvent {
+            ts_ms: now_ms(),
+            kind: SecurityEventKind::NodeLeave,
+            source: id.clone(),
+            detail: String::new(),
+        });
     }
 
     // Remove this connection's routing channel when the connection closes.
@@ -328,6 +362,7 @@ async fn process_message(
     node_id: &mut Option<String>,
     auth_tokens: &Arc<Vec<String>>,
     dashboard: Option<&DashboardState>,
+    auth_tag: &'static str,
 ) -> Option<MeshMessage> {
     match msg {
         MeshMessage::Heartbeat(HeartbeatPayload {
@@ -343,10 +378,20 @@ async fn process_message(
             // When tokens are configured, require the heartbeat token to match exactly.
             if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
                 warn!(node_id = %identity.id, "heartbeat rejected: missing or wrong auth token");
+                if let Some(dash) = dashboard {
+                    dash.push_security(SecurityEvent {
+                        ts_ms: now_ms(),
+                        kind: SecurityEventKind::NodeAuthFailed,
+                        source: identity.id.clone(),
+                        detail: "heartbeat: wrong auth token".into(),
+                    });
+                }
                 return None;
             }
             info!(node_id = %identity.id, hostname = %identity.hostname, "heartbeat");
             let this_id = identity.id.clone();
+            let this_hostname = identity.hostname.clone();
+            let is_first_heartbeat = node_id.is_none();
             *node_id = Some(this_id.clone());
             let nodes = {
                 let mut reg = registry.lock().unwrap();
@@ -355,6 +400,14 @@ async fn process_message(
             };
             connections.lock().unwrap().insert(identity.id, tx.clone());
             if let Some(dash) = dashboard {
+                if is_first_heartbeat {
+                    dash.push_security(SecurityEvent {
+                        ts_ms: now_ms(),
+                        kind: SecurityEventKind::NodeJoin,
+                        source: this_id.clone(),
+                        detail: format!("{this_hostname} · {auth_tag}"),
+                    });
+                }
                 dash.push_topology(&nodes);
                 dash.push_health(
                     &this_id,
@@ -818,6 +871,7 @@ mod tests {
             &mut node_id,
             &tokens,
             Some(dashboard.as_ref()),
+            "no auth",
         )
         .await;
 
@@ -852,6 +906,7 @@ mod tests {
             &mut node_id,
             &tokens,
             Some(dashboard.as_ref()),
+            "no auth",
         )
         .await;
 

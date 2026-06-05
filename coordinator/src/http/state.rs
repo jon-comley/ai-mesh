@@ -13,6 +13,37 @@ use tracing::warn;
 pub type NodeConnections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
 
 const HEALTH_WINDOW: usize = 60;
+const ERROR_RING_CAP: usize = 200;
+const SECURITY_RING_CAP: usize = 200;
+
+/// One captured WARN/ERROR log record — surfaced in the Errors tab.
+#[derive(Clone, Serialize)]
+pub struct ErrorEntry {
+    pub ts_ms: u64,
+    /// "WARN" or "ERROR"
+    pub level: String,
+    pub target: String,
+    pub message: String,
+}
+
+/// Enum of auditable access events shown in the Security tab.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecurityEventKind {
+    NodeJoin,
+    NodeLeave,
+    NodeAuthFailed,
+    DashboardConnect,
+}
+
+/// One security/access event.
+#[derive(Clone, Serialize)]
+pub struct SecurityEvent {
+    pub ts_ms: u64,
+    pub kind: SecurityEventKind,
+    pub source: String,
+    pub detail: String,
+}
 
 /// Events broadcast to all connected dashboard WebSocket clients.
 #[derive(Clone, Serialize)]
@@ -53,6 +84,12 @@ pub enum DashboardEvent {
     },
     ZigbeeStatus {
         online: bool,
+    },
+    ErrorUpdate {
+        errors: Vec<ErrorEntry>,
+    },
+    SecurityUpdate {
+        events: Vec<SecurityEvent>,
     },
 }
 
@@ -192,6 +229,8 @@ pub struct DashboardState {
     /// Location used by the JS solar calculator (served via GET /api/solar/config).
     pub lat: f64,
     pub lon: f64,
+    error_log: Mutex<VecDeque<ErrorEntry>>,
+    security_log: Mutex<VecDeque<SecurityEvent>>,
 }
 
 impl DashboardState {
@@ -220,6 +259,8 @@ impl DashboardState {
             solar_sweep_notify: Arc::new(Notify::new()),
             lat,
             lon,
+            error_log: Mutex::new(VecDeque::new()),
+            security_log: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -562,6 +603,60 @@ impl DashboardState {
             nodes: nodes.iter().map(node_dash_info).collect(),
         };
         let _ = self.tx.send(evt);
+    }
+
+    /// Append an error entry to the ring buffer and broadcast to connected clients.
+    pub fn push_error(&self, entry: ErrorEntry) {
+        let errors = {
+            let mut log = self.error_log.lock().unwrap();
+            log.push_back(entry);
+            if log.len() > ERROR_RING_CAP {
+                log.pop_front();
+            }
+            log.iter().rev().take(50).cloned().collect::<Vec<_>>()
+        };
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::ErrorUpdate { errors });
+        }
+    }
+
+    /// Return the most recent error entries (newest first) for warm-starting new WS clients.
+    pub fn get_error_snapshot(&self) -> Vec<ErrorEntry> {
+        self.error_log
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(50)
+            .cloned()
+            .collect()
+    }
+
+    /// Append a security event to the ring buffer and broadcast to connected clients.
+    pub fn push_security(&self, event: SecurityEvent) {
+        let events = {
+            let mut log = self.security_log.lock().unwrap();
+            log.push_back(event);
+            if log.len() > SECURITY_RING_CAP {
+                log.pop_front();
+            }
+            log.iter().rev().take(50).cloned().collect::<Vec<_>>()
+        };
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::SecurityUpdate { events });
+        }
+    }
+
+    /// Return the most recent security events (newest first) for warm-starting new WS clients.
+    pub fn get_security_snapshot(&self) -> Vec<SecurityEvent> {
+        self.security_log
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(50)
+            .cloned()
+            .collect()
     }
 
     /// Record a health sample for `node_id`, capped at HEALTH_WINDOW entries,

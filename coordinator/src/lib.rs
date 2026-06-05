@@ -2,6 +2,7 @@ pub mod coordinator;
 pub mod effects;
 pub mod http;
 pub mod intent;
+pub mod logging;
 pub mod mdns;
 pub mod model_lifecycle;
 pub mod registry;
