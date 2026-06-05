@@ -392,13 +392,9 @@ deploy-node node:
             ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
                 & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}'\
             \""
-        # Apply stability hardening immediately after provisioning —
-        # registry fixes (ULPS, AX200 NIC, power plan) that must be present
-        # after every deploy, not just after a manual fix-node run.
-        echo ">>> Applying stability hardening (fix-beelink-stability.ps1)..."
-        scp -q scripts/fix-beelink-stability.ps1 ${NODE_USER}@${NODE_HOST}:C:/fix-stability.ps1
-        ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File C:/fix-stability.ps1' -Wait\""
-        echo ">>> Stability hardening applied. Reboot {{node}} to activate."
+        # Stability hardening (ULPS, AX200 NIC, power plan) is applied by
+        # install-node-windows.ps1's Harden-Stability function above — no
+        # separate step needed here.
         ;;
 
       *)
