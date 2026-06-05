@@ -2201,25 +2201,25 @@ body {
 .layout-sheet-backdrop.visible { display: block; }
 
 @media (max-width: 899px) {
-  /* The sidebar becomes a bottom sheet, opened by ＋ Add. */
+  /* The device palette opens as a CENTRED modal — the browser centres it in the
+     viewport via the transform, so it can never land off-screen regardless of the
+     mobile browser's dynamic toolbar (which broke both the bottom-sheet and the
+     button-anchored popover). The backdrop dims behind it and taps to close. */
   .layout-sidebar {
     position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    width: auto !important;            /* beat any inline width from the resize handle */
-    max-height: 60vh;
-    max-height: 60dvh;                 /* dynamic viewport: keep the sheet within the
-                                          VISIBLE area on mobile (with the address bar
-                                          shown) so it isn't anchored below the fold and
-                                          clipped to just its top. vh line is the fallback. */
-    border-radius: 16px 16px 0 0;
-    transform: translateY(110%);
-    transition: transform 0.25s ease;
+    display: none;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(300px, calc(100vw - 32px)) !important;   /* beat the resize handle's inline width */
+    max-height: 80vh;
+    max-height: 80dvh;                                  /* dvh where supported; vh fallback */
+    border-radius: 14px;
     z-index: 60;
-    padding-bottom: calc(12px + var(--safe-bottom, 0px));
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    padding-bottom: calc(8px + var(--safe-bottom, 0px));
   }
-  .layout-sidebar.sheet-open { transform: translateY(0); }
+  .layout-sidebar.sheet-open { display: flex; }
   .layout-sidebar-resize,
   .layout-sidebar-toggle { display: none; }   /* collapse/resize are desktop-only */
 }

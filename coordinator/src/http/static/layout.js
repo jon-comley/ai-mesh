@@ -1116,8 +1116,9 @@ function setShowLabels(v) {
   });
 }
 
-// Open/close the device-palette bottom sheet (phone). On desktop the sidebar is
-// inline, the backdrop is hidden, and these just toggle a harmless class.
+// Open/close the device palette (phone). It opens as a centred modal (CSS-driven,
+// see the media query) — the backdrop dims and taps to close. On desktop the
+// sidebar is inline, the backdrop is hidden, and this just toggles a class.
 function toggleSidebarSheet(sidebar) {
   const open = !sidebar.classList.contains('sheet-open');
   sidebar.classList.toggle('sheet-open', open);
