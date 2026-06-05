@@ -398,7 +398,7 @@ Full design spec: `plans/phase11-dashboard.md`
 
 ### Phase H — Polish, icons, desktop layout pass
 
-### Deferred dashboard polish (raised post-C5)
+### Deferred dashboard polish (raised post-C5, updated 2026-06-05)
 
 These are non-blocking UX improvements for after C6 ships:
 
@@ -408,6 +408,14 @@ These are non-blocking UX improvements for after C6 ships:
 - **Sparkline tooltip with exact timestamp** — on `mouseover` a `<title>` element or a floating tooltip shows `cpu: X.X%  ram: Y.Y%  at HH:MM:SS` for the hovered data point; helps operators correlate a spike with a specific inference request.
 - **Per-node collapse/expand in Health panel** — each health card has a `▾ / ▸` toggle; collapsed cards show only the last value, not the full sparkline; useful when the cluster grows beyond 4–5 nodes and the panel gets long.
 - **Sparkline fill area** — shade the area under the CPU sparkline with a low-opacity accent fill for faster visual triage.
+
+#### Layout view — known issues / deferred fixes (2026-06-05)
+
+- **Dragging windows/doors from the popover unreliable** — the drag-to-place gesture for openings (doors/windows) from the sidebar popover doesn't always trigger correctly; sometimes requires multiple attempts or doesn't start at all. Investigate pointer-event capture interaction with the popover's dismiss handler — the capture-phase `pointerdown` listener that closes the popover may be consuming the drag-start event before `makeDraggable` sees it. See `layout.js` `openOpeningPopover` / `makeMoveDraggable`.
+
+- **Room brightness/colour/temp controls (action bar)** — popover is correctly positioned above the action bar on desktop; mobile behaviour needs verification after the `position:fixed` + `getBoundingClientRect` approach was adopted. The centred-modal approach used for the ＋Add palette may be worth applying here too if offset issues surface on mobile.
+
+- **＋Add palette (mobile)** — switched to a centred modal (`position:fixed; top/left:50%; translate(-50%,-50%)`) to escape the dynamic-viewport toolbar issue. The `collapsed` class was found to hide all content when the sidebar had been collapsed on desktop and then opened on mobile — fixed by removing `collapsed` on open. Monitor for any remaining edge cases.
 
 ### Deferred chaos / QA scenarios (raised post-Phase B)
 
