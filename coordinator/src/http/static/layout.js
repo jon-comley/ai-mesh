@@ -1121,6 +1121,7 @@ function setShowLabels(v) {
 // sidebar is inline, the backdrop is hidden, and this just toggles a class.
 function toggleSidebarSheet(sidebar) {
   const open = !sidebar.classList.contains('sheet-open');
+  if (open) sidebar.classList.remove('collapsed'); // collapsed hides all sections
   sidebar.classList.toggle('sheet-open', open);
   document.querySelector('.layout-sheet-backdrop')?.classList.toggle('visible', open);
 }
