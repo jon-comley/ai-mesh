@@ -493,6 +493,7 @@ mesh security-report        # one-shot snapshot of current failure counts
 - Historical inference latency per model.
 - Live intent log (query, routed-to node, latency, response preview).
 - Mobile-friendly layout.
+- **Beelink BIOS — locate Wake on LAN setting** — not found during 2026-06-05 BIOS session. Suspected somewhere under Advanced → AMD CBS → SOC Misc Control (near Pluton) or an onboard devices submenu. Goal: disable WoL to prevent unexpected NIC wake/sleep transitions (belt-and-braces alongside the Windows-side AX200 PnPCapabilities=24 fix already applied).
 
 ---
 
