@@ -392,6 +392,13 @@ deploy-node node:
             ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
                 & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}'\
             \""
+        # Apply stability hardening immediately after provisioning —
+        # registry fixes (ULPS, AX200 NIC, power plan) that must be present
+        # after every deploy, not just after a manual fix-node run.
+        echo ">>> Applying stability hardening (fix-beelink-stability.ps1)..."
+        scp -q scripts/fix-beelink-stability.ps1 ${NODE_USER}@${NODE_HOST}:C:/fix-stability.ps1
+        ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File C:/fix-stability.ps1' -Wait\""
+        echo ">>> Stability hardening applied. Reboot {{node}} to activate."
         ;;
 
       *)
@@ -881,6 +888,18 @@ uninstall-node node:
         ;;
     esac
     echo ">>> Node {{node}} uninstalled."
+
+# Remotely apply the Beelink SER8 stability fix (stable GPIO driver + registry hardening).
+# Usage: just fix-node beelink1
+fix-node node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    echo ">>> Pushing stability fix script to {{node}}..."
+    scp scripts/fix-beelink-stability.ps1 ${NODE_USER}@${NODE_HOST}:C:/fix-stability.ps1
+    echo ">>> Executing fix script as Administrator..."
+    ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File C:/fix-stability.ps1' -Wait\""
+    echo ">>> Fix applied. Please REBOOT {{node}} manually."
 
 # Update llama.cpp to the latest release on a node.
 # Usage: just update-llama <node>

@@ -307,7 +307,10 @@ function Harden-Stability {
             -ErrorAction SilentlyContinue
     }
 
-    Write-Host ">>> Stability hardening applied (Fast Startup off, NIC power save off, GPU ULPS off, WoL off)."
+    # High Performance power plan — prevents CPU/GPU from throttling under 24/7 load
+    powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c | Out-Null
+
+    Write-Host ">>> Stability hardening applied (Fast Startup off, NIC power save off, GPU ULPS off, WoL off, High Performance power plan)."
 }
 
 function Ensure-StartupHardeningTask {
