@@ -587,6 +587,49 @@ The node is on **Intel Wi-Fi AX200 (wireless)**, not wired. These fatal miniport
 
 ---
 
+#### Definitive BIOS "Golden State" (2026-06-05 — confirmed settings)
+
+These are the exact settings required for stable 24/7 operation. **Every CMOS reset wipes them all — reapply after any CMOS reset.**
+
+**1. Performance & Graphics**
+
+| Setting | Value | Path |
+|---|---|---|
+| UMA Frame Buffer Size | **8G** | Advanced → AMD CBS → NBIO Common Options → GFX Configuration → iGPU Configuration (set to UMA Specified) → UMA Frame Buffer Size |
+| Power Limit (TDP) | **Balanced (54W)** or **Performance (65W)** | Advanced → AMD CBS | 
+
+> Do not exceed 65W — risks power supply bottleneck. UMA 8G stops stuttering when the GPU dynamically resizes memory during inference.
+
+**2. Stability & Thermal**
+
+| Setting | Value | Path |
+|---|---|---|
+| Global C-state Control | **Disabled** | Advanced → AMD CBS → CPU Common Options |
+| Smart Fan — Fan Start Level | **45%** | Advanced → Smart Fan |
+
+> Global C-state = #2 cause of `0x133` BSODs (CPU hangs on idle power-saving transitions). Fan at 85% default is too late/loud; 45% keeps the Hawks Point chip cool under 24/7 load.
+
+**3. Reliability & Security**
+
+| Setting | Value | Path |
+|---|---|---|
+| Pluton Security Processor | **Disabled** | Advanced → SOC Misc Control |
+| Restore on AC Power Loss | **Power On** | Advanced → AMD PBS or APM Configuration |
+| Wake on LAN | **Disabled** | Advanced → Network Stack or Onboard Devices |
+
+> Pluton = the SPI bus lock that triggers crash storms. **CRUCIAL.** Restore on AC = self-heals after power cuts. WoL = prevents unexpected NIC wake/sleep transitions.
+
+**⚠️ CAUTION — Trusted Platform Modules setting:**
+Setting "Trusted Platform Modules" to "dTPM Level 3" caused the machine to get stuck in "Automatic Repair" (boot loop). **Leave it on the default setting.** Only "Pluton Security Processor → Disabled" is needed; do not touch the TPM level.
+
+**After BIOS — run the software hardening script:**
+```
+just fix-node beelink1
+```
+This applies: AMD ULPS/sleep registry tweaks, Intel AX200 NIC power management fix (PnPCapabilities=24), High Performance power plan.
+
+---
+
 #### Verification checklist after any reboot, driver change, or CMOS reset
 
 ```bash
