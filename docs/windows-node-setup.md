@@ -587,6 +587,41 @@ The node is on **Intel Wi-Fi AX200 (wireless)**, not wired. These fatal miniport
 
 ---
 
+#### 2026-06-05 — Full recovery + automation overhaul
+
+**What happened:** Another CMOS reset wiped all BIOS settings (same recurring trap). Pluton re-enabled → `0x133` storm resumed — three bugchecks logged on 06-05 (19:30, 20:48, 20:51), uptime only 7 minutes at collection. Intel AX200 Wi-Fi also dropped (fatal miniport resets), making the box unreachable over wireless; had to plug in ethernet to get SSH access.
+
+**Root cause (same as every time):** CMOS reset → BIOS defaults restored → Pluton re-enabled → fTPM SPI bus lock → `0x133` DPC_WATCHDOG.
+
+**What was fixed (2026-06-05):**
+
+1. **BIOS Golden State re-applied** — all settings from the table above (Pluton Disabled, Global C-state Disabled, UMA 8G, Fan 45%, Restore on AC Power Loss, WoL Disabled, TDP Balanced).
+
+2. **`fix-beelink-stability.ps1` repaired** — the AX200 Wi-Fi power management fix was using the **GPU class GUID** (`{4d36e968...}`) instead of the **NIC class GUID** (`{4D36E972...}`), so it silently did nothing on every previous run. Now correct. Also removed the unverified GPIO driver download (shortlink redirect, no hash, not a confirmed fix for any logged crash) and the overly-broad `SearchOrderConfig` driver-search block. Adds verification output.
+
+3. **`install-node-windows.ps1` updated** — added High Performance power plan activation to `Harden-Stability` (was missing; only `fix-beelink-stability.ps1` had it).
+
+4. **`just deploy-node beelink1` fixed** — a redundant second stability-hardening step was added that used `Start-Process -Verb RunAs` over SSH, which hangs waiting for a UAC prompt that never arrives. Removed — `install-node-windows.ps1` already runs `Harden-Stability` inline (elevated by the install script) so no second pass is needed.
+
+5. **Ethernet** — AX200 Wi-Fi is unreliable (fatal miniport resets correlate with crash/unreachable episodes). Plugged in wired ethernet; this should be the permanent connection for this node.
+
+**Verified state post-recovery (SSH):**
+```
+AMD EnableUlps=0  PP_SclkDeepSleepDisable=1  ✅
+AX200 PnPCapabilities=24                      ✅  (NIC fix now actually applied)
+Power plan: High Performance                  ✅
+```
+
+**Current state:** BIOS settings applied, software hardening applied, wired ethernet in, reboot pending to activate. Once rebooted, run `just start-cluster` to bring the full cluster back online.
+
+**Recovery checklist going forward (after any CMOS reset):**
+1. BIOS → apply the Golden State table above
+2. Boot Windows → `just fix-node beelink1` (or `just deploy-node beelink1` for a full reinstall)
+3. Reboot to activate
+4. `just start-cluster`
+
+---
+
 #### Definitive BIOS "Golden State" (2026-06-05 — confirmed settings)
 
 These are the exact settings required for stable 24/7 operation. **Every CMOS reset wipes them all — reapply after any CMOS reset.**
