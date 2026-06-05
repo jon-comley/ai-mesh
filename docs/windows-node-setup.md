@@ -630,29 +630,33 @@ These are the exact settings required for stable 24/7 operation. **Every CMOS re
 
 | Setting | Value | Path |
 |---|---|---|
-| UMA Frame Buffer Size | **8G** | Advanced → AMD CBS → NBIO Common Options → GFX Configuration → iGPU Configuration (set to UMA Specified) → UMA Frame Buffer Size |
-| Power Limit (TDP) | **Balanced (54W)** or **Performance (65W)** | Advanced → AMD CBS | 
+| iGPU Configuration | **UMA_SPECIFIED** | Advanced → AMD CBS → NBIO Common Options → GFX Configuration → iGPU Configuration |
+| UMA Frame Buffer Size | **8G** | Advanced → AMD CBS → NBIO Common Options → GFX Configuration → UMA Frame Buffer Size |
 
-> Do not exceed 65W — risks power supply bottleneck. UMA 8G stops stuttering when the GPU dynamically resizes memory during inference.
+> UMA 8G stops stuttering when the GPU dynamically resizes memory during inference.
 
 **2. Stability & Thermal**
 
 | Setting | Value | Path |
 |---|---|---|
 | Global C-state Control | **Disabled** | Advanced → AMD CBS → CPU Common Options |
-| Smart Fan — Fan Start Level | **45%** | Advanced → Smart Fan |
+| Smart Fan — CPU Fan Mode | **Automatic Mode** | Advanced → Hardware Monitor → Smart Fan Function → CPU Fan Setting |
+| Smart Fan — SMF Temp Limit (fan OFF) | **30°C** (default) | Advanced → Hardware Monitor → Smart Fan Function → CPU Fan Setting |
+| Smart Fan — SMF Fan Limit (fan ON) | **35°C** (default) | Advanced → Hardware Monitor → Smart Fan Function → CPU Fan Setting |
+| Smart Fan — SMF Start PWM | **45%** (default: 80) | Advanced → Hardware Monitor → Smart Fan Function → CPU Fan Setting |
+| Smart Fan — Full PWM Temperature | **90°C** (default) | Advanced → Hardware Monitor → Smart Fan Function → CPU Fan Setting |
+| Smart Fan — SMF Slope PWM | **1** (default) | Advanced → Hardware Monitor → Smart Fan Function → CPU Fan Setting |
 
-> Global C-state = #2 cause of `0x133` BSODs (CPU hangs on idle power-saving transitions). Fan at 85% default is too late/loud; 45% keeps the Hawks Point chip cool under 24/7 load.
+> Fan curve: kicks in at 35°C at 45% speed, ramps 1%/°C, hits 100% at 90°C. Reducing Start PWM from the 80% default makes it quiet enough for 24/7 operation while still keeping the Hawks Point chip cool. Only SMF Start PWM needs changing — the rest are fine at defaults.
 
 **3. Reliability & Security**
 
 | Setting | Value | Path |
 |---|---|---|
-| Pluton Security Processor | **Disabled** | Advanced → SOC Misc Control |
-| Restore on AC Power Loss | **Power On** | Advanced → AMD PBS or APM Configuration |
-| Wake on LAN | **Disabled** | Advanced → Network Stack or Onboard Devices |
+| Pluton Security Processor | **Disabled** | Advanced → AMD CBS → SOC Misc Control |
+| Restore on AC Power Loss | **Always On** | Advanced → FCH Common Options → Ac Power Loss Options → Ac Loss Control |
 
-> Pluton = the SPI bus lock that triggers crash storms. **CRUCIAL.** Restore on AC = self-heals after power cuts. WoL = prevents unexpected NIC wake/sleep transitions.
+> Pluton = the SPI bus lock that triggers crash storms. **CRUCIAL.** Restore on AC = self-heals after power cuts.
 
 **⚠️ CAUTION — Trusted Platform Modules setting:**
 Setting "Trusted Platform Modules" to "dTPM Level 3" caused the machine to get stuck in "Automatic Repair" (boot loop). **Leave it on the default setting.** Only "Pluton Security Processor → Disabled" is needed; do not touch the TPM level.
