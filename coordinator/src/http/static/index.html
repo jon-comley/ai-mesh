@@ -56,6 +56,8 @@
       <h2>Errors</h2>
       <div id="error-feed"><p class="placeholder">No errors.</p></div>
     </section>
+
+    <section class="panel panel-chat" id="panel-chat"></section>
   </main>
 
   <nav class="tab-bar" role="tablist">
@@ -104,6 +106,13 @@
         <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
       </svg>
       <span>Errors</span>
+    </button>
+
+    <button class="tab" data-panel="chat" role="tab" aria-selected="false" aria-controls="panel-chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      </svg>
+      <span>Chat</span>
     </button>
   </nav>
 

@@ -1328,6 +1328,43 @@ pub async fn clear_room_effect(
     StatusCode::NO_CONTENT.into_response()
 }
 
+// ── Chat / inference ─────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct ChatRequest {
+    pub text: String,
+    pub model_name: Option<String>,
+    #[serde(default)]
+    pub context: Vec<shared::IntentTurn>,
+}
+
+pub async fn chat(
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Json(body): Json<ChatRequest>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request_id = gen_request_id();
+    let req = shared::IntentRequest {
+        request_id,
+        text: body.text,
+        model_name: body.model_name,
+        context: body.context,
+    };
+    let resp = crate::intent::handle_intent(
+        req,
+        registry,
+        state.connections.clone(),
+        state.pending_inferences.clone(),
+        state.pending_intents.clone(),
+    )
+    .await;
+    Json(resp).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

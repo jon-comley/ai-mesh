@@ -1754,6 +1754,18 @@ pair-bulb:
     echo ">>> Watching for join events (Ctrl+C to stop)..."
     mosquitto_sub -h ${PI_MQTT} -t 'zigbee2mqtt/bridge/event' -v
 
+# Hit the HTTP /api/chat endpoint directly and pretty-print the response.
+# Usage: just chat "what is the capital of France?"
+chat text:
+    #!/usr/bin/env bash
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    TOKEN=""
+    if [ -f "$STATE" ]; then source "$STATE"; TOKEN="${MESH_AUTH_TOKEN:-}"; fi
+    curl -s -X POST "http://{{coordinator_ip}}:9001/api/chat?token=${TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -d "{\"text\":$(printf '%s' '{{text}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"context\":[]}" \
+        | python3 -m json.tool
+
 # Send a natural-language intent to the coordinator.
 # Usage: just intent "turn test_bulb on"
 #        just intent "what is the capital of France"

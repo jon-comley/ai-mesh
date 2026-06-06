@@ -1,7 +1,6 @@
 use crate::http::state::{
     DashboardState, ModelEntry, NodeModelInfo, SecurityEvent, SecurityEventKind,
 };
-use crate::intent::PendingIntents;
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
 use shared::frame::{
@@ -23,6 +22,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 pub use crate::http::state::NodeConnections as Connections;
+pub use crate::http::state::{PendingInferences, PendingIntents};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -30,8 +30,6 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-/// Maps request_id → (reply_channel, node_id_that_was_selected)
-pub type PendingInferences = Arc<Mutex<HashMap<String, (oneshot::Sender<MeshMessage>, String)>>>;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -46,8 +44,8 @@ pub struct Server {
     pub addr: String,
     pub registry: Arc<Mutex<Registry>>,
     pub connections: Connections,
-    pending_inferences: PendingInferences,
-    pending_intents: PendingIntents,
+    pub pending_inferences: PendingInferences,
+    pub pending_intents: PendingIntents,
     /// Valid auth tokens. Empty = no authentication (dev/test mode).
     pub auth_tokens: Arc<Vec<String>>,
     /// TLS acceptor. None = plain TCP (tests and MESH_INSECURE=1 mode).

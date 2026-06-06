@@ -164,6 +164,8 @@ impl Coordinator {
             let tokens = Arc::new(tokens);
             server.auth_tokens = tokens.clone();
             let dashboard = DashboardState::new(tokens, server.connections.clone());
+            server.pending_inferences = dashboard.pending_inferences.clone();
+            server.pending_intents = dashboard.pending_intents.clone();
             server.dashboard = Some(dashboard.clone());
             warm_start_lighting(&self.registry, &dashboard);
             warm_start_rooms(&self.registry, &dashboard);
@@ -196,6 +198,8 @@ impl Coordinator {
         let tokens = Arc::new(tokens);
         server.auth_tokens = tokens.clone();
         let dashboard = DashboardState::new(tokens, server.connections.clone());
+        server.pending_inferences = dashboard.pending_inferences.clone();
+        server.pending_intents = dashboard.pending_intents.clone();
         server.dashboard = Some(dashboard.clone());
         warm_start_lighting(&self.registry, &dashboard);
         warm_start_rooms(&self.registry, &dashboard);

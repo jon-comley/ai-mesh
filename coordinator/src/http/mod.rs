@@ -33,6 +33,7 @@ const EFFECTS_JS: &str = include_str!("static/effects.js");
 const SCENES_JS: &str = include_str!("static/scenes.js");
 const ERRORS_JS: &str = include_str!("static/errors.js");
 const SECURITY_JS: &str = include_str!("static/security.js");
+const CHAT_JS: &str = include_str!("static/chat.js");
 const SOLAR_JS: &str = include_str!("static/solar.js");
 const LAYOUTSTATE_JS: &str = include_str!("static/layoutstate.js");
 const LAYOUT3D_JS: &str = include_str!("static/layout3d.js");
@@ -115,6 +116,7 @@ pub fn router(
         .route("/api/scenes/reorder", post(api::reorder_scenes))
         .route("/api/scenes/{id}/recall", post(api::recall_scene))
         .route("/api/scenes/{id}", delete(api::delete_scene))
+        .route("/api/chat", post(api::chat))
         .layer(axum::Extension(registry))
         .layer(axum::Extension(effects))
         .with_state(dashboard)
@@ -142,6 +144,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/scenes.js", SCENES_JS, JS),
         ("/static/errors.js", ERRORS_JS, JS),
         ("/static/security.js", SECURITY_JS, JS),
+        ("/static/chat.js", CHAT_JS, JS),
         ("/static/solar.js", SOLAR_JS, JS),
         ("/static/layoutstate.js", LAYOUTSTATE_JS, JS),
         ("/static/layout3d.js", LAYOUT3D_JS, JS),

@@ -6,11 +6,17 @@ use shared::messages::{LightAction, LightStateReport, NodeRecordLite};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tracing::warn;
 
 /// Live TCP sender channels keyed by node ID — shared between the TCP server and the HTTP API.
 pub type NodeConnections = Arc<Mutex<HashMap<String, mpsc::Sender<MeshMessage>>>>;
+
+/// Pending inference one-shots: request_id → (reply_channel, node_id).
+pub type PendingInferences = Arc<Mutex<HashMap<String, (oneshot::Sender<MeshMessage>, String)>>>;
+
+/// Pending intent-level one-shots: request_id → reply_channel.
+pub type PendingIntents = Arc<Mutex<HashMap<String, oneshot::Sender<MeshMessage>>>>;
 
 const HEALTH_WINDOW: usize = 60;
 const ERROR_RING_CAP: usize = 200;
@@ -231,6 +237,10 @@ pub struct DashboardState {
     pub lon: f64,
     error_log: Mutex<VecDeque<ErrorEntry>>,
     security_log: Mutex<VecDeque<SecurityEvent>>,
+    /// Shared with the TCP server so the HTTP chat endpoint can dispatch inference requests.
+    pub pending_inferences: PendingInferences,
+    /// Shared with the TCP server so tool calls (scene_load) can wait for a reply.
+    pub pending_intents: PendingIntents,
 }
 
 impl DashboardState {
@@ -261,6 +271,8 @@ impl DashboardState {
             lon,
             error_log: Mutex::new(VecDeque::new()),
             security_log: Mutex::new(VecDeque::new()),
+            pending_inferences: Arc::new(Mutex::new(HashMap::new())),
+            pending_intents: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
