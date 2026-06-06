@@ -1,17 +1,15 @@
+use crate::http::state::{PendingInferences, PendingIntents};
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
-use crate::server::{Connections, PendingInferences};
+use crate::server::Connections;
 use shared::{
     InferenceRequest, IntentRequest, IntentResponse, LightAction, LightCommandRequest, LightTarget,
     MeshMessage, SceneLoadRequest, ToolCallRecord, WIRE_VERSION,
 };
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
-
-pub type PendingIntents = Arc<Mutex<HashMap<String, oneshot::Sender<MeshMessage>>>>;
 
 const INTENT_INFERENCE_TIMEOUT_SECS: u64 = 60;
 const TOOL_RESPONSE_TIMEOUT_SECS: u64 = 10;
@@ -74,16 +72,24 @@ pub async fn handle_intent(
     }
     user_prompt.push_str(&request.text);
 
-    // 4. Find LLM node
+    // 4. Find a connected LLM node — skip any whose TCP channel has gone away.
+    let connected: std::collections::HashSet<String> =
+        connections.lock().unwrap().keys().cloned().collect();
     let llm_node_id = {
         let reg = registry.lock().unwrap();
         Scheduler::new(&reg)
             .select_node_for_inference(&model_name)
+            .filter(|n| connected.contains(&n.id))
             .map(|n| n.id)
     };
     let llm_node_id = match llm_node_id {
         Some(id) => id,
-        None => return fail(format!("no node has model '{}' in Ready state", model_name)),
+        None => {
+            return fail(format!(
+                "no connected node has model '{}' in Ready state",
+                model_name
+            ));
+        }
     };
 
     let agent_tx = connections.lock().unwrap().get(&llm_node_id).cloned();
@@ -100,8 +106,8 @@ pub async fn handle_intent(
         model_name: model_name.clone(),
         system_prompt: Some(system_prompt),
         prompt: user_prompt,
-        max_tokens: 128,
-        temperature: Some(0.0),
+        max_tokens: 512,
+        temperature: Some(0.4),
         wire_version: WIRE_VERSION,
     };
 
@@ -133,11 +139,14 @@ pub async fn handle_intent(
     };
 
     let node_id = llm_result.node_id.clone();
+    if let Some(e) = llm_result.error {
+        return fail(format!("inference error from {node_id}: {e}"));
+    }
     let raw = llm_result.output.trim().to_string();
     info!(
         request_id = %request.request_id,
         node_id = %node_id,
-        "intent LLM output: {}",
+        "intent LLM output: {:?}",
         raw
     );
 
@@ -444,18 +453,19 @@ pub fn build_system_prompt(
     };
 
     format!(
-        r#"You are a smart home controller. You control real smart home devices using the tools below.
+        r#"You are a helpful smart home assistant. You can control smart home devices and answer general questions.
 
-Tools:
+To control a device, reply with ONLY this JSON (no extra text):
+{{"tool": "<name>", "args": {{ ... }}}}
+
+Available tools:
 {schema_json}{device_section}
 
 Rules:
 - Use the exact device or group name from the known list for the "target" field.
 - If the user says "all" or "everything", use a group name if one exists.
-- For device control requests, respond with ONLY this exact JSON format (no other text, no tags, no markdown):
-{{"tool": "<name>", "args": {{ ... }}}}
-- For general questions or conversation, respond normally in plain text.
-- Do NOT use XML tags, function_call tags, or any special formatting. Plain JSON only."#
+- For general questions or conversation that are NOT about device control, reply in plain text — do NOT output JSON.
+- Only output the JSON object above when the user is asking you to control a device."#
     )
 }
 
@@ -693,8 +703,8 @@ mod tests {
     fn build_system_prompt_forbids_special_tags() {
         let schemas = tool_schemas_for_feature("lighting");
         let p = build_system_prompt(&schemas, &[], &[]);
-        assert!(p.contains("Do NOT use XML tags"));
-        assert!(p.contains("Plain JSON only"));
+        assert!(p.contains("Only output the JSON object"));
+        assert!(p.contains("do NOT output JSON"));
     }
 
     #[test]

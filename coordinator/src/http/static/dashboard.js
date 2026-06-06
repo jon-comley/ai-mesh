@@ -7,6 +7,7 @@ import * as effects from '/static/effects.js';
 import * as scenes from '/static/scenes.js';
 import * as errors from '/static/errors.js';
 import * as security from '/static/security.js';
+import * as chat from '/static/chat.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -123,6 +124,7 @@ function connect() {
 topology.init(document.getElementById('node-list'));
 errors.init(document.getElementById('error-feed'));
 security.init(document.getElementById('security-table'));
+chat.init(document.getElementById('panel-chat'));
 lighting.setRoomsActive();
 
 // Ask for token on very first visit when auth is likely needed.
