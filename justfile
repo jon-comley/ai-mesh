@@ -213,7 +213,21 @@ build:
     cargo build
 
 test:
-    cargo test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo test 2>&1 | tee /tmp/mesh-test-out.txt
+    echo ""
+    echo "=== Test summary ==="
+    grep "^test result" /tmp/mesh-test-out.txt | awk '
+        BEGIN { pass=0; fail=0; ignore=0 }
+        { for(i=1;i<=NF;i++) {
+            if ($i~/^[0-9]+$/) {
+                if ($(i+1)=="passed;") pass+=$i
+                else if ($(i+1)=="failed;") fail+=$i
+                else if ($(i+1)=="ignored;") ignore+=$i
+            }
+        }}
+        END { printf "  passed: %d  failed: %d  ignored: %d\n", pass, fail, ignore }'
 
 # Frontend (dashboard ES module) unit tests — Vitest + jsdom. Dev-only.
 test-ui:
