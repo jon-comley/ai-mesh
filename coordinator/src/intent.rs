@@ -6,6 +6,7 @@ use shared::{
     InferenceRequest, IntentRequest, IntentResponse, LightAction, LightCommandRequest,
     LightStateReport, LightTarget, MeshMessage, SceneLoadRequest, ToolCallRecord, WIRE_VERSION,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
@@ -63,8 +64,22 @@ pub async fn handle_intent(
 
     // 3. Build system prompt + conversation
     let (known_devices, known_groups) = registry.lock().unwrap().all_light_device_names();
-    let system_prompt =
-        build_system_prompt(&schemas, &known_devices, &known_groups, &device_states);
+    let device_room_map = registry.lock().unwrap().device_room_name_map();
+    let scene_names: Vec<String> = registry
+        .lock()
+        .unwrap()
+        .list_scenes()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    let system_prompt = build_system_prompt(
+        &schemas,
+        &known_devices,
+        &known_groups,
+        &device_states,
+        &device_room_map,
+        &scene_names,
+    );
     let mut user_prompt = String::new();
     for turn in &request.context {
         match turn.role {
@@ -167,7 +182,7 @@ pub async fn handle_intent(
         let tool_name = call["tool"].as_str().unwrap_or("").to_string();
         let args = call["args"].clone();
 
-        let result = dispatch_tool(
+        let tool_result = dispatch_tool(
             &request.request_id,
             &tool_name,
             args.clone(),
@@ -177,15 +192,28 @@ pub async fn handle_intent(
         )
         .await;
 
+        let confirmation = do_confirmation_pass(
+            &request.request_id,
+            &request.text,
+            &tool_name,
+            &args,
+            &tool_result,
+            &agent_tx,
+            &pending_inferences,
+            &llm_node_id,
+            &model_name,
+        )
+        .await;
+
         return IntentResponse {
             request_id: request.request_id,
             node_id,
             model_name,
-            text: None,
+            text: confirmation,
             tool_calls: vec![ToolCallRecord {
                 tool: tool_name,
                 args,
-                result: Some(result),
+                result: Some(tool_result),
             }],
             error: None,
         };
@@ -313,6 +341,24 @@ async fn dispatch_tool(
     }
 }
 
+fn named_color_to_xy(name: &str) -> Option<(f32, f32)> {
+    match name.to_lowercase().trim() {
+        "red" => Some((0.675, 0.322)),
+        "orange" => Some((0.600, 0.380)),
+        "yellow" => Some((0.500, 0.470)),
+        "green" => Some((0.409, 0.518)),
+        "cyan" | "teal" => Some((0.225, 0.330)),
+        "blue" => Some((0.167, 0.040)),
+        "violet" | "purple" | "indigo" => Some((0.200, 0.100)),
+        "pink" | "magenta" => Some((0.430, 0.280)),
+        "white" => Some((0.313, 0.329)),
+        "sky blue" | "sky_blue" => Some((0.240, 0.240)),
+        "light blue" | "light_blue" => Some((0.220, 0.180)),
+        "light green" | "light_green" | "lime" => Some((0.380, 0.500)),
+        _ => None,
+    }
+}
+
 fn build_light_command(
     request_id: &str,
     args: &serde_json::Value,
@@ -342,8 +388,16 @@ fn build_light_command(
                     y: y.clamp(0.0, 1.0) as f32,
                 },
                 _ => {
-                    tracing::warn!("color action missing cx/cy — command dropped");
-                    return None;
+                    let color_name = args.get("color_name").and_then(|v| v.as_str());
+                    match color_name.and_then(named_color_to_xy) {
+                        Some((x, y)) => LightAction::ColorXY { x, y },
+                        None => {
+                            tracing::warn!(
+                                "color action missing cx/cy and unrecognised color_name — command dropped"
+                            );
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -390,6 +444,67 @@ fn strip_think_blocks(s: &str) -> String {
     out.trim().to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn do_confirmation_pass(
+    request_id: &str,
+    original_text: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+    tool_result: &str,
+    agent_tx: &tokio::sync::mpsc::Sender<MeshMessage>,
+    pending_inferences: &PendingInferences,
+    llm_node_id: &str,
+    model_name: &str,
+) -> Option<String> {
+    let infer_req_id = format!("intent-{}-confirm", request_id);
+    let system = "You are a smart home assistant. The user made a request and the system just carried it out. Reply in ONE brief friendly sentence confirming what happened. Be specific about which device or scene was affected if you know it. Never output JSON.".to_string();
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("the device");
+    let prompt = format!(
+        "User said: \"{original_text}\"\nTool '{tool_name}' ran on '{target}': {tool_result}\nConfirm in one sentence."
+    );
+    let req = InferenceRequest {
+        request_id: infer_req_id.clone(),
+        node_id: None,
+        model_name: model_name.to_string(),
+        system_prompt: Some(system),
+        prompt,
+        max_tokens: 80,
+        temperature: Some(0.6),
+        wire_version: WIRE_VERSION,
+    };
+    let (otx, orx) = oneshot::channel();
+    pending_inferences
+        .lock()
+        .unwrap()
+        .insert(infer_req_id.clone(), (otx, llm_node_id.to_string()));
+    if agent_tx
+        .send(MeshMessage::RequestModelInference(req))
+        .await
+        .is_err()
+    {
+        pending_inferences.lock().unwrap().remove(&infer_req_id);
+        return None;
+    }
+    match timeout(Duration::from_secs(INTENT_INFERENCE_TIMEOUT_SECS), orx).await {
+        Ok(Ok(MeshMessage::ModelInferenceResult(res))) if res.error.is_none() => {
+            let text = strip_think_blocks(res.output.trim());
+            // Drop it if the model produced JSON anyway
+            if try_parse_tool_call(&text).is_some() {
+                None
+            } else {
+                Some(text)
+            }
+        }
+        _ => {
+            pending_inferences.lock().unwrap().remove(&infer_req_id);
+            None
+        }
+    }
+}
+
 pub fn try_parse_tool_call(output: &str) -> Option<serde_json::Value> {
     let stripped = output
         .trim_start_matches("```json")
@@ -424,19 +539,23 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         "action": {
                             "type": "string",
                             "enum": ["on", "off", "toggle", "brightness", "color_temp", "color"],
-                            "description": "Use 'color' for any named colour (blue, red, green, pink, purple, orange…) — always requires cx+cy. Use 'color_temp' only for white-light warmth (warm, cool, neutral, candlelight, daylight). 'light blue', 'dark red', 'pale green' are colours — use 'color' with brightness."
+                            "description": "Use 'color' for any named colour — set color_name (e.g. \"blue\") OR cx+cy. Use 'color_temp' only for white-light warmth (warm, cool, daylight). 'light blue', 'pale green' etc. are colours — use 'color'."
                         },
                         "value": {
                             "type": "number",
                             "description": "Brightness 0–255 or colour temp in Kelvin (for brightness/color_temp actions)"
                         },
+                        "color_name": {
+                            "type": "string",
+                            "description": "Named colour for action=color. Supported: red, orange, yellow, green, cyan, teal, blue, violet, purple, pink, magenta, white, sky blue, light blue, light green. Prefer this over cx+cy."
+                        },
                         "cx": {
                             "type": "number",
-                            "description": "CIE 1931 x chromaticity (0.0–1.0). Saturated: red=0.675, orange=0.600, yellow=0.500, green=0.409, cyan=0.225, blue=0.167, violet=0.200. White point=0.313. Light/pale shades interpolate toward white: light-blue=0.220, sky-blue=0.240, pale-pink=0.430. Dark shades stay at the saturated value."
+                            "description": "CIE 1931 x chromaticity (0.0–1.0). Only needed when color_name is not sufficient."
                         },
                         "cy": {
                             "type": "number",
-                            "description": "CIE 1931 y chromaticity (0.0–1.0). Saturated: red=0.322, orange=0.380, yellow=0.470, green=0.518, cyan=0.330, blue=0.040, violet=0.100. White point=0.329. Light/pale shades interpolate toward white: light-blue=0.180, sky-blue=0.240, pale-pink=0.280. Dark shades stay at the saturated value."
+                            "description": "CIE 1931 y chromaticity (0.0–1.0). Only needed when color_name is not sufficient."
                         }
                     },
                     "required": ["target", "action"]
@@ -468,6 +587,8 @@ pub fn build_system_prompt(
     known_devices: &[String],
     known_groups: &[String],
     device_states: &[LightStateReport],
+    device_room_map: &HashMap<String, String>,
+    scene_names: &[String],
 ) -> String {
     if schemas.is_empty() {
         return "You are a helpful assistant. Answer the user's question directly.".into();
@@ -482,6 +603,10 @@ pub fn build_system_prompt(
         if !known_devices.is_empty() {
             lines.push("Known devices:".to_string());
             for name in known_devices {
+                let room_tag = device_room_map
+                    .get(name)
+                    .map(|r| format!(" [{}]", r))
+                    .unwrap_or_default();
                 let state = device_states.iter().find(|s| &s.device_id == name);
                 let status = match state {
                     None => "  (no state yet)".to_string(),
@@ -500,7 +625,7 @@ pub fn build_system_prompt(
                         format!("  (online, {})", parts.join(", "))
                     }
                 };
-                lines.push(format!("  - {name}{status}"));
+                lines.push(format!("  - {name}{room_tag}{status}"));
             }
         }
         if !known_groups.is_empty() {
@@ -512,6 +637,12 @@ pub fn build_system_prompt(
         format!("\n\n{}", lines.join("\n"))
     };
 
+    let scene_section = if scene_names.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nAvailable scenes: {}", scene_names.join(", "))
+    };
+
     format!(
         r#"You are a helpful smart home assistant embedded in ai-mesh. You have direct control of and live state for all listed devices.
 
@@ -519,14 +650,16 @@ To control a device, reply with ONLY this JSON (no extra text):
 {{"tool": "<name>", "args": {{ ... }}}}
 
 Available tools:
-{schema_json}{device_section}
+{schema_json}{device_section}{scene_section}
 
 Rules:
-- Use the exact device or group name from the known list for the "target" field.
-- If the user says "all" or "everything", use a group name if one exists.
-- For status questions ("are my lights on?", "is X responding?"), answer in plain text using the live device state above — do NOT output JSON.
-- For general questions or conversation that are NOT about device control, reply in plain text — do NOT output JSON.
-- Only output the JSON object above when the user is asking you to control a device."#
+- The "target" field must be an exact device or group name from the known list above. Never invent a target name.
+- When the user names a room (e.g. "kitchen lights", "the bedroom"), find devices tagged [RoomName] above. If no group for that room exists, pick the first online device in that room.
+- If the user says "one of", "just one", or "a single", always pick the FIRST online device listed for that room.
+- If the user says "all" or "everything", use a group if one exists; otherwise target devices individually (one command at a time for now).
+- Never issue a command to a device shown as [OFFLINE — not responding].
+- For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists above. Count devices sharing a [RoomName] tag to answer "how many". do NOT output JSON for these questions.
+- Only output the JSON object above when the user is explicitly asking you to CHANGE or CONTROL something."#
     )
 }
 
@@ -536,7 +669,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_no_schemas_returns_plain() {
-        let p = build_system_prompt(&[], &[], &[], &[]);
+        let p = build_system_prompt(&[], &[], &[], &[], &HashMap::new(), &[]);
         assert!(!p.contains("tool"));
         assert!(p.contains("helpful assistant"));
     }
@@ -544,7 +677,7 @@ mod tests {
     #[test]
     fn build_system_prompt_with_schemas_includes_tool_section() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[], &[]);
+        let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
         assert!(p.contains("light_command"));
         assert!(p.contains("scene_load"));
         assert!(p.contains(r#"{"tool":"#));
@@ -555,7 +688,7 @@ mod tests {
         let schemas = tool_schemas_for_feature("lighting");
         let devices = vec!["test_bulb".to_string(), "desk_lamp".to_string()];
         let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &groups, &[]);
+        let p = build_system_prompt(&schemas, &devices, &groups, &[], &HashMap::new(), &[]);
         assert!(p.contains("test_bulb"));
         assert!(p.contains("desk_lamp"));
         assert!(p.contains("all"));
@@ -566,7 +699,7 @@ mod tests {
     #[test]
     fn build_system_prompt_no_devices_omits_device_section() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[], &[]);
+        let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
         assert!(!p.contains("Known devices"));
         assert!(!p.contains("Known groups"));
     }
@@ -734,7 +867,7 @@ mod tests {
     fn build_system_prompt_devices_only_no_groups() {
         let schemas = tool_schemas_for_feature("lighting");
         let devices = vec!["test_bulb".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &[], &[]);
+        let p = build_system_prompt(&schemas, &devices, &[], &[], &HashMap::new(), &[]);
         assert!(p.contains("Known devices"));
         assert!(!p.contains("Known groups"));
     }
@@ -743,7 +876,7 @@ mod tests {
     fn build_system_prompt_groups_only_no_devices() {
         let schemas = tool_schemas_for_feature("lighting");
         let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &[], &groups, &[]);
+        let p = build_system_prompt(&schemas, &[], &groups, &[], &HashMap::new(), &[]);
         assert!(!p.contains("Known devices"));
         assert!(p.contains("Known groups"));
     }
@@ -753,9 +886,9 @@ mod tests {
         let schemas = tool_schemas_for_feature("lighting");
         let devices = vec!["test_bulb".to_string()];
         let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &groups, &[]);
+        let p = build_system_prompt(&schemas, &devices, &groups, &[], &HashMap::new(), &[]);
         // LLM is told to use exact names
-        assert!(p.contains("exact device or group name"));
+        assert!(p.contains("exact device or group name from the known list"));
         assert!(p.contains("test_bulb"));
         assert!(p.contains("all"));
     }
@@ -763,7 +896,7 @@ mod tests {
     #[test]
     fn build_system_prompt_forbids_special_tags() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[], &[]);
+        let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
         assert!(p.contains("Only output the JSON object"));
         assert!(p.contains("do NOT output JSON"));
     }
@@ -771,7 +904,7 @@ mod tests {
     #[test]
     fn build_system_prompt_schema_is_compact_json() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[], &[]);
+        let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
         for schema in schemas {
             let s = serde_json::to_string(&schema).unwrap();
             assert!(!s.contains('\n'), "schema JSON must be compact");
@@ -827,7 +960,7 @@ mod tests {
                 online: false,
             },
         ];
-        let p = build_system_prompt(&schemas, &devices, &[], &states);
+        let p = build_system_prompt(&schemas, &devices, &[], &states, &HashMap::new(), &[]);
         assert!(p.contains("kitchen_light"), "device name must appear");
         assert!(
             p.contains("online"),

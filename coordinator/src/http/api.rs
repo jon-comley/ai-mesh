@@ -17,11 +17,7 @@ use crate::effects::registry::EffectRegistry;
 use crate::registry::{DeviceSnapshot, Opening, Registry};
 
 fn gen_request_id() -> String {
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("http-{ms}")
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[derive(Deserialize)]

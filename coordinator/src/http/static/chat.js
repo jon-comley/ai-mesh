@@ -67,6 +67,9 @@ async function send() {
           const result = tc.result ?? '';
           appendToolMsg(tc.tool, result, data.node_id, data.model_name);
         }
+        if (data.text) {
+          appendMsg('assistant', data.text, data.node_id, data.model_name);
+        }
       } else {
         const reply = data.text ?? '';
         appendMsg('assistant', reply, data.node_id, data.model_name);
