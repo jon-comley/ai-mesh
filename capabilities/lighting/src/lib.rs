@@ -347,6 +347,7 @@ mod tests {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         });
         assert!(!LightingCapability::new("test-node").handles(&msg));
     }

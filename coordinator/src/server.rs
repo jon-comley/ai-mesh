@@ -285,6 +285,18 @@ where
         info!(node_id = %id, "connection closed, removing from connection map");
         connections.lock().unwrap().remove(&id);
 
+        // Agent service stops kill llama-server, so clear stale model state now.
+        // This runs on agent disconnect (TCP closes cleanly). On coordinator restart
+        // Tokio cancels tasks before cleanup runs, so DB model state is preserved.
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.clear_node_models(&id);
+            if let Some(dash) = &dashboard {
+                let snapshot = build_model_snapshot(&reg);
+                dash.push_model_update(snapshot);
+            }
+        }
+
         // Immediately fail any pending inferences that were routed to this node,
         // so CLI clients get a fast error instead of waiting GENERATE_TIMEOUT_SECS.
         let mut pending = pending_inferences.lock().unwrap();
@@ -372,6 +384,7 @@ async fn process_message(
             gpu_usage_pct,
             gpu_vram_used_gb,
             gpu_vram_total_gb,
+            disk_free_gb,
         }) => {
             // When tokens are configured, require the heartbeat token to match exactly.
             if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
@@ -415,6 +428,7 @@ async fn process_message(
                     gpu_usage_pct,
                     gpu_vram_used_gb,
                     gpu_vram_total_gb,
+                    disk_free_gb,
                 );
             }
             Some(MeshMessage::Acknowledge)
@@ -968,6 +982,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1007,6 +1022,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1056,6 +1072,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1122,6 +1139,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1217,6 +1235,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1257,6 +1276,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1296,6 +1316,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1337,6 +1358,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1421,6 +1443,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;
@@ -1448,6 +1471,7 @@ mod tests {
                 gpu_usage_pct: None,
                 gpu_vram_used_gb: None,
                 gpu_vram_total_gb: None,
+                disk_free_gb: None,
             }),
         )
         .await;

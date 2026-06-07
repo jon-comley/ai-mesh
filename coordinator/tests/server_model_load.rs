@@ -96,6 +96,7 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         }),
     )
     .await;

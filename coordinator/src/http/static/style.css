@@ -72,6 +72,8 @@ body {
   padding: 16px;
 }
 .panel.active { display: block; }
+/* Chat panel needs flex so the thread scrolls and the input bar sticks to the bottom. */
+.panel-chat.active { display: flex; }
 
 .panel h2 {
   font-size: 18px;
@@ -382,25 +384,52 @@ body {
   background: color-mix(in srgb, var(--red) 25%, transparent);
 }
 
-.model-card-footer {
+.model-picker-row {
   display: flex;
-  justify-content: flex-end;
-  margin-top: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 8px 0 0;
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
-.load-btn {
+.model-picker-select {
+  flex: 1;
+  min-width: 0;
   background: var(--surface-2);
+  color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-muted);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.82rem;
+  font-family: inherit;
   cursor: pointer;
-  font-size: 11px;
-  padding: 3px 10px;
 }
 
-.load-btn:hover {
-  color: var(--text);
-  border-color: var(--accent);
+.model-picker-load {
+  background: var(--accent, #4f8ef7);
+  color: #fff;
+  border: none;
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.9rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-family: inherit;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.model-picker-load:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.model-load-error {
+  flex: 0 0 100%;
+  font-size: 0.75rem;
+  color: var(--red);
+  padding-top: 1px;
 }
 
 /* ── Lighting cards ────────────────────────────────────────────────────────── */

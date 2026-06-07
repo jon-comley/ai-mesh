@@ -42,6 +42,9 @@ pub struct HeartbeatPayload {
     /// Total GPU VRAM, gibibytes; None on CPU-only nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_vram_total_gb: Option<f32>,
+    /// Free disk space on the model storage filesystem, gibibytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free_gb: Option<f32>,
 }
 
 impl From<NodeIdentity> for HeartbeatPayload {
@@ -55,6 +58,7 @@ impl From<NodeIdentity> for HeartbeatPayload {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         }
     }
 }
@@ -221,6 +225,7 @@ mod tests {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
@@ -244,6 +249,7 @@ mod tests {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
@@ -269,6 +275,7 @@ mod tests {
             gpu_usage_pct: Some(75.0),
             gpu_vram_used_gb: Some(3.5),
             gpu_vram_total_gb: Some(8.0),
+            disk_free_gb: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         let back: HeartbeatPayload = serde_json::from_str(&json).unwrap();
@@ -333,6 +340,7 @@ mod tests {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         };
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains("cpu_usage_pct"));

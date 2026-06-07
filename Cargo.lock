@@ -325,6 +325,7 @@ dependencies = [
  "capability-core",
  "dirs",
  "futures-util",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
