@@ -1360,6 +1360,7 @@ pub async fn chat(
         state.connections.clone(),
         state.pending_inferences.clone(),
         state.pending_intents.clone(),
+        state.get_light_snapshot(),
     )
     .await;
     Json(resp).into_response()
