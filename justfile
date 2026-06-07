@@ -425,6 +425,9 @@ deploy-node node:
         echo ">>> Coordinator is running — pushing credentials to {{node}}..."
         just set-fingerprint {{node}} \
             || echo ">>> Warning: could not push credentials to {{node}} — run: just set-fingerprint {{node}}"
+        echo ">>> Auto-loading best-fit model on {{node}} (agent restart kills llama-server)..."
+        just auto-load-model {{node}} \
+            || echo ">>> Warning: could not load model on {{node}} — run: just auto-load-model {{node}}"
     else
         echo ">>> No coordinator running yet — run 'just start-cluster' (or 'just set-fingerprint {{node}}' after starting the coordinator)"
     fi
@@ -950,17 +953,32 @@ update-llama node:
     echo "llama.cpp updated to $LATEST on {{node}}"
 
 # Auto-place a model — coordinator picks the best-fit node. No SSH needed.
-# Usage: just load qwen2.5:7b
+# Usage: just load qwen3:8b
 load model:
     #!/usr/bin/env bash
     set -e
     case "{{model}}" in
-        qwen2.5:0.5b)  SIZE_MB=512 ;;
-        qwen2.5:1.5b)  SIZE_MB=1024 ;;
-        qwen2.5:7b)    SIZE_MB=4096 ;;
-        qwen2.5:14b)   SIZE_MB=8192 ;;
-        qwen2.5:32b)   SIZE_MB=20480 ;;
-        *) echo "Unknown model: {{model}} (supported: qwen2.5:0.5b 1.5b 7b 14b 32b)"; exit 1 ;;
+        qwen3:4b)         SIZE_MB=2382  ;;
+        qwen3:8b)         SIZE_MB=4795  ;;
+        qwen3:14b)        SIZE_MB=8584  ;;
+        qwen3:32b)        SIZE_MB=18849 ;;
+        qwen2.5:0.5b)     SIZE_MB=500   ;;
+        qwen2.5:1.5b)     SIZE_MB=986   ;;
+        qwen2.5:7b)       SIZE_MB=4096  ;;
+        qwen2.5:14b)      SIZE_MB=8192  ;;
+        qwen2.5:32b)      SIZE_MB=19456 ;;
+        llama3.2:1b)      SIZE_MB=770   ;;
+        llama3.2:3b)      SIZE_MB=1926  ;;
+        llama3.1:8b)      SIZE_MB=4692  ;;
+        phi4:14b)         SIZE_MB=8635  ;;
+        gemma3:4b)        SIZE_MB=2374  ;;
+        gemma3:12b)       SIZE_MB=6964  ;;
+        mistral:7b)       SIZE_MB=4170  ;;
+        deepseek-r1:7b)   SIZE_MB=4466  ;;
+        deepseek-r1:8b)   SIZE_MB=4692  ;;
+        deepseek-r1:14b)  SIZE_MB=8572  ;;
+        deepseek-r1:32b)  SIZE_MB=18934 ;;
+        *) echo "Unknown model: {{model}}"; exit 1 ;;
     esac
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" load "{{model}}" "$SIZE_MB"
 
@@ -975,12 +993,27 @@ load-model node model:
     [ -f "$STATE" ] && source "$STATE" && export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
     MODEL="{{model}}"
     case "$MODEL" in
-        qwen2.5:0.5b)  SIZE_MB=512 ;;
-        qwen2.5:1.5b)  SIZE_MB=1024 ;;
-        qwen2.5:7b)    SIZE_MB=4096 ;;
-        qwen2.5:14b)   SIZE_MB=8192 ;;
-        qwen2.5:32b)   SIZE_MB=20480 ;;
-        *) echo "Unknown model: $MODEL (supported: qwen2.5:0.5b 1.5b 7b 14b 32b)"; exit 1 ;;
+        qwen3:4b)         SIZE_MB=2382  ;;
+        qwen3:8b)         SIZE_MB=4795  ;;
+        qwen3:14b)        SIZE_MB=8584  ;;
+        qwen3:32b)        SIZE_MB=18849 ;;
+        qwen2.5:0.5b)     SIZE_MB=500   ;;
+        qwen2.5:1.5b)     SIZE_MB=986   ;;
+        qwen2.5:7b)       SIZE_MB=4096  ;;
+        qwen2.5:14b)      SIZE_MB=8192  ;;
+        qwen2.5:32b)      SIZE_MB=19456 ;;
+        llama3.2:1b)      SIZE_MB=770   ;;
+        llama3.2:3b)      SIZE_MB=1926  ;;
+        llama3.1:8b)      SIZE_MB=4692  ;;
+        phi4:14b)         SIZE_MB=8635  ;;
+        gemma3:4b)        SIZE_MB=2374  ;;
+        gemma3:12b)       SIZE_MB=6964  ;;
+        mistral:7b)       SIZE_MB=4170  ;;
+        deepseek-r1:7b)   SIZE_MB=4466  ;;
+        deepseek-r1:8b)   SIZE_MB=4692  ;;
+        deepseek-r1:14b)  SIZE_MB=8572  ;;
+        deepseek-r1:32b)  SIZE_MB=18934 ;;
+        *) echo "Unknown model: $MODEL"; exit 1 ;;
     esac
     # Retry for up to 120s — allow time for reconnect after coordinator restart.
     NODE_ID=""
@@ -1017,49 +1050,32 @@ load-model node model:
         ' 2>/dev/null || echo "0:0")
         ;;
       windows)
-        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$m=8192}else{$m=[int]($g.AdapterRAM/1MB)};$gpu=1};if($m -eq 0){$m=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB)};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
+        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$vram=8192}else{$vram=[int]($g.AdapterRAM/1MB)};$gpu=1;$m=if($sysRam -gt $vram){$sysRam}else{$vram}};if($m -eq 0){$m=$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
         ;;
       *) HW_INFO="0:0" ;;
     esac
     HW_MB=$(echo "$HW_INFO" | cut -d: -f1 | tr -d '[:space:]'); HW_MB="${HW_MB:-0}"
     HW_GPU=$(echo "$HW_INFO" | cut -d: -f2 | tr -d '[:space:]'); HW_GPU="${HW_GPU:-0}"
 
-    # Map hardware to a ceiling rank using separate GPU-VRAM and CPU/unified thresholds.
-    # CPU thresholds are conservative — models compete with OS memory.
-    if [ "$HW_GPU" = "1" ]; then
-        if   [ "$HW_MB" -ge 22000 ]; then HW_MAX=4
-        elif [ "$HW_MB" -ge 9000  ]; then HW_MAX=3
-        elif [ "$HW_MB" -ge 4000  ]; then HW_MAX=2
-        elif [ "$HW_MB" -ge 1000  ]; then HW_MAX=1
-        else                               HW_MAX=0
-        fi
-    else
-        if   [ "$HW_MB" -ge 44000 ]; then HW_MAX=4
-        elif [ "$HW_MB" -ge 18000 ]; then HW_MAX=3
-        elif [ "$HW_MB" -ge 10000 ]; then HW_MAX=2
-        elif [ "$HW_MB" -ge 3000  ]; then HW_MAX=1
-        else                               HW_MAX=0
-        fi
-    fi
-
-    # Model rank table (ascending by size).
-    MODEL_NAMES=("qwen2.5:0.5b" "qwen2.5:1.5b" "qwen2.5:7b" "qwen2.5:14b" "qwen2.5:32b")
-    case "$MODEL" in
-        qwen2.5:0.5b) MODEL_RANK=0 ;;
-        qwen2.5:1.5b) MODEL_RANK=1 ;;
-        qwen2.5:7b)   MODEL_RANK=2 ;;
-        qwen2.5:14b)  MODEL_RANK=3 ;;
-        qwen2.5:32b)  MODEL_RANK=4 ;;
-    esac
-
-    # Ceiling = strictly below both the model being loaded and the hardware max.
-    CEILING=$(( (MODEL_RANK - 1) < HW_MAX ? (MODEL_RANK - 1) : HW_MAX ))
+    # All known models sorted by size descending — used to suggest fallbacks.
+    ALL_MODELS=(
+        "qwen2.5:32b:19456"  "qwen3:32b:18849"    "deepseek-r1:32b:18934"
+        "phi4:14b:8635"      "qwen3:14b:8584"      "deepseek-r1:14b:8572"
+        "qwen2.5:14b:8192"   "gemma3:12b:6964"     "qwen3:8b:4795"
+        "deepseek-r1:8b:4692" "llama3.1:8b:4692"   "deepseek-r1:7b:4466"
+        "mistral:7b:4170"    "qwen2.5:7b:4096"     "qwen3:4b:2382"
+        "gemma3:4b:2374"     "llama3.2:3b:1926"    "qwen2.5:1.5b:986"
+        "llama3.2:1b:770"    "qwen2.5:0.5b:500"
+    )
+    THRESHOLD=$(( HW_MB * 80 / 100 ))
 
     echo ">>> Loading ${MODEL} (${SIZE_MB} MB) on {{node}} (${NODE_ID})..."
-    if [ "$CEILING" -ge 0 ]; then
-        echo ">>> NOTE: if this model fails, available fallbacks (within this node's hardware):"
-        for (( i=CEILING; i>=0; i-- )); do
-            echo ">>>   just load-model {{node}} ${MODEL_NAMES[$i]}"
+    if [ "$SIZE_MB" -gt "$THRESHOLD" ]; then
+        echo ">>> NOTE: ${MODEL} (${SIZE_MB} MB) exceeds 80% of detected memory (${THRESHOLD} MB)."
+        echo ">>> Fallbacks that fit this node:"
+        for entry in "${ALL_MODELS[@]}"; do
+            m="${entry%:*}"; s="${entry##*:}"
+            [ "$s" -lt "$SIZE_MB" ] && [ "$s" -le "$THRESHOLD" ] && echo ">>>   just load-model {{node}} ${m%:*}:${m##*:}"
         done
     fi
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" load --node-id "${NODE_ID}" "${MODEL}" "${SIZE_MB}" | sed 's/^/>>> /'
@@ -1091,7 +1107,7 @@ auto-load-model node:
         ')
         ;;
       windows)
-        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$m=8192}else{$m=[int]($g.AdapterRAM/1MB)};$gpu=1};if($m -eq 0){$m=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB)};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
+        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$vram=8192}else{$vram=[int]($g.AdapterRAM/1MB)};$gpu=1;$m=if($sysRam -gt $vram){$sysRam}else{$vram}};if($m -eq 0){$m=$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
         ;;
       *)
         echo "Unknown NODE_OS: $NODE_OS"; exit 1 ;;
@@ -1099,22 +1115,44 @@ auto-load-model node:
     HW_MB=$(echo "$HW_INFO" | cut -d: -f1 | tr -d '[:space:]'); HW_MB="${HW_MB:-0}"
     HW_GPU=$(echo "$HW_INFO" | cut -d: -f2 | tr -d '[:space:]'); HW_GPU="${HW_GPU:-0}"
 
-    if [ "$HW_GPU" = "1" ]; then
-        if   [ "$HW_MB" -ge 22000 ]; then MODEL="qwen2.5:32b"
-        elif [ "$HW_MB" -ge 9000  ]; then MODEL="qwen2.5:14b"
-        elif [ "$HW_MB" -ge 4000  ]; then MODEL="qwen2.5:7b"
-        elif [ "$HW_MB" -ge 1000  ]; then MODEL="qwen2.5:1.5b"
-        else                               MODEL="qwen2.5:0.5b"
+    # Free disk space on the model directory (need 2× model size: .tmp + final .gguf).
+    case "$NODE_OS" in
+      linux)
+        DISK_FREE_MB=$(ssh ${NODE_USER}@${NODE_HOST} \
+            "df --block-size=1M --output=avail \$(echo ~/.ai-mesh/models) 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo 0)
+        ;;
+      windows)
+        DISK_FREE_MB=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} \
+            'powershell -NoProfile -Command "[int]((Get-PSDrive C).Free/1MB)"' 2>/dev/null || echo 0)
+        ;;
+      *) DISK_FREE_MB=0 ;;
+    esac
+    DISK_FREE_MB="${DISK_FREE_MB:-0}"
+
+    # Models in preference order (best first at each size tier — Qwen3 preferred).
+    # Pick the largest model that fits in free RAM AND leaves 2× space on disk.
+    CANDIDATE_MODELS=(
+        "qwen2.5:32b:19456"  "qwen3:32b:18849"    "deepseek-r1:32b:18934"
+        "phi4:14b:8635"      "qwen3:14b:8584"      "deepseek-r1:14b:8572"
+        "qwen2.5:14b:8192"   "gemma3:12b:6964"     "qwen3:8b:4795"
+        "deepseek-r1:8b:4692" "llama3.1:8b:4692"   "deepseek-r1:7b:4466"
+        "mistral:7b:4170"    "qwen2.5:7b:4096"     "qwen3:4b:2382"
+        "gemma3:4b:2374"     "llama3.2:3b:1926"    "qwen2.5:1.5b:986"
+        "llama3.2:1b:770"    "qwen2.5:0.5b:500"
+    )
+    THRESHOLD=$(( HW_MB * 80 / 100 ))
+    MODEL=""
+    for entry in "${CANDIDATE_MODELS[@]}"; do
+        m="${entry%:*}"; s="${entry##*:}"
+        if [ "$s" -le "$THRESHOLD" ] && [ $(( s * 2 )) -le "$DISK_FREE_MB" ]; then
+            MODEL="$m"; break
         fi
-    else
-        if   [ "$HW_MB" -ge 44000 ]; then MODEL="qwen2.5:32b"
-        elif [ "$HW_MB" -ge 18000 ]; then MODEL="qwen2.5:14b"
-        elif [ "$HW_MB" -ge 10000 ]; then MODEL="qwen2.5:7b"
-        elif [ "$HW_MB" -ge 3000  ]; then MODEL="qwen2.5:1.5b"
-        else                               MODEL="qwen2.5:0.5b"
-        fi
+    done
+    if [ -z "$MODEL" ]; then
+        echo ">>> {{node}}: RAM=${HW_MB}MB disk_free=${DISK_FREE_MB}MB — no model fits both constraints"
+        exit 1
     fi
-    echo ">>> {{node}}: detected ${HW_MB} MB ($([ "$HW_GPU" = "1" ] && echo GPU || echo CPU)) → selecting ${MODEL}"
+    echo ">>> {{node}}: detected ${HW_MB} MB ($([ "$HW_GPU" = "1" ] && echo GPU || echo CPU), threshold ${THRESHOLD} MB) → selecting ${MODEL}"
     just load-model {{node}} ${MODEL}
 
 # Tail live logs from a node.

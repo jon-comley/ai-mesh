@@ -8,7 +8,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
-use sysinfo::System;
+use sysinfo::{Disks, System};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
@@ -82,6 +82,18 @@ impl Agent {
             (cpu, used, total)
         };
         let gpu = read_gpu_sample();
+
+        // Free space on the model storage filesystem.
+        let model_dir = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".ai-mesh")
+            .join("models");
+        let disk_free_gb = Disks::new_with_refreshed_list()
+            .iter()
+            .filter(|d| model_dir.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())
+            .map(|d| d.available_space() as f32 / 1_073_741_824.0);
+
         HeartbeatPayload {
             identity: self.identity.clone(),
             auth_token: std::env::var("MESH_AUTH_TOKEN")
@@ -94,6 +106,7 @@ impl Agent {
             gpu_usage_pct: gpu.as_ref().map(|g| g.usage_pct),
             gpu_vram_used_gb: gpu.as_ref().map(|g| g.vram_used_gb),
             gpu_vram_total_gb: gpu.map(|g| g.vram_total_gb),
+            disk_free_gb,
         }
     }
 

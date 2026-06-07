@@ -11,7 +11,10 @@ use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
-const INTENT_INFERENCE_TIMEOUT_SECS: u64 = 60;
+// Must exceed LLAMA_GENERATE_TIMEOUT_SECS on the agent (default 120 s) so the
+// agent's own HTTP timeout fires first and sends back an error rather than us
+// dropping the result mid-flight.
+const INTENT_INFERENCE_TIMEOUT_SECS: u64 = 150;
 const TOOL_RESPONSE_TIMEOUT_SECS: u64 = 10;
 
 pub async fn handle_intent(
@@ -24,6 +27,7 @@ pub async fn handle_intent(
     let fail = |msg: String| IntentResponse {
         request_id: request.request_id.clone(),
         node_id: String::new(),
+        model_name: String::new(),
         text: None,
         tool_calls: vec![],
         error: Some(msg),
@@ -106,7 +110,7 @@ pub async fn handle_intent(
         model_name: model_name.clone(),
         system_prompt: Some(system_prompt),
         prompt: user_prompt,
-        max_tokens: 512,
+        max_tokens: 2048,
         temperature: Some(0.4),
         wire_version: WIRE_VERSION,
     };
@@ -139,10 +143,16 @@ pub async fn handle_intent(
     };
 
     let node_id = llm_result.node_id.clone();
+    let model_name = llm_result.model_name.clone();
     if let Some(e) = llm_result.error {
-        return fail(format!("inference error from {node_id}: {e}"));
+        let hostname = registry
+            .lock()
+            .unwrap()
+            .get_node_hostname(&node_id)
+            .unwrap_or_else(|| node_id.clone());
+        return fail(format!("inference error from {hostname}: {e}"));
     }
-    let raw = llm_result.output.trim().to_string();
+    let raw = strip_think_blocks(llm_result.output.trim());
     info!(
         request_id = %request.request_id,
         node_id = %node_id,
@@ -168,6 +178,7 @@ pub async fn handle_intent(
         return IntentResponse {
             request_id: request.request_id,
             node_id,
+            model_name,
             text: None,
             tool_calls: vec![ToolCallRecord {
                 tool: tool_name,
@@ -181,6 +192,7 @@ pub async fn handle_intent(
     IntentResponse {
         request_id: request.request_id,
         node_id,
+        model_name,
         text: Some(raw),
         tool_calls: vec![],
         error: None,
@@ -350,6 +362,30 @@ fn build_light_command(
         target,
         command,
     }])
+}
+
+/// Remove DeepSeek R1-style <think>…</think> chain-of-thought blocks from output.
+fn strip_think_blocks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        match rest.find("<think>") {
+            None => {
+                out.push_str(rest);
+                break;
+            }
+            Some(start) => {
+                out.push_str(&rest[..start]);
+                rest = &rest[start + "<think>".len()..];
+                if let Some(end) = rest.find("</think>") {
+                    rest = &rest[end + "</think>".len()..];
+                } else {
+                    break; // unclosed tag — drop the rest
+                }
+            }
+        }
+    }
+    out.trim().to_string()
 }
 
 pub fn try_parse_tool_call(output: &str) -> Option<serde_json::Value> {

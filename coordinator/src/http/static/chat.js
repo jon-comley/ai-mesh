@@ -1,7 +1,8 @@
+import { getHostname } from '/static/models.js';
+
 let thread = null;
 let input = null;
 let sendBtn = null;
-let history = [];
 let busy = false;
 
 export function init(panel) {
@@ -64,11 +65,11 @@ async function send() {
       } else if (data.tool_calls && data.tool_calls.length > 0) {
         for (const tc of data.tool_calls) {
           const result = tc.result ?? '';
-          appendToolMsg(tc.tool, result, data.node_id);
+          appendToolMsg(tc.tool, result, data.node_id, data.model_name);
         }
       } else {
         const reply = data.text ?? '';
-        appendMsg('assistant', reply, data.node_id);
+        appendMsg('assistant', reply, data.node_id, data.model_name);
       }
     }
   } catch (err) {
@@ -78,15 +79,20 @@ async function send() {
 
   busy = false;
   sendBtn.disabled = false;
-  input.focus();
+  // Blur on mobile so the keyboard dismisses and the response is readable;
+  // on desktop the input stays focused for quick follow-ups.
+  if (window.matchMedia('(pointer: coarse)').matches) {
+    input.blur();
+  } else {
+    input.focus();
+  }
 }
 
 function clear() {
-  history = [];
   if (thread) thread.innerHTML = '';
 }
 
-function appendMsg(role, text, nodeId) {
+function appendMsg(role, text, nodeId, modelName) {
   const div = document.createElement('div');
   div.className = `chat-msg chat-${role}`;
   const bubble = document.createElement('div');
@@ -96,7 +102,7 @@ function appendMsg(role, text, nodeId) {
   if (nodeId && role === 'assistant') {
     const meta = document.createElement('div');
     meta.className = 'chat-meta';
-    meta.textContent = nodeId.slice(0, 8);
+    meta.textContent = metaLine(nodeId, modelName);
     div.appendChild(meta);
   }
   thread.appendChild(div);
@@ -104,7 +110,7 @@ function appendMsg(role, text, nodeId) {
   return div;
 }
 
-function appendToolMsg(tool, result, nodeId) {
+function appendToolMsg(tool, result, nodeId, modelName) {
   const div = document.createElement('div');
   div.className = 'chat-msg chat-assistant';
   const bubble = document.createElement('div');
@@ -114,12 +120,17 @@ function appendToolMsg(tool, result, nodeId) {
   if (nodeId) {
     const meta = document.createElement('div');
     meta.className = 'chat-meta';
-    meta.textContent = nodeId.slice(0, 8);
+    meta.textContent = metaLine(nodeId, modelName);
     div.appendChild(meta);
   }
   thread.appendChild(div);
   thread.scrollTop = thread.scrollHeight;
   return div;
+}
+
+function metaLine(nodeId, modelName) {
+  const host = getHostname(nodeId);
+  return modelName ? `${host} · ${modelName}` : host;
 }
 
 function appendThinking() {

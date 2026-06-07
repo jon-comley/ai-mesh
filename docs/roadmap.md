@@ -402,7 +402,9 @@ Full design spec: `plans/phase11-dashboard.md`
 
 ### Phase H — Polish, icons, desktop layout pass
 
-### Deferred dashboard polish (raised post-C5, updated 2026-06-05)
+### Deferred dashboard polish (raised post-C5, updated 2026-06-07)
+
+- **Multi-turn chat context** — `history` in `chat.js` was removed (dead state, 2026-06-07). To wire it back properly: (1) `chat.js` accumulates `{ role, text }` pairs after each send/receive; (2) `POST /api/chat` body includes `context: [{role, text}]`; (3) coordinator `handle_intent` prepends context turns to the LLM prompt as additional `user`/`assistant` messages before the current user turn. Needs careful token-budget management (truncate oldest turns first) so long conversations don't overflow `max_tokens`. The chat panel should also expose a visible conversation limit and a "start fresh" affordance beyond the existing Clear button.
 
 These are non-blocking UX improvements for after C6 ships:
 

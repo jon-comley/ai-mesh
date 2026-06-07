@@ -691,6 +691,24 @@ impl Registry {
         }
     }
 
+    /// Clear all model allocations for a node (called when it reconnects, since
+    /// llama-server is killed by agent service restarts and models must be reloaded).
+    pub fn clear_node_models(&mut self, id: &str) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.models.clear();
+        }
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM model_allocations WHERE node_id = ?1",
+            params![id],
+        ) {
+            warn!(error = %e, node_id = %id, "DB clear_node_models failed");
+        }
+    }
+
+    pub fn get_node_hostname(&self, id: &str) -> Option<String> {
+        self.nodes.get(id).map(|n| n.identity.hostname.clone())
+    }
+
     pub fn get(&self, id: &str) -> Option<&NodeRecord> {
         self.nodes.get(id)
     }

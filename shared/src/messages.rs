@@ -225,6 +225,7 @@ pub struct ToolCallRecord {
 pub struct IntentResponse {
     pub request_id: String,
     pub node_id: String,
+    pub model_name: String,
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCallRecord>,
     pub error: Option<String>,
@@ -301,6 +302,7 @@ mod tests {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         };
 
         let msg = MeshMessage::Heartbeat(payload.clone());
@@ -326,6 +328,7 @@ mod tests {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         };
         let msg = MeshMessage::Heartbeat(payload.clone());
         let json = serde_json::to_string(&msg).unwrap();
@@ -349,6 +352,7 @@ mod tests {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         };
         let json = serde_json::to_string(&MeshMessage::Heartbeat(payload)).unwrap();
         assert!(
@@ -803,6 +807,7 @@ mod tests {
         let msg = MeshMessage::IntentResponse(IntentResponse {
             request_id: "ir-1".into(),
             node_id: "pi1".into(),
+            model_name: "qwen3:8b".into(),
             text: Some("Done — living room set to cozy.".into()),
             tool_calls: vec![ToolCallRecord {
                 tool: "scene_load".into(),
@@ -820,6 +825,7 @@ mod tests {
         let msg = MeshMessage::IntentResponse(IntentResponse {
             request_id: "ir-2".into(),
             node_id: "beelink1".into(),
+            model_name: "qwen3:8b".into(),
             text: Some("TCP keepalive is a mechanism that...".into()),
             tool_calls: vec![],
             error: None,

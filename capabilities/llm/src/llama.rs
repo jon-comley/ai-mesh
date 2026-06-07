@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
@@ -16,7 +16,7 @@ fn http_client() -> &'static reqwest::Client {
         let timeout_secs = std::env::var("LLAMA_GENERATE_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(120u64);
+            .unwrap_or(90u64);
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
@@ -117,6 +117,66 @@ fn resolve_gguf(model_name: &str) -> Result<GgufSpec, String> {
                 "qwen2.5-32b-instruct-q4_k_m-00005-of-00005.gguf",
             ],
         }),
+        "qwen3:4b" => Ok(GgufSpec {
+            repo: "Qwen/Qwen3-4B-GGUF",
+            shards: &["Qwen3-4B-Q4_K_M.gguf"],
+        }),
+        "qwen3:8b" => Ok(GgufSpec {
+            repo: "Qwen/Qwen3-8B-GGUF",
+            shards: &["Qwen3-8B-Q4_K_M.gguf"],
+        }),
+        "qwen3:14b" => Ok(GgufSpec {
+            repo: "Qwen/Qwen3-14B-GGUF",
+            shards: &["Qwen3-14B-Q4_K_M.gguf"],
+        }),
+        "qwen3:32b" => Ok(GgufSpec {
+            repo: "Qwen/Qwen3-32B-GGUF",
+            shards: &["Qwen3-32B-Q4_K_M.gguf"],
+        }),
+        "llama3.2:1b" => Ok(GgufSpec {
+            repo: "bartowski/Llama-3.2-1B-Instruct-GGUF",
+            shards: &["Llama-3.2-1B-Instruct-Q4_K_M.gguf"],
+        }),
+        "llama3.2:3b" => Ok(GgufSpec {
+            repo: "bartowski/Llama-3.2-3B-Instruct-GGUF",
+            shards: &["Llama-3.2-3B-Instruct-Q4_K_M.gguf"],
+        }),
+        "llama3.1:8b" => Ok(GgufSpec {
+            repo: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+            shards: &["Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"],
+        }),
+        "phi4:14b" => Ok(GgufSpec {
+            repo: "bartowski/phi-4-GGUF",
+            shards: &["phi-4-Q4_K_M.gguf"],
+        }),
+        "gemma3:4b" => Ok(GgufSpec {
+            repo: "bartowski/google_gemma-3-4b-it-GGUF",
+            shards: &["google_gemma-3-4b-it-Q4_K_M.gguf"],
+        }),
+        "gemma3:12b" => Ok(GgufSpec {
+            repo: "bartowski/google_gemma-3-12b-it-GGUF",
+            shards: &["google_gemma-3-12b-it-Q4_K_M.gguf"],
+        }),
+        "mistral:7b" => Ok(GgufSpec {
+            repo: "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+            shards: &["Mistral-7B-Instruct-v0.3-Q4_K_M.gguf"],
+        }),
+        "deepseek-r1:7b" => Ok(GgufSpec {
+            repo: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+            shards: &["DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"],
+        }),
+        "deepseek-r1:8b" => Ok(GgufSpec {
+            repo: "bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF",
+            shards: &["DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"],
+        }),
+        "deepseek-r1:14b" => Ok(GgufSpec {
+            repo: "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF",
+            shards: &["DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf"],
+        }),
+        "deepseek-r1:32b" => Ok(GgufSpec {
+            repo: "bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF",
+            shards: &["DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf"],
+        }),
         other => Err(format!(
             "unknown model '{other}' — add it to llama::resolve_gguf"
         )),
@@ -125,11 +185,29 @@ fn resolve_gguf(model_name: &str) -> Result<GgufSpec, String> {
 
 // ── GGUF download ─────────────────────────────────────────────────────────────
 
+/// Returns free bytes on the filesystem containing `path`, or `u64::MAX` if
+/// the check fails (so callers default to allowing the download).
+fn free_bytes_for(_path: &Path) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut buf = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        let c_path = std::ffi::CString::new(_path.as_os_str().as_bytes()).unwrap_or_default();
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), buf.as_mut_ptr()) };
+        if rc == 0 {
+            let s = unsafe { buf.assume_init() };
+            return s.f_bavail.saturating_mul(s.f_bsize);
+        }
+    }
+    u64::MAX
+}
+
 async fn download_shard(
     client: &reqwest::Client,
     repo: &str,
     filename: &str,
     dest: &PathBuf,
+    size_hint_bytes: u64,
 ) -> Result<(), String> {
     let url = format!("https://huggingface.co/{repo}/resolve/main/{filename}");
     let resp = client
@@ -147,21 +225,36 @@ async fn download_shard(
     }
 
     let tmp = dest.with_extension("tmp");
-    let mut file = tokio::fs::File::create(&tmp)
-        .await
-        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream error for {filename}: {e}"))?;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| format!("write error for {filename}: {e}"))?;
+    let std_file =
+        std::fs::File::create(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    // Pre-allocate the full file size so the kernel claims space up front:
+    // fails immediately if the disk is too full rather than mid-stream.
+    if size_hint_bytes > 0 {
+        let _ = std_file.set_len(size_hint_bytes);
     }
-    file.flush()
-        .await
-        .map_err(|e| format!("failed to flush {filename}: {e}"))?;
+    let mut file = tokio::fs::File::from_std(std_file);
+
+    let result: Result<(), String> = async {
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("stream error for {filename}: {e}"))?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| format!("write error for {filename}: {e}"))?;
+        }
+        file.flush()
+            .await
+            .map_err(|e| format!("failed to flush {filename}: {e}"))?;
+        Ok(())
+    }
+    .await;
+
     drop(file);
+
+    if let Err(e) = result {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
 
     tokio::fs::rename(&tmp, dest)
         .await
@@ -172,18 +265,31 @@ async fn download_shard(
 
 // ── /api/pull equivalent: download + start server ────────────────────────────
 
-pub async fn pull_model(model_name: &str) -> Result<(), String> {
+pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
     let spec = resolve_gguf(model_name)?;
     let dir = model_dir();
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("cannot create model dir {}: {e}", dir.display()))?;
 
+    // Require 2× the model size free: one copy for the .tmp in-progress file
+    // and one for the final .gguf so we never silently fill the disk.
+    let needed = size_mb.saturating_mul(2) * 1024 * 1024;
+    let free = free_bytes_for(&dir);
+    if free < needed {
+        return Err(format!(
+            "insufficient disk space to download {model_name}: need {} MB free, have {} MB",
+            needed / 1024 / 1024,
+            free / 1024 / 1024,
+        ));
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3600))
         .build()
         .map_err(|e| format!("http client error: {e}"))?;
 
+    let shard_hint = size_mb.saturating_mul(1024 * 1024) / spec.shards.len().max(1) as u64;
     for shard in spec.shards {
         let dest = dir.join(shard);
         if dest.exists() {
@@ -191,7 +297,7 @@ pub async fn pull_model(model_name: &str) -> Result<(), String> {
             continue;
         }
         tracing::info!(shard, "downloading shard from HuggingFace...");
-        download_shard(&client, spec.repo, shard, &dest).await?;
+        download_shard(&client, spec.repo, shard, &dest, shard_hint).await?;
         tracing::info!(shard, "download complete");
     }
 

@@ -68,7 +68,7 @@ impl Capability for LlmCapability {
                 let mname = req.model_name.clone();
                 let size = req.model_size_mb;
                 tokio::spawn(async move {
-                    let state = match llama::pull_model(&mname).await {
+                    let state = match llama::pull_model(&mname, size).await {
                         Ok(()) => {
                             info!(model = %mname, "llama pull complete");
                             ModelLifecycleState::Ready
@@ -227,6 +227,7 @@ mod tests {
             gpu_usage_pct: None,
             gpu_vram_used_gb: None,
             gpu_vram_total_gb: None,
+            disk_free_gb: None,
         });
         assert!(!make_cap().handles(&msg));
     }
