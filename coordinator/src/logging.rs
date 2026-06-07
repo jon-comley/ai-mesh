@@ -19,7 +19,13 @@ pub struct ErrorCaptureLayer;
 impl<S: Subscriber> Layer<S> for ErrorCaptureLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let level = *event.metadata().level();
+        // In tracing: ERROR < WARN < INFO < DEBUG < TRACE.
+        // level > WARN drops INFO/DEBUG/TRACE; keeps WARN and ERROR.
         if level > Level::WARN {
+            return;
+        }
+        // Ignore third-party crate noise — only capture our own events.
+        if !event.metadata().target().starts_with("coordinator") {
             return;
         }
         let mut visitor = MessageVisitor::default();

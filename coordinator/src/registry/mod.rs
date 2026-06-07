@@ -1191,6 +1191,28 @@ impl Registry {
             .ok()
     }
 
+    /// Returns a map of device_id → room display name for all assigned devices.
+    pub fn device_room_name_map(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        let mut stmt = match self.conn.prepare(
+            "SELECT rd.device_id, r.name FROM room_devices rd JOIN rooms r ON rd.room_id = r.id",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "device_room_name_map prepare failed");
+                return map;
+            }
+        };
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for row in rows.flatten() {
+                map.insert(row.0, row.1);
+            }
+        }
+        map
+    }
+
     // ── Scenes ── see registry/scenes.rs ───────────────────────────────────────
 
     // ── Light state persistence ───────────────────────────────────────────────
