@@ -694,12 +694,16 @@ async fn process_message(
         }
         MeshMessage::IntentRequest(req) => {
             info!(request_id = %req.request_id, "intent request received");
+            let device_states = dashboard
+                .map(|d| d.get_light_snapshot())
+                .unwrap_or_default();
             let response = crate::intent::handle_intent(
                 req,
                 registry.clone(),
                 connections.clone(),
                 pending_inferences.clone(),
                 pending_intents.clone(),
+                device_states,
             )
             .await;
             Some(MeshMessage::IntentResponse(response))

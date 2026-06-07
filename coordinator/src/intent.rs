@@ -3,8 +3,8 @@ use crate::registry::Registry;
 use crate::scheduler::Scheduler;
 use crate::server::Connections;
 use shared::{
-    InferenceRequest, IntentRequest, IntentResponse, LightAction, LightCommandRequest, LightTarget,
-    MeshMessage, SceneLoadRequest, ToolCallRecord, WIRE_VERSION,
+    InferenceRequest, IntentRequest, IntentResponse, LightAction, LightCommandRequest,
+    LightStateReport, LightTarget, MeshMessage, SceneLoadRequest, ToolCallRecord, WIRE_VERSION,
 };
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
@@ -23,6 +23,7 @@ pub async fn handle_intent(
     connections: Connections,
     pending_inferences: PendingInferences,
     pending_intents: PendingIntents,
+    device_states: Vec<LightStateReport>,
 ) -> IntentResponse {
     let fail = |msg: String| IntentResponse {
         request_id: request.request_id.clone(),
@@ -62,7 +63,8 @@ pub async fn handle_intent(
 
     // 3. Build system prompt + conversation
     let (known_devices, known_groups) = registry.lock().unwrap().all_light_device_names();
-    let system_prompt = build_system_prompt(&schemas, &known_devices, &known_groups);
+    let system_prompt =
+        build_system_prompt(&schemas, &known_devices, &known_groups, &device_states);
     let mut user_prompt = String::new();
     for turn in &request.context {
         match turn.role {
@@ -465,6 +467,7 @@ pub fn build_system_prompt(
     schemas: &[serde_json::Value],
     known_devices: &[String],
     known_groups: &[String],
+    device_states: &[LightStateReport],
 ) -> String {
     if schemas.is_empty() {
         return "You are a helpful assistant. Answer the user's question directly.".into();
@@ -477,7 +480,28 @@ pub fn build_system_prompt(
     } else {
         let mut lines = Vec::new();
         if !known_devices.is_empty() {
-            lines.push(format!("Known devices: {}", known_devices.join(", ")));
+            lines.push("Known devices:".to_string());
+            for name in known_devices {
+                let state = device_states.iter().find(|s| &s.device_id == name);
+                let status = match state {
+                    None => "  (no state yet)".to_string(),
+                    Some(s) if !s.online => "  [OFFLINE — not responding]".to_string(),
+                    Some(s) => {
+                        let mut parts = Vec::new();
+                        parts.push(if s.on { "on" } else { "off" }.to_string());
+                        if let Some(b) = s.brightness {
+                            parts.push(format!("{}% brightness", (b as u32 * 100 / 254).min(100)));
+                        }
+                        if let Some(ct) = s.color_temp
+                            && ct > 0
+                        {
+                            parts.push(format!("{} K", 1_000_000u32 / ct as u32));
+                        }
+                        format!("  (online, {})", parts.join(", "))
+                    }
+                };
+                lines.push(format!("  - {name}{status}"));
+            }
         }
         if !known_groups.is_empty() {
             lines.push(format!(
@@ -489,7 +513,7 @@ pub fn build_system_prompt(
     };
 
     format!(
-        r#"You are a helpful smart home assistant. You can control smart home devices and answer general questions.
+        r#"You are a helpful smart home assistant embedded in ai-mesh. You have direct control of and live state for all listed devices.
 
 To control a device, reply with ONLY this JSON (no extra text):
 {{"tool": "<name>", "args": {{ ... }}}}
@@ -500,6 +524,7 @@ Available tools:
 Rules:
 - Use the exact device or group name from the known list for the "target" field.
 - If the user says "all" or "everything", use a group name if one exists.
+- For status questions ("are my lights on?", "is X responding?"), answer in plain text using the live device state above — do NOT output JSON.
 - For general questions or conversation that are NOT about device control, reply in plain text — do NOT output JSON.
 - Only output the JSON object above when the user is asking you to control a device."#
     )
@@ -511,7 +536,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_no_schemas_returns_plain() {
-        let p = build_system_prompt(&[], &[], &[]);
+        let p = build_system_prompt(&[], &[], &[], &[]);
         assert!(!p.contains("tool"));
         assert!(p.contains("helpful assistant"));
     }
@@ -519,7 +544,7 @@ mod tests {
     #[test]
     fn build_system_prompt_with_schemas_includes_tool_section() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[]);
+        let p = build_system_prompt(&schemas, &[], &[], &[]);
         assert!(p.contains("light_command"));
         assert!(p.contains("scene_load"));
         assert!(p.contains(r#"{"tool":"#));
@@ -530,7 +555,7 @@ mod tests {
         let schemas = tool_schemas_for_feature("lighting");
         let devices = vec!["test_bulb".to_string(), "desk_lamp".to_string()];
         let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &groups);
+        let p = build_system_prompt(&schemas, &devices, &groups, &[]);
         assert!(p.contains("test_bulb"));
         assert!(p.contains("desk_lamp"));
         assert!(p.contains("all"));
@@ -541,7 +566,7 @@ mod tests {
     #[test]
     fn build_system_prompt_no_devices_omits_device_section() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[]);
+        let p = build_system_prompt(&schemas, &[], &[], &[]);
         assert!(!p.contains("Known devices"));
         assert!(!p.contains("Known groups"));
     }
@@ -709,7 +734,7 @@ mod tests {
     fn build_system_prompt_devices_only_no_groups() {
         let schemas = tool_schemas_for_feature("lighting");
         let devices = vec!["test_bulb".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &[]);
+        let p = build_system_prompt(&schemas, &devices, &[], &[]);
         assert!(p.contains("Known devices"));
         assert!(!p.contains("Known groups"));
     }
@@ -718,7 +743,7 @@ mod tests {
     fn build_system_prompt_groups_only_no_devices() {
         let schemas = tool_schemas_for_feature("lighting");
         let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &[], &groups);
+        let p = build_system_prompt(&schemas, &[], &groups, &[]);
         assert!(!p.contains("Known devices"));
         assert!(p.contains("Known groups"));
     }
@@ -728,7 +753,7 @@ mod tests {
         let schemas = tool_schemas_for_feature("lighting");
         let devices = vec!["test_bulb".to_string()];
         let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &groups);
+        let p = build_system_prompt(&schemas, &devices, &groups, &[]);
         // LLM is told to use exact names
         assert!(p.contains("exact device or group name"));
         assert!(p.contains("test_bulb"));
@@ -738,7 +763,7 @@ mod tests {
     #[test]
     fn build_system_prompt_forbids_special_tags() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[]);
+        let p = build_system_prompt(&schemas, &[], &[], &[]);
         assert!(p.contains("Only output the JSON object"));
         assert!(p.contains("do NOT output JSON"));
     }
@@ -746,7 +771,7 @@ mod tests {
     #[test]
     fn build_system_prompt_schema_is_compact_json() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[]);
+        let p = build_system_prompt(&schemas, &[], &[], &[]);
         for schema in schemas {
             let s = serde_json::to_string(&schema).unwrap();
             assert!(!s.contains('\n'), "schema JSON must be compact");
@@ -774,6 +799,44 @@ mod tests {
         assert!(
             props.get("brightness").is_none(),
             "brightness must not be a color-action field in schema"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_shows_device_state() {
+        use shared::messages::LightStateReport;
+        let schemas = tool_schemas_for_feature("lighting");
+        let devices = vec!["kitchen_light".to_string(), "hallway_light".to_string()];
+        let states = vec![
+            LightStateReport {
+                node_id: "n1".into(),
+                device_id: "kitchen_light".into(),
+                on: true,
+                brightness: Some(200),
+                color_xy: None,
+                color_temp: Some(370),
+                online: true,
+            },
+            LightStateReport {
+                node_id: "n1".into(),
+                device_id: "hallway_light".into(),
+                on: false,
+                brightness: None,
+                color_xy: None,
+                color_temp: None,
+                online: false,
+            },
+        ];
+        let p = build_system_prompt(&schemas, &devices, &[], &states);
+        assert!(p.contains("kitchen_light"), "device name must appear");
+        assert!(
+            p.contains("online"),
+            "online device must show online status"
+        );
+        assert!(p.contains("OFFLINE"), "offline device must show OFFLINE");
+        assert!(
+            p.contains("78%"),
+            "brightness should be rendered as percent"
         );
     }
 }
