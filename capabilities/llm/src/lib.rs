@@ -71,22 +71,28 @@ impl Capability for LlmCapability {
                     let state = match llama::pull_model(&mname, size).await {
                         Ok(()) => {
                             info!(model = %mname, "llama pull complete");
-                            ModelLifecycleState::Ready
+                            Some(ModelLifecycleState::Ready)
+                        }
+                        Err(e) if e == "unloaded" => {
+                            info!(model = %mname, "load cancelled by unload — suppressing Failed status");
+                            None
                         }
                         Err(e) => {
                             warn!(model = %mname, error = %e, "llama pull failed");
-                            ModelLifecycleState::Failed { reason: e }
+                            Some(ModelLifecycleState::Failed { reason: e })
                         }
                     };
-                    let _ = tx2
-                        .send(MeshMessage::ModelStatus(ModelStatusReport {
-                            node_id: nid,
-                            model_name: mname,
-                            size_mb: size,
-                            state,
-                            wire_version: WIRE_VERSION,
-                        }))
-                        .await;
+                    if let Some(state) = state {
+                        let _ = tx2
+                            .send(MeshMessage::ModelStatus(ModelStatusReport {
+                                node_id: nid,
+                                model_name: mname,
+                                size_mb: size,
+                                state,
+                                wire_version: WIRE_VERSION,
+                            }))
+                            .await;
+                    }
                 });
             }
 

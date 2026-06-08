@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
@@ -51,15 +52,25 @@ fn gpu_layers() -> u32 {
         .unwrap_or(0)
 }
 
-fn flash_attn() -> bool {
-    std::env::var("LLAMA_FLASH_ATTN")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(false)
+fn ctx_size() -> u32 {
+    std::env::var("LLAMA_CTX_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(4096)
+}
+
+fn n_batch() -> Option<u32> {
+    std::env::var("LLAMA_N_BATCH")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
 }
 
 // ── Child process tracking ────────────────────────────────────────────────────
 
 static LLAMA_CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+// Set to true when unload_model is called intentionally; pull_model reads this
+// to distinguish "killed by unload" from "crashed" and avoids reporting Failed.
+static UNLOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn child_lock() -> &'static Mutex<Option<Child>> {
     LLAMA_CHILD.get_or_init(|| Mutex::new(None))
@@ -304,6 +315,7 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
     // First shard is the entry-point llama-server expects.
     let model_path = dir.join(spec.shards[0]);
 
+    UNLOAD_REQUESTED.store(false, Ordering::Relaxed);
     kill_existing().await;
 
     let layers = gpu_layers();
@@ -315,13 +327,13 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
         .arg("--port")
         .arg("8080")
         .arg("--ctx-size")
-        .arg("4096");
+        .arg(ctx_size().to_string());
 
     if layers > 0 {
         cmd.arg("--n-gpu-layers").arg(layers.to_string());
     }
-    if flash_attn() {
-        cmd.arg("--flash-attn").arg("on");
+    if let Some(batch) = n_batch() {
+        cmd.arg("--n-batch").arg(batch.to_string());
     }
 
     let child = cmd
@@ -339,6 +351,10 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
         .unwrap_or(180u64);
     for elapsed in 0..max_secs {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        if UNLOAD_REQUESTED.load(Ordering::Acquire) {
+            tracing::info!(model = model_name, "load aborted by unload request");
+            return Err("unloaded".into());
+        }
         if let Ok(r) = hclient
             .get(&health_url)
             .timeout(std::time::Duration::from_secs(2))
@@ -366,6 +382,7 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
 // ── unload: kill child process ────────────────────────────────────────────────
 
 pub async fn unload_model() -> Result<(), String> {
+    UNLOAD_REQUESTED.store(true, Ordering::Release);
     kill_existing().await;
     Ok(())
 }
@@ -590,13 +607,6 @@ mod tests {
     fn gpu_layers_defaults_to_zero_when_unset() {
         if std::env::var("LLAMA_GPU_LAYERS").is_err() {
             assert_eq!(gpu_layers(), 0);
-        }
-    }
-
-    #[test]
-    fn flash_attn_defaults_to_false_when_unset() {
-        if std::env::var("LLAMA_FLASH_ATTN").is_err() {
-            assert!(!flash_attn());
         }
     }
 

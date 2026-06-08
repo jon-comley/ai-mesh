@@ -48,6 +48,15 @@ export function getHostname(nodeId) {
   return nodesMap.get(nodeId)?.hostname ?? nodeId;
 }
 
+/** Returns "nodeId/modelName" for the first Ready model, or null if none are ready. */
+export function getReadyLlmModel() {
+  for (const [nodeId, node] of nodesMap) {
+    const ready = node.models.find(m => m.state.toLowerCase() === 'ready');
+    if (ready) return `${nodeId}/${ready.name}`;
+  }
+  return null;
+}
+
 // ── Event delegation ──────────────────────────────────────────────────────────
 
 if (modelListEl) {
