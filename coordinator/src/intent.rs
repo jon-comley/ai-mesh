@@ -33,6 +33,8 @@ pub async fn handle_intent(
         text: None,
         tool_calls: vec![],
         error: Some(msg),
+        duration_ms: 0,
+        tokens_generated: 0,
     };
 
     // 1. Collect tool schemas from nodes that advertise a given feature
@@ -161,6 +163,8 @@ pub async fn handle_intent(
 
     let node_id = llm_result.node_id.clone();
     let model_name = llm_result.model_name.clone();
+    let duration_ms = llm_result.duration_ms;
+    let tokens_generated = llm_result.tokens_generated;
     if let Some(e) = llm_result.error {
         let hostname = registry
             .lock()
@@ -177,37 +181,47 @@ pub async fn handle_intent(
         raw
     );
 
-    // 6. Parse as tool call or return as free text
-    if let Some(call) = try_parse_tool_call(&raw) {
-        let tool_name = call["tool"].as_str().unwrap_or("").to_string();
-        let mut args = call["args"].clone();
+    // 6. Parse as tool call(s) or return as free text
+    if let Some(calls) = try_parse_tool_calls(&raw) {
+        let mut records: Vec<ToolCallRecord> = Vec::new();
+        let mut confirm_inputs: Vec<(String, serde_json::Value, String)> = Vec::new();
 
-        // If the model emitted action=color but forgot color_name/cx/cy,
-        // extract the colour from the user's original text as a fallback.
-        if args.get("action").and_then(|v| v.as_str()) == Some("color")
-            && args.get("cx").is_none()
-            && args.get("color_name").is_none()
-            && let Some(color) = extract_color_from_text(&request.text)
-        {
-            args["color_name"] = serde_json::Value::String(color.to_string());
+        for call in &calls {
+            let tool_name = call["tool"].as_str().unwrap_or("").to_string();
+            let mut args = call["args"].clone();
+
+            // If the model emitted action=color but forgot color_name/cx/cy,
+            // extract the colour from the user's original text as a fallback.
+            if args.get("action").and_then(|v| v.as_str()) == Some("color")
+                && args.get("cx").is_none()
+                && args.get("color_name").is_none()
+                && let Some(color) = extract_color_from_text(&request.text)
+            {
+                args["color_name"] = serde_json::Value::String(color.to_string());
+            }
+
+            let tool_result = dispatch_tool(
+                &request.request_id,
+                &tool_name,
+                args.clone(),
+                &registry,
+                &connections,
+                &pending_intents,
+            )
+            .await;
+
+            confirm_inputs.push((tool_name.clone(), args.clone(), tool_result.clone()));
+            records.push(ToolCallRecord {
+                tool: tool_name,
+                args,
+                result: Some(tool_result),
+            });
         }
-
-        let tool_result = dispatch_tool(
-            &request.request_id,
-            &tool_name,
-            args.clone(),
-            &registry,
-            &connections,
-            &pending_intents,
-        )
-        .await;
 
         let confirmation = do_confirmation_pass(
             &request.request_id,
             &request.text,
-            &tool_name,
-            &args,
-            &tool_result,
+            &confirm_inputs,
             &agent_tx,
             &pending_inferences,
             &llm_node_id,
@@ -220,12 +234,10 @@ pub async fn handle_intent(
             node_id,
             model_name,
             text: confirmation,
-            tool_calls: vec![ToolCallRecord {
-                tool: tool_name,
-                args,
-                result: Some(tool_result),
-            }],
+            tool_calls: records,
             error: None,
+            duration_ms,
+            tokens_generated,
         };
     }
 
@@ -236,6 +248,8 @@ pub async fn handle_intent(
         text: Some(raw),
         tool_calls: vec![],
         error: None,
+        duration_ms: llm_result.duration_ms,
+        tokens_generated: llm_result.tokens_generated,
     }
 }
 
@@ -499,9 +513,7 @@ fn strip_think_blocks(s: &str) -> String {
 async fn do_confirmation_pass(
     request_id: &str,
     original_text: &str,
-    tool_name: &str,
-    args: &serde_json::Value,
-    tool_result: &str,
+    records: &[(String, serde_json::Value, String)],
     agent_tx: &tokio::sync::mpsc::Sender<MeshMessage>,
     pending_inferences: &PendingInferences,
     llm_node_id: &str,
@@ -509,13 +521,18 @@ async fn do_confirmation_pass(
 ) -> Option<String> {
     let infer_req_id = format!("intent-{}-confirm", request_id);
     let system = "You are a smart home assistant. The user made a request and the system just carried it out. Reply in ONE brief friendly sentence confirming what happened. Be specific about which device or scene was affected if you know it. Never output JSON.".to_string();
-    let target = args
-        .get("target")
-        .and_then(|v| v.as_str())
-        .unwrap_or("the device");
-    let prompt = format!(
-        "User said: \"{original_text}\"\nTool '{tool_name}' ran on '{target}': {tool_result}\nConfirm in one sentence."
-    );
+    let what_ran = records
+        .iter()
+        .map(|(tool, args, result)| {
+            let target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("the device");
+            format!("Tool '{tool}' ran on '{target}': {result}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!("User said: \"{original_text}\"\n{what_ran}\nConfirm in one sentence.");
     let req = InferenceRequest {
         request_id: infer_req_id.clone(),
         node_id: None,
@@ -543,7 +560,7 @@ async fn do_confirmation_pass(
         Ok(Ok(MeshMessage::ModelInferenceResult(res))) if res.error.is_none() => {
             let text = strip_think_blocks(res.output.trim());
             // Drop it if the model produced JSON anyway
-            if try_parse_tool_call(&text).is_some() {
+            if try_parse_tool_calls(&text).is_some() {
                 None
             } else {
                 Some(text)
@@ -556,7 +573,7 @@ async fn do_confirmation_pass(
     }
 }
 
-pub fn try_parse_tool_call(output: &str) -> Option<serde_json::Value> {
+pub fn try_parse_tool_calls(output: &str) -> Option<Vec<serde_json::Value>> {
     let stripped = output
         .trim_start_matches("```json")
         .trim_start_matches("```")
@@ -567,8 +584,15 @@ pub fn try_parse_tool_call(output: &str) -> Option<serde_json::Value> {
         .or_else(|_| serde_json::from_str::<serde_json::Value>(&format!("{stripped}}}")));
 
     let v = parsed.ok()?;
-    if v.get("tool").is_some() && v.get("args").is_some() {
-        Some(v)
+    if let Some(arr) = v.as_array() {
+        let calls: Vec<_> = arr
+            .iter()
+            .filter(|el| el.get("tool").is_some() && el["args"].is_object())
+            .cloned()
+            .collect();
+        if calls.is_empty() { None } else { Some(calls) }
+    } else if v.get("tool").is_some() && v["args"].is_object() {
+        Some(vec![v])
     } else {
         None
     }
@@ -697,8 +721,11 @@ pub fn build_system_prompt(
     format!(
         r#"You are a helpful smart home assistant embedded in ai-mesh. You have direct control of and live state for all listed devices.
 
-To control a device, reply with ONLY this JSON (no extra text):
+To control one device, reply with ONLY this JSON (no extra text):
 {{"tool": "<name>", "args": {{ ... }}}}
+
+To control multiple devices in one request, reply with ONLY a JSON array (no extra text):
+[{{"tool": "<name>", "args": {{ ... }}}}, {{"tool": "<name>", "args": {{ ... }}}}]
 
 Available tools:
 {schema_json}{device_section}{scene_section}
@@ -707,10 +734,11 @@ Rules:
 - The "target" field must be an exact device or group name from the known list above. Never invent a target name.
 - When the user names a room (e.g. "kitchen lights", "the bedroom"), find devices tagged [RoomName] above. If no group for that room exists, pick the first online device in that room.
 - If the user says "one of", "just one", or "a single", always pick the FIRST online device listed for that room.
-- If the user says "all" or "everything", use a group if one exists; otherwise target devices individually (one command at a time for now).
+- If the user says "all" or "everything", use a group if one exists; otherwise emit one array element per online device in that room.
+- For compound requests (e.g. "dim warm light"), emit one array element per command — brightness and colour/temperature are separate tool calls.
 - Never issue a command to a device shown as [OFFLINE — not responding].
 - For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists above. Count devices sharing a [RoomName] tag to answer "how many". do NOT output JSON for these questions.
-- Only output the JSON object above when the user is explicitly asking you to CHANGE or CONTROL something."#
+- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something."#
     )
 }
 
@@ -756,44 +784,64 @@ mod tests {
     }
 
     #[test]
-    fn try_parse_tool_call_valid_json() {
+    fn try_parse_tool_calls_valid_json() {
         let raw = r#"{"tool":"light_command","args":{"target":"living_room","action":"on"}}"#;
-        let result = try_parse_tool_call(raw).unwrap();
-        assert_eq!(result["tool"], "light_command");
-        assert_eq!(result["args"]["action"], "on");
+        let result = try_parse_tool_calls(raw).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["tool"], "light_command");
+        assert_eq!(result[0]["args"]["action"], "on");
     }
 
     #[test]
-    fn try_parse_tool_call_free_text_returns_none() {
+    fn try_parse_tool_calls_free_text_returns_none() {
         let raw = "The capital of France is Paris.";
-        assert!(try_parse_tool_call(raw).is_none());
+        assert!(try_parse_tool_calls(raw).is_none());
     }
 
     #[test]
-    fn try_parse_tool_call_strips_code_fence() {
+    fn try_parse_tool_calls_strips_code_fence() {
         let raw = "```json\n{\"tool\":\"scene_load\",\"args\":{\"scene\":\"cozy\"}}\n```";
-        let result = try_parse_tool_call(raw).unwrap();
-        assert_eq!(result["tool"], "scene_load");
+        let result = try_parse_tool_calls(raw).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["tool"], "scene_load");
     }
 
     #[test]
-    fn try_parse_tool_call_missing_args_returns_none() {
+    fn try_parse_tool_calls_missing_args_returns_none() {
         let raw = r#"{"tool":"light_command"}"#;
-        assert!(try_parse_tool_call(raw).is_none());
+        assert!(try_parse_tool_calls(raw).is_none());
     }
 
     #[test]
-    fn try_parse_tool_call_truncated_json_repaired() {
+    fn try_parse_tool_calls_truncated_json_repaired() {
         let raw = r#"{"tool":"light_command","args":{"target":"test_bulb","action":"off"}"#;
-        let result = try_parse_tool_call(raw).unwrap();
-        assert_eq!(result["tool"], "light_command");
-        assert_eq!(result["args"]["action"], "off");
+        let result = try_parse_tool_calls(raw).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["tool"], "light_command");
+        assert_eq!(result[0]["args"]["action"], "off");
     }
 
     #[test]
-    fn try_parse_tool_call_json_without_tool_field_returns_none() {
+    fn try_parse_tool_calls_json_without_tool_field_returns_none() {
         let raw = r#"{"action":"on","target":"living_room"}"#;
-        assert!(try_parse_tool_call(raw).is_none());
+        assert!(try_parse_tool_calls(raw).is_none());
+    }
+
+    #[test]
+    fn try_parse_tool_calls_array_form() {
+        let raw = r#"[{"tool":"light_command","args":{"target":"kitchen","action":"brightness","value":30}},{"tool":"light_command","args":{"target":"kitchen","action":"color","color_name":"warm"}}]"#;
+        let result = try_parse_tool_calls(raw).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["args"]["action"], "brightness");
+        assert_eq!(result[1]["args"]["action"], "color");
+    }
+
+    #[test]
+    fn try_parse_tool_calls_array_with_invalid_element_skipped() {
+        let raw = r#"[{"tool":"light_command","args":{"target":"kitchen","action":"on"}},{"not_a_tool":"x"}]"#;
+        let result = try_parse_tool_calls(raw).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["tool"], "light_command");
     }
 
     #[test]
@@ -948,7 +996,7 @@ mod tests {
     fn build_system_prompt_forbids_special_tags() {
         let schemas = tool_schemas_for_feature("lighting");
         let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
-        assert!(p.contains("Only output the JSON object"));
+        assert!(p.contains("Only output JSON"));
         assert!(p.contains("do NOT output JSON"));
     }
 

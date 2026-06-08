@@ -12,8 +12,12 @@ pub struct GpuSample {
 #[cfg(not(target_os = "windows"))]
 pub fn read_gpu_sample() -> Option<GpuSample> {
     let usage = read_sysfs_u64("/sys/class/drm/card0/device/gpu_busy_percent")?;
-    let used = read_sysfs_u64("/sys/class/drm/card0/device/mem_info_vram_used")?;
-    let total = read_sysfs_u64("/sys/class/drm/card0/device/mem_info_vram_total")?;
+    let used = read_sysfs_u64("/sys/class/drm/card0/device/mem_info_vis_vram_used")
+        .or_else(|| read_sysfs_u64("/sys/class/drm/card0/device/mem_info_vram_used"))?;
+    // vis_vram_total = dedicated/visible VRAM only; on AMD APUs (780M etc.) this
+    // is the BIOS-configured allocation rather than the full GTT pool.
+    let total = read_sysfs_u64("/sys/class/drm/card0/device/mem_info_vis_vram_total")
+        .or_else(|| read_sysfs_u64("/sys/class/drm/card0/device/mem_info_vram_total"))?;
     if total == 0 {
         return None;
     }
