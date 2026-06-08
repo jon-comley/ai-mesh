@@ -52,11 +52,13 @@ async function send() {
 
   const token = localStorage.getItem('meshToken') ?? '';
   try {
+    const t0 = Date.now();
     const res = await fetch(`/api/chat?token=${encodeURIComponent(token)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, context: conversationContext }),
     });
+    const totalMs = Date.now() - t0;
 
     thinking.remove();
 
@@ -69,10 +71,10 @@ async function send() {
       } else if (data.tool_calls && data.tool_calls.length > 0) {
         for (const tc of data.tool_calls) {
           const result = tc.result ?? '';
-          appendToolMsg(tc.tool, result, data.node_id, data.model_name);
+          appendToolMsg(tc.tool, result, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs);
         }
         if (data.text) {
-          appendMsg('assistant', data.text, data.node_id, data.model_name);
+          appendMsg('assistant', data.text, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs);
         }
         const assistantContent = data.text ||
           data.tool_calls.map(tc => `${tc.tool}: ${tc.result ?? ''}`).join('; ');
@@ -80,7 +82,7 @@ async function send() {
         conversationContext.push({ role: 'Assistant', content: assistantContent });
       } else {
         const reply = data.text ?? '';
-        appendMsg('assistant', reply, data.node_id, data.model_name);
+        appendMsg('assistant', reply, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs);
         conversationContext.push({ role: 'User', content: text });
         conversationContext.push({ role: 'Assistant', content: reply });
       }
@@ -116,7 +118,7 @@ function newContext() {
   thread.scrollTop = thread.scrollHeight;
 }
 
-function appendMsg(role, text, nodeId, modelName) {
+function appendMsg(role, text, nodeId, modelName, durationMs, tokensGenerated, totalMs) {
   const div = document.createElement('div');
   div.className = `chat-msg chat-${role}`;
   const bubble = document.createElement('div');
@@ -126,7 +128,7 @@ function appendMsg(role, text, nodeId, modelName) {
   if (nodeId && role === 'assistant') {
     const meta = document.createElement('div');
     meta.className = 'chat-meta';
-    meta.textContent = metaLine(nodeId, modelName);
+    meta.textContent = metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs);
     div.appendChild(meta);
   }
   thread.appendChild(div);
@@ -134,7 +136,7 @@ function appendMsg(role, text, nodeId, modelName) {
   return div;
 }
 
-function appendToolMsg(tool, result, nodeId, modelName) {
+function appendToolMsg(tool, result, nodeId, modelName, durationMs, tokensGenerated, totalMs) {
   const div = document.createElement('div');
   div.className = 'chat-msg chat-assistant';
   const bubble = document.createElement('div');
@@ -144,7 +146,7 @@ function appendToolMsg(tool, result, nodeId, modelName) {
   if (nodeId) {
     const meta = document.createElement('div');
     meta.className = 'chat-meta';
-    meta.textContent = metaLine(nodeId, modelName);
+    meta.textContent = metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs);
     div.appendChild(meta);
   }
   thread.appendChild(div);
@@ -152,9 +154,16 @@ function appendToolMsg(tool, result, nodeId, modelName) {
   return div;
 }
 
-function metaLine(nodeId, modelName) {
+function metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs) {
   const host = getHostname(nodeId);
-  return modelName ? `${host} · ${modelName}` : host;
+  let line = modelName ? `${host} · ${modelName}` : host;
+  if (totalMs > 0) {
+    const total = (totalMs / 1000).toFixed(1);
+    const infer = durationMs > 0 ? `${(durationMs / 1000).toFixed(1)}s` : '—';
+    const tps   = tokensGenerated > 0 ? ` · ${(tokensGenerated / (durationMs / 1000)).toFixed(1)} tok/s` : '';
+    line += ` · ${total}s (${infer} inference)${tps}`;
+  }
+  return line;
 }
 
 function appendThinking() {

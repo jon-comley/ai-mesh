@@ -229,6 +229,10 @@ pub struct IntentResponse {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCallRecord>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub tokens_generated: u32,
 }
 
 // ── MeshMessage ───────────────────────────────────────────────────────────────
@@ -815,6 +819,8 @@ mod tests {
                 result: Some("ok".into()),
             }],
             error: None,
+            duration_ms: 1234,
+            tokens_generated: 10,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
@@ -829,6 +835,8 @@ mod tests {
             text: Some("TCP keepalive is a mechanism that...".into()),
             tool_calls: vec![],
             error: None,
+            duration_ms: 800,
+            tokens_generated: 42,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);

@@ -145,18 +145,18 @@ function loadFooter(node) {
   const loaded  = new Set(node.models.map(m => m.name));
   const sample  = getLatestSample(node.node_id);
 
-  // Use FREE memory (total minus already-in-use) so nodes running many services
-  // (coordinator, MQTT, Zigbee) only show models that actually fit.
-  // Fall back to total RAM spec when no live sample is available yet.
   const freeRamGb  = sample
     ? Math.max(0, (sample.ram_total_gb ?? 0) - (sample.ram_used_gb ?? 0))
     : (node.ram_gb ?? 0);
-  const freeVramGb = sample
-    ? Math.max(0, (sample.gpu_vram_total_gb ?? 0) - (sample.gpu_vram_used_gb ?? 0))
+  const totalVramGb = sample?.gpu_vram_total_gb ?? 0;
+  const freeVramGb  = sample
+    ? Math.max(0, totalVramGb - (sample.gpu_vram_used_gb ?? 0))
     : 0;
-  const ramLimitMb = (freeRamGb + freeVramGb) > 0
-    ? (freeRamGb + freeVramGb) * 1024
-    : Infinity;
+  // GPU nodes: only show models that fit in free VRAM — loading into RAM on a
+  // GPU node runs on CPU and defeats the purpose. CPU-only nodes: use free RAM.
+  const memLimitMb = totalVramGb > 0
+    ? freeVramGb * 1024
+    : freeRamGb > 0 ? freeRamGb * 1024 : Infinity;
 
   // Also filter by available disk space — need 2× the model size for the
   // in-progress .tmp file plus the final .gguf.
@@ -166,7 +166,7 @@ function loadFooter(node) {
 
   const available = KNOWN_MODELS.filter(m =>
     !loaded.has(m.name) &&
-    m.size_mb <= ramLimitMb &&
+    m.size_mb <= memLimitMb &&
     m.size_mb * 2 <= diskFreeMb
   );
   if (available.length === 0) return '';

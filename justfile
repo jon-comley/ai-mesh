@@ -691,10 +691,9 @@ set-fingerprint node:
                 'MESH_TLS_FINGERPRINT=${FP}' \
                 'MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}' | Out-Null;\
             taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
-            \$svcpid = (Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
-            if (\$svcpid -gt 0) { Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue };\
-            Start-Sleep -Milliseconds 800;\
-            Start-Service ai-mesh-agent -ErrorAction SilentlyContinue;\
+            sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
+            \$w = 0; while ((Get-Service ai-mesh-agent -ErrorAction SilentlyContinue).Status -ne 'Stopped' -and \$w -lt 20) { Start-Sleep -Milliseconds 500; \$w++ };\
+            sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
             exit 0\
         \""
         ;;
@@ -1093,21 +1092,28 @@ auto-load-model node:
       linux)
         HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} '
             mem=0; gpu=0
-            for f in /sys/class/drm/card*/device/mem_info_vram_total; do
-                [ -f "$f" ] || continue
-                v=$(( $(cat "$f") / 1048576 ))
-                [ "$v" -gt "$mem" ] && mem="$v" && gpu=1
+            for base in /sys/class/drm/card*/device; do
+                [ -f "$base/mem_info_vram_total" ] || continue
+                tf="$base/mem_info_vis_vram_total"
+                [ -f "$tf" ] || tf="$base/mem_info_vram_total"
+                total=$(( $(cat "$tf") / 1048576 ))
+                [ "$total" -eq 0 ] && continue
+                uf="$base/mem_info_vis_vram_used"
+                [ -f "$uf" ] || uf="$base/mem_info_vram_used"
+                used=0; [ -f "$uf" ] && used=$(( $(cat "$uf") / 1048576 ))
+                free=$(( total - used ))
+                [ "$free" -gt "$mem" ] && mem="$free" && gpu=1
             done
             if [ "$gpu" -eq 0 ] && command -v nvidia-smi &>/dev/null; then
-                v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d " ")
+                v=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d " ")
                 [ -n "$v" ] && [ "$v" -gt 0 ] && mem="$v" && gpu=1
             fi
-            [ "$gpu" -eq 0 ] && mem=$(awk "/MemTotal/{print int(\$2/1024)}" /proc/meminfo)
+            [ "$gpu" -eq 0 ] && mem=$(awk "/MemAvailable/{print int(\$2/1024); exit}" /proc/meminfo)
             echo "${mem}:${gpu}"
         ')
         ;;
       windows)
-        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$vram=8192}else{$vram=[int]($g.AdapterRAM/1MB)};$gpu=1;$m=if($sysRam -gt $vram){$sysRam}else{$vram}};if($m -eq 0){$m=$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
+        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){$raw=$g.AdapterRAM/1MB;$vram=[int]([Math]::Ceiling($raw/512)*512);$gpu=1;$m=$vram};if($m -eq 0){$m=$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
         ;;
       *)
         echo "Unknown NODE_OS: $NODE_OS"; exit 1 ;;
@@ -1140,7 +1146,11 @@ auto-load-model node:
         "gemma3:4b:2374"     "llama3.2:3b:1926"    "qwen2.5:1.5b:986"
         "llama3.2:1b:770"    "qwen2.5:0.5b:500"
     )
-    THRESHOLD=$(( HW_MB * 80 / 100 ))
+    if [ "$HW_GPU" = "1" ]; then
+        THRESHOLD=$HW_MB
+    else
+        THRESHOLD=$(( HW_MB * 90 / 100 ))
+    fi
     MODEL=""
     for entry in "${CANDIDATE_MODELS[@]}"; do
         m="${entry%:*}"; s="${entry##*:}"
@@ -1149,7 +1159,7 @@ auto-load-model node:
         fi
     done
     if [ -z "$MODEL" ]; then
-        echo ">>> {{node}}: RAM=${HW_MB}MB disk_free=${DISK_FREE_MB}MB — no model fits both constraints"
+        echo ">>> {{node}}: free_mem=${HW_MB}MB disk_free=${DISK_FREE_MB}MB — no model fits both constraints"
         exit 1
     fi
     echo ">>> {{node}}: detected ${HW_MB} MB ($([ "$HW_GPU" = "1" ] && echo GPU || echo CPU), threshold ${THRESHOLD} MB) → selecting ${MODEL}"
@@ -1288,25 +1298,37 @@ load-models-retry:
     if [ ${#COMPUTE_NODES[@]} -eq 0 ]; then echo ">>> No compute nodes configured."; exit 0; fi
 
     for attempt in 1 2 3; do
-        # Match each node's IP against the live node table; a row with "Ready" is done.
+        # Classify each compute node: Ready (done), Loading (wait only), or absent (trigger load).
         NODES_OUT=$(cargo run -q -p cli -- --coordinator "${COORD}" nodes 2>/dev/null || true)
-        PENDING=()
+        NEEDS_LOAD=()
+        WAIT_IPS=()
         for entry in "${COMPUTE_NODES[@]}"; do
-            echo "${NODES_OUT}" | grep "${entry##*:}" | grep -q "Ready" || PENDING+=("${entry}")
+            ip="${entry##*:}"
+            line=$(echo "${NODES_OUT}" | grep "${ip}" || true)
+            if echo "${line}" | grep -q "Ready"; then
+                : # already done
+            elif echo "${line}" | grep -q "Loading"; then
+                WAIT_IPS+=("${ip}")  # in-flight — just wait, don't re-trigger
+            else
+                NEEDS_LOAD+=("${entry}")
+                WAIT_IPS+=("${ip}")
+            fi
         done
-        if [ ${#PENDING[@]} -eq 0 ]; then echo ">>> All compute models Ready."; exit 0; fi
+        if [ ${#WAIT_IPS[@]} -eq 0 ]; then echo ">>> All compute models Ready."; exit 0; fi
 
-        echo ">>> Load attempt ${attempt}/3 — loading on: ${PENDING[*]%%:*}"
-        for entry in "${PENDING[@]}"; do
-            just auto-load-model "${entry%%:*}" \
-                || echo ">>> Warning: could not load model on ${entry%%:*} (will retry)"
-        done
+        if [ ${#NEEDS_LOAD[@]} -gt 0 ]; then
+            echo ">>> Load attempt ${attempt}/3 — triggering: ${NEEDS_LOAD[*]%%:*}"
+            for entry in "${NEEDS_LOAD[@]}"; do
+                just auto-load-model "${entry%%:*}" \
+                    || echo ">>> Warning: could not load model on ${entry%%:*} (will retry)"
+            done
+        else
+            echo ">>> Load attempt ${attempt}/3 — already loading, waiting: ${WAIT_IPS[*]}"
+        fi
 
-        PENDING_IPS=()
-        for entry in "${PENDING[@]}"; do PENDING_IPS+=("${entry##*:}"); done
         if [ "${attempt}" -eq 1 ]; then WAIT_TIMEOUT=300; else WAIT_TIMEOUT=120; fi
         cargo run -q -p cli -- --coordinator "${COORD}" \
-            wait-ready "${PENDING_IPS[@]}" --timeout "${WAIT_TIMEOUT}" \
+            wait-ready "${WAIT_IPS[@]}" --timeout "${WAIT_TIMEOUT}" \
             || echo ">>> Attempt ${attempt}: some models not Ready yet"
     done
 
@@ -1552,6 +1574,9 @@ restart-coordinator: update-portproxy
     # remotely, so it showed offline/red in the Nodes view.
     AGENT_ROLE=controller COORDINATOR_IP={{coordinator_ip}} cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
 
+    # Wait for coordinator to finish clearing stale model state from the
+    # agent restarts above before load-models-retry checks node status.
+    sleep 5
     echo ">>> Reloading hardware-selected models on compute nodes..."
     just load-models-retry
 
