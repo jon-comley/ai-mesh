@@ -180,7 +180,17 @@ pub async fn handle_intent(
     // 6. Parse as tool call or return as free text
     if let Some(call) = try_parse_tool_call(&raw) {
         let tool_name = call["tool"].as_str().unwrap_or("").to_string();
-        let args = call["args"].clone();
+        let mut args = call["args"].clone();
+
+        // If the model emitted action=color but forgot color_name/cx/cy,
+        // extract the colour from the user's original text as a fallback.
+        if args.get("action").and_then(|v| v.as_str()) == Some("color")
+            && args.get("cx").is_none()
+            && args.get("color_name").is_none()
+            && let Some(color) = extract_color_from_text(&request.text)
+        {
+            args["color_name"] = serde_json::Value::String(color.to_string());
+        }
 
         let tool_result = dispatch_tool(
             &request.request_id,
@@ -232,7 +242,7 @@ pub async fn handle_intent(
 async fn dispatch_tool(
     request_id: &str,
     tool_name: &str,
-    args: serde_json::Value,
+    mut args: serde_json::Value,
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
     pending_intents: &PendingIntents,
@@ -261,7 +271,8 @@ async fn dispatch_tool(
 
     match tool_name {
         "light_command" => {
-            // Validate target against known devices/groups (if any are registered).
+            // Validate target; if it names a room instead of a device, resolve to
+            // the first device in that room so the command still goes through.
             if let Some(target) = args
                 .get("target")
                 .and_then(|v| v.as_str())
@@ -274,11 +285,26 @@ async fn dispatch_tool(
                     .map(String::as_str)
                     .collect();
                 if !known.is_empty() && !known.contains(&target) {
-                    return format!(
-                        "unknown target '{}' — known targets: {}",
-                        target,
-                        known.join(", ")
-                    );
+                    // Not a device/group — try matching against a room name.
+                    let resolved = registry
+                        .lock()
+                        .unwrap()
+                        .list_rooms()
+                        .into_iter()
+                        .find(|r| r.name.eq_ignore_ascii_case(target))
+                        .and_then(|r| r.device_ids.into_iter().next());
+                    match resolved {
+                        Some(device_id) => {
+                            args["target"] = serde_json::Value::String(device_id);
+                        }
+                        None => {
+                            return format!(
+                                "unknown target '{}' — known targets: {}",
+                                target,
+                                known.join(", ")
+                            );
+                        }
+                    }
                 }
             }
             let Some(cmds) = build_light_command(request_id, &args) else {
@@ -339,6 +365,31 @@ async fn dispatch_tool(
         }
         other => format!("unknown tool: {other}"),
     }
+}
+
+fn extract_color_from_text(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    // Multi-word colours checked before single words to avoid false matches.
+    let colors: &[&str] = &[
+        "sky blue",
+        "light blue",
+        "light green",
+        "red",
+        "orange",
+        "yellow",
+        "green",
+        "cyan",
+        "teal",
+        "blue",
+        "violet",
+        "purple",
+        "indigo",
+        "pink",
+        "magenta",
+        "white",
+        "lime",
+    ];
+    colors.iter().copied().find(|c| lower.contains(c))
 }
 
 fn named_color_to_xy(name: &str) -> Option<(f32, f32)> {
@@ -547,7 +598,7 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         },
                         "color_name": {
                             "type": "string",
-                            "description": "Named colour for action=color. Supported: red, orange, yellow, green, cyan, teal, blue, violet, purple, pink, magenta, white, sky blue, light blue, light green. Prefer this over cx+cy."
+                            "description": "Named colour for action=color. Supported: red, orange, yellow, green, cyan, teal, blue, violet, purple, indigo, pink, magenta, white, lime, sky blue, light blue, light green. Prefer this over cx+cy."
                         },
                         "cx": {
                             "type": "number",
@@ -970,6 +1021,69 @@ mod tests {
         assert!(
             p.contains("78%"),
             "brightness should be rendered as percent"
+        );
+    }
+
+    #[test]
+    fn extract_color_basic() {
+        assert_eq!(extract_color_from_text("set it to blue"), Some("blue"));
+        assert_eq!(extract_color_from_text("make it red please"), Some("red"));
+        assert_eq!(extract_color_from_text("turn it on"), None);
+    }
+
+    #[test]
+    fn extract_color_case_insensitive() {
+        assert_eq!(extract_color_from_text("colour BLUE"), Some("blue"));
+        assert_eq!(extract_color_from_text("Set to RED"), Some("red"));
+    }
+
+    #[test]
+    fn extract_color_multi_word_beats_single() {
+        // Multi-word colours must be checked before single words to avoid
+        // "sky blue" matching as just "blue".
+        assert_eq!(extract_color_from_text("sky blue please"), Some("sky blue"));
+        assert_eq!(
+            extract_color_from_text("set it to light blue"),
+            Some("light blue")
+        );
+        assert_eq!(
+            extract_color_from_text("light green colour"),
+            Some("light green")
+        );
+    }
+
+    #[test]
+    fn build_light_command_color_name_blue() {
+        let args =
+            serde_json::json!({"target": "test_bulb", "action": "color", "color_name": "blue"});
+        let cmd = build_light_command("r20", &args).unwrap().remove(0);
+        assert!(
+            matches!(cmd.command, LightAction::ColorXY { x, y } if (x - 0.167).abs() < 1e-3 && (y - 0.040).abs() < 1e-3)
+        );
+    }
+
+    #[test]
+    fn build_light_command_color_name_case_insensitive() {
+        let args =
+            serde_json::json!({"target": "test_bulb", "action": "color", "color_name": "Red"});
+        let cmd = build_light_command("r21", &args).unwrap().remove(0);
+        assert!(
+            matches!(cmd.command, LightAction::ColorXY { x, y: _ } if (x - 0.675).abs() < 1e-3)
+        );
+    }
+
+    #[test]
+    fn build_light_command_color_name_unknown_returns_none() {
+        let args = serde_json::json!({"target": "test_bulb", "action": "color", "color_name": "chartreuse"});
+        assert!(build_light_command("r22", &args).is_none());
+    }
+
+    #[test]
+    fn build_light_command_cx_cy_takes_precedence_over_color_name() {
+        let args = serde_json::json!({"target": "test_bulb", "action": "color", "cx": 0.5, "cy": 0.4, "color_name": "blue"});
+        let cmd = build_light_command("r23", &args).unwrap().remove(0);
+        assert!(
+            matches!(cmd.command, LightAction::ColorXY { x, y } if (x - 0.5).abs() < 1e-3 && (y - 0.4).abs() < 1e-3)
         );
     }
 }
