@@ -103,11 +103,13 @@ Environment=LLAMA_MODEL_DIR=/home/${AGENT_USER}/.ai-mesh/models
 Environment=LLAMA_SERVER_BIN=/opt/llama.cpp/llama-server
 Environment=LD_LIBRARY_PATH=/opt/llama.cpp
 Environment=LLAMA_GPU_LAYERS=0
+Environment=LLAMA_CTX_SIZE=4096
 Environment=DEFAULT_MODEL=${DEFAULT_MODEL}
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_HOST=${MQTT_HOST}" || true)
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_PORT=${MQTT_PORT}" || true)
 Restart=always
 RestartSec=5
+TimeoutStopSec=15
 User=${AGENT_USER}
 StandardOutput=journal
 StandardError=journal

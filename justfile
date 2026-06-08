@@ -359,7 +359,7 @@ deploy-node node:
             AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
         fi
 
-        ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent 2>/dev/null || true"
+        ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
         scp_dots ">>> Uploading agent binary" \
             scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
         scp_dots ">>> Uploading install script" \
@@ -374,7 +374,7 @@ deploy-node node:
 
         WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
         echo ">>> Creating ${WIN_PATH} on ${NODE_HOST}..."
-        ssh ${NODE_USER}@${NODE_HOST} \
+        ssh -o ConnectTimeout=15 ${NODE_USER}@${NODE_HOST} \
             "powershell -Command \"if (-not (Test-Path '${WIN_PATH}')) { New-Item -ItemType Directory -Path '${WIN_PATH}' | Out-Null }\""
 
         scp_dots ">>> Uploading agent.exe" \
@@ -393,12 +393,10 @@ deploy-node node:
 
         scp_dots ">>> Stopping service and swapping binary" \
             ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
+                taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
+                taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
                 sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-                Start-Sleep 2;\
-                \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
-                foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
-                Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
-                Start-Sleep 2;\
+                Start-Sleep 1;\
                 cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
             \""
         echo ">>> Running provisioning script (this takes a minute — installing NSSM, llama.cpp, registering service)..."
@@ -468,7 +466,7 @@ provision-all:
 
             echo ">>> Stopping agent service..."
             ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "
-                sudo systemctl stop ai-mesh-agent 2>/dev/null || true
+                timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true
             " || true
 
             scp_dots ">>> Uploading agent binary" \
@@ -487,11 +485,9 @@ provision-all:
 
             echo ">>> Stopping agent service..."
             ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+                taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
+                taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
                 sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-                Start-Sleep 2;\
-                \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
-                foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
-                Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
                 exit 0\
             \"" || true
 
@@ -527,16 +523,14 @@ restart-node node:
     source nodes/{{node}}.env
     case "$NODE_OS" in
       linux)
-        ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl restart ai-mesh-agent"
+        ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true; sudo systemctl start ai-mesh-agent"
         ;;
       windows)
         ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
+            taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
             sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-            Start-Sleep 2;\
-            \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
-            foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
-            Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
-            Start-Sleep 2;\
+            Start-Sleep 1;\
             sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
             exit 0\""
         ;;
@@ -590,7 +584,7 @@ update-node node:
             AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
         fi
         echo ">>> Uploading updated agent to ${NODE_HOST}..."
-        ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent"
+        ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
         scp -q -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
             ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
         ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
@@ -624,12 +618,10 @@ update-node node:
             exit 1
         fi
         ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
+            taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
             sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-            Start-Sleep 2;\
-            \$pids = (Get-WmiObject Win32_Process -Filter 'name=''nssm.exe''').ProcessId;\
-            foreach (\$p in \$pids) { taskkill /F /PID \$p 2>&1 | Out-Null };\
-            Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
-            Start-Sleep 2;\
+            Start-Sleep 1;\
             cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
             sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
             exit 0\
@@ -671,28 +663,25 @@ set-fingerprint node:
             printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}\n' \
                 | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
             sudo systemctl daemon-reload
-            sudo systemctl restart ai-mesh-agent
+            timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true
+            sudo systemctl start ai-mesh-agent
         "
         ;;
       windows)
-        DEFAULT_MODEL="${DEFAULT_MODEL:-qwen2.5:7b}"
         ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
-            \$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source;\
-            if (-not \$nssm) { \$nssm = 'C:\\Users\\${NODE_USER}\\ai-mesh\\bin\\nssm.exe' };\
-            if (-not (Test-Path \$nssm)) { throw 'nssm.exe not found' };\
-            & \$nssm set ai-mesh-agent AppEnvironmentExtra \
-                'COORDINATOR_IP={{coordinator_ip}}' \
-                'AGENT_ROLE=${NODE_ROLE}' \
-                ('LLAMA_MODEL_DIR=' + \$env:USERPROFILE + '\\.ai-mesh\\models') \
-                ('LLAMA_SERVER_BIN=' + \$env:LOCALAPPDATA + '\\Programs\\llama.cpp\\llama-server.exe') \
-                'LLAMA_GPU_LAYERS=99' \
-                'LLAMA_FLASH_ATTN=1' \
-                'DEFAULT_MODEL=${DEFAULT_MODEL}' \
-                'MESH_TLS_FINGERPRINT=${FP}' \
-                'MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}' | Out-Null;\
+            \$rp = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\ai-mesh-agent\\Parameters';\
+            \$raw = (Get-ItemProperty -Path \$rp -Name AppEnvironmentExtra -ErrorAction SilentlyContinue).AppEnvironmentExtra;\
+            \$envMap = @{};\
+            if (\$raw) { \$raw | ForEach-Object { if (\$_ -match '^([^=]+)=(.*)$') { \$envMap[\$Matches[1]] = \$Matches[2] } } };\
+            \$envMap['MESH_TLS_FINGERPRINT'] = '${FP}';\
+            \$envMap['MESH_AUTH_TOKEN'] = '${MESH_AUTH_TOKEN}';\
+            \$pairs = @(\$envMap.GetEnumerator() | ForEach-Object { '{0}={1}' -f \$_.Key, \$_.Value });\
+            Set-ItemProperty -Path \$rp -Name AppEnvironmentExtra -Value \$pairs -Type MultiString;\
             taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
-            sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-            \$w = 0; while ((Get-Service ai-mesh-agent -ErrorAction SilentlyContinue).Status -ne 'Stopped' -and \$w -lt 20) { Start-Sleep -Milliseconds 500; \$w++ };\
+            taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
+            \$svcpid=(Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
+            if(\$svcpid -gt 0){Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue};\
+            Start-Sleep -Milliseconds 800;\
             sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
             exit 0\
         \""
@@ -745,26 +734,20 @@ set-auth-token token:
             "
             ;;
           windows)
-            DEFAULT_MODEL="${DEFAULT_MODEL:-qwen2.5:7b}"
             ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
-                \$nssm = Get-Command nssm.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source;\
-                if (-not \$nssm) { \$nssm = 'C:\\Users\\${NODE_USER}\\ai-mesh\\bin\\nssm.exe' };\
-                if (-not (Test-Path \$nssm)) { throw 'nssm.exe not found' };\
-                & \$nssm set ai-mesh-agent AppEnvironmentExtra \
-                    'COORDINATOR_IP={{coordinator_ip}}' \
-                    'AGENT_ROLE=${NODE_ROLE}' \
-                    ('LLAMA_MODEL_DIR=' + \$env:USERPROFILE + '\\.ai-mesh\\models') \
-                    ('LLAMA_SERVER_BIN=' + \$env:LOCALAPPDATA + '\\Programs\\llama.cpp\\llama-server.exe') \
-                    'LLAMA_GPU_LAYERS=99' \
-                    'LLAMA_FLASH_ATTN=1' \
-                    'DEFAULT_MODEL=${DEFAULT_MODEL}' \
-                    'MESH_TLS_FINGERPRINT=${FP}' \
-                    'MESH_AUTH_TOKEN=${TOKEN}';\
+                \$rp = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\ai-mesh-agent\\Parameters';\
+                \$raw = (Get-ItemProperty -Path \$rp -Name AppEnvironmentExtra -ErrorAction SilentlyContinue).AppEnvironmentExtra;\
+                \$envMap = @{};\
+                if (\$raw) { \$raw | ForEach-Object { if (\$_ -match '^([^=]+)=(.*)$') { \$envMap[\$Matches[1]] = \$Matches[2] } } };\
+                \$envMap['MESH_AUTH_TOKEN'] = '${TOKEN}';\
+                \$pairs = @(\$envMap.GetEnumerator() | ForEach-Object { '{0}={1}' -f \$_.Key, \$_.Value });\
+                Set-ItemProperty -Path \$rp -Name AppEnvironmentExtra -Value \$pairs -Type MultiString;\
                 taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
+                taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
                 \$svcpid = (Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
                 if (\$svcpid -gt 0) { Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue };\
                 Start-Sleep -Milliseconds 800;\
-                Start-Service ai-mesh-agent -ErrorAction SilentlyContinue;\
+                sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
                 exit 0\
             \""
             ;;
@@ -1049,7 +1032,7 @@ load-model node model:
         ' 2>/dev/null || echo "0:0")
         ;;
       windows)
-        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){if($g.AdapterRAM -eq 4294967295){$vram=8192}else{$vram=[int]($g.AdapterRAM/1MB)};$gpu=1;$m=if($sysRam -gt $vram){$sysRam}else{$vram}};if($m -eq 0){$m=$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
+        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
         ;;
       *) HW_INFO="0:0" ;;
     esac
@@ -1113,7 +1096,7 @@ auto-load-model node:
         ')
         ;;
       windows)
-        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);$m=0;$gpu=0;if($g){$raw=$g.AdapterRAM/1MB;$vram=[int]([Math]::Ceiling($raw/512)*512);$gpu=1;$m=$vram};if($m -eq 0){$m=$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
+        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
         ;;
       *)
         echo "Unknown NODE_OS: $NODE_OS"; exit 1 ;;
@@ -1595,7 +1578,7 @@ stop-cluster:
           linux)
             echo ">>> Stopping ${NODE_NAME} (${NODE_HOST})..."
             ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
-                "sudo systemctl stop ai-mesh-agent" 2>/dev/null \
+                "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" 2>/dev/null \
                 || echo ">>> Warning: could not reach ${NODE_NAME} (skipping)"
             ;;
           windows)
@@ -1636,7 +1619,7 @@ dev: update-portproxy
         case "$NODE_OS" in
           linux)
             ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
-                "sudo systemctl stop ai-mesh-agent" 2>/dev/null || true
+                "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" 2>/dev/null || true
             ;;
           windows)
             ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} \
@@ -1727,7 +1710,7 @@ sanity-full: update-portproxy
         for f in nodes/*.env; do
             source "$f"
             [ "$NODE_OS" = "linux" ] && \
-                ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent" 2>/dev/null || true
+                ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" 2>/dev/null || true
         done
     }
     trap cleanup EXIT
@@ -1737,7 +1720,7 @@ sanity-full: update-portproxy
         source "$f"
         case "$NODE_OS" in
           linux)
-            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent 2>/dev/null || true" || true
+            ssh -o ConnectTimeout=5 ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" || true
             ;;
           windows)
             WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
@@ -2055,7 +2038,7 @@ test-inference: update-portproxy
             source "$f"
             case "$NODE_OS" in
               linux)
-                ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent" 2>/dev/null || true
+                ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" 2>/dev/null || true
                 ;;
               windows)
                 ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
@@ -2076,7 +2059,7 @@ test-inference: update-portproxy
         source "$f"
         case "$NODE_OS" in
           linux)
-            ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-agent 2>/dev/null || true" || true
+            ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" || true
             ;;
           windows)
             ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\

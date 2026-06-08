@@ -448,7 +448,7 @@ function Ensure-AgentService {
         "LLAMA_MODEL_DIR=$env:USERPROFILE\.ai-mesh\models" `
         "LLAMA_SERVER_BIN=$(Join-Path $llamaInstallDir 'llama-server.exe')" `
         "LLAMA_GPU_LAYERS=99" `
-        "LLAMA_FLASH_ATTN=1" `
+        "LLAMA_CTX_SIZE=4096" `
         "DEFAULT_MODEL=$defaultModel"
     & $nssm set $agentService Start SERVICE_AUTO_START
     & $nssm set $agentService AppStdout $agentLog

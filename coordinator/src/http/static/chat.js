@@ -1,10 +1,11 @@
-import { getHostname } from '/static/models.js';
+import { getHostname, getReadyLlmModel } from '/static/models.js';
 
 let thread = null;
 let input = null;
 let sendBtn = null;
 let busy = false;
 let conversationContext = [];
+let lastModelKey = null;
 
 export function init(panel) {
   panel.innerHTML = `
@@ -41,6 +42,11 @@ export function init(panel) {
 async function send() {
   const text = input.value.trim();
   if (!text || busy) return;
+
+  const currentModelKey = getReadyLlmModel();
+  if (currentModelKey && lastModelKey && currentModelKey !== lastModelKey) {
+    newContext('model changed — new conversation');
+  }
 
   input.value = '';
   busy = true;
@@ -80,11 +86,13 @@ async function send() {
           data.tool_calls.map(tc => `${tc.tool}: ${tc.result ?? ''}`).join('; ');
         conversationContext.push({ role: 'User', content: text });
         conversationContext.push({ role: 'Assistant', content: assistantContent });
+        if (data.node_id && data.model_name) lastModelKey = `${data.node_id}/${data.model_name}`;
       } else {
         const reply = data.text ?? '';
         appendMsg('assistant', reply, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs);
         conversationContext.push({ role: 'User', content: text });
         conversationContext.push({ role: 'Assistant', content: reply });
+        if (data.node_id && data.model_name) lastModelKey = `${data.node_id}/${data.model_name}`;
       }
     }
   } catch (err) {
@@ -108,12 +116,12 @@ function clear() {
   conversationContext = [];
 }
 
-function newContext() {
+function newContext(label = 'new conversation') {
   conversationContext = [];
   if (!thread) return;
   const divider = document.createElement('div');
   divider.className = 'chat-divider';
-  divider.textContent = 'new conversation';
+  divider.textContent = label;
   thread.appendChild(divider);
   thread.scrollTop = thread.scrollHeight;
 }

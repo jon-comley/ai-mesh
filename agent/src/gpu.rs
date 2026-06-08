@@ -38,15 +38,27 @@ fn read_sysfs_u64(path: &str) -> Option<u64> {
 #[cfg(target_os = "windows")]
 pub fn read_gpu_sample() -> Option<GpuSample> {
     // Spawn PowerShell (always present on Windows 10+) to read GPU perf counters.
-    // Two counter paths in one Get-Counter call → one 1-second sample window.
+    // Three counter paths in one Get-Counter call → one 1-second sample window.
     // Acceptable overhead at the default 30-second heartbeat cadence.
+    //
+    // GPU memory selection: take max(Dedicated, Shared).
+    //   Discrete GPU: Dedicated holds the model weights (GBs); Shared is small.
+    //   UMA (AMD 780M etc.): Dedicated is the fixed framebuffer (~100 MB);
+    //     Shared holds Vulkan allocations from the unified memory pool.
+    //   max() picks the right pool for both architectures with no threshold to tune.
     let script = "\
         $ErrorActionPreference='SilentlyContinue';\
         $cs=(Get-Counter @('\\GPU Engine(*)\\Utilization Percentage',\
-             '\\GPU Adapter Memory(*)\\Dedicated Usage')).CounterSamples;\
+             '\\GPU Adapter Memory(*)\\Dedicated Usage',\
+             '\\GPU Adapter Memory(*)\\Shared Usage')).CounterSamples;\
         $u=($cs|Where-Object Path -like '*Engine*'|Measure-Object CookedValue -Maximum).Maximum;\
-        $d=($cs|Where-Object Path -like '*Dedicated*'|Measure-Object CookedValue -Sum).Sum;\
-        $t=(Get-CimInstance Win32_VideoController|Select-Object -First 1).AdapterRAM;\
+        $ded=($cs|Where-Object Path -like '*Dedicated*'|Measure-Object CookedValue -Sum).Sum;\
+        $shr=($cs|Where-Object Path -like '*Shared*'|Measure-Object CookedValue -Sum).Sum;\
+        $d=if($ded -gt $shr){$ded}else{$shr};\
+        $t=(Get-ChildItem 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}' \
+            -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('HardwareInformation.qwMemorySize')}\
+            |Where-Object{$_ -gt 0}|Select-Object -First 1);\
+        if(-not $t){$t=(Get-CimInstance Win32_VideoController|Select-Object -First 1).AdapterRAM};\
         \"$u $d $t\"";
 
     let out = std::process::Command::new("powershell")
@@ -61,7 +73,7 @@ pub fn read_gpu_sample() -> Option<GpuSample> {
     parse_ps_output(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// Parse `"<util_pct> <dedicated_bytes> <total_bytes>"` from the PowerShell script.
+/// Parse `"<util_pct> <used_bytes> <total_bytes>"` from the PowerShell script.
 /// Extracted for unit-testability without spawning a process.
 #[cfg(target_os = "windows")]
 fn parse_ps_output(text: &str) -> Option<GpuSample> {
@@ -74,9 +86,10 @@ fn parse_ps_output(text: &str) -> Option<GpuSample> {
     if vram_total_gb == 0.0 {
         return None;
     }
+    let vram_total_gb = vram_total_gb.clamp(0.0, 1024.0);
     Some(GpuSample {
         usage_pct: usage_pct.clamp(0.0, 100.0),
-        vram_used_gb,
+        vram_used_gb: vram_used_gb.clamp(0.0, vram_total_gb),
         vram_total_gb,
     })
 }
@@ -134,7 +147,7 @@ mod tests {
 
         #[test]
         fn parse_ps_output_valid() {
-            // 5.3% util, 1 GiB used, 2 GiB total
+            // 5.3% util, 1 GiB used (max of dedicated/shared), 2 GiB total
             let s = parse_ps_output("5.3 1073741824 2147483648").unwrap();
             assert!((s.usage_pct - 5.3).abs() < 0.01);
             assert!((s.vram_used_gb - 1.0).abs() < 0.001);
@@ -146,6 +159,24 @@ mod tests {
             // Multiple engines can sum >100%; clamp to 100.
             let s = parse_ps_output("150.0 1073741824 2147483648").unwrap();
             assert_eq!(s.usage_pct, 100.0);
+        }
+
+        #[test]
+        fn parse_ps_output_clamps_negative_used_to_zero() {
+            // Buggy driver may return negative CookedValue bytes; clamp to 0.
+            // Total = 2 GiB (2147483648), used reported as -1 (underflow sentinel).
+            let s = parse_ps_output("10.0 -1073741824 2147483648").unwrap();
+            assert_eq!(s.vram_used_gb, 0.0);
+            assert!((s.vram_total_gb - 2.0).abs() < 0.001);
+        }
+
+        #[test]
+        fn parse_ps_output_clamps_used_to_total() {
+            // used > total should not happen but can with buggy drivers.
+            let total_bytes = 2_147_483_648u64;
+            let used_bytes = 3_221_225_472u64; // 3 GiB > 2 GiB total
+            let s = parse_ps_output(&format!("10.0 {used_bytes} {total_bytes}")).unwrap();
+            assert!((s.vram_used_gb - s.vram_total_gb).abs() < 0.001);
         }
 
         #[test]
