@@ -3275,7 +3275,8 @@ body {
   cursor: default;
 }
 
-.chat-clear {
+.chat-clear,
+.chat-new {
   background: transparent;
   color: var(--text-muted);
   border: 1px solid var(--border, #2a3040);
@@ -3286,7 +3287,26 @@ body {
   font-family: inherit;
 }
 
-.chat-clear:hover {
+.chat-clear:hover,
+.chat-new:hover {
   color: var(--text);
   border-color: var(--text-muted);
+}
+
+.chat-divider {
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin: 0.6rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.chat-divider::before,
+.chat-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border, #2a3040);
 }
