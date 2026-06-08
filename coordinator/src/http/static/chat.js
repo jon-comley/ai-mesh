@@ -4,6 +4,7 @@ let thread = null;
 let input = null;
 let sendBtn = null;
 let busy = false;
+let conversationContext = [];
 
 export function init(panel) {
   panel.innerHTML = `
@@ -13,6 +14,7 @@ export function init(panel) {
         placeholder="Ask anything or control your home…"></textarea>
       <div class="chat-btn-row">
         <button class="chat-send" id="chat-send">Send</button>
+        <button class="chat-new" id="chat-new">New</button>
         <button class="chat-clear" id="chat-clear">Clear</button>
       </div>
     </div>`;
@@ -21,11 +23,13 @@ export function init(panel) {
   input   = panel.querySelector('#chat-input');
   sendBtn = panel.querySelector('#chat-send');
   const clearBtn = panel.querySelector('#chat-clear');
+  const newBtn   = panel.querySelector('#chat-new');
 
   requestAnimationFrame(() => { if (thread) thread.scrollTop = thread.scrollHeight; });
 
   sendBtn.addEventListener('click', () => send());
   clearBtn.addEventListener('click', () => clear());
+  newBtn.addEventListener('click', () => newContext());
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -51,7 +55,7 @@ async function send() {
     const res = await fetch(`/api/chat?token=${encodeURIComponent(token)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, context: [] }),
+      body: JSON.stringify({ text, context: conversationContext }),
     });
 
     thinking.remove();
@@ -70,9 +74,15 @@ async function send() {
         if (data.text) {
           appendMsg('assistant', data.text, data.node_id, data.model_name);
         }
+        const assistantContent = data.text ||
+          data.tool_calls.map(tc => `${tc.tool}: ${tc.result ?? ''}`).join('; ');
+        conversationContext.push({ role: 'User', content: text });
+        conversationContext.push({ role: 'Assistant', content: assistantContent });
       } else {
         const reply = data.text ?? '';
         appendMsg('assistant', reply, data.node_id, data.model_name);
+        conversationContext.push({ role: 'User', content: text });
+        conversationContext.push({ role: 'Assistant', content: reply });
       }
     }
   } catch (err) {
@@ -93,6 +103,17 @@ async function send() {
 
 function clear() {
   if (thread) thread.innerHTML = '';
+  conversationContext = [];
+}
+
+function newContext() {
+  conversationContext = [];
+  if (!thread) return;
+  const divider = document.createElement('div');
+  divider.className = 'chat-divider';
+  divider.textContent = 'new conversation';
+  thread.appendChild(divider);
+  thread.scrollTop = thread.scrollHeight;
 }
 
 function appendMsg(role, text, nodeId, modelName) {
