@@ -407,6 +407,12 @@ async fn process_message(
             let nodes = {
                 let mut reg = registry.lock().unwrap();
                 reg.update_heartbeat(identity.clone());
+                if is_first_heartbeat {
+                    // Agent (re)connected — llama-server may have been killed since
+                    // the coordinator last saw it. Clear stale model state so the
+                    // scheduler doesn't route to a server that isn't running.
+                    reg.clear_node_models(&this_id);
+                }
                 reg.list_nodes()
             };
             connections.lock().unwrap().insert(identity.id, tx.clone());

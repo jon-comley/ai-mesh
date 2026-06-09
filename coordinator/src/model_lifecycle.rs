@@ -86,6 +86,7 @@ impl ModelHandle<Ready> {
             output: String::new(),
             tokens_generated: 0,
             duration_ms: started.elapsed().as_millis() as u64,
+            prompt_eval_ms: 0,
             error: Some("inference not yet implemented — Phase 6".into()),
             wire_version: WIRE_VERSION,
         }

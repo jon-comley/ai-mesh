@@ -35,6 +35,7 @@ pub async fn handle_intent(
         error: Some(msg),
         duration_ms: 0,
         tokens_generated: 0,
+        prompt_eval_ms: 0,
     };
 
     // 1. Collect tool schemas from nodes that advertise a given feature
@@ -74,15 +75,15 @@ pub async fn handle_intent(
         .into_iter()
         .map(|s| s.name)
         .collect();
-    let system_prompt = build_system_prompt(
-        &schemas,
+    let system_prompt = build_system_prompt(&schemas);
+    let device_ctx = build_device_context(
         &known_devices,
         &known_groups,
         &device_states,
         &device_room_map,
         &scene_names,
     );
-    let mut user_prompt = String::new();
+    let mut user_prompt = device_ctx;
     for turn in &request.context {
         match turn.role {
             shared::IntentRole::User => {
@@ -165,6 +166,7 @@ pub async fn handle_intent(
     let model_name = llm_result.model_name.clone();
     let duration_ms = llm_result.duration_ms;
     let tokens_generated = llm_result.tokens_generated;
+    let prompt_eval_ms = llm_result.prompt_eval_ms;
     if let Some(e) = llm_result.error {
         let hostname = registry
             .lock()
@@ -184,7 +186,6 @@ pub async fn handle_intent(
     // 6. Parse as tool call(s) or return as free text
     if let Some(calls) = try_parse_tool_calls(&raw) {
         let mut records: Vec<ToolCallRecord> = Vec::new();
-        let mut confirm_inputs: Vec<(String, serde_json::Value, String)> = Vec::new();
 
         for call in &calls {
             let tool_name = call["tool"].as_str().unwrap_or("").to_string();
@@ -210,7 +211,6 @@ pub async fn handle_intent(
             )
             .await;
 
-            confirm_inputs.push((tool_name.clone(), args.clone(), tool_result.clone()));
             records.push(ToolCallRecord {
                 tool: tool_name,
                 args,
@@ -218,26 +218,16 @@ pub async fn handle_intent(
             });
         }
 
-        let confirmation = do_confirmation_pass(
-            &request.request_id,
-            &request.text,
-            &confirm_inputs,
-            &agent_tx,
-            &pending_inferences,
-            &llm_node_id,
-            &model_name,
-        )
-        .await;
-
         return IntentResponse {
             request_id: request.request_id,
             node_id,
             model_name,
-            text: confirmation,
+            text: None,
             tool_calls: records,
             error: None,
             duration_ms,
             tokens_generated,
+            prompt_eval_ms,
         };
     }
 
@@ -248,8 +238,9 @@ pub async fn handle_intent(
         text: Some(raw),
         tool_calls: vec![],
         error: None,
-        duration_ms: llm_result.duration_ms,
-        tokens_generated: llm_result.tokens_generated,
+        duration_ms,
+        tokens_generated,
+        prompt_eval_ms,
     }
 }
 
@@ -509,70 +500,6 @@ fn strip_think_blocks(s: &str) -> String {
     out.trim().to_string()
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn do_confirmation_pass(
-    request_id: &str,
-    original_text: &str,
-    records: &[(String, serde_json::Value, String)],
-    agent_tx: &tokio::sync::mpsc::Sender<MeshMessage>,
-    pending_inferences: &PendingInferences,
-    llm_node_id: &str,
-    model_name: &str,
-) -> Option<String> {
-    let infer_req_id = format!("intent-{}-confirm", request_id);
-    let system = "You are a smart home assistant. The user made a request and the system just carried it out. Reply in ONE brief friendly sentence confirming what happened. Be specific about which device or scene was affected if you know it. Never output JSON.".to_string();
-    let what_ran = records
-        .iter()
-        .map(|(tool, args, result)| {
-            let target = args
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("the device");
-            format!("Tool '{tool}' ran on '{target}': {result}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let prompt = format!("User said: \"{original_text}\"\n{what_ran}\nConfirm in one sentence.");
-    let req = InferenceRequest {
-        request_id: infer_req_id.clone(),
-        node_id: None,
-        model_name: model_name.to_string(),
-        system_prompt: Some(system),
-        prompt,
-        max_tokens: 80,
-        temperature: Some(0.6),
-        wire_version: WIRE_VERSION,
-    };
-    let (otx, orx) = oneshot::channel();
-    pending_inferences
-        .lock()
-        .unwrap()
-        .insert(infer_req_id.clone(), (otx, llm_node_id.to_string()));
-    if agent_tx
-        .send(MeshMessage::RequestModelInference(req))
-        .await
-        .is_err()
-    {
-        pending_inferences.lock().unwrap().remove(&infer_req_id);
-        return None;
-    }
-    match timeout(Duration::from_secs(INTENT_INFERENCE_TIMEOUT_SECS), orx).await {
-        Ok(Ok(MeshMessage::ModelInferenceResult(res))) if res.error.is_none() => {
-            let text = strip_think_blocks(res.output.trim());
-            // Drop it if the model produced JSON anyway
-            if try_parse_tool_calls(&text).is_some() {
-                None
-            } else {
-                Some(text)
-            }
-        }
-        _ => {
-            pending_inferences.lock().unwrap().remove(&infer_req_id);
-            None
-        }
-    }
-}
-
 pub fn try_parse_tool_calls(output: &str) -> Option<Vec<serde_json::Value>> {
     let stripped = output
         .trim_start_matches("```json")
@@ -657,20 +584,44 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
     }
 }
 
-pub fn build_system_prompt(
-    schemas: &[serde_json::Value],
-    known_devices: &[String],
-    known_groups: &[String],
-    device_states: &[LightStateReport],
-    device_room_map: &HashMap<String, String>,
-    scene_names: &[String],
-) -> String {
+pub fn build_system_prompt(schemas: &[serde_json::Value]) -> String {
     if schemas.is_empty() {
         return "You are a helpful assistant. Answer the user's question directly.".into();
     }
 
     let schema_json = serde_json::to_string(schemas).unwrap_or_default();
 
+    format!(
+        r#"You are a helpful smart home assistant embedded in ai-mesh. You have direct control of and live state for all listed devices.
+
+To control one device, reply with ONLY this JSON (no extra text):
+{{"tool": "<name>", "args": {{ ... }}}}
+
+To control multiple devices in one request, reply with ONLY a JSON array (no extra text):
+[{{"tool": "<name>", "args": {{ ... }}}}, {{"tool": "<name>", "args": {{ ... }}}}]
+
+Available tools:
+{schema_json}
+
+Rules:
+- The "target" field must be an exact device or group name from the known list. Never invent a target name.
+- When the user names a room (e.g. "kitchen lights", "the bedroom"), find devices tagged [RoomName]. If no group for that room exists, pick the first online device in that room.
+- If the user says "one of", "just one", or "a single", always pick the FIRST online device listed for that room.
+- If the user says "all" or "everything", use a group if one exists; otherwise emit one array element per online device in that room.
+- For compound requests (e.g. "dim warm light"), emit one array element per command — brightness and colour/temperature are separate tool calls.
+- Never issue a command to a device shown as [OFFLINE — not responding].
+- For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists. Count devices sharing a [RoomName] tag to answer "how many". do NOT output JSON for these questions.
+- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something."#
+    )
+}
+
+pub fn build_device_context(
+    known_devices: &[String],
+    known_groups: &[String],
+    device_states: &[LightStateReport],
+    device_room_map: &HashMap<String, String>,
+    scene_names: &[String],
+) -> String {
     let device_section = if known_devices.is_empty() && known_groups.is_empty() {
         String::new()
     } else {
@@ -709,37 +660,21 @@ pub fn build_system_prompt(
                 known_groups.join(", ")
             ));
         }
-        format!("\n\n{}", lines.join("\n"))
+        lines.join("\n")
     };
 
     let scene_section = if scene_names.is_empty() {
         String::new()
     } else {
-        format!("\n\nAvailable scenes: {}", scene_names.join(", "))
+        format!("Available scenes: {}", scene_names.join(", "))
     };
 
-    format!(
-        r#"You are a helpful smart home assistant embedded in ai-mesh. You have direct control of and live state for all listed devices.
-
-To control one device, reply with ONLY this JSON (no extra text):
-{{"tool": "<name>", "args": {{ ... }}}}
-
-To control multiple devices in one request, reply with ONLY a JSON array (no extra text):
-[{{"tool": "<name>", "args": {{ ... }}}}, {{"tool": "<name>", "args": {{ ... }}}}]
-
-Available tools:
-{schema_json}{device_section}{scene_section}
-
-Rules:
-- The "target" field must be an exact device or group name from the known list above. Never invent a target name.
-- When the user names a room (e.g. "kitchen lights", "the bedroom"), find devices tagged [RoomName] above. If no group for that room exists, pick the first online device in that room.
-- If the user says "one of", "just one", or "a single", always pick the FIRST online device listed for that room.
-- If the user says "all" or "everything", use a group if one exists; otherwise emit one array element per online device in that room.
-- For compound requests (e.g. "dim warm light"), emit one array element per command — brightness and colour/temperature are separate tool calls.
-- Never issue a command to a device shown as [OFFLINE — not responding].
-- For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists above. Count devices sharing a [RoomName] tag to answer "how many". do NOT output JSON for these questions.
-- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something."#
-    )
+    match (device_section.is_empty(), scene_section.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => format!("{device_section}\n\n"),
+        (true, false) => format!("{scene_section}\n\n"),
+        (false, false) => format!("{device_section}\n\n{scene_section}\n\n"),
+    }
 }
 
 #[cfg(test)]
@@ -748,7 +683,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_no_schemas_returns_plain() {
-        let p = build_system_prompt(&[], &[], &[], &[], &HashMap::new(), &[]);
+        let p = build_system_prompt(&[]);
         assert!(!p.contains("tool"));
         assert!(p.contains("helpful assistant"));
     }
@@ -756,31 +691,53 @@ mod tests {
     #[test]
     fn build_system_prompt_with_schemas_includes_tool_section() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
+        let p = build_system_prompt(&schemas);
         assert!(p.contains("light_command"));
         assert!(p.contains("scene_load"));
         assert!(p.contains(r#"{"tool":"#));
     }
 
     #[test]
-    fn build_system_prompt_injects_known_devices_and_groups() {
+    fn build_system_prompt_no_devices_omits_device_section() {
         let schemas = tool_schemas_for_feature("lighting");
-        let devices = vec!["test_bulb".to_string(), "desk_lamp".to_string()];
-        let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &groups, &[], &HashMap::new(), &[]);
-        assert!(p.contains("test_bulb"));
-        assert!(p.contains("desk_lamp"));
-        assert!(p.contains("all"));
-        assert!(p.contains("Known devices"));
-        assert!(p.contains("Known groups"));
+        let p = build_system_prompt(&schemas);
+        assert!(!p.contains("Known devices"));
+        assert!(!p.contains("Known groups"));
     }
 
     #[test]
-    fn build_system_prompt_no_devices_omits_device_section() {
+    fn build_system_prompt_does_not_contain_no_think() {
+        // /no_think is applied per model family in llama.rs, not baked into the
+        // static system prompt. If it appears here the KV-cache benefit is lost
+        // for non-Qwen models and the token is sent incorrectly to phi4/gemma/etc.
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
-        assert!(!p.contains("Known devices"));
-        assert!(!p.contains("Known groups"));
+        let p = build_system_prompt(&schemas);
+        assert!(
+            !p.contains("/no_think"),
+            "system prompt must not contain /no_think"
+        );
+        assert!(
+            !p.contains("/think"),
+            "system prompt must not contain /think"
+        );
+    }
+
+    #[test]
+    fn build_device_context_injects_known_devices_and_groups() {
+        let devices = vec!["test_bulb".to_string(), "desk_lamp".to_string()];
+        let groups = vec!["all".to_string()];
+        let ctx = build_device_context(&devices, &groups, &[], &HashMap::new(), &[]);
+        assert!(ctx.contains("test_bulb"));
+        assert!(ctx.contains("desk_lamp"));
+        assert!(ctx.contains("all"));
+        assert!(ctx.contains("Known devices"));
+        assert!(ctx.contains("Known groups"));
+    }
+
+    #[test]
+    fn build_device_context_empty_returns_empty() {
+        let ctx = build_device_context(&[], &[], &[], &HashMap::new(), &[]);
+        assert!(ctx.is_empty());
     }
 
     #[test]
@@ -963,39 +920,34 @@ mod tests {
     }
 
     #[test]
-    fn build_system_prompt_devices_only_no_groups() {
-        let schemas = tool_schemas_for_feature("lighting");
+    fn build_device_context_devices_only_no_groups() {
         let devices = vec!["test_bulb".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &[], &[], &HashMap::new(), &[]);
-        assert!(p.contains("Known devices"));
-        assert!(!p.contains("Known groups"));
+        let ctx = build_device_context(&devices, &[], &[], &HashMap::new(), &[]);
+        assert!(ctx.contains("Known devices"));
+        assert!(!ctx.contains("Known groups"));
     }
 
     #[test]
-    fn build_system_prompt_groups_only_no_devices() {
-        let schemas = tool_schemas_for_feature("lighting");
+    fn build_device_context_groups_only_no_devices() {
         let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &[], &groups, &[], &HashMap::new(), &[]);
-        assert!(!p.contains("Known devices"));
-        assert!(p.contains("Known groups"));
+        let ctx = build_device_context(&[], &groups, &[], &HashMap::new(), &[]);
+        assert!(!ctx.contains("Known devices"));
+        assert!(ctx.contains("Known groups"));
     }
 
     #[test]
-    fn build_system_prompt_injects_device_list_into_target_description() {
-        let schemas = tool_schemas_for_feature("lighting");
+    fn build_device_context_injects_device_list_into_target_description() {
         let devices = vec!["test_bulb".to_string()];
         let groups = vec!["all".to_string()];
-        let p = build_system_prompt(&schemas, &devices, &groups, &[], &HashMap::new(), &[]);
-        // LLM is told to use exact names
-        assert!(p.contains("exact device or group name from the known list"));
-        assert!(p.contains("test_bulb"));
-        assert!(p.contains("all"));
+        let ctx = build_device_context(&devices, &groups, &[], &HashMap::new(), &[]);
+        assert!(ctx.contains("test_bulb"));
+        assert!(ctx.contains("all"));
     }
 
     #[test]
     fn build_system_prompt_forbids_special_tags() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
+        let p = build_system_prompt(&schemas);
         assert!(p.contains("Only output JSON"));
         assert!(p.contains("do NOT output JSON"));
     }
@@ -1003,7 +955,7 @@ mod tests {
     #[test]
     fn build_system_prompt_schema_is_compact_json() {
         let schemas = tool_schemas_for_feature("lighting");
-        let p = build_system_prompt(&schemas, &[], &[], &[], &HashMap::new(), &[]);
+        let p = build_system_prompt(&schemas);
         for schema in schemas {
             let s = serde_json::to_string(&schema).unwrap();
             assert!(!s.contains('\n'), "schema JSON must be compact");
@@ -1035,9 +987,8 @@ mod tests {
     }
 
     #[test]
-    fn build_system_prompt_shows_device_state() {
+    fn build_device_context_shows_device_state() {
         use shared::messages::LightStateReport;
-        let schemas = tool_schemas_for_feature("lighting");
         let devices = vec!["kitchen_light".to_string(), "hallway_light".to_string()];
         let states = vec![
             LightStateReport {
@@ -1059,15 +1010,15 @@ mod tests {
                 online: false,
             },
         ];
-        let p = build_system_prompt(&schemas, &devices, &[], &states, &HashMap::new(), &[]);
-        assert!(p.contains("kitchen_light"), "device name must appear");
+        let ctx = build_device_context(&devices, &[], &states, &HashMap::new(), &[]);
+        assert!(ctx.contains("kitchen_light"), "device name must appear");
         assert!(
-            p.contains("online"),
+            ctx.contains("online"),
             "online device must show online status"
         );
-        assert!(p.contains("OFFLINE"), "offline device must show OFFLINE");
+        assert!(ctx.contains("OFFLINE"), "offline device must show OFFLINE");
         assert!(
-            p.contains("78%"),
+            ctx.contains("78%"),
             "brightness should be rendered as percent"
         );
     }

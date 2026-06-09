@@ -186,6 +186,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                         output: "Simulated answer".into(),
                         tokens_generated: 10,
                         duration_ms: 50,
+                        prompt_eval_ms: 0,
                         error: None,
                         wire_version: WIRE_VERSION,
                     }),
