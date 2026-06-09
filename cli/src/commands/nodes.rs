@@ -4,7 +4,10 @@ use shared::{MeshMessage, NodeRecordFull, NodeRecordLite};
 pub async fn run(coordinator: &str) {
     match fetch_nodes_full(coordinator).await {
         Ok(nodes) => print_table(nodes),
-        Err(e) => println!("Error: {}", e),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 

@@ -244,10 +244,10 @@ fn ui(f: &mut Frame, state: &State) {
         .iter()
         .map(|n| {
             let is_target = state.target_ips.contains(&n.ip);
-            let row_style = if is_target
-                && n.models
-                    .iter()
-                    .any(|m| m.state == ModelLifecycleState::Ready)
+            let row_style = if n
+                .models
+                .iter()
+                .any(|m| m.state == ModelLifecycleState::Ready)
             {
                 Style::default().fg(Color::Green)
             } else if is_target

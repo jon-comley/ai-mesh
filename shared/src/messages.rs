@@ -40,6 +40,8 @@ pub struct InferenceResult {
     pub output: String,
     pub tokens_generated: u32,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub prompt_eval_ms: u64,
     pub error: Option<String>,
     #[serde(default = "default_wire_version")]
     pub wire_version: u32,
@@ -233,6 +235,8 @@ pub struct IntentResponse {
     pub duration_ms: u64,
     #[serde(default)]
     pub tokens_generated: u32,
+    #[serde(default)]
+    pub prompt_eval_ms: u64,
 }
 
 // ── MeshMessage ───────────────────────────────────────────────────────────────
@@ -608,6 +612,7 @@ mod tests {
             output: "world".into(),
             tokens_generated: 1,
             duration_ms: 42,
+            prompt_eval_ms: 0,
             error: None,
             wire_version: WIRE_VERSION,
         };
@@ -821,6 +826,7 @@ mod tests {
             error: None,
             duration_ms: 1234,
             tokens_generated: 10,
+            prompt_eval_ms: 0,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
@@ -837,6 +843,7 @@ mod tests {
             error: None,
             duration_ms: 800,
             tokens_generated: 42,
+            prompt_eval_ms: 0,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);

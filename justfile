@@ -167,7 +167,7 @@ hardware-report: update-portproxy
     COORD_PID=""
 
     # Check 127.0.0.1, not the LAN IP — portproxy accepts TCP even when nothing is behind it.
-    if ! timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/{{coordinator_port}}" 2>/dev/null; then
+    if ! cargo run -q -p cli -- --coordinator "127.0.0.1:{{coordinator_port}}" nodes > /dev/null 2>&1; then
         echo ">>> Coordinator not running — starting in background..."
         MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -q -p coordinator \
             > /tmp/mesh-coordinator.log 2>&1 &
@@ -177,7 +177,7 @@ hardware-report: update-portproxy
         echo ">>> Waiting for coordinator to accept connections..."
         for i in $(seq 1 30); do
             sleep 1
-            if timeout 1 bash -c "echo > /dev/tcp/{{coordinator_ip}}/{{coordinator_port}}" 2>/dev/null; then
+            if cargo run -q -p cli -- --coordinator "127.0.0.1:{{coordinator_port}}" nodes > /dev/null 2>&1; then
                 echo ">>> Coordinator ready."
                 break
             fi
@@ -1361,15 +1361,15 @@ start-cluster: update-portproxy
         echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
         scp -q "jonno@{{coordinator_ip}}:.config/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
 
-        echo ">>> Verifying connectivity to {{coordinator_ip}}:9000..."
-        if timeout 5 bash -c "echo > /dev/tcp/{{coordinator_ip}}/9000" 2>/dev/null; then
+        cargo build -q -p cli
+        echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
+        if cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes > /dev/null 2>&1; then
             echo ">>> Coordinator ready."
         else
-            echo ">>> ERROR: Could not reach coordinator at {{coordinator_ip}}:9000"
+            echo ">>> ERROR: Could not reach coordinator at {{coordinator_ip}}:{{coordinator_port}}"
             echo ">>>        Is it running? Check: ssh jonno@{{coordinator_ip}} systemctl status ai-mesh-coordinator"
             exit 1
         fi
-        cargo build -q -p cli
     fi
 
     # Push TLS fingerprint + auth token to all compute nodes before starting their agents.
@@ -1487,15 +1487,15 @@ restart-coordinator: update-portproxy
         echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
         scp -q "jonno@{{coordinator_ip}}:.config/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
 
-        echo ">>> Verifying connectivity to {{coordinator_ip}}:9000..."
-        if timeout 5 bash -c "echo > /dev/tcp/{{coordinator_ip}}/9000" 2>/dev/null; then
+        cargo build -q -p cli
+        echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
+        if cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes > /dev/null 2>&1; then
             echo ">>> Coordinator ready."
         else
-            echo ">>> ERROR: Could not reach coordinator at {{coordinator_ip}}:9000"
+            echo ">>> ERROR: Could not reach coordinator at {{coordinator_ip}}:{{coordinator_port}}"
             echo ">>>        Is it running? Check: ssh jonno@{{coordinator_ip}} systemctl status ai-mesh-coordinator"
             exit 1
         fi
-        cargo build -q -p cli
     fi
 
     # Read fingerprint (and token if set) from the coordinator state file.
@@ -1669,7 +1669,7 @@ dev: update-portproxy
     AGENT_PID=$!
 
     echo ">>> Verifying portproxy (remote nodes connect via {{coordinator_ip}}:{{coordinator_port}})..."
-    if timeout 3 bash -c "echo > /dev/tcp/{{coordinator_ip}}/{{coordinator_port}}" 2>/dev/null; then
+    if cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes > /dev/null 2>&1; then
         echo ">>> Portproxy OK — {{coordinator_ip}}:{{coordinator_port}} is reachable"
     else
         echo ">>> WARNING: {{coordinator_ip}}:{{coordinator_port}} not reachable from WSL"

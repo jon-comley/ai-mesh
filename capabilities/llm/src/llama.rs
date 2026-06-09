@@ -426,6 +426,9 @@ struct CompletionUsage {
 struct CompletionTimings {
     #[serde(default)]
     predicted_ms: f64,
+    // llama.cpp exposes prefill time under different names across builds
+    #[serde(default, alias = "prompt_ms", alias = "t_prompt_processing")]
+    prompt_eval_ms: f64,
 }
 
 #[derive(Deserialize)]
@@ -437,36 +440,66 @@ struct ChatResponse {
     timings: CompletionTimings,
 }
 
+// ── model-family detection ─────────────────────────────────────────────────────
+
+/// Qwen2.5 / Qwen3 — thinking suppressed via `/no_think` in the system prompt.
+fn is_qwen(model_name: &str) -> bool {
+    model_name.to_ascii_lowercase().starts_with("qwen")
+}
+
+/// DeepSeek-R1 — thinking suppressed via an empty `<think></think>` assistant
+/// prefill appended after the user turn.
+fn is_deepseek_r1(model_name: &str) -> bool {
+    model_name.to_ascii_lowercase().starts_with("deepseek-r1")
+}
+
 // ── /v1/chat/completions inference ────────────────────────────────────────────
 
-/// Run inference. Returns (output_text, tokens_generated, duration_ms).
+/// Run inference. Returns (output_text, tokens_generated, duration_ms, prompt_eval_ms).
 pub async fn generate(
     model_name: &str,
     system_prompt: Option<&str>,
     prompt: &str,
     max_tokens: u32,
     temperature: f32,
-) -> Result<(String, u32, u64), String> {
+) -> Result<(String, u32, u64, u64), String> {
     let client = http_client();
     let url = format!("{}/v1/chat/completions", llama_host());
 
     let wall_start = Instant::now();
 
-    let sys = system_prompt.unwrap_or("You are a helpful assistant.");
+    let base_sys = system_prompt.unwrap_or("You are a helpful assistant.");
+    // Qwen models recognise /no_think as a special token that disables CoT.
+    let effective_sys: String = if is_qwen(model_name) {
+        format!("{base_sys}\n\n/no_think")
+    } else {
+        base_sys.to_string()
+    };
+
+    let mut messages = vec![
+        ChatMessage {
+            role: "system",
+            content: &effective_sys,
+        },
+        ChatMessage {
+            role: "user",
+            content: prompt,
+        },
+    ];
+    // DeepSeek-R1 skips its thinking phase when an empty think block is
+    // provided as an assistant prefill at the end of the message list.
+    if is_deepseek_r1(model_name) {
+        messages.push(ChatMessage {
+            role: "assistant",
+            content: "<think>\n</think>",
+        });
+    }
+
     let resp = client
         .post(&url)
         .json(&ChatRequest {
             model: model_name,
-            messages: vec![
-                ChatMessage {
-                    role: "system",
-                    content: sys,
-                },
-                ChatMessage {
-                    role: "user",
-                    content: prompt,
-                },
-            ],
+            messages,
             max_tokens,
             stream: false,
             repeat_penalty: 1.1,
@@ -500,8 +533,9 @@ pub async fn generate(
     } else {
         wall_start.elapsed().as_millis() as u64
     };
+    let prompt_eval_ms = body.timings.prompt_eval_ms as u64;
 
-    Ok((output, tokens, duration_ms))
+    Ok((output, tokens, duration_ms, prompt_eval_ms))
 }
 
 #[cfg(test)]
@@ -666,6 +700,60 @@ mod tests {
             99 // stand-in for wall_start.elapsed()
         };
         assert_eq!(duration_ms, 99);
+    }
+
+    // ── model family detection ────────────────────────────────────────────────
+
+    #[test]
+    fn is_qwen_matches_qwen2_5_and_qwen3_variants() {
+        for name in &[
+            "qwen2.5:0.5b",
+            "qwen2.5:7b",
+            "qwen3:8b",
+            "qwen3:14b",
+            "QWEN3:4b",
+        ] {
+            assert!(is_qwen(name), "{name} should be detected as Qwen");
+        }
+    }
+
+    #[test]
+    fn is_qwen_does_not_match_other_families() {
+        for name in &[
+            "phi4:14b",
+            "gemma3:4b",
+            "llama3.2:3b",
+            "mistral:7b",
+            "deepseek-r1:8b",
+        ] {
+            assert!(!is_qwen(name), "{name} should not be detected as Qwen");
+        }
+    }
+
+    #[test]
+    fn is_deepseek_r1_matches_all_r1_variants() {
+        for name in &[
+            "deepseek-r1:7b",
+            "deepseek-r1:8b",
+            "deepseek-r1:14b",
+            "deepseek-r1:32b",
+            "DeepSeek-R1:8b",
+        ] {
+            assert!(
+                is_deepseek_r1(name),
+                "{name} should be detected as DeepSeek-R1"
+            );
+        }
+    }
+
+    #[test]
+    fn is_deepseek_r1_does_not_match_other_deepseek_or_families() {
+        for name in &["deepseek-v3:7b", "qwen2.5:7b", "phi4:14b", "llama3.1:8b"] {
+            assert!(
+                !is_deepseek_r1(name),
+                "{name} should not be detected as DeepSeek-R1"
+            );
+        }
     }
 
     // ── unload_model ──────────────────────────────────────────────────────────

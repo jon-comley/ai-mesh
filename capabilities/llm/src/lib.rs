@@ -115,13 +115,14 @@ impl Capability for LlmCapability {
                         }
                         res = llama::generate(&req.model_name, req.system_prompt.as_deref(), &req.prompt, req.max_tokens, req.temperature.unwrap_or(0.8)) => {
                             let result = match res {
-                                Ok((output, tokens, duration_ms)) => InferenceResult {
+                                Ok((output, tokens, duration_ms, prompt_eval_ms)) => InferenceResult {
                                     request_id: req.request_id,
                                     node_id: nid,
                                     model_name: req.model_name,
                                     output,
                                     tokens_generated: tokens,
                                     duration_ms,
+                                    prompt_eval_ms,
                                     error: None,
                                     wire_version: WIRE_VERSION,
                                 },
@@ -134,6 +135,7 @@ impl Capability for LlmCapability {
                                         output: String::new(),
                                         tokens_generated: 0,
                                         duration_ms: 0,
+                                        prompt_eval_ms: 0,
                                         error: Some(e),
                                         wire_version: WIRE_VERSION,
                                     }

@@ -19,18 +19,20 @@ bandwidth formula `~80 GB/s ÷ model_size`. Measured values are marked.
 | gemma3:4b | 2.8 GB | ~27 | Good — Google instruction-tuned |
 | mistral:7b | 4.1 GB | ~19 | Good — strong instruction following |
 | qwen3:8b | 5.0 GB | **16.6** (measured) | Better — default pick |
+| deepseek-r1:8b | 5.0 GB | **17** (measured) | Strong reasoning — see CoT note below |
 | gemma3:12b | 7.8 GB | ~12 | Strong — good coding + analysis |
 | phi4:14b | 8.9 GB | ~9 | Strong reasoning, STEM |
 | qwen3:14b | 9.0 GB | ~10 | Best quality that fits comfortably |
+| deepseek-r1:14b | 9.0 GB | ~10 | Strong reasoning — see CoT note below |
 | qwen3:32b | ~20 GB | ✗ won't load | Exceeds 16 GB UMA |
 
 ---
 
 ## Inference time examples
 
-tok/s numbers from the table above. Prompt evaluation (reading your input) is
-roughly 5–10× faster than generation and is not the bottleneck for normal messages,
-so the times below are dominated by output generation.
+tok/s numbers from the table above. The times below are dominated by output
+generation. Prompt evaluation (prefill) adds a one-off cost on the first request
+to a freshly-loaded model; see the Prompt evaluation section for measured values.
 
 ---
 
@@ -94,10 +96,52 @@ For a detailed code or explanation reply (~400 tokens):
 
 ---
 
+## Reasoning models and chain-of-thought suppression
+
+Some models in the table are *reasoning* models — they generate a hidden thinking
+chain before the visible answer. The thinking tokens are stripped from the response
+but still consume generation time.
+
+| Model family | Reasoning | Suppression method |
+|---|---|---|
+| Qwen2.5, Qwen3 | Optional (off by default on Qwen2.5; opt-in on Qwen3) | `/no_think` appended to system prompt |
+| DeepSeek-R1 | Always-on by default | Empty `<think>\n</think>` assistant prefill |
+| phi4, gemma3, mistral, llama | None | No action needed |
+
+Without suppression, deepseek-r1:8b spends ~6–8 s generating ~100 hidden thinking
+tokens for a simple one-line reply — making a 5 GB model slower end-to-end than
+phi4:14b despite running at 17 tok/s. With the empty-think prefill, generation time
+matches response length as expected.
+
+ai-mesh applies these suppressions automatically in `capabilities/llm/src/llama.rs`
+based on the model name prefix (`qwen` → `/no_think`, `deepseek-r1` → prefill).
+
+---
+
+## Prompt evaluation (prefill) times
+
+Prompt evaluation — processing your input and the system prompt before the first
+output token — can be significant on the first request to a freshly-loaded model.
+
+| Hardware | Model | First request | Subsequent |
+|---|---|---|---|
+| Beelink (GPU) | phi4:14b | ~6.6 s | ~2.3 s |
+| Beelink (GPU) | deepseek-r1:8b | ~3.3 s | ~1.0 s |
+| pi1 (CPU) | qwen2.5:1.5b | ~22 s | ~1–2 s |
+
+The large first-request cost is a cold KV-cache: llama.cpp must process all system
+prompt tokens from scratch. Subsequent requests reuse the cached KV state, so only
+the new conversation turn (a few tokens) is evaluated.
+
+ai-mesh keeps the system prompt fully static (device state is sent in the user turn
+instead) so `cache_prompt: true` gets a guaranteed cache hit from the second request
+onward.
+
+---
+
 ## Notes
 
-- All tok/s figures are for **generation** (output). Prompt evaluation is faster and
-  rarely adds more than 0.5 s for normal messages.
+- All tok/s figures are for **generation** (output).
 - UMA bandwidth (~80 GB/s) is shared with the CPU and display. Heavy CPU load or
   screen rendering can reduce effective GPU bandwidth by 10–15%.
 - Models larger than ~13 GB (qwen3:32b etc.) will spill to system RAM and drop to
