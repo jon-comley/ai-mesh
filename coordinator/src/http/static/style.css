@@ -258,6 +258,8 @@ body {
 .metric-value {
   font-variant-numeric: tabular-nums;
 }
+.metric-warn { color: var(--amber); }
+.metric-crit { color: var(--red); }
 
 .sparkline {
   display: block;
