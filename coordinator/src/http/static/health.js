@@ -163,7 +163,7 @@ function sparklineSvg(data, h, color, timestamps, label) {
   }).join('');
 
   return `<svg width="100%" height="${h}" viewBox="0 0 ${W} ${h}" class="sparkline" aria-hidden="true" preserveAspectRatio="none">`
-    + `<polygon points="${fillPts}" fill="${color}" fill-opacity="0.15"/>`
+    + `<polygon points="${fillPts}" fill="${color}" fill-opacity="var(--sparkline-fill, 0.15)"/>`
     + `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>`
     + tooltipRects
     + `</svg>`;
