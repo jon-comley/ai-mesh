@@ -208,6 +208,7 @@ pub async fn handle_intent(
                 &registry,
                 &connections,
                 &pending_intents,
+                &device_states,
             )
             .await;
 
@@ -244,6 +245,13 @@ pub async fn handle_intent(
     }
 }
 
+fn device_is_offline(target: &str, states: &[LightStateReport]) -> bool {
+    states
+        .iter()
+        .find(|s| s.device_id == target)
+        .is_some_and(|s| !s.online)
+}
+
 async fn dispatch_tool(
     request_id: &str,
     tool_name: &str,
@@ -251,6 +259,7 @@ async fn dispatch_tool(
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
     pending_intents: &PendingIntents,
+    device_states: &[LightStateReport],
 ) -> String {
     // Find a lighting node that is currently connected
     let lighting_node_id = {
@@ -311,6 +320,16 @@ async fn dispatch_tool(
                         }
                     }
                 }
+            }
+            // Reject commands to individual devices that are known to be offline.
+            // Groups are not checked here — the lighting node handles partial groups.
+            let final_target = args
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if device_is_offline(&final_target, device_states) {
+                return format!("device '{}' is currently offline", final_target);
             }
             let Some(cmds) = build_light_command(request_id, &args) else {
                 return "unrecognised colour — no command sent".into();
@@ -1084,5 +1103,49 @@ mod tests {
         assert!(
             matches!(cmd.command, LightAction::ColorXY { x, y } if (x - 0.5).abs() < 1e-3 && (y - 0.4).abs() < 1e-3)
         );
+    }
+
+    #[test]
+    fn device_is_offline_returns_true_for_offline_device() {
+        use shared::messages::LightStateReport;
+        let states = vec![
+            LightStateReport {
+                node_id: "n1".into(),
+                device_id: "bulb_a".into(),
+                on: false,
+                brightness: None,
+                color_xy: None,
+                color_temp: None,
+                online: false,
+            },
+            LightStateReport {
+                node_id: "n1".into(),
+                device_id: "bulb_b".into(),
+                on: true,
+                brightness: None,
+                color_xy: None,
+                color_temp: None,
+                online: true,
+            },
+        ];
+        assert!(device_is_offline("bulb_a", &states));
+        assert!(!device_is_offline("bulb_b", &states));
+    }
+
+    #[test]
+    fn device_is_offline_unknown_device_is_not_offline() {
+        use shared::messages::LightStateReport;
+        let states = vec![LightStateReport {
+            node_id: "n1".into(),
+            device_id: "bulb_a".into(),
+            on: true,
+            brightness: None,
+            color_xy: None,
+            color_temp: None,
+            online: true,
+        }];
+        // Unknown target → not in states → treat as online (let it through;
+        // the lighting node decides if it actually exists).
+        assert!(!device_is_offline("unknown_bulb", &states));
     }
 }
