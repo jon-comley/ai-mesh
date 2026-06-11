@@ -66,9 +66,10 @@ fn n_batch() -> Option<u32> {
 }
 
 /// Default health-wait ceiling: 180 s floor, scaled up for larger models
-/// (~30 MB/s worst-case cold read + upload). 8.6 GB (14b) → ~287 s.
+/// (~30 MB/s worst-case cold read + upload). 8.6 GB (14b) → ~287 s. Capped
+/// at 900 s so pathological model sizes don't stall a node for 20+ minutes.
 fn health_timeout_secs(size_mb: u64) -> u64 {
-    180.max(size_mb / 30)
+    180.max(size_mb / 30).min(900)
 }
 
 // ── Child process tracking ────────────────────────────────────────────────────
@@ -697,6 +698,7 @@ mod tests {
     fn health_timeout_scales_for_large_models() {
         assert_eq!(health_timeout_secs(8635), 287); // 14b-class
         assert_eq!(health_timeout_secs(19456), 648); // 32b-class
+        assert_eq!(health_timeout_secs(1_000_000), 900); // cap
     }
 
     #[test]
