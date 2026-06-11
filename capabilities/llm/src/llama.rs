@@ -65,6 +65,12 @@ fn n_batch() -> Option<u32> {
         .and_then(|v| v.trim().parse().ok())
 }
 
+/// Default health-wait ceiling: 180 s floor, scaled up for larger models
+/// (~30 MB/s worst-case cold read + upload). 8.6 GB (14b) → ~287 s.
+fn health_timeout_secs(size_mb: u64) -> u64 {
+    180.max(size_mb / 30)
+}
+
 // ── Child process tracking ────────────────────────────────────────────────────
 
 static LLAMA_CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
@@ -342,18 +348,36 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
 
     *child_lock().lock().await = Some(child);
 
-    // Wait for the health endpoint. Large models on GPU can take >60 s to load.
+    // Wait for the health endpoint, scaling the ceiling with model size — a
+    // cold-cache disk read + VRAM upload of a 14b-class GGUF can exceed a
+    // fixed 180 s on iGPU nodes.
     let health_url = format!("{}/health", llama_host());
     let hclient = reqwest::Client::new();
     let max_secs = std::env::var("LLAMA_HEALTH_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(180u64);
+        .unwrap_or_else(|| health_timeout_secs(size_mb));
     for elapsed in 0..max_secs {
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         if UNLOAD_REQUESTED.load(Ordering::Acquire) {
             tracing::info!(model = model_name, "load aborted by unload request");
             return Err("unloaded".into());
+        }
+        // Fail fast if llama-server exited (port clash, VRAM allocation
+        // failure, corrupt GGUF) instead of burning the rest of the timeout.
+        // Checked before /health so an orphaned server on the same port can't
+        // be mistaken for this one.
+        {
+            let mut guard = child_lock().lock().await;
+            match guard.as_mut() {
+                Some(child) => {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        guard.take();
+                        return Err(format!("llama-server exited during startup: {status}"));
+                    }
+                }
+                None => return Err("unloaded".into()),
+            }
         }
         if let Ok(r) = hclient
             .get(&health_url)
@@ -374,6 +398,10 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
         }
     }
 
+    // Kill the still-loading server so the registry's Failed state matches
+    // reality; a retry then starts clean (and benefits from the warm page
+    // cache left by this attempt's disk read).
+    kill_existing().await;
     Err(format!(
         "llama-server did not become healthy within {max_secs} s"
     ))
@@ -658,6 +686,18 @@ mod tests {
     }
 
     // ── ChatResponse deserialization ──────────────────────────────────────────
+
+    #[test]
+    fn health_timeout_floor_is_180s_for_small_models() {
+        assert_eq!(health_timeout_secs(500), 180); // 0.5b
+        assert_eq!(health_timeout_secs(4096), 180); // 7b
+    }
+
+    #[test]
+    fn health_timeout_scales_for_large_models() {
+        assert_eq!(health_timeout_secs(8635), 287); // 14b-class
+        assert_eq!(health_timeout_secs(19456), 648); // 32b-class
+    }
 
     #[test]
     fn chat_response_parses_full_response() {
