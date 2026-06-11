@@ -631,9 +631,9 @@ These are the exact settings required for stable 24/7 operation. **Every CMOS re
 | Setting | Value | Path |
 |---|---|---|
 | iGPU Configuration | **UMA_SPECIFIED** | Advanced → AMD CBS → NBIO Common Options → GFX Configuration → iGPU Configuration |
-| UMA Frame Buffer Size | **8G** | Advanced → AMD CBS → NBIO Common Options → GFX Configuration → UMA Frame Buffer Size |
+| UMA Frame Buffer Size | **16G** (was 8G; raised 2026-06-11) | Advanced → AMD CBS → NBIO Common Options → GFX Configuration → UMA Frame Buffer Size |
 
-> UMA 8G stops stuttering when the GPU dynamically resizes memory during inference.
+> A fixed UMA size stops stuttering when the GPU dynamically resizes memory during inference. 16G gives headroom for larger models on the 780M.
 
 **2. Stability & Thermal**
 
