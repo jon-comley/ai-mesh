@@ -4,6 +4,8 @@ let thread = null;
 let input = null;
 let sendBtn = null;
 let busy = false;
+const MAX_CONTEXT_TURNS = 20; // 10 exchanges; oldest pair dropped when exceeded
+
 let conversationContext = [];
 let lastModelKey = null;
 
@@ -14,6 +16,7 @@ export function init(panel) {
       <textarea class="chat-input" id="chat-input" rows="2"
         placeholder="Ask anything or control your home…"></textarea>
       <div class="chat-btn-row">
+        <span class="chat-ctx-counter" id="chat-ctx-counter"></span>
         <button class="chat-send" id="chat-send">Send</button>
         <button class="chat-new" id="chat-new">New</button>
         <button class="chat-clear" id="chat-clear">Clear</button>
@@ -86,12 +89,14 @@ async function send() {
           data.tool_calls.map(tc => `${tc.tool}: ${tc.result ?? ''}`).join('; ');
         conversationContext.push({ role: 'User', content: text });
         conversationContext.push({ role: 'Assistant', content: assistantContent });
+        trimAndUpdateContext();
         if (data.node_id && data.model_name) lastModelKey = `${data.node_id}/${data.model_name}`;
       } else {
         const reply = data.text ?? '';
         appendMsg('assistant', reply, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0);
         conversationContext.push({ role: 'User', content: text });
         conversationContext.push({ role: 'Assistant', content: reply });
+        trimAndUpdateContext();
         if (data.node_id && data.model_name) lastModelKey = `${data.node_id}/${data.model_name}`;
       }
     }
@@ -114,16 +119,33 @@ async function send() {
 function clear() {
   if (thread) thread.innerHTML = '';
   conversationContext = [];
+  updateTurnCounter();
 }
 
 function newContext(label = 'new conversation') {
   conversationContext = [];
+  updateTurnCounter();
   if (!thread) return;
   const divider = document.createElement('div');
   divider.className = 'chat-divider';
   divider.textContent = label;
   thread.appendChild(divider);
   thread.scrollTop = thread.scrollHeight;
+}
+
+function trimAndUpdateContext() {
+  if (conversationContext.length > MAX_CONTEXT_TURNS) {
+    conversationContext = conversationContext.slice(-MAX_CONTEXT_TURNS);
+  }
+  updateTurnCounter();
+}
+
+function updateTurnCounter() {
+  const el = document.getElementById('chat-ctx-counter');
+  if (!el) return;
+  const n = conversationContext.length;
+  el.textContent = n > 0 ? `${n} / ${MAX_CONTEXT_TURNS} turns` : '';
+  el.classList.toggle('chat-ctx-near-limit', n >= MAX_CONTEXT_TURNS * 0.8);
 }
 
 function appendMsg(role, text, nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs = 0) {

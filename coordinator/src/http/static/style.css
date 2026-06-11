@@ -3275,7 +3275,15 @@ body {
   display: flex;
   gap: 0.5rem;
   justify-content: flex-end;
+  align-items: center;
 }
+
+.chat-ctx-counter {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-right: auto;
+}
+.chat-ctx-counter.chat-ctx-near-limit { color: var(--amber); }
 
 .chat-send {
   background: var(--accent, #4f8ef7);
