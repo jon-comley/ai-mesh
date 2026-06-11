@@ -84,7 +84,13 @@ pub async fn handle_intent(
         &scene_names,
     );
     let mut user_prompt = device_ctx;
-    for turn in &request.context {
+    const MAX_CONTEXT_TURNS: usize = 20;
+    let context = if request.context.len() > MAX_CONTEXT_TURNS {
+        &request.context[request.context.len() - MAX_CONTEXT_TURNS..]
+    } else {
+        &request.context[..]
+    };
+    for turn in context {
         match turn.role {
             shared::IntentRole::User => {
                 user_prompt.push_str(&format!("User: {}\n", turn.content));
