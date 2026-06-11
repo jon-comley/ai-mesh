@@ -47,7 +47,7 @@ into 15 review units; each finding independently verified by a skeptic pass).
 
 > _Operational finding (2026-06-02, not part of the 16-bug code audit):_
 - [x] **Live pi1 DB retains the purged `rooms.solar_enabled` column** — F-Effects-2 dropped `rooms.solar_enabled` (and `light_states.solar_enabled`) from the schema, but pi1's live `/var/lib/ai-mesh/ai_mesh.db` still has `rooms.solar_enabled` (verified 2026-06-02). *Fixed (2026-06-05):* Surgically dropped `solar_enabled` from both `rooms` and `light_states` via Python/SQLite on pi1; coordinator restarted and healthy.
-- [ ] **beelink1 (SER8) stability — fTPM DPC_WATCHDOG storm regressed (2026-06-02)** — the `0x00000133`/`param2=0x1e00` fTPM crash signature that was fixed on 2026-05-28 has returned (5 minidumps since 2026-06-01 22:17; full writeup in `docs/windows-node-setup.md` → 2026-06-02 entry). fTPM appears to have re-enabled itself when BIOS defaults were restored (power event / suspected weak CMOS battery). Plus a household power cut from which beelink did **not** auto-recover (down ~56 min until physical reset). Node is up and serving `qwen2.5:7b` again but will storm again until fTPM is genuinely off. **Actions:** (1) re-disable fTPM in BIOS — Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor (and Pluton Security Processor → Disabled); (2) set BIOS "Restore on AC Power Loss = Power On" + check CMOS battery; (3) longer-term, rebuild beelink on a leaner OS (Win IoT Enterprise LTSC) or move it to Linux to escape the Windows/AMD-PSP class entirely. Pi1/coordinator/lighting unaffected throughout.
+- [x] **beelink1 (SER8) stability — fTPM DPC_WATCHDOG storm regressed (2026-06-02)** *(Resolved 2026-06-11: BIOS work completed — fTPM re-disabled, AC power-loss recovery set, WoL disabled; node stable.)* — the `0x00000133`/`param2=0x1e00` fTPM crash signature that was fixed on 2026-05-28 has returned (5 minidumps since 2026-06-01 22:17; full writeup in `docs/windows-node-setup.md` → 2026-06-02 entry). fTPM appears to have re-enabled itself when BIOS defaults were restored (power event / suspected weak CMOS battery). Plus a household power cut from which beelink did **not** auto-recover (down ~56 min until physical reset). Node is up and serving `qwen2.5:7b` again but will storm again until fTPM is genuinely off. **Actions:** (1) re-disable fTPM in BIOS — Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor (and Pluton Security Processor → Disabled); (2) set BIOS "Restore on AC Power Loss = Power On" + check CMOS battery; (3) longer-term, rebuild beelink on a leaner OS (Win IoT Enterprise LTSC) or move it to Linux to escape the Windows/AMD-PSP class entirely. Pi1/coordinator/lighting unaffected throughout.
 
 ---
 
@@ -158,7 +158,7 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - **Device availability tracking** ✓ (UI side, see **F-Lighting-UX**) — per-device `online` flag flows through to the dashboard (offline cards disabled; placeholders start offline) and a bridge-level `ZigbeeStatus` drives the offline banner. **Still deferred (LLM side):** suppressing/marking offline devices in the LLM system prompt, and a distinct `device 'x' is currently offline` validation error instead of the generic unknown-target error.
 - **`bridge/event` subscription** — Subscribe to `zigbee2mqtt/bridge/event` for real-time device join/leave announcements. Currently `bridge/devices` (retained) covers discovery on connect, but live pairing events require this topic. Low priority until live-pair UX is needed.
 - **ZigbeeClient lifecycle hardening** — `connect()` spawns one event loop task internally and is safe via `OnceCell`. If multiple lighting nodes or dynamic reconnect logic is added, consider an explicit `shutdown()` signal and replacing `OnceCell<Arc<ZigbeeClient>>` with `ArcSwap<ZigbeeClient>` to allow reconnect without structural changes.
-- **Bounded Manual State Cache** — The `last_manual_states` cache in the coordinator is currently unbounded. Implement a cleanup strategy (e.g., LRU or TTL) to prevent memory growth in meshes with high device turnover.
+- ~~**Bounded Manual State Cache**~~ — obsolete: `last_manual_states` was deleted entirely in the F-Effects-2 legacy purge; nothing to bound.
 - **Solar Dashboard Widget** — Add a compass and elevation widget to the Topology view to visualize the real-time solar vector.
 - **Debounce map pruning** — completed debounce tasks leave a dead `AbortHandle` in the map until the same device fires again. Low impact (map stays small), but a periodic sweep or a completion callback could keep it clean in long-running deployments.
 - **Distributed lighting capability** — the `capability-lighting` crate connects to an MQTT broker by address (`MQTT_HOST`/`MQTT_PORT`). Any node (e.g. beelink1) could run the lighting capability pointed at pi1's Mosquitto broker, saving the coordinator→pi1 LightCommand mesh hop when beelink1 is already serving the intent. Estimated saving: ~1–2ms LAN RTT. Not worth building until the Zigbee RF round-trip (~300–500ms) is no longer the dominant latency.
@@ -402,18 +402,20 @@ Full design spec: `plans/phase11-dashboard.md`
 
 ### Phase H — Polish, icons, desktop layout pass
 
-### Deferred dashboard polish (raised post-C5, updated 2026-06-07)
+### Deferred dashboard polish (raised post-C5, updated 2026-06-11)
 
-- **Multi-turn chat context** — `history` in `chat.js` was removed (dead state, 2026-06-07). To wire it back properly: (1) `chat.js` accumulates `{ role, text }` pairs after each send/receive; (2) `POST /api/chat` body includes `context: [{role, text}]`; (3) coordinator `handle_intent` prepends context turns to the LLM prompt as additional `user`/`assistant` messages before the current user turn. Needs careful token-budget management (truncate oldest turns first) so long conversations don't overflow `max_tokens`. The chat panel should also expose a visible conversation limit and a "start fresh" affordance beyond the existing Clear button.
+> Full backlog audit with effort estimates and recommended order: `plans/backlog-2026-06.md` (2026-06-11). Items below are kept in place for context; the plan file is the working list.
+
+- **Multi-turn chat context** ✓ (2026-06-08) — `chat.js` accumulates `conversationContext` pairs; `POST /api/chat` carries `context: Vec<IntentTurn>`; `handle_intent` prepends the turns before the current user message. New-conversation button shipped alongside. **Still open:** token-budget truncation (oldest turns first) and a visible turn-count limit — see `plans/backlog-2026-06.md` #6.
 
 These are non-blocking UX improvements for after C6 ships:
 
 - **Dashboard preferences persistence** — room-collapse state is currently stored in `localStorage` (per-browser, per-device). A `dashboard_preferences` SQLite table keyed by `(user_id, key, value)` would make the dashboard look the same from any device or browser. Natural extension point for future preferences: panel order, collapsed-by-default rooms, effect palette visibility. Design consideration: `localStorage` is zero-latency and works offline; SQLite adds a round-trip but survives browser clear and works across devices. A hybrid (optimistic `localStorage` write + async sync to server) gives both.
 
-- **RAM% / CPU% colour thresholds** — colour the metric-value text amber (> 75%) or red (> 90%) so overloaded nodes stand out without reading the number.
-- **Sparkline tooltip with exact timestamp** — on `mouseover` a `<title>` element or a floating tooltip shows `cpu: X.X%  ram: Y.Y%  at HH:MM:SS` for the hovered data point; helps operators correlate a spike with a specific inference request.
-- **Per-node collapse/expand in Health panel** — each health card has a `▾ / ▸` toggle; collapsed cards show only the last value, not the full sparkline; useful when the cluster grows beyond 4–5 nodes and the panel gets long.
-- **Sparkline fill area** — shade the area under the CPU sparkline with a low-opacity accent fill for faster visual triage.
+- **Metric colour thresholds** ✓ (2026-06-11) — `metricClass(pct, metric)` with per-metric bands (`METRIC_THRESHOLDS`: CPU/RAM warn 75 / crit 90, GPU 90/98, VRAM 95/99 — VRAM normally sits near full when a model is loaded) colours the value text amber/red on CPU%, RAM%, GPU%, and VRAM%.
+- **Sparkline tooltip with exact timestamp** ✓ (2026-06-11) — per-point transparent `<rect>` hit regions (Voronoi midpoint splits, no gaps) each carry a `<title>` showing `CPU: 87.3%  at 14:23:01`; falls back to `(sample N)` labels when timestamps are absent or mismatched. Mini sparklines on the Nodes tab unchanged.
+- **Sparkline fill area** ✓ (2026-06-11) — `<polygon>` at 0.15 fill-opacity closes the area under each line in the stroke colour.
+- **Per-node collapse/expand in Health panel** — each health card has a `▾ / ▸` toggle; collapsed cards show only the last value, not the full sparkline; useful when the cluster grows beyond 4–5 nodes and the panel gets long. (`plans/backlog-2026-06.md` #4.)
 
 #### Layout view — known issues / deferred fixes (2026-06-05)
 
@@ -495,7 +497,7 @@ mesh security-report        # one-shot snapshot of current failure counts
 - Historical inference latency per model.
 - Live intent log (query, routed-to node, latency, response preview).
 - Mobile-friendly layout.
-- **Beelink BIOS — locate Wake on LAN setting** — not found during 2026-06-05 BIOS session. Suspected somewhere under Advanced → AMD CBS → SOC Misc Control (near Pluton) or an onboard devices submenu. Goal: disable WoL to prevent unexpected NIC wake/sleep transitions (belt-and-braces alongside the Windows-side AX200 PnPCapabilities=24 fix already applied).
+- ~~**Beelink BIOS — locate Wake on LAN setting**~~ — done 2026-06-11: WoL located and disabled alongside the fTPM re-disable; node stable.
 
 ---
 
