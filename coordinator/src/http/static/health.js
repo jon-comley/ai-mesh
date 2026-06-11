@@ -65,18 +65,21 @@ function healthCard(nodeId, samp) {
   const ramStr = last
     ? `${last.ram_used_gb.toFixed(1)} / ${last.ram_total_gb.toFixed(1)} GB`
     : '—';
-  const cpuData = samp.map(s => s.cpu_pct);
-  const ramData = samp.map(s => s.ram_total_gb > 0
+  const cpuData  = samp.map(s => s.cpu_pct);
+  const ramData  = samp.map(s => s.ram_total_gb > 0
     ? (s.ram_used_gb / s.ram_total_gb) * 100 : 0);
-  const hasGpu  = samp.some(s => s.gpu_pct != null);
+  const ts       = samp.map(s => s.ts_ms);
+  const hasGpu   = samp.some(s => s.gpu_pct != null);
   const gpuData  = hasGpu ? samp.map(s => s.gpu_pct ?? 0) : [];
   const vramData = hasGpu ? samp.map(s =>
     (s.gpu_vram_total_gb ?? 0) > 0
       ? ((s.gpu_vram_used_gb ?? 0) / s.gpu_vram_total_gb) * 100 : 0
   ) : [];
-  const lastGpu = hasGpu ? samp.findLast(s => s.gpu_pct != null) : null;
-  const gpuPct  = lastGpu ? lastGpu.gpu_pct.toFixed(1) : '—';
-  const vramStr = lastGpu && lastGpu.gpu_vram_total_gb > 0
+  const lastGpu  = hasGpu ? samp.findLast(s => s.gpu_pct != null) : null;
+  const gpuPct   = lastGpu ? lastGpu.gpu_pct.toFixed(1) : '—';
+  const vramPct  = lastGpu && lastGpu.gpu_vram_total_gb > 0
+    ? ((lastGpu.gpu_vram_used_gb ?? 0) / lastGpu.gpu_vram_total_gb * 100).toFixed(1) : '—';
+  const vramStr  = lastGpu && lastGpu.gpu_vram_total_gb > 0
     ? `${(lastGpu.gpu_vram_used_gb ?? 0).toFixed(1)} / ${lastGpu.gpu_vram_total_gb.toFixed(1)} GB`
     : '—';
 
@@ -88,28 +91,28 @@ function healthCard(nodeId, samp) {
   <div class="health-metric">
     <div class="metric-row">
       <span class="metric-label">CPU</span>
-      <span class="metric-value">${cpu}%</span>
+      <span class="metric-value ${metricClass(cpu, 'CPU')}">${cpu}%</span>
     </div>
-    ${sparklineSvg(cpuData, 52, 'var(--accent)')}
+    ${sparklineSvg(cpuData, 52, 'var(--accent)', ts, 'CPU')}
   </div>
   <div class="health-metric">
     <div class="metric-row">
       <span class="metric-label">RAM</span>
-      <span class="metric-value">${ramStr} · ${ramPct}%</span>
+      <span class="metric-value ${metricClass(ramPct, 'RAM')}">${ramStr} · ${ramPct}%</span>
     </div>
-    ${sparklineSvg(ramData, 52, 'var(--green)')}
+    ${sparklineSvg(ramData, 52, 'var(--green)', ts, 'RAM')}
   </div>
   ${hasGpu ? `<div class="health-metric">
     <div class="metric-row">
       <span class="metric-label">GPU</span>
-      <span class="metric-value">${gpuPct}%</span>
+      <span class="metric-value ${metricClass(gpuPct, 'GPU')}">${gpuPct}%</span>
     </div>
-    ${sparklineSvg(gpuData, 52, 'var(--amber)')}
+    ${sparklineSvg(gpuData, 52, 'var(--amber)', ts, 'GPU')}
     <div class="metric-row" style="margin-top:4px">
       <span class="metric-label">VRAM</span>
-      <span class="metric-value">${vramStr}</span>
+      <span class="metric-value ${metricClass(vramPct, 'VRAM')}">${vramStr}</span>
     </div>
-    ${sparklineSvg(vramData, 28, 'var(--amber)')}
+    ${sparklineSvg(vramData, 28, 'var(--amber)', ts, 'VRAM')}
   </div>` : ''}
 </div>`;
 }
@@ -126,14 +129,51 @@ function paintMiniSparkline(nodeId) {
 
 // ── SVG sparkline ─────────────────────────────────────────────────────────────
 
-function sparklineSvg(data, h, color) {
+function sparklineSvg(data, h, color, timestamps, label) {
   if (!data || data.length < 2) return '';
   const W   = 240;
+  const n   = data.length;
   const max = Math.max(...data, 1);
-  const pts = data
-    .map((v, i) => `${((i / (data.length - 1)) * W).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`)
-    .join(' ');
-  return `<svg width="100%" height="${h}" viewBox="0 0 ${W} ${h}" class="sparkline" aria-hidden="true" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+  const xOf = i => (i / (n - 1)) * W;
+  const yOf = v => h - (v / max) * h;
+  const pts = data.map((v, i) => `${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`).join(' ');
+
+  // Fill polygon: line points + bottom-right + bottom-left closes the shape
+  const fillPts = `${pts} ${W.toFixed(1)},${h} 0,${h}`;
+
+  // Per-point tooltip rects — each covers the Voronoi region around that sample
+  const hasTs = timestamps && timestamps.length === n;
+  const tooltipRects = data.map((v, i) => {
+    const left  = i === 0     ? 0 : (xOf(i - 1) + xOf(i)) / 2;
+    const right = i === n - 1 ? W : (xOf(i) + xOf(i + 1)) / 2;
+    const when  = hasTs ? `  at ${new Date(timestamps[i]).toLocaleTimeString()}` : `  (sample ${i + 1})`;
+    const title = `${label ? label + ': ' : ''}${v.toFixed(1)}%${when}`;
+    return `<rect x="${left.toFixed(1)}" y="0" width="${(right - left).toFixed(1)}" height="${h}" fill="transparent"><title>${title}</title></rect>`;
+  }).join('');
+
+  return `<svg width="100%" height="${h}" viewBox="0 0 ${W} ${h}" class="sparkline" aria-hidden="true" preserveAspectRatio="none">`
+    + `<polygon points="${fillPts}" fill="${color}" fill-opacity="0.15"/>`
+    + `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>`
+    + tooltipRects
+    + `</svg>`;
+}
+
+// ── Metric threshold colouring ────────────────────────────────────────────────
+
+const METRIC_THRESHOLDS = {
+  CPU:  { warn: 75, crit: 90 },
+  RAM:  { warn: 75, crit: 90 },
+  GPU:  { warn: 90, crit: 98 },
+  VRAM: { warn: 95, crit: 99 },
+};
+
+function metricClass(pct, metric) {
+  const v = parseFloat(pct);
+  if (!isFinite(v)) return '';
+  const { warn, crit } = METRIC_THRESHOLDS[metric] ?? { warn: 75, crit: 90 };
+  if (v >= crit) return 'metric-crit';
+  if (v >= warn) return 'metric-warn';
+  return '';
 }
 
 // ── Interval prompt ───────────────────────────────────────────────────────────
