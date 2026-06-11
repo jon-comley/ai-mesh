@@ -219,10 +219,26 @@ body {
   margin-bottom: 10px;
 }
 
+.health-collapse-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px 0 0;
+  flex-shrink: 0;
+  line-height: 1;
+  transition: color 0.15s;
+}
+.health-collapse-btn:hover { color: var(--text); }
+
 .health-node-name {
   font-weight: 600;
   font-size: 15px;
+  flex: 1;
 }
+
+.health-card.collapsed .sparkline { display: none; }
 
 .interval-btn {
   background: var(--surface-2);

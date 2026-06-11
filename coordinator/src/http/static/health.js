@@ -1,6 +1,7 @@
 /** Health panel: CPU/RAM sparklines + heartbeat interval control. */
 
-const ORDER_KEY = 'meshHealthOrder';
+const ORDER_KEY    = 'meshHealthOrder';
+const COLLAPSE_PFX = 'mesh-health-collapsed-';
 
 const samplesMap   = new Map(); // nodeId -> HealthSample[]
 const hostnamesMap = new Map(); // nodeId -> hostname
@@ -40,8 +41,16 @@ export function repaintAll() {
 
 if (healthChartsEl) {
   healthChartsEl.addEventListener('click', e => {
-    const btn = e.target.closest('[data-interval-node]');
-    if (btn) promptHeartbeatInterval(btn.dataset.intervalNode);
+    const collapseBtn = e.target.closest('[data-collapse-node]');
+    if (collapseBtn) {
+      const id = collapseBtn.dataset.collapseNode;
+      const nowCollapsed = localStorage.getItem(COLLAPSE_PFX + id) !== '1';
+      localStorage.setItem(COLLAPSE_PFX + id, nowCollapsed ? '1' : '0');
+      renderHealthPanel();
+      return;
+    }
+    const intervalBtn = e.target.closest('[data-interval-node]');
+    if (intervalBtn) promptHeartbeatInterval(intervalBtn.dataset.intervalNode);
   });
   enableDrag(healthChartsEl);
 }
@@ -57,7 +66,8 @@ function renderHealthPanel() {
 }
 
 function healthCard(nodeId, samp) {
-  const name  = hostnamesMap.get(nodeId) ?? nodeId;
+  const name      = hostnamesMap.get(nodeId) ?? nodeId;
+  const collapsed = localStorage.getItem(COLLAPSE_PFX + nodeId) === '1';
   const last  = samp.at(-1);
   const cpu   = last ? last.cpu_pct.toFixed(1) : '—';
   const ramPct = last && last.ram_total_gb > 0
@@ -83,8 +93,9 @@ function healthCard(nodeId, samp) {
     ? `${(lastGpu.gpu_vram_used_gb ?? 0).toFixed(1)} / ${lastGpu.gpu_vram_total_gb.toFixed(1)} GB`
     : '—';
 
-  return `<div class="health-card" draggable="true" data-drag-id="${esc(nodeId)}">
+  return `<div class="health-card${collapsed ? ' collapsed' : ''}" draggable="true" data-drag-id="${esc(nodeId)}">
   <div class="health-card-header">
+    <button class="health-collapse-btn" data-collapse-node="${esc(nodeId)}">${collapsed ? '▸' : '▾'}</button>
     <span class="health-node-name">${esc(name)}</span>
     <button class="interval-btn" data-interval-node="${esc(nodeId)}">Set interval · ${intervalsMap.get(nodeId) ?? 30}s</button>
   </div>
