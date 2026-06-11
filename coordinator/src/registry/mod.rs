@@ -450,6 +450,7 @@ impl Registry {
     /// Existing rows are loaded into the in-memory map on construction.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
         init_schema(&conn)?;
         let mut reg = Self {
             nodes: HashMap::new(),
