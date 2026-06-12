@@ -1359,7 +1359,7 @@ start-cluster: update-portproxy
         # Remote coordinator mode (running on pi1 as systemd service)
         echo ">>> Coordinator is running remotely on {{coordinator_ip}}"
         echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
-        scp -q "jonno@{{coordinator_ip}}:.config/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
+        scp -q "jonno@{{coordinator_ip}}:/var/lib/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
 
         cargo build -q -p cli
         echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
@@ -1485,7 +1485,7 @@ restart-coordinator: update-portproxy
         # Remote coordinator mode (running on pi1 as systemd service)
         echo ">>> Coordinator is running remotely on {{coordinator_ip}}"
         echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
-        scp -q "jonno@{{coordinator_ip}}:.config/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
+        scp -q "jonno@{{coordinator_ip}}:/var/lib/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
 
         cargo build -q -p cli
         echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
