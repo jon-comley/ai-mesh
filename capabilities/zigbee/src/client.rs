@@ -78,6 +78,7 @@ impl ZigbeeClient {
                             "zigbee2mqtt/bridge/devices",
                             "zigbee2mqtt/bridge/groups",
                             "zigbee2mqtt/bridge/state",
+                            "zigbee2mqtt/bridge/event",
                         ] {
                             if let Err(e) =
                                 subscribe_client.subscribe(*topic, QoS::AtMostOnce).await
