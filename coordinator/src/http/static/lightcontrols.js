@@ -245,7 +245,7 @@ const TEMP_GRADIENT = (() => {
 
 // opts: { mireds, onInput?(m), onChange(m) }
 // onInput fires live during the drag; onChange fires on release.
-function buildTempBar({ mireds, onInput, onChange }) {
+export function buildTempBar({ mireds, onInput, onChange }) {
   const bar = document.createElement('div');
   bar.className = 'temp-bar';
   bar.style.background = TEMP_GRADIENT;
