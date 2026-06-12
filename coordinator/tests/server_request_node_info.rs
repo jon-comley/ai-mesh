@@ -14,12 +14,13 @@ async fn server_handles_request_node_info() {
     let reg_clone = registry.clone();
 
     tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.unwrap();
+        let (socket, peer_addr) = listener.accept().await.unwrap();
         let connections = Arc::new(Mutex::new(HashMap::new()));
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let pending_intents = Arc::new(Mutex::new(HashMap::new()));
         coordinator::server::handle_connection(
             socket,
+            peer_addr,
             reg_clone,
             connections,
             pending,

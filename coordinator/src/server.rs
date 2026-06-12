@@ -10,6 +10,7 @@ use shared::{
     AdminMessage, HeartbeatPayload, MeshMessage, ModelLifecycleState, NodeRecordFull, NodeRole,
 };
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,7 +73,7 @@ impl Server {
         let listener = TcpListener::bind(&self.addr).await?;
 
         loop {
-            let (socket, _) = listener.accept().await?;
+            let (socket, peer_addr) = listener.accept().await?;
             let registry = self.registry.clone();
             let connections = self.connections.clone();
             let pending_inferences = self.pending_inferences.clone();
@@ -87,6 +88,7 @@ impl Server {
                         Ok(tls_stream) => {
                             let _ = handle_connection(
                                 tls_stream,
+                                peer_addr,
                                 registry,
                                 connections,
                                 pending_inferences,
@@ -103,6 +105,7 @@ impl Server {
                 tokio::spawn(async move {
                     let _ = handle_connection(
                         socket,
+                        peer_addr,
                         registry,
                         connections,
                         pending_inferences,
@@ -117,8 +120,10 @@ impl Server {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection<S>(
     socket: S,
+    peer_addr: SocketAddr,
     registry: Arc<Mutex<Registry>>,
     connections: Connections,
     pending_inferences: PendingInferences,
@@ -140,7 +145,9 @@ where
             Ok(buf) => buf,
             Err(FrameReadError::Closed) => return Ok(()),
             Err(FrameReadError::TooLarge(n)) => {
-                warn!("rejected connection: auth frame length {n} exceeds MAX_FRAME_LEN");
+                warn!(
+                    "rejected connection from {peer_addr}: auth frame length {n} exceeds MAX_FRAME_LEN"
+                );
                 return Ok(());
             }
         };
@@ -217,7 +224,9 @@ where
             Ok(buf) => buf,
             Err(FrameReadError::Closed) => break,
             Err(FrameReadError::TooLarge(n)) => {
-                warn!("dropping connection: frame length {n} exceeds MAX_FRAME_LEN");
+                warn!(
+                    "dropping connection from {peer_addr}: frame length {n} exceeds MAX_FRAME_LEN"
+                );
                 break;
             }
         };
