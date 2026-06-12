@@ -103,7 +103,7 @@ A Progressive Web App — open in Chrome/Safari and use "Add to Home Screen" to 
 All coordinator ↔ agent and coordinator ↔ CLI traffic runs over **TLS** with a **shared auth token**.
 
 ### TLS (transport layer)
-The coordinator generates a self-signed certificate on first start, persisted at `~/.config/ai-mesh/coordinator.crt`. Agents and the CLI verify the cert via its SHA-256 fingerprint (TOFU model — trust on first contact, reject any change).
+The coordinator generates a self-signed certificate on first start, persisted at `/var/lib/ai-mesh/coordinator.crt`. Agents and the CLI verify the cert via its SHA-256 fingerprint (TOFU model — trust on first contact, reject any change).
 
 ### Auth token (application layer)
 Each agent includes `MESH_AUTH_TOKEN` in its startup `AuthToken` frame (connection-level) and in every `Heartbeat` (per-message defence-in-depth). The coordinator rejects any connection or heartbeat with a missing or wrong token when auth is configured. Dual-token rotation (`MESH_AUTH_TOKEN` + `MESH_AUTH_TOKEN_NEXT`) allows zero-downtime key rotation — use `just rotate-token` to rotate automatically.
@@ -112,10 +112,10 @@ Each agent includes `MESH_AUTH_TOKEN` in its startup `AuthToken` frame (connecti
 Every wire message after the initial `AuthToken` handshake is wrapped in a `SignedFrame` (HMAC-SHA256). The signing key is derived from `MESH_AUTH_TOKEN` via HKDF-SHA256 — no new credentials needed. The coordinator rejects frames with a wrong signature, stale timestamp (>30s skew), or no `SignedFrame` wrapper at all after auth. This closes the residual window where a rogue process that obtained a valid token could inject arbitrary messages. Use `just chaos` to adversarially verify the full security stack.
 
 ### Coordinator state file
-On startup the coordinator writes `~/.config/ai-mesh/coordinator.state` (0600, shell-sourceable KEY=VALUE) containing the current fingerprint and auth token. All justfile recipes source this file — no log-grepping, no race conditions.
+On startup the coordinator writes `/var/lib/ai-mesh/coordinator.state` (0600, shell-sourceable KEY=VALUE) containing the current fingerprint and auth token. All justfile recipes source this file — no log-grepping, no race conditions.
 
 **`just start-cluster`, `just restart-coordinator`, and `just deploy-node` handle everything automatically:**
-- Source `~/.config/ai-mesh/coordinator.state` for fingerprint + auth token
+- Source `/var/lib/ai-mesh/coordinator.state` for fingerprint + auth token
 - Write `export MESH_TLS_FINGERPRINT=...` and `export MESH_AUTH_TOKEN=...` to `~/.bashrc` on the controller machine
 - Call `just set-fingerprint <node>` for every compute node, which pushes **both** `MESH_TLS_FINGERPRINT` and `MESH_AUTH_TOKEN` in one SSH operation
 - `deploy-node` additionally pushes credentials immediately after provisioning if the coordinator is already running

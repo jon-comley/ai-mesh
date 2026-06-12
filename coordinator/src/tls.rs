@@ -9,6 +9,13 @@ use tokio_rustls::TlsAcceptor;
 use tracing::info;
 
 pub fn cert_dir() -> PathBuf {
+    cert_dir_from(std::env::var("MESH_STATE_DIR").ok().as_deref())
+}
+
+pub(crate) fn cert_dir_from(mesh_state_dir: Option<&str>) -> PathBuf {
+    if let Some(dir) = mesh_state_dir {
+        return PathBuf::from(dir);
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("ai-mesh")
@@ -83,7 +90,7 @@ fn pem_to_der(pem: &[u8], label: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{cert_dir_from, *};
     use tempfile::TempDir;
 
     #[test]
@@ -118,5 +125,20 @@ mod tests {
         let key_path = dir.path().join("coordinator.key");
         let (cert_der, key_der) = load_or_generate(&cert_path, &key_path);
         let _ = make_acceptor(cert_der, key_der);
+    }
+
+    #[test]
+    fn cert_dir_uses_mesh_state_dir_when_set() {
+        let dir = cert_dir_from(Some("/var/lib/ai-mesh"));
+        assert_eq!(dir, std::path::PathBuf::from("/var/lib/ai-mesh"));
+    }
+
+    #[test]
+    fn cert_dir_falls_back_to_config_dir_when_unset() {
+        let dir = cert_dir_from(None);
+        assert!(
+            dir.to_string_lossy().contains("ai-mesh"),
+            "fallback cert dir should contain 'ai-mesh': {dir:?}"
+        );
     }
 }

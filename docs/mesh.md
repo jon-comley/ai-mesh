@@ -43,7 +43,7 @@ The coordinator is the central hub of the mesh. It:
 - Maintains a **SQLite-backed** registry of nodes (survives restarts)
 - Tracks heartbeats and last-seen timestamps
 - Routes model load, inference, lighting, and intent commands to the correct agent
-- Writes `~/.config/ai-mesh/coordinator.state` on startup
+- Writes `/var/lib/ai-mesh/coordinator.state` on startup
 
 The coordinator binds to `0.0.0.0:9000` and runs on **pi1** (`192.168.1.11`) as an always-on systemd service; nodes connect there directly. (Historically it ran in WSL2 behind a Windows portproxy — that portproxy is now vestigial.)
 

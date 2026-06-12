@@ -511,8 +511,8 @@ Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniL
 
 - ✓ **pi1 hosts the coordinator** — co-located with zigbee2mqtt + Mosquitto on localhost. Beelink freed for heavy compute. Pi 5 fanless, low-power, zero crashes (vs. Beelink's fTPM/GPU driver instability).
 - ✓ **Tailscale remote access** — phone authenticated to 100.100.100.100; dashboard URL bookmarked; MagicDNS pending propagation (IP URL works immediately).
-- ✓ **Coordinator state migration** — `~/.config/ai-mesh/` (cert/key/token) + `ai_mesh.db` → `/var/lib/ai-mesh/`; token reused across restarts so bookmarks remain valid.
-- ✓ **Systemd service** — `Restart=always` + `RestartSec=5s` for automatic recovery from transient network/DB issues; `ProtectSystem=full` + `NoNewPrivileges=true` for baseline hardening.
+- ✓ **Coordinator state migration** — cert/key/token + `ai_mesh.db` all in `/var/lib/ai-mesh/`; token reused across restarts so bookmarks remain valid.
+- ✓ **Systemd service** — `Restart=always` + `RestartSec=5s` for automatic recovery from transient network/DB issues; `ProtectSystem=full` + `ProtectHome=true` + `NoNewPrivileges=true` for baseline hardening.
 - ✓ **Agent repointing** — Beelink + OmniLink1 now point to pi1:9001; OmniLink1 reclassified as Compute (was Controller); all agents verified connected and healthy.
 
 **Deployment recipes**
@@ -537,7 +537,7 @@ Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniL
 
 **Future hardening (deferred — not blocking)**
 
-- `ProtectHome=true` on systemd unit (blocked by `dirs::config_dir()` → `~/.config/ai-mesh/`; needs `MESH_CONFIG_DIR` env or state relocation).
+- ✓ `ProtectHome=true` on systemd unit — `MESH_STATE_DIR=/var/lib/ai-mesh` redirects cert/key/state out of home; `StateDirectory=ai-mesh` ensures the dir exists with correct ownership.
 - SQLite `journal_mode=WAL` + `synchronous=NORMAL` for SD-card wear mitigation on pi1.
 - `LimitNOFILE=4096` if cluster grows past ~100 agents.
 - Per-node TLS certs instead of single self-signed cert across all agents.
