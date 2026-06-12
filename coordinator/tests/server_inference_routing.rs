@@ -41,10 +41,11 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
         let conns = connections.clone();
         let pend = pending_inferences.clone();
         tokio::spawn(async move {
-            if let Ok((socket, _)) = agent_listener.accept().await {
+            if let Ok((socket, peer_addr)) = agent_listener.accept().await {
                 let pending_intents = Arc::new(Mutex::new(HashMap::new()));
                 let _ = coordinator::server::handle_connection(
                     socket,
+                    peer_addr,
                     reg,
                     conns,
                     pend,
@@ -65,10 +66,11 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
         let conns = connections.clone();
         let pend = pending_inferences.clone();
         tokio::spawn(async move {
-            if let Ok((socket, _)) = cli_listener.accept().await {
+            if let Ok((socket, peer_addr)) = cli_listener.accept().await {
                 let pending_intents = Arc::new(Mutex::new(HashMap::new()));
                 let _ = coordinator::server::handle_connection(
                     socket,
+                    peer_addr,
                     reg,
                     conns,
                     pend,
