@@ -413,7 +413,7 @@ async fn main() {
     if token.is_empty() {
         eprintln!("\nERROR: MESH_AUTH_TOKEN is not set.");
         eprintln!("The chaos test requires a coordinator with HMAC auth enabled.");
-        eprintln!("Source coordinator.state first:  source ~/.config/ai-mesh/coordinator.state");
+        eprintln!("Source coordinator.state first:  source /var/lib/ai-mesh/coordinator.state");
         std::process::exit(2);
     }
     println!();

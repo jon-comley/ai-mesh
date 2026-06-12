@@ -14,9 +14,9 @@ corrected in place where it lagged reality. This file is the working list.
 | 4 | Per-node collapse/expand — Health panel | `▾/▸` per health card; collapsed shows last values only, no sparklines; `localStorage` persistence. Copy the room-card chevron pattern. | **Done** 4f25eee | 30 min |
 | 5 | Room CT slider → `buildTempBar` | `rooms.js:499` uses generic `buildSlider`; switch to the warm→cool gradient `buildTempBar` from `lightcontrols.js` to match device cards. | **Done** 998338b | 30 min |
 | 6 | Chat context token budget | Backend wiring done; remaining: truncate oldest turns (client `MAX_CONTEXT_TURNS` trim in `chat.js` + server-side guard in `handle_intent`) so long conversations don't overflow the prompt. Visible turn-count limit in UI. | **Done** c1e45d0 | 45 min |
-| 7 | `bridge/event` subscription | Add `zigbee2mqtt/bridge/event` to the re-subscribe list in `client.rs` for live pairing announcements. Low priority until live-pair UX exists. | Not started | 30 min |
-| 8 | Log peer addr on oversized frame | Thread `SocketAddr` through `handle_connection` so `read_bounded_frame` rejections name the peer. Forensics only; roadmap rates it low value. | Not started | 45 min |
-| 9 | ProtectHome=true on pi1 unit | Needs `MESH_CONFIG_DIR` env var or moving `~/.config/ai-mesh/` state to `/var/lib/ai-mesh/`. | Not started | 1 hr |
+| 7 | `bridge/event` subscription | Add `zigbee2mqtt/bridge/event` to the re-subscribe list in `client.rs` for live pairing announcements. Low priority until live-pair UX exists. | **Done** a3bd020 | 30 min |
+| 8 | Log peer addr on oversized frame | Thread `SocketAddr` through `handle_connection` so `read_bounded_frame` rejections name the peer. Forensics only; roadmap rates it low value. | **Done** a3bd020 | 45 min |
+| 9 | ProtectHome=true on pi1 unit | `MESH_STATE_DIR` env var in `state.rs` + `tls.rs`; unit sets `MESH_STATE_DIR=/var/lib/ai-mesh` + `StateDirectory=ai-mesh` + `ProtectHome=true`. | **Done** | 1 hr |
 | 10 | Offline-device LLM suppression | Mark/suppress offline devices in the intent system prompt; return `device 'x' is currently offline` instead of generic unknown-target. UI half shipped in F-Lighting-UX. | **Done** 677c694 | 1–2 hrs |
 | 11 | Layout opening-drag fix | Drag-to-place windows/doors from the sidebar popover unreliable — capture-phase `pointerdown` dismiss handler likely eats the drag start. `layout.js` `openOpeningPopover` / `makeMoveDraggable`. Needs a browser session. | Not started | 1–2 hrs |
 | 12 | Deferred chaos scenarios | (1) token rotation mid-WS-session; (2) lagged broadcast receiver under heartbeat flood; (3) `Channel closed` arm in `ws.rs`. Called out post-Phase B as pre-ship requirements for Phase 11. | Not started | 2 hrs |
@@ -32,8 +32,7 @@ corrected in place where it lagged reality. This file is the working list.
 
 ## Recommended next slice
 
-Items #7, #8, #9 are the remaining quick wins (< 1 hr each). #11 needs a
-browser session (WSL2 limitation). #14 is the next substantial feature.
+Items #7, #8, #9 are done. #11 needs a browser session (WSL2 limitation). #14 is the next substantial feature.
 
 Items 13 and 15 are blocked on hardware/topology and should not be started.
 

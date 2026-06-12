@@ -19,18 +19,18 @@ Environment="RUST_LOG=info"
 # MDNS_ADVERTISE_IP should be set to pi1's LAN IP (192.168.1.11) or overridden via /etc/systemd/system/ai-mesh-coordinator.service.d/override.conf
 Environment="MDNS_ADVERTISE_IP=192.168.1.11"
 Environment="MESH_HTTP_PORT=9001"
+Environment="MESH_STATE_DIR=/var/lib/ai-mesh"
 
 # Read coordinator.state on startup to reuse the existing token and cert/key pinning.
-# State file is at ~/.config/ai-mesh/coordinator.state (the ~ resolves to User's home).
-EnvironmentFile=-%h/.config/ai-mesh/coordinator.state
+# State file lives under StateDirectory so no home-dir access is required.
+EnvironmentFile=-/var/lib/ai-mesh/coordinator.state
 
 # Security
 ProtectSystem=full
+ProtectHome=true
 NoNewPrivileges=true
 PrivateTmp=true
-
-# Sandboxing is light; we read /var/lib/ai-mesh and the user's ~/.config/ai-mesh.
-# Not enabling ProtectHome=true yet — blocks reads from ~/.config/ai-mesh (deferred to future hardening).
+StateDirectory=ai-mesh
 
 # Resource limits
 LimitNOFILE=4096

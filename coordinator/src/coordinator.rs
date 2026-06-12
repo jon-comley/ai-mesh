@@ -120,7 +120,7 @@ impl Coordinator {
 
             // Collect valid auth tokens. Precedence:
             //  1. MESH_AUTH_TOKEN env var (explicit override)
-            //  2. Token persisted in ~/.config/ai-mesh/coordinator.state from a prior run
+            //  2. Token persisted in /var/lib/ai-mesh/coordinator.state from a prior run
             //  3. Freshly generated token (first run, or persisted state missing)
             // Step 2 keeps the token stable across `cargo run` restarts so that
             // bookmarked dashboard URLs (e.g. on a phone) keep working.

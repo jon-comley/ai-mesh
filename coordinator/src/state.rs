@@ -2,6 +2,13 @@ use std::path::PathBuf;
 use tracing::{info, warn};
 
 pub fn state_path() -> PathBuf {
+    state_path_from(std::env::var("MESH_STATE_DIR").ok().as_deref())
+}
+
+fn state_path_from(mesh_state_dir: Option<&str>) -> PathBuf {
+    if let Some(dir) = mesh_state_dir {
+        return PathBuf::from(dir).join("coordinator.state");
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("ai-mesh")
@@ -101,7 +108,7 @@ pub(crate) fn read_from_path(path: &std::path::Path) -> Option<PersistedState> {
 
 #[cfg(test)]
 mod tests {
-    use super::write_to_path;
+    use super::{state_path_from, write_to_path};
     use std::fs;
     use tempfile::TempDir;
 
@@ -252,5 +259,27 @@ mod tests {
                 "unexpected key in state file: {key:?}"
             );
         }
+    }
+
+    #[test]
+    fn state_path_uses_mesh_state_dir_when_set() {
+        let path = state_path_from(Some("/var/lib/ai-mesh"));
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/var/lib/ai-mesh/coordinator.state")
+        );
+    }
+
+    #[test]
+    fn state_path_falls_back_to_config_dir_when_unset() {
+        let path = state_path_from(None);
+        assert!(
+            path.to_string_lossy().contains("ai-mesh"),
+            "fallback path should contain 'ai-mesh': {path:?}"
+        );
+        assert!(
+            path.to_string_lossy().ends_with("coordinator.state"),
+            "fallback path should end with coordinator.state: {path:?}"
+        );
     }
 }

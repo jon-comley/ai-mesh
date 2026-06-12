@@ -8,7 +8,7 @@
 - Store hardware and capability reports
 - Route model load, inference, and lighting commands to the correct agent
 - Respond to CLI queries
-- Write `~/.config/ai-mesh/coordinator.state` on startup (TLS fingerprint + auth token, shell-sourceable)
+- Write `/var/lib/ai-mesh/coordinator.state` on startup (TLS fingerprint + auth token, shell-sourceable)
 
 ## Architecture
 
