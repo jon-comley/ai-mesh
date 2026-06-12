@@ -12,6 +12,7 @@ import {
   deleteDevice, patchDeviceName,
 } from '/static/actions.js';
 import { esc, showToast } from '/static/util.js';
+import { setPref } from '/static/prefs.js';
 import { tok, api } from '/static/api.js';
 import {
   model, devicesMap,
@@ -974,7 +975,7 @@ function renderRoomCard(room) {
     const nowCollapsed = !body.classList.contains('collapsed');
     body.classList.toggle('collapsed', nowCollapsed);
     collapseBtn.textContent = nowCollapsed ? '▸' : '▾';
-    localStorage.setItem(`mesh-room-collapsed-${room.id}`, nowCollapsed ? '1' : '0');
+    setPref(`mesh-room-collapsed-${room.id}`, nowCollapsed ? '1' : '0');
   });
 
   // Device cards
@@ -1051,7 +1052,7 @@ function renderRoomCard(room) {
         // Auto-expand so the user can see the newly assigned device
         body.classList.remove('collapsed');
         collapseBtn.textContent = '▾';
-        localStorage.setItem(`mesh-room-collapsed-${room.id}`, '0');
+        setPref(`mesh-room-collapsed-${room.id}`, '0');
       }
     }
   });

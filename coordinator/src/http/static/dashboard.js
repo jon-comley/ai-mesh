@@ -1,3 +1,4 @@
+import { loadPrefs } from '/static/prefs.js';
 import * as topology from '/static/topology.js';
 import * as health from '/static/health.js';
 import * as models from '/static/models.js';
@@ -132,6 +133,7 @@ if (!localStorage.getItem('meshToken')) {
   promptToken();
 }
 
+loadPrefs();
 connect();
 
 // Tap the connection dot to re-enter the token.
