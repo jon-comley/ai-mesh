@@ -262,7 +262,13 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             CHECK (enabled IN (0, 1))
         );
         CREATE UNIQUE INDEX IF NOT EXISTS uid_enabled_room_effect
-            ON room_effects (room_id) WHERE enabled = 1;",
+            ON room_effects (room_id) WHERE enabled = 1;
+        CREATE TABLE IF NOT EXISTS dashboard_preferences (
+            user_id TEXT NOT NULL,
+            key     TEXT NOT NULL,
+            value   TEXT NOT NULL,
+            PRIMARY KEY (user_id, key)
+        );",
     )?;
 
     // Migration: Add overrides_json to room_effects if absent.
@@ -1340,6 +1346,26 @@ impl Registry {
     }
 
     // ── room_effects ── see registry/effects.rs ────────────────────────────────
+
+    // ── dashboard_preferences ──────────────────────────────────────────────────
+
+    pub fn get_all_preferences(&self, user_id: &str) -> Vec<(String, String)> {
+        self.conn
+            .prepare("SELECT key, value FROM dashboard_preferences WHERE user_id = ?1")
+            .and_then(|mut stmt| {
+                stmt.query_map([user_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn set_preference(&self, user_id: &str, key: &str, value: &str) {
+        let _ = self.conn.execute(
+            "INSERT INTO dashboard_preferences (user_id, key, value) VALUES (?1, ?2, ?3)
+             ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![user_id, key, value],
+        );
+    }
 }
 
 #[cfg(test)]

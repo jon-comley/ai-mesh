@@ -6,7 +6,7 @@ use axum::{
     Router,
     http::{StatusCode, header},
     response::Html,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -43,6 +43,7 @@ const API_JS: &str = include_str!("static/api.js");
 const STATE_JS: &str = include_str!("static/state.js");
 const INDICATORS_JS: &str = include_str!("static/indicators.js");
 const LAYOUT_JS: &str = include_str!("static/layout.js");
+const PREFS_JS: &str = include_str!("static/prefs.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
@@ -117,6 +118,8 @@ pub fn router(
         .route("/api/scenes/{id}/recall", post(api::recall_scene))
         .route("/api/scenes/{id}", delete(api::delete_scene))
         .route("/api/chat", post(api::chat))
+        .route("/api/preferences", get(api::get_preferences))
+        .route("/api/preferences/{key}", put(api::set_preference))
         .layer(axum::Extension(registry))
         .layer(axum::Extension(effects))
         .with_state(dashboard)
@@ -154,6 +157,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/state.js", STATE_JS, JS),
         ("/static/indicators.js", INDICATORS_JS, JS),
         ("/static/layout.js", LAYOUT_JS, JS),
+        ("/static/prefs.js", PREFS_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
     ];

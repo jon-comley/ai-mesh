@@ -1,5 +1,7 @@
 /** Health panel: CPU/RAM sparklines + heartbeat interval control. */
 
+import { setPref } from '/static/prefs.js';
+
 const ORDER_KEY    = 'meshHealthOrder';
 const COLLAPSE_PFX = 'mesh-health-collapsed-';
 
@@ -45,7 +47,7 @@ if (healthChartsEl) {
     if (collapseBtn) {
       const id = collapseBtn.dataset.collapseNode;
       const nowCollapsed = localStorage.getItem(COLLAPSE_PFX + id) !== '1';
-      localStorage.setItem(COLLAPSE_PFX + id, nowCollapsed ? '1' : '0');
+      setPref(COLLAPSE_PFX + id, nowCollapsed ? '1' : '0');
       renderHealthPanel();
       return;
     }
@@ -241,7 +243,7 @@ function enableDrag(el) {
   el.addEventListener('dragend', () => {
     if (dragSrc) dragSrc.classList.remove('dragging');
     const ids = [...el.querySelectorAll('[data-drag-id]')].map(c => c.dataset.dragId);
-    localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
+    setPref(ORDER_KEY, JSON.stringify(ids));
     dragSrc = null;
   });
 }

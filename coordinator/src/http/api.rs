@@ -1362,6 +1362,48 @@ pub async fn chat(
     Json(resp).into_response()
 }
 
+// ── Dashboard preferences ─────────────────────────────────────────────────────
+
+const PREF_USER_ID: &str = "default";
+
+#[derive(Deserialize)]
+pub struct PrefBody {
+    value: String,
+}
+
+pub async fn get_preferences(
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let pairs = registry.lock().unwrap().get_all_preferences(PREF_USER_ID);
+    let map: std::collections::HashMap<String, String> = pairs.into_iter().collect();
+    Json(map).into_response()
+}
+
+pub async fn set_preference(
+    Path(key): Path<String>,
+    Query(q): Query<TokenQuery>,
+    State(state): State<Arc<DashboardState>>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Json(body): Json<PrefBody>,
+) -> impl IntoResponse {
+    if !state.auth_ok(&q.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if key.is_empty() {
+        return (StatusCode::BAD_REQUEST, "key must not be empty").into_response();
+    }
+    registry
+        .lock()
+        .unwrap()
+        .set_preference(PREF_USER_ID, &key, &body.value);
+    StatusCode::NO_CONTENT.into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3401,5 +3443,126 @@ mod tests {
             .unwrap();
         let stored: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
         assert!(stored.is_empty(), "bulb-1 should be re-included");
+    }
+
+    // ── preferences ──────────────────────────────────────────────────────────
+
+    fn make_pref_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
+        use axum::routing::put;
+        Router::new()
+            .route("/api/preferences", get(get_preferences))
+            .route("/api/preferences/{key}", put(set_preference))
+            .layer(axum::Extension(registry))
+            .with_state(state)
+    }
+
+    async fn get_prefs(
+        state: Arc<DashboardState>,
+        registry: Arc<Mutex<Registry>>,
+        token: &str,
+    ) -> (StatusCode, std::collections::HashMap<String, String>) {
+        let router = make_pref_router(state, registry);
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/preferences?token={token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let map = serde_json::from_slice(&bytes).unwrap_or_default();
+        (status, map)
+    }
+
+    async fn put_pref(
+        state: Arc<DashboardState>,
+        registry: Arc<Mutex<Registry>>,
+        token: &str,
+        key: &str,
+        value: &str,
+    ) -> StatusCode {
+        let router = make_pref_router(state, registry);
+        let body = format!(r#"{{"value":{value:?}}}"#);
+        let req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/preferences/{key}?token={token}"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let _ = to_bytes(resp.into_body(), usize::MAX).await;
+        status
+    }
+
+    #[tokio::test]
+    async fn get_preferences_empty() {
+        let (state, reg) = (
+            make_state(vec![], empty_connections()),
+            Arc::new(Mutex::new(Registry::new())),
+        );
+        let (status, map) = get_prefs(state, reg, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_preference_then_get() {
+        let state = make_state(vec![], empty_connections());
+        let reg = Arc::new(Mutex::new(Registry::new()));
+
+        let s = put_pref(
+            state.clone(),
+            Arc::clone(&reg),
+            "",
+            "meshNodeOrder",
+            r#"["n1","n2"]"#,
+        )
+        .await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+
+        let (status, map) = get_prefs(state, reg, "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            map.get("meshNodeOrder").map(String::as_str),
+            Some(r#"["n1","n2"]"#)
+        );
+    }
+
+    #[tokio::test]
+    async fn set_preference_upsert() {
+        let state = make_state(vec![], empty_connections());
+        let reg = Arc::new(Mutex::new(Registry::new()));
+
+        put_pref(state.clone(), Arc::clone(&reg), "", "k", "v1").await;
+        put_pref(state.clone(), Arc::clone(&reg), "", "k", "v2").await;
+
+        let (_, map) = get_prefs(state, reg, "").await;
+        assert_eq!(map.get("k").map(String::as_str), Some("v2"));
+    }
+
+    #[tokio::test]
+    async fn preferences_returns_401_for_wrong_token() {
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let reg = Arc::new(Mutex::new(Registry::new()));
+        let (status, _) = get_prefs(state.clone(), Arc::clone(&reg), "wrong").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let s = put_pref(state, reg, "wrong", "k", "v").await;
+        assert_eq!(s, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn set_preference_empty_body_returns_400() {
+        let state = make_state(vec![], empty_connections());
+        let reg = Arc::new(Mutex::new(Registry::new()));
+        let router = make_pref_router(state, reg);
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/preferences/k?token=")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

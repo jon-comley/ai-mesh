@@ -1,6 +1,7 @@
 /** Models panel: per-node model list with load/unload controls. */
 
 import { getLatestSample } from '/static/health.js';
+import { setPref } from '/static/prefs.js';
 
 const ORDER_KEY   = 'meshModelOrder';
 const nodesMap    = new Map(); // nodeId -> NodeModelInfo
@@ -265,7 +266,7 @@ function enableDrag(el) {
   el.addEventListener('dragend', () => {
     if (dragSrc) dragSrc.classList.remove('dragging');
     const ids = [...el.querySelectorAll('[data-drag-id]')].map(c => c.dataset.dragId);
-    localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
+    setPref(ORDER_KEY, JSON.stringify(ids));
     dragSrc = null;
   });
 }
