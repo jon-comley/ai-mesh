@@ -5,7 +5,7 @@
 import * as layout from '/static/layout.js';
 import { xyToRgb, hslToXy } from '/static/colormath.js';
 import { buildSlider, buildColourWheel } from '/static/controls.js';
-import { buildLightControls, dismissOpenLightControl } from '/static/lightcontrols.js';
+import { buildLightControls, buildTempBar, dismissOpenLightControl } from '/static/lightcontrols.js';
 import {
   createRoom, deleteRoom, renameRoom, reorderRooms,
   addDeviceToRoom, removeDeviceFromRoom, reorderRoomDevices,
@@ -496,12 +496,10 @@ function buildRoomControlsPanel(room, devices, hasColour, activeEffect, onClose)
   const avgCT = ctDevices.length > 0
     ? Math.round(ctDevices.reduce((s, d) => s + (d.color_temp ?? 0), 0) / ctDevices.length)
     : 370;
-  const tempSliderEl = buildSlider({
-    label: 'Temperature',
-    min: 154, max: 500, value: avgCT,
-    format: v => Math.round(1e6 / v) + 'K',
+  const tempSliderEl = buildTempBar({
+    mireds: avgCT,
     onInput: v => paintRoomDot(trigger('room-temp'), 'temp', layout.ctToHex(v)),
-    onCommit: async v => {
+    onChange: async v => {
       setMode('temp');
       roomDotDomain.set(room.id, 'temp');   // temp becomes the persistent dot
       paintRoomDot(trigger('room-temp'), 'temp', layout.ctToHex(v));
