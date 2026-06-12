@@ -60,7 +60,7 @@ impl ZigbeeClient {
         let subscribe_client = mqtt_client.clone();
 
         tokio::spawn(async move {
-            let mut debounce: std::collections::HashMap<String, tokio::task::AbortHandle> =
+            let mut debounce: std::collections::HashMap<String, tokio::task::JoinHandle<()>> =
                 std::collections::HashMap::new();
             let mut known_groups: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
@@ -158,17 +158,18 @@ impl ZigbeeClient {
                                 Some(report) if !known_groups.contains(&report.device_id) => {
                                     // Debounce: Z2M fires multiple partial updates per action.
                                     // Cancel any pending emit for this device and restart the timer.
+                                    // Sweep completed handles (amortised on each state event).
+                                    debounce.retain(|_, h| !h.is_finished());
                                     let device_id = report.device_id.clone();
                                     if let Some(h) = debounce.remove(&device_id) {
                                         h.abort();
                                     }
                                     let tx_d = tx_loop.clone();
-                                    let abort_handle = tokio::spawn(async move {
+                                    let handle = tokio::spawn(async move {
                                         tokio::time::sleep(Duration::from_millis(75)).await;
                                         let _ = tx_d.send(ZigbeeEvent::StateChanged(report));
-                                    })
-                                    .abort_handle();
-                                    debounce.insert(device_id, abort_handle);
+                                    });
+                                    debounce.insert(device_id, handle);
                                 }
                                 Some(_) => {} // group name — silently skip
                                 None => {
