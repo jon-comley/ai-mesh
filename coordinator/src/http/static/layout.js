@@ -1854,6 +1854,9 @@ function wireChipTouchDrag(chip, kind, payload) {
   let pointerId = null;
 
   const cleanup = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup',   onUp);
+    document.removeEventListener('pointercancel', onCancel);
     if (ghost) { ghost.remove(); ghost = null; }
     clearDragPreview();
     dragType = null;
@@ -1865,20 +1868,8 @@ function wireChipTouchDrag(chip, kind, payload) {
     }
   };
 
-  chip.addEventListener('pointerdown', e => {
-    // Mouse falls through to native HTML5 DnD (already wired). Touch/pen
-    // take this path because dragstart never fires from them.
-    if (e.pointerType === 'mouse') return;
-    if (e.button !== 0 && e.button !== -1) return;
-    startX = e.clientX;
-    startY = e.clientY;
-    pointerId = e.pointerId;
-    dragging = false;
-    chip.setPointerCapture(e.pointerId);
-  });
-
-  chip.addEventListener('pointermove', e => {
-    if (e.pointerType === 'mouse') return;
+  // Named functions so cleanup can removeEventListener by reference.
+  function onMove(e) {
     if (e.pointerId !== pointerId) return;
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
@@ -1887,7 +1878,6 @@ function wireChipTouchDrag(chip, kind, payload) {
       // Commit to drag mode
       dragging = true;
       dragType = kind;
-      setCanvasDragClass(true);
       ghost = chip.cloneNode(true);
       ghost.style.position = 'fixed';
       ghost.style.left = `${e.clientX}px`;
@@ -1901,6 +1891,10 @@ function wireChipTouchDrag(chip, kind, payload) {
       if (kind === 'bulb' && typeof window.__roomsStartPulse === 'function') {
         window.__roomsStartPulse(payload);
       }
+      // Close the sidebar sheet AFTER ghost is in the DOM. Capture stays on
+      // document.body (never display:none) so the sheet hiding the chip element
+      // cannot trigger pointercancel.
+      setCanvasDragClass(true);
       e.preventDefault();
     }
     if (dragging) {
@@ -1918,29 +1912,44 @@ function wireChipTouchDrag(chip, kind, payload) {
         }
       }
     }
-  });
+  }
 
-  chip.addEventListener('pointerup', e => {
-    if (e.pointerType === 'mouse') return;
+  function onUp(e) {
     if (e.pointerId !== pointerId) return;
-    if (chip.hasPointerCapture(e.pointerId)) chip.releasePointerCapture(e.pointerId);
-    if (!dragging) { cleanup(); return; }
-    const svg = document.getElementById('layout-canvas');
-    if (svg) {
-      const rect = svg.getBoundingClientRect();
-      if (e.clientX >= rect.left && e.clientX <= rect.right &&
-          e.clientY >= rect.top  && e.clientY <= rect.bottom) {
-        const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
-        commitDropAt(kind, payload, nx, ny);
+    if (dragging) {
+      const svg = document.getElementById('layout-canvas');
+      if (svg) {
+        const rect = svg.getBoundingClientRect();
+        if (e.clientX >= rect.left && e.clientX <= rect.right &&
+            e.clientY >= rect.top  && e.clientY <= rect.bottom) {
+          const { nx, ny } = svgPoint(svg, e.clientX, e.clientY);
+          commitDropAt(kind, payload, nx, ny);
+        }
       }
     }
     cleanup();
-  });
+  }
 
-  chip.addEventListener('pointercancel', e => {
-    if (e.pointerType === 'mouse') return;
+  function onCancel(e) {
     if (e.pointerId !== pointerId) return;
     cleanup();
+  }
+
+  chip.addEventListener('pointerdown', e => {
+    // Mouse falls through to native HTML5 DnD (already wired). Touch/pen
+    // take this path because dragstart never fires from them.
+    if (e.pointerType === 'mouse') return;
+    if (e.button !== 0 && e.button !== -1) return;
+    startX = e.clientX;
+    startY = e.clientY;
+    pointerId = e.pointerId;
+    dragging = false;
+    // Capture on document.body rather than chip so that closeSidebarSheet()
+    // hiding the chip (display:none) cannot fire pointercancel mid-drag.
+    document.body.setPointerCapture(e.pointerId);
+    document.addEventListener('pointermove', onMove, { passive: false });
+    document.addEventListener('pointerup',   onUp);
+    document.addEventListener('pointercancel', onCancel);
   });
 }
 
