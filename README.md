@@ -134,8 +134,8 @@ MESH_INSECURE=1 cargo run -p cli -- nodes
 | Node | OS | Hardware | Model | Capabilities |
 |------|----|----------|-------|--------------|
 | pi1 | Linux (ARM64) | Raspberry Pi 5, 8 GB RAM | `qwen2.5:1.5b` | llm, lighting |
-| Beelink SER8 | Windows 11 | AMD Radeon 780M, 8 GB VRAM | `qwen2.5:7b` | llm |
-| Mac mini M4 | macOS (ARM64) | 48 GB unified, 16 CPU / 20 GPU cores | `qwen2.5:32b` | llm |
+| Beelink SER8 (beelink1) | Windows 11 | AMD Radeon 780M, 8 GB VRAM | `qwen2.5:7b` | llm |
+| OmniLink1 (WSL2) | Linux (x86_64) | controller only | — | controller |
 
 The coordinator schedules inference requests to whichever node has the requested model loaded and ready.
 
