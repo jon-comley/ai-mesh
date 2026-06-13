@@ -406,7 +406,7 @@ Full design spec: `plans/phase11-dashboard.md`
 
 > Full backlog audit with effort estimates and recommended order: `plans/backlog-2026-06.md` (2026-06-11). Items below are kept in place for context; the plan file is the working list.
 
-- **Multi-turn chat context** ✓ (2026-06-08) — `chat.js` accumulates `conversationContext` pairs; `POST /api/chat` carries `context: Vec<IntentTurn>`; `handle_intent` prepends the turns before the current user message. New-conversation button shipped alongside. **Still open:** token-budget truncation (oldest turns first) and a visible turn-count limit — see `plans/backlog-2026-06.md` #6.
+- **Multi-turn chat context** ✓ (2026-06-08) — `chat.js` accumulates `conversationContext` pairs; `POST /api/chat` carries `context: Vec<IntentTurn>`; `handle_intent` prepends the turns before the current user message. New-conversation button shipped alongside. **Token-budget truncation** ✓ (2026-06-08, `c1e45d0`) — client trims to `MAX_CONTEXT_TURNS = 20` oldest-first; turn counter shown in UI.
 
 These are non-blocking UX improvements for after C6 ships:
 
@@ -415,11 +415,11 @@ These are non-blocking UX improvements for after C6 ships:
 - **Metric colour thresholds** ✓ (2026-06-11) — `metricClass(pct, metric)` with per-metric bands (`METRIC_THRESHOLDS`: CPU/RAM warn 75 / crit 90, GPU 90/98, VRAM 95/99 — VRAM normally sits near full when a model is loaded) colours the value text amber/red on CPU%, RAM%, GPU%, and VRAM%.
 - **Sparkline tooltip with exact timestamp** ✓ (2026-06-11) — per-point transparent `<rect>` hit regions (Voronoi midpoint splits, no gaps) each carry a `<title>` showing `CPU: 87.3%  at 14:23:01`; falls back to `(sample N)` labels when timestamps are absent or mismatched. Mini sparklines on the Nodes tab unchanged.
 - **Sparkline fill area** ✓ (2026-06-11) — `<polygon>` at 0.15 fill-opacity closes the area under each line in the stroke colour.
-- **Per-node collapse/expand in Health panel** — each health card has a `▾ / ▸` toggle; collapsed cards show only the last value, not the full sparkline; useful when the cluster grows beyond 4–5 nodes and the panel gets long. (`plans/backlog-2026-06.md` #4.)
+- **Per-node collapse/expand in Health panel** ✓ (2026-06-12, `4f25eee`) — each health card has a `▾ / ▸` toggle; collapsed cards show only the last value, not the full sparkline; `localStorage` persistence.
 
 #### Layout view — known issues / deferred fixes (2026-06-05)
 
-- **Dragging windows/doors from the popover unreliable** — the drag-to-place gesture for openings (doors/windows) from the sidebar popover doesn't always trigger correctly; sometimes requires multiple attempts or doesn't start at all. Investigate pointer-event capture interaction with the popover's dismiss handler — the capture-phase `pointerdown` listener that closes the popover may be consuming the drag-start event before `makeDraggable` sees it. See `layout.js` `openOpeningPopover` / `makeMoveDraggable`.
+- **Dragging windows/doors from the popover unreliable** ✓ (2026-06-13, `3feadde`) — fixed by capturing pointer on `document.body` instead of the chip element, so `closeSidebarSheet()` hiding the chip cannot fire `pointercancel` mid-drag; move/up/cancel handlers promoted to named functions registered on `document` so `cleanup()` can remove them by reference.
 
 - **Room brightness/colour/temp controls (action bar)** — popover is correctly positioned above the action bar on desktop; mobile behaviour needs verification after the `position:fixed` + `getBoundingClientRect` approach was adopted. The centred-modal approach used for the ＋Add palette may be worth applying here too if offset issues surface on mobile.
 
@@ -427,11 +427,11 @@ These are non-blocking UX improvements for after C6 ships:
 
 ### Deferred chaos / QA scenarios (raised post-Phase B)
 
-These are not blocking but should be added to the chaos binary before Phase 11 ships as complete:
+✓ All three scenarios covered (2026-06-13, `97eb9f7`):
 
-- **WS auth edge cases** — token rotation mid-session (valid token replaced; existing WS connections should remain alive until they close naturally), simultaneous connect with old and new token during rotation window
-- **Lagged broadcast receiver** — connect N WS clients, then flood the coordinator with heartbeats faster than clients can consume; verify no panics, no disconnects, just the `Lagged(n)` path in `ws.rs` firing and clients catching back up cleanly
-- **Phase B chaos coverage audit** — walk every branch in `ws.rs` and `state.rs` and confirm each has either a unit test or a chaos scenario; the `Channel closed` arm (coordinator shutdown mid-session) is the main gap
+- **WS auth edge cases** ✓ — `ws_handler_rejects_wrong_token`, `ws_handler_accepts_both_tokens_during_rotation`, `ws_handler_rejects_expired_token_during_rotation` in `ws.rs` tests; real TCP server, real HTTP upgrade requests.
+- **Lagged broadcast receiver** ✓ — `broadcast_receiver_gets_lagged_when_slow` in `state.rs` tests; 200 events overflow the 128-slot channel, receiver gets `RecvError::Lagged`.
+- **Channel closed arm** ✓ — `broadcast_receiver_gets_closed_when_state_dropped` in `state.rs` tests; dropping the last `Arc<DashboardState>` gives `RecvError::Closed`.
 
 ---
 
