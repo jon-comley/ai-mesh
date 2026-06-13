@@ -232,3 +232,86 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
 
     debug!("dashboard WebSocket client disconnected");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::Router;
+    use axum::routing::get;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn make_state(tokens: Vec<String>) -> Arc<DashboardState> {
+        DashboardState::new(
+            Arc::new(tokens),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+    }
+
+    /// Bind an ephemeral server, run `f` against its address, then return the
+    /// raw HTTP response status line (e.g. "HTTP/1.1 401 Unauthorized").
+    async fn ws_status(tokens: Vec<String>, path_and_query: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let state = make_state(tokens);
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(state);
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let req = format!(
+            "GET {path_and_query} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 512];
+        let n = stream.read(&mut buf).await.unwrap();
+        let response = String::from_utf8_lossy(&buf[..n]);
+        response.lines().next().unwrap_or("").to_string()
+    }
+
+    /// A wrong dashboard token must return 401 before the WS upgrade happens.
+    #[tokio::test]
+    async fn ws_handler_rejects_wrong_token() {
+        let status = ws_status(vec!["secret".into()], "/ws?token=definitely-wrong").await;
+        assert!(status.contains("401"), "expected 401, got: {status}");
+    }
+
+    /// During token rotation both old and new tokens must be accepted.
+    /// A client that connects with the old token gets a 101 upgrade, not 401.
+    #[tokio::test]
+    async fn ws_handler_accepts_both_tokens_during_rotation() {
+        let tokens = vec!["old-token".into(), "new-token".into()];
+
+        let status_old = ws_status(tokens.clone(), "/ws?token=old-token").await;
+        assert!(
+            status_old.contains("101"),
+            "old token: expected 101, got: {status_old}"
+        );
+
+        let status_new = ws_status(tokens, "/ws?token=new-token").await;
+        assert!(
+            status_new.contains("101"),
+            "new token: expected 101, got: {status_new}"
+        );
+    }
+
+    /// An expired token (not in the rotation window) is rejected even when a
+    /// rotation is active.
+    #[tokio::test]
+    async fn ws_handler_rejects_expired_token_during_rotation() {
+        let tokens = vec!["old-token".into(), "new-token".into()];
+        let status = ws_status(tokens, "/ws?token=expired-token").await;
+        assert!(status.contains("401"), "expected 401, got: {status}");
+    }
+}
