@@ -18,23 +18,26 @@ corrected in place where it lagged reality. This file is the working list.
 | 8 | Log peer addr on oversized frame | Thread `SocketAddr` through `handle_connection` so `read_bounded_frame` rejections name the peer. Forensics only; roadmap rates it low value. | **Done** a3bd020 | 45 min |
 | 9 | ProtectHome=true on pi1 unit | `MESH_STATE_DIR` env var in `state.rs` + `tls.rs`; unit sets `MESH_STATE_DIR=/var/lib/ai-mesh` + `StateDirectory=ai-mesh` + `ProtectHome=true`. | **Done** | 1 hr |
 | 10 | Offline-device LLM suppression | Mark/suppress offline devices in the intent system prompt; return `device 'x' is currently offline` instead of generic unknown-target. UI half shipped in F-Lighting-UX. | **Done** 677c694 | 1–2 hrs |
-| 11 | Layout opening-drag fix | Drag-to-place windows/doors from the sidebar popover unreliable — capture-phase `pointerdown` dismiss handler likely eats the drag start. `layout.js` `openOpeningPopover` / `makeMoveDraggable`. Needs a browser session. | Not started | 1–2 hrs |
-| 12 | Deferred chaos scenarios | (1) token rotation mid-WS-session; (2) lagged broadcast receiver under heartbeat flood; (3) `Channel closed` arm in `ws.rs`. Called out post-Phase B as pre-ship requirements for Phase 11. | Not started | 2 hrs |
+| 11 | Layout opening-drag fix | Drag-to-place windows/doors from the sidebar popover unreliable — capture-phase `pointerdown` dismiss handler likely eats the drag start. `layout.js` `openOpeningPopover` / `makeMoveDraggable`. Needs a browser session. | **Done** 3feadde — pointer captured on `document.body` so `closeSidebarSheet()` hiding the chip cannot fire `pointercancel` mid-drag; handlers promoted to named functions for clean removal. | 1–2 hrs |
+| 12 | Deferred chaos scenarios | (1) token rotation mid-WS-session; (2) lagged broadcast receiver under heartbeat flood; (3) `Channel closed` arm in `ws.rs`. Called out post-Phase B as pre-ship requirements for Phase 11. | **Done** — implementations were already in place; added 5 tests: `ws_handler_rejects_wrong_token`, `ws_handler_accepts_both_tokens_during_rotation`, `ws_handler_rejects_expired_token_during_rotation` (ws.rs); `broadcast_receiver_gets_lagged_when_slow`, `broadcast_receiver_gets_closed_when_state_dropped` (state.rs). | 2 hrs |
 | 13 | Multi-GPU VRAM selection | `vramData`/`vramPct` use whichever GPU the agent reports; needs a device index once a multi-GPU node exists. Blocked on hardware + agent-side support. | Blocked | 2 hrs |
 | 14 | Dashboard preferences persistence | `dashboard_preferences (user_id, key, value)` SQLite table; hybrid optimistic `localStorage` + async server sync. Homes collapse state, panel order, palette visibility. | **Done** | 3 hrs |
 | 15 | ZigbeeClient lifecycle hardening | `OnceCell` → `ArcSwap` + explicit `shutdown()`. Only matters when a second lighting node exists. | Blocked | 3 hrs |
 | 16 | F8.2 — Photo Colour Picker | Client-side Canvas grab-box → average region colour → CIE xy → existing device command endpoint. Zero backend work. | Not started | 1 day |
 | 17 | F8.1 — Telemetry Lighting effect | Wire inference + heartbeat events into the registered `Telemetry` effect stub (`tick()` currently returns empty). GPU activity → ambient pulse, node offline → red flash. | Not started | 1 day |
-| 18 | Phase E — Error feed | Structured error log tab; `DashboardEvent::ErrorEntry` on inference fail / model-load fail / Zigbee disconnect. Foundation for the diagnostic panel. | Not started | 1 day |
+| 18 | Phase E — Error feed | Structured error log tab; `DashboardEvent::ErrorEntry` on inference fail / model-load fail / Zigbee disconnect. Foundation for the diagnostic panel. | **Done** — `ErrorCaptureLayer` in `logging.rs`, ring buffer + `push_error` in `state.rs`, WS snapshot on connect, `errors.js` + tab in `index.html`, CSS in `style.css`. | 1 day |
 | 19 | Phase G — Security panel | `PeerSecurityStats` counters keyed by `SocketAddr`, `DashboardEvent::SecurityIncident`, dashboard table + `mesh security-report`. Fully spec'd in roadmap. | Not started | 1–2 days |
 | 20 | F7 — Switches capability | New crate: Z2M button/remote/motion/contact events → `SwitchEvent` → `DashboardEvent::SwitchEvent` + activity feed. Prerequisite for Reactive Graph and Hot/Cold game. | Not started | 2–3 days |
 | 21 | F-Spatial Phase C — Three.js 3D | SVG canvas → Three.js scene, ortho/perspective toggle, `THREE.Shape` rooms, emissive fixture spheres tracking live state. Dimensions schema already landed in Phase E. | Not started | 3–5 days |
 
 ## Recommended next slice
 
-Items #7, #8, #9 are done. #11 needs a browser session (WSL2 limitation). #14 is the next substantial feature.
+Items #1–#11, #14 are done. Remaining open items by effort:
 
-Items 13 and 15 are blocked on hardware/topology and should not be started.
+- **#16** (photo colour picker, 1 day) — pure frontend, no backend work needed.
+- **#17** (Telemetry lighting effect, 1 day) — wire inference/heartbeat events into the `Telemetry` effect stub.
+
+Items #13 and #15 are blocked on hardware/topology and should not be started.
 
 ## Deferred from review (2026-06-11, model-load hardening)
 

@@ -23,7 +23,7 @@ const ERROR_RING_CAP: usize = 200;
 const SECURITY_RING_CAP: usize = 200;
 
 /// One captured WARN/ERROR log record — surfaced in the Errors tab.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ErrorEntry {
     pub ts_ms: u64,
     /// "WARN" or "ERROR"
@@ -33,7 +33,7 @@ pub struct ErrorEntry {
 }
 
 /// Enum of auditable access events shown in the Security tab.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityEventKind {
     NodeJoin,
@@ -43,7 +43,7 @@ pub enum SecurityEventKind {
 }
 
 /// One security/access event.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SecurityEvent {
     pub ts_ms: u64,
     pub kind: SecurityEventKind,
@@ -52,7 +52,7 @@ pub struct SecurityEvent {
 }
 
 /// Events broadcast to all connected dashboard WebSocket clients.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum DashboardEvent {
     TopologyUpdate {
@@ -109,7 +109,7 @@ pub struct RoomEffectInfo {
     pub overrides: Vec<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct RoomInfo {
     pub id: String,
     pub name: String,
@@ -144,7 +144,7 @@ impl From<RoomRecord> for RoomInfo {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SceneInfo {
     pub id: String,
     pub name: String,
@@ -157,7 +157,7 @@ pub struct SceneInfo {
 }
 
 /// Per-model entry in a `ModelUpdate` event — one per non-Unloaded allocation.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ModelEntry {
     pub name: String,
     pub size_mb: u64,
@@ -167,7 +167,7 @@ pub struct ModelEntry {
 }
 
 /// Per-node model summary — one per Compute node in a `ModelUpdate` event.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct NodeModelInfo {
     pub node_id: String,
     pub hostname: String,
@@ -178,7 +178,7 @@ pub struct NodeModelInfo {
 }
 
 /// One health data point, coordinator-stamped.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct HealthSample {
     /// Unix timestamp in milliseconds, set by the coordinator on receipt.
     pub ts_ms: u64,
@@ -199,7 +199,7 @@ pub struct HealthSample {
     pub disk_free_gb: Option<f32>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct NodeDashInfo {
     pub id: String,
     pub name: String,
@@ -1753,5 +1753,61 @@ mod tests {
             !json.contains("\"room_id\""),
             "None room_id should be absent: {json}"
         );
+    }
+
+    // ── chaos: broadcast channel behaviours ──────────────────────────────────
+
+    fn make_state() -> Arc<DashboardState> {
+        DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+    }
+
+    fn dummy_error(i: u64) -> ErrorEntry {
+        ErrorEntry {
+            ts_ms: i,
+            level: "ERROR".into(),
+            target: "coordinator::test".into(),
+            message: format!("error {i}"),
+        }
+    }
+
+    /// A slow receiver that never drains will get RecvError::Lagged once the
+    /// sender fills the channel (capacity 128). handle_socket continues on Lagged
+    /// rather than breaking — this test verifies the channel produces the error.
+    #[tokio::test]
+    async fn broadcast_receiver_gets_lagged_when_slow() {
+        let state = make_state();
+        let mut rx = state.tx.subscribe();
+
+        // Send 200 events without draining — exceeds the 128-slot capacity.
+        for i in 0..200u64 {
+            state.push_error(dummy_error(i));
+        }
+
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                assert!(n > 0, "lagged count must be positive");
+            }
+            other => panic!("expected RecvError::Lagged, got {other:?}"),
+        }
+    }
+
+    /// When the last Arc<DashboardState> is dropped the broadcast sender is
+    /// released and waiting receivers get RecvError::Closed.  handle_socket
+    /// breaks on Closed — this test verifies the channel produces the error.
+    #[tokio::test]
+    async fn broadcast_receiver_gets_closed_when_state_dropped() {
+        let state = make_state();
+        let mut rx = state.tx.subscribe();
+
+        // Drop the sole owner of the state (and therefore of tx).
+        drop(state);
+
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Closed) => {}
+            other => panic!("expected RecvError::Closed, got {other:?}"),
+        }
     }
 }
