@@ -835,6 +835,22 @@ async fn process_message(
             }
         },
         MeshMessage::Ping => Some(MeshMessage::Acknowledge),
+        MeshMessage::ReaperStatus(mut report) => {
+            if let Some(id) = node_id.as_deref() {
+                report.node_id = id.to_string();
+            }
+            if let Some(dash) = dashboard {
+                dash.push_reaper_status(report);
+            }
+            None
+        }
+        MeshMessage::ReaperCommandResult(result) => {
+            let entry = pending_intents.lock().unwrap().remove(&result.request_id);
+            if let Some(otx) = entry {
+                let _ = otx.send(MeshMessage::ReaperCommandResult(result));
+            }
+            None
+        }
         _ => None,
     }
 }

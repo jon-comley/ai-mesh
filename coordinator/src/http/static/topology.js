@@ -1,6 +1,6 @@
 /** Nodes panel — renders a live list of mesh nodes. */
 
-import { setPref } from '/static/prefs.js';
+import { setPrefDebounced } from '/static/prefs.js';
 
 const ORDER_KEY = 'meshNodeOrder';
 let container = null;
@@ -74,7 +74,7 @@ function enableDrag(el, key) {
   el.addEventListener('dragend', () => {
     if (dragSrc) dragSrc.classList.remove('dragging');
     const ids = [...el.querySelectorAll('[data-drag-id]')].map(c => c.dataset.dragId);
-    setPref(key, JSON.stringify(ids));
+    setPrefDebounced(key, JSON.stringify(ids));
     dragSrc = null;
   });
 }

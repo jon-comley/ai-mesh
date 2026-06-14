@@ -1366,6 +1366,17 @@ impl Registry {
             rusqlite::params![user_id, key, value],
         );
     }
+
+    /// Returns true if the row existed and was deleted, false if not found.
+    pub fn delete_preference(&self, user_id: &str, key: &str) -> bool {
+        self.conn
+            .execute(
+                "DELETE FROM dashboard_preferences WHERE user_id = ?1 AND key = ?2",
+                rusqlite::params![user_id, key],
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

@@ -192,6 +192,30 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Push REAPER status snapshot so the REAPER tab populates immediately on connect.
+    // Only push when online — avoids misleading the client with a stale offline state.
+    if let Some(snap) = state.get_reaper_snapshot()
+        && snap.reaper_online
+    {
+        let evt = DashboardEvent::ReaperUpdate {
+            online: snap.reaper_online,
+            play_state: snap.play_state,
+            position: snap.position,
+            tempo: snap.tempo,
+            ts_num: snap.ts_num,
+            ts_denom: snap.ts_denom,
+            last_command: None,
+        };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot ReaperUpdate: {e}"),
+        }
+    }
+
     loop {
         tokio::select! {
             event = rx.recv() => match event {

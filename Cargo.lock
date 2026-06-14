@@ -10,6 +10,7 @@ dependencies = [
  "capability-core",
  "capability-lighting",
  "capability-llm",
+ "capability-reaper",
  "dirs",
  "futures-util",
  "mdns-sd",
@@ -328,6 +329,19 @@ dependencies = [
  "libc",
  "reqwest",
  "serde",
+ "serde_json",
+ "shared",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "capability-reaper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "capability-core",
+ "reqwest",
  "serde_json",
  "shared",
  "tokio",

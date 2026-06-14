@@ -31,3 +31,17 @@ export function setPref(key, value) {
     body: JSON.stringify({ value }),
   }).catch(() => {});
 }
+
+const _debounceTimers = new Map();
+export function setPrefDebounced(key, value, delay = 200) {
+  localStorage.setItem(key, value);
+  clearTimeout(_debounceTimers.get(key));
+  _debounceTimers.set(key, setTimeout(() => {
+    _debounceTimers.delete(key);
+    fetch('/api/preferences/' + encodeURIComponent(key) + '?token=' + encodeURIComponent(token()), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    }).catch(() => {});
+  }, delay));
+}

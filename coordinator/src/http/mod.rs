@@ -44,6 +44,7 @@ const STATE_JS: &str = include_str!("static/state.js");
 const INDICATORS_JS: &str = include_str!("static/indicators.js");
 const LAYOUT_JS: &str = include_str!("static/layout.js");
 const PREFS_JS: &str = include_str!("static/prefs.js");
+const REAPER_JS: &str = include_str!("static/reaper.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
@@ -119,7 +120,11 @@ pub fn router(
         .route("/api/scenes/{id}", delete(api::delete_scene))
         .route("/api/chat", post(api::chat))
         .route("/api/preferences", get(api::get_preferences))
-        .route("/api/preferences/{key}", put(api::set_preference))
+        .route(
+            "/api/preferences/{key}",
+            put(api::set_preference).delete(api::delete_preference),
+        )
+        .route("/api/reaper/state", get(api::get_reaper_state))
         .layer(axum::Extension(registry))
         .layer(axum::Extension(effects))
         .with_state(dashboard)
@@ -158,6 +163,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/indicators.js", INDICATORS_JS, JS),
         ("/static/layout.js", LAYOUT_JS, JS),
         ("/static/prefs.js", PREFS_JS, JS),
+        ("/static/reaper.js", REAPER_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
     ];

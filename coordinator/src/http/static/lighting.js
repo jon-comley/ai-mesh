@@ -5,6 +5,7 @@ import { buildLightControls } from '/static/lightcontrols.js';
 import { repaintModeDots } from '/static/indicators.js';
 import { esc, showToast } from '/static/util.js';
 import { HUE_DEFAULT_ON } from '/static/state.js';
+import { setPrefDebounced } from '/static/prefs.js';
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
@@ -266,7 +267,7 @@ function getDragAfterEl(container, y) {
 
 function saveOrder(container) {
   const ids = [...container.querySelectorAll('[data-drag-id]')].map(el => el.dataset.dragId);
-  localStorage.setItem(ORDER_KEY, JSON.stringify(ids));
+  setPrefDebounced(ORDER_KEY, JSON.stringify(ids));
 }
 
 function applyOrder(items, idFn) {

@@ -2,7 +2,7 @@ use crate::registry::RoomRecord;
 use serde::Serialize;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
-use shared::messages::{LightAction, LightStateReport, NodeRecordLite};
+use shared::messages::{LightAction, LightStateReport, NodeRecordLite, ReaperStatusReport};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -96,6 +96,18 @@ pub enum DashboardEvent {
     },
     SecurityUpdate {
         events: Vec<SecurityEvent>,
+    },
+    ReaperUpdate {
+        online: bool,
+        /// 0=stopped, 1=playing, 2=paused, 5=recording
+        play_state: u8,
+        position: f64,
+        tempo: f64,
+        ts_num: u32,
+        ts_denom: u32,
+        /// Most recent command result: (action, ok, message). Drives the tab command log.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_command: Option<(String, bool, String)>,
     },
 }
 
@@ -244,6 +256,8 @@ pub struct DashboardState {
     pub pending_inferences: PendingInferences,
     /// Shared with the TCP server so tool calls (scene_load) can wait for a reply.
     pub pending_intents: PendingIntents,
+    /// Last-known REAPER status — replayed to new WS clients on connect.
+    reaper_snapshot: Mutex<Option<ReaperStatusReport>>,
 }
 
 impl DashboardState {
@@ -276,6 +290,7 @@ impl DashboardState {
             security_log: Mutex::new(VecDeque::new()),
             pending_inferences: Arc::new(Mutex::new(HashMap::new())),
             pending_intents: Arc::new(Mutex::new(HashMap::new())),
+            reaper_snapshot: Mutex::new(None),
         })
     }
 
@@ -718,6 +733,67 @@ impl DashboardState {
             node_id: node_id.to_owned(),
             samples,
         });
+    }
+
+    /// Update the REAPER snapshot and broadcast if status changed.
+    /// Always updates the snapshot (even when offline) so stale data is never frozen.
+    pub fn push_reaper_status(&self, report: ReaperStatusReport) {
+        let evt = {
+            let mut snap = self.reaper_snapshot.lock().unwrap();
+            let changed = snap.as_ref().is_none_or(|prev| {
+                prev.reaper_online != report.reaper_online
+                    || prev.play_state != report.play_state
+                    || (prev.position - report.position).abs() >= 0.1
+            });
+            *snap = Some(report.clone());
+            if !changed || self.tx.receiver_count() == 0 {
+                return;
+            }
+            DashboardEvent::ReaperUpdate {
+                online: report.reaper_online,
+                play_state: report.play_state,
+                position: report.position,
+                tempo: report.tempo,
+                ts_num: report.ts_num,
+                ts_denom: report.ts_denom,
+                last_command: None,
+            }
+        };
+        let _ = self.tx.send(evt);
+    }
+
+    /// Broadcast a ReaperUpdate carrying a command result alongside the current snapshot.
+    pub fn push_reaper_command_result(&self, action: String, ok: bool, message: String) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let snap = self.reaper_snapshot.lock().unwrap();
+        let (online, play_state, position, tempo, ts_num, ts_denom) =
+            snap.as_ref().map_or((false, 0, 0.0, 0.0, 0, 0), |s| {
+                (
+                    s.reaper_online,
+                    s.play_state,
+                    s.position,
+                    s.tempo,
+                    s.ts_num,
+                    s.ts_denom,
+                )
+            });
+        drop(snap);
+        let _ = self.tx.send(DashboardEvent::ReaperUpdate {
+            online,
+            play_state,
+            position,
+            tempo,
+            ts_num,
+            ts_denom,
+            last_command: Some((action, ok, message)),
+        });
+    }
+
+    /// Return the current REAPER snapshot for WS warm-start and REST responses.
+    pub fn get_reaper_snapshot(&self) -> Option<ReaperStatusReport> {
+        self.reaper_snapshot.lock().unwrap().clone()
     }
 }
 

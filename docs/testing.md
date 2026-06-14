@@ -167,6 +167,22 @@ These tests use `authenticated_send` — a helper that sends the connection-leve
 
 ---
 
+### Coordinator — `api.rs` — Dashboard preferences
+
+Tests the `GET /api/preferences`, `PUT /api/preferences/{key}`, and `DELETE /api/preferences/{key}` endpoints:
+
+| Test | What it pins |
+|------|-------------|
+| `get_preferences_empty` | GET on empty DB returns 200 with an empty map |
+| `set_preference_then_get` | PUT returns 200 with the updated map; subsequent GET confirms persistence |
+| `set_preference_upsert` | Second PUT on same key overwrites value; returned map reflects new value |
+| `preferences_returns_401_for_wrong_token` | GET, PUT, and DELETE all reject a bad token with 401 |
+| `set_preference_empty_body_returns_400` | PUT with an empty body returns 400 |
+| `delete_preference_removes_key` | DELETE returns 200 with updated map; key absent from subsequent GET |
+| `delete_nonexistent_preference_returns_404` | DELETE on a key that doesn't exist returns 404 |
+
+---
+
 ## 3. Known Gaps
 
 These behaviours are implemented but not yet covered by automated tests:
