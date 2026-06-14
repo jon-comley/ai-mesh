@@ -9,6 +9,7 @@ import * as scenes from '/static/scenes.js';
 import * as errors from '/static/errors.js';
 import * as security from '/static/security.js';
 import * as chat from '/static/chat.js';
+import * as reaper from '/static/reaper.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -77,6 +78,7 @@ const handlers = {
   ZigbeeStatus: evt => rooms.handleZigbeeStatus(evt.online),
   ErrorUpdate: evt => errors.handleErrorUpdate(evt),
   SecurityUpdate: evt => security.handleSecurityUpdate(evt),
+  ReaperUpdate: evt => reaper.handleReaperUpdate(evt),
 };
 
 function dispatch(evt) {
@@ -126,6 +128,7 @@ topology.init(document.getElementById('node-list'));
 errors.init(document.getElementById('error-feed'));
 security.init(document.getElementById('security-table'));
 chat.init(document.getElementById('panel-chat'));
+reaper.init(document.getElementById('panel-reaper'));
 lighting.setRoomsActive();
 
 // Ask for token on very first visit when auth is likely needed.

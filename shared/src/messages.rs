@@ -194,6 +194,38 @@ pub struct LightDeviceListReport {
     pub groups: Vec<String>,
 }
 
+// ── REAPER capability types ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReaperCommandRequest {
+    pub request_id: String,
+    /// Named transport action ("play" | "stop" | "pause" | "record" | "rewind")
+    /// or a numeric action ID as a string ("40075") or a named SWS action ("_SWS_ABOUT").
+    /// "seek" is reserved for future use and is not exposed via the tool schema.
+    pub action: String,
+    /// Sparse extra params. Currently unused; reserved for future "seek" support.
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReaperCommandResult {
+    pub request_id: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReaperStatusReport {
+    pub node_id: String,
+    pub reaper_online: bool,
+    /// 0=stopped, 1=playing, 2=paused, 5=recording
+    pub play_state: u8,
+    pub position: f64,
+    pub tempo: f64,
+    pub ts_num: u32,
+    pub ts_denom: u32,
+}
+
 // ── Intent routing types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -280,6 +312,10 @@ pub enum MeshMessage {
     // Zigbee bridge up/down — emitted by the lighting capability when MQTT
     // connection to zigbee2mqtt is lost or restored
     ZigbeeStatus { online: bool },
+    // REAPER DAW capability messages
+    ReaperCommand(ReaperCommandRequest),
+    ReaperCommandResult(ReaperCommandResult),
+    ReaperStatus(ReaperStatusReport),
 }
 
 /// Structured admin messages for coordinator control.

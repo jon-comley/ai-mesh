@@ -4,7 +4,8 @@ use crate::scheduler::Scheduler;
 use crate::server::Connections;
 use shared::{
     InferenceRequest, IntentRequest, IntentResponse, LightAction, LightCommandRequest,
-    LightStateReport, LightTarget, MeshMessage, SceneLoadRequest, ToolCallRecord, WIRE_VERSION,
+    LightStateReport, LightTarget, MeshMessage, ReaperCommandRequest, SceneLoadRequest,
+    ToolCallRecord, WIRE_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -43,7 +44,7 @@ pub async fn handle_intent(
         let reg = registry.lock().unwrap();
         let mut seen = std::collections::HashSet::new();
         let mut schemas = Vec::new();
-        for feature in ["lighting"] {
+        for feature in ["lighting", "reaper"] {
             if !reg.nodes_with_feature(feature).is_empty() {
                 for schema in tool_schemas_for_feature(feature) {
                     let name = schema["name"].as_str().unwrap_or("").to_string();
@@ -393,6 +394,69 @@ async fn dispatch_tool(
                 }
             }
         }
+        "reaper_transport" | "reaper_action" => {
+            // Node selection: first connected reaper node.
+            // If multiple REAPER nodes exist in future, extend this to a policy.
+            let reaper_node_id = {
+                let reg = registry.lock().unwrap();
+                let nodes: Vec<String> = reg
+                    .nodes_with_feature("reaper")
+                    .into_iter()
+                    .map(|n| n.id)
+                    .collect();
+                drop(reg);
+                let conns = connections.lock().unwrap();
+                nodes.into_iter().find(|id| conns.contains_key(id))
+            };
+            let Some(reaper_node_id) = reaper_node_id else {
+                return "no REAPER node connected".into();
+            };
+
+            let action = if tool_name == "reaper_transport" {
+                args["action"].as_str().unwrap_or("").to_string()
+            } else {
+                args["action_id"].as_str().unwrap_or("").to_string()
+            };
+
+            let cmd = ReaperCommandRequest {
+                request_id: request_id.to_string(),
+                action,
+                params: args.clone(),
+            };
+
+            let (otx, orx) = oneshot::channel();
+            pending_intents
+                .lock()
+                .unwrap()
+                .insert(request_id.to_string(), otx);
+
+            let sent = connections
+                .lock()
+                .unwrap()
+                .get(&reaper_node_id)
+                .map(|tx| tx.try_send(MeshMessage::ReaperCommand(cmd)).is_ok())
+                .unwrap_or(false);
+
+            if !sent {
+                pending_intents.lock().unwrap().remove(request_id);
+                return "failed to send ReaperCommand to node".into();
+            }
+
+            // 5 s timeout — prevents the LLM hanging if REAPER is unresponsive.
+            match timeout(Duration::from_secs(5), orx).await {
+                Ok(Ok(MeshMessage::ReaperCommandResult(r))) => {
+                    if r.ok {
+                        "ok".into()
+                    } else {
+                        r.message
+                    }
+                }
+                _ => {
+                    pending_intents.lock().unwrap().remove(request_id);
+                    "REAPER command timed out".into()
+                }
+            }
+        }
         other => format!("unknown tool: {other}"),
     }
 }
@@ -602,6 +666,37 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         "transition_ms": { "type": "integer" }
                     },
                     "required": ["scene"]
+                }
+            }),
+        ],
+        "reaper" => vec![
+            serde_json::json!({
+                "name": "reaper_transport",
+                "description": "Control REAPER DAW transport. Use to start/stop playback or recording.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["play", "stop", "pause", "record", "rewind"],
+                            "description": "Transport action to perform"
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_action",
+                "description": "Run a REAPER action by numeric command ID or named string ID. Examples: '40075' = toggle repeat, '1007' = stop, '_SWS_ABOUT' for SWS extension actions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action_id": {
+                            "type": "string",
+                            "description": "REAPER action ID — numeric string ('40075') or named action string ('_SWS_ABOUT')"
+                        }
+                    },
+                    "required": ["action_id"]
                 }
             }),
         ],

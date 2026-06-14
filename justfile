@@ -523,7 +523,11 @@ restart-node node:
     source nodes/{{node}}.env
     case "$NODE_OS" in
       linux)
-        ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true; sudo systemctl start ai-mesh-agent"
+        if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
+            sudo systemctl restart ai-mesh-agent
+        else
+            ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true; sudo systemctl start ai-mesh-agent"
+        fi
         ;;
       windows)
         ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
@@ -656,16 +660,26 @@ set-fingerprint node:
 
     case "$NODE_OS" in
       linux)
-        ssh ${NODE_USER}@${NODE_HOST} "
-            sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d 2>/dev/null || true
-            printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=${FP}\n' \
+        if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
+            sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
+            printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=%s\n' "${FP}" \
                 | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
-            printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}\n' \
+            printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=%s\n' "${MESH_AUTH_TOKEN}" \
                 | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
             sudo systemctl daemon-reload
-            timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true
-            sudo systemctl start ai-mesh-agent
-        "
+            sudo systemctl restart ai-mesh-agent
+        else
+            ssh ${NODE_USER}@${NODE_HOST} "
+                sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d 2>/dev/null || true
+                printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=${FP}\n' \
+                    | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
+                printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}\n' \
+                    | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
+                sudo systemctl daemon-reload
+                timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true
+                sudo systemctl start ai-mesh-agent
+            "
+        fi
         ;;
       windows)
         ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} "powershell -Command \"\

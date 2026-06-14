@@ -410,7 +410,14 @@ Full design spec: `plans/phase11-dashboard.md`
 
 These are non-blocking UX improvements for after C6 ships:
 
-- **Dashboard preferences persistence** ✓ (2026-06-13) — `dashboard_preferences (user_id, key, value)` SQLite table; hybrid optimistic `localStorage` write + async `PUT /api/preferences/{key}` server sync. `loadPrefs()` hydrates localStorage from the server on page load so panel order, room-collapse state, and health-node-collapse state look the same from any device or browser. Synced keys: `meshNodeOrder`, `meshHealthOrder`, `meshModelOrder`, `mesh-health-collapsed-*`, `mesh-room-collapsed-*`. New `prefs.js` module; 5 new tests (438 total).
+- **Dashboard preferences persistence** ✓ (2026-06-13, updated 2026-06-14) — `dashboard_preferences (user_id, key, value)` SQLite table; hybrid optimistic `localStorage` write + async server sync. `loadPrefs()` hydrates localStorage from the server on page load so panel order and collapse state look the same from any device or browser. Synced keys: `meshNodeOrder`, `meshHealthOrder`, `meshModelOrder`, `meshLightOrder`, `mesh-health-collapsed-*`, `mesh-room-collapsed-*`. New `prefs.js` module with `setPref` (instant) and `setPrefDebounced` (200 ms, used by all drag-end handlers to avoid write storms). `PUT /api/preferences/{key}` returns the full updated map (no re-fetch needed). `DELETE /api/preferences/{key}` added (returns 200 + updated map, 404 if key absent). 7 preference tests (445 coordinator total, 567 workspace).
+
+  **Deferred preferences improvements:**
+  - Schema / key allow-list — any string accepted today; enforce at write boundary when key space stabilises.
+  - `user_id` wired to auth token — currently hardcoded `"default"`; safe for single-user, must change before multi-user auth.
+  - Multi-device live sync — `loadPrefs()` on page load is sufficient for single-user; real-time cross-device push needs a WS-pushed `PrefsUpdated` event.
+  - `updated_at` / `version` columns — deferred until migration tooling exists.
+  - Consistent key naming (`dashboard.mesh.order`, `dashboard.health.collapsed.<id>` etc.) — rename sweep is a separate commit with localStorage migration.
 
 - **Metric colour thresholds** ✓ (2026-06-11) — `metricClass(pct, metric)` with per-metric bands (`METRIC_THRESHOLDS`: CPU/RAM warn 75 / crit 90, GPU 90/98, VRAM 95/99 — VRAM normally sits near full when a model is loaded) colours the value text amber/red on CPU%, RAM%, GPU%, and VRAM%.
 - **Sparkline tooltip with exact timestamp** ✓ (2026-06-11) — per-point transparent `<rect>` hit regions (Voronoi midpoint splits, no gaps) each carry a `<title>` showing `CPU: 87.3%  at 14:23:01`; falls back to `(sample N)` labels when timestamps are absent or mismatched. Mini sparklines on the Nodes tab unchanged.
@@ -541,6 +548,31 @@ Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniL
 - SQLite `journal_mode=WAL` + `synchronous=NORMAL` for SD-card wear mitigation on pi1.
 - `LimitNOFILE=4096` if cluster grows past ~100 agents.
 - Per-node TLS certs instead of single self-signed cert across all agents.
+
+---
+
+## Phase 11.7 — REAPER DAW Integration ✓ Complete (2026-06-14)
+
+Full details: `docs/reaper.md`
+
+LLM control of the REAPER digital audio workstation via the coordinator intent pipeline. REAPER runs on Windows (OmniLink1); the agent runs in WSL2 and reaches the REAPER web server over loopback (WSL2 mirrored networking).
+
+**Achieved**
+
+- ✓ `capability-reaper` crate — polls `/_/TRANSPORT` every 2 s; parses both JSON and tab-delimited responses; reports `ReaperStatusReport` (online, play state, position, tempo, time sig) to coordinator.
+- ✓ Named transport actions — `play`, `stop`, `pause`, `record`, `rewind` mapped to REAPER command IDs; numeric IDs and SWS string actions (e.g. `_SWS_ABOUT`) passed through directly.
+- ✓ `reaper_transport` + `reaper_action` tool schemas — LLM can trigger transport and arbitrary REAPER actions by name or numeric ID.
+- ✓ `reaper.js` dashboard panel — live online/offline badge, play state, position, tempo, time sig, command log; all elements null-guarded.
+- ✓ `scripts/install-reaper-windows.ps1` — downloads and silently installs REAPER, writes web server config (`reaper-webbrd.ini`, port 8080, `0.0.0.0`), registers the Web Browser Control surface in `reaper.ini`, opens firewall rule.
+- ✓ OmniLink1 registered as a `controller` node with `--features reaper`; REAPER env vars in systemd drop-in (`REAPER_HOST=127.0.0.1`, `REAPER_PORT=8080`).
+- ✓ `just set-fingerprint` and `just restart-node` handle local nodes (`NODE_HOST=127.0.0.1`) without SSH — write drop-ins and restart directly.
+
+**Deferred**
+
+- Dashboard REAPER panel exposed in nav (currently rendered but tab not wired in index.html).
+- Tempo / time-sig control via intent (read-only today).
+- Track list / project state queries.
+- REAPER on macOS (next machine).
 
 ---
 

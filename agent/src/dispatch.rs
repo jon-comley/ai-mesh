@@ -13,6 +13,8 @@ pub fn build_capabilities(node_id: &str) -> Vec<Arc<dyn Capability + Send + Sync
         Arc::new(capability_llm::LlmCapability::new(node_id)),
         #[cfg(feature = "lighting")]
         Arc::new(capability_lighting::LightingCapability::new(node_id)),
+        #[cfg(feature = "reaper")]
+        Arc::new(capability_reaper::ReaperCapability::new(node_id)),
     ]
 }
 
