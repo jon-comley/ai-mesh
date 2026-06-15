@@ -4,8 +4,8 @@ use crate::scheduler::Scheduler;
 use crate::server::Connections;
 use shared::{
     InferenceRequest, IntentRequest, IntentResponse, LightAction, LightCommandRequest,
-    LightStateReport, LightTarget, MeshMessage, ReaperCommandRequest, SceneLoadRequest,
-    ToolCallRecord, WIRE_VERSION,
+    LightStateReport, LightTarget, MeshMessage, ReaperCommandRequest, ReaperScriptRequest,
+    SceneLoadRequest, ToolCallRecord, WIRE_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -457,6 +457,63 @@ async fn dispatch_tool(
                 }
             }
         }
+        "reaper_script" => {
+            let reaper_node_id = {
+                let reg = registry.lock().unwrap();
+                let nodes: Vec<String> = reg
+                    .nodes_with_feature("reaper")
+                    .into_iter()
+                    .map(|n| n.id)
+                    .collect();
+                drop(reg);
+                let conns = connections.lock().unwrap();
+                nodes.into_iter().find(|id| conns.contains_key(id))
+            };
+            let Some(reaper_node_id) = reaper_node_id else {
+                return "no REAPER node connected".into();
+            };
+
+            // `code` is required by the schema; empty -> daemon runs an empty file
+            // (harmless no-op), matching the unwrap_or("") convention used by
+            // reaper_transport/reaper_action above.
+            let code = args["code"].as_str().unwrap_or("").to_string();
+            let req = ReaperScriptRequest {
+                request_id: request_id.to_string(),
+                code,
+            };
+
+            let (otx, orx) = oneshot::channel();
+            pending_intents
+                .lock()
+                .unwrap()
+                .insert(request_id.to_string(), otx);
+
+            let sent = connections
+                .lock()
+                .unwrap()
+                .get(&reaper_node_id)
+                .map(|tx| tx.try_send(MeshMessage::ReaperScript(req)).is_ok())
+                .unwrap_or(false);
+
+            if !sent {
+                pending_intents.lock().unwrap().remove(request_id);
+                return "failed to send ReaperScript to node".into();
+            }
+
+            match timeout(Duration::from_secs(10), orx).await {
+                Ok(Ok(MeshMessage::ReaperScriptResult(r))) => {
+                    if r.ok {
+                        "ok".into()
+                    } else {
+                        r.message
+                    }
+                }
+                _ => {
+                    pending_intents.lock().unwrap().remove(request_id);
+                    "REAPER script timed out".into()
+                }
+            }
+        }
         other => format!("unknown tool: {other}"),
     }
 }
@@ -672,14 +729,14 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
         "reaper" => vec![
             serde_json::json!({
                 "name": "reaper_transport",
-                "description": "Control REAPER DAW transport. Use to start/stop playback or recording.",
+                "description": "Control REAPER DAW transport or project. Use to start/stop playback, recording, or manage projects.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["play", "stop", "pause", "record", "rewind"],
-                            "description": "Transport action to perform"
+                            "enum": ["play", "stop", "pause", "record", "rewind", "new_project", "save"],
+                            "description": "Transport or project action: play/stop/pause/record/rewind control playback; new_project creates a new empty project; save saves the current project"
                         }
                     },
                     "required": ["action"]
@@ -697,6 +754,20 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["action_id"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_script",
+                "description": "Execute Lua/ReaScript inside REAPER for complex automation not covered by reaper_transport/reaper_action. Use for: creating tracks, setting recording inputs, arming, naming, saving to a specific path. Key API: reaper.InsertTrackAtIndex(idx,true), reaper.GetTrack(0,idx), reaper.GetSetMediaTrackInfo_String(t,'P_NAME','Vocals',true), reaper.SetMediaTrackInfo_Value(t,'I_RECINPUT',0) where I_RECINPUT 0=input1 1=input2 (mono), reaper.SetMediaTrackInfo_Value(t,'I_RECARM',1), reaper.SetMediaTrackInfo_Value(t,'I_RECMON',1), reaper.Main_SaveProjectEx(0,'C:\\\\path\\\\name.rpp',0). Wrap multiple calls in reaper.Undo_BeginBlock()/EndBlock('desc',-1).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Lua code to execute in REAPER's scripting environment"
+                        }
+                    },
+                    "required": ["code"]
                 }
             }),
         ],

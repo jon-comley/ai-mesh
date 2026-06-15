@@ -28,6 +28,8 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
         "llm".into(),
         #[cfg(feature = "lighting")]
         "lighting".into(),
+        #[cfg(feature = "reaper")]
+        "reaper".into(),
     ];
 
     Ok(NodeCapabilities {

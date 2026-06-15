@@ -3,7 +3,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use capability_core::Capability;
-use shared::{MeshMessage, ReaperCommandRequest, ReaperCommandResult, ReaperStatusReport};
+use shared::{
+    MeshMessage, ReaperCommandRequest, ReaperCommandResult, ReaperScriptRequest,
+    ReaperScriptResult, ReaperStatusReport,
+};
 use tokio::sync::mpsc::Sender;
 use tracing::{debug, warn};
 
@@ -44,7 +47,10 @@ impl Capability for ReaperCapability {
     }
 
     fn handles(&self, msg: &MeshMessage) -> bool {
-        matches!(msg, MeshMessage::ReaperCommand(_))
+        matches!(
+            msg,
+            MeshMessage::ReaperCommand(_) | MeshMessage::ReaperScript(_)
+        )
     }
 
     async fn start(&self, tx: Sender<MeshMessage>) -> Result<(), String> {
@@ -106,17 +112,31 @@ impl Capability for ReaperCapability {
     }
 
     async fn handle(&self, msg: MeshMessage, _tx: Sender<MeshMessage>) {
-        let MeshMessage::ReaperCommand(cmd) = msg else {
-            return;
-        };
-        let result = execute_command(&cmd, &Self::reaper_addr()).await;
-        if let Some(tx) = self.tx()
-            && tx
-                .send(MeshMessage::ReaperCommandResult(result))
-                .await
-                .is_err()
-        {
-            warn!("reaper: coordinator channel closed while sending command result");
+        let addr = Self::reaper_addr();
+        match msg {
+            MeshMessage::ReaperCommand(cmd) => {
+                let result = execute_command(&cmd, &addr).await;
+                if let Some(tx) = self.tx()
+                    && tx
+                        .send(MeshMessage::ReaperCommandResult(result))
+                        .await
+                        .is_err()
+                {
+                    warn!("reaper: coordinator channel closed while sending command result");
+                }
+            }
+            MeshMessage::ReaperScript(cmd) => {
+                let result = execute_script(&cmd, &addr).await;
+                if let Some(tx) = self.tx()
+                    && tx
+                        .send(MeshMessage::ReaperScriptResult(result))
+                        .await
+                        .is_err()
+                {
+                    warn!("reaper: coordinator channel closed while sending script result");
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -147,10 +167,11 @@ async fn parse_transport_response(
         return Ok((play_state, position, tempo, ts_num, ts_denom));
     }
 
-    // Fall back to tab-delimited format:
-    // play_state \t play_rate \t repeat \t position \t loop_mode \t tempo \t ts_num \t ts_denom
     let parts: Vec<&str> = body.trim().split('\t').collect();
-    if parts.len() >= 8 {
+
+    // Format A (no header, 8 fields):
+    // play_state \t play_rate \t repeat \t position \t loop_mode \t tempo \t ts_num \t ts_denom
+    if parts.len() >= 8 && parts[0].parse::<u8>().is_ok() {
         let play_state = parts[0].parse::<u8>().unwrap_or(0);
         let position = parts[3].parse::<f64>().unwrap_or(0.0);
         let tempo = parts[5].parse::<f64>().unwrap_or(120.0);
@@ -159,9 +180,18 @@ async fn parse_transport_response(
         return Ok((play_state, position, tempo, ts_num, ts_denom));
     }
 
+    // Format B (TRANSPORT header, 6 fields):
+    // TRANSPORT \t play_state \t position_secs \t repeat \t pos_str \t pos_str2
+    if parts.first() == Some(&"TRANSPORT") && parts.len() >= 3 {
+        let play_state = parts[1].parse::<u8>().unwrap_or(0);
+        let position = parts[2].parse::<f64>().unwrap_or(0.0);
+        return Ok((play_state, position, 120.0, 4, 4));
+    }
+
     Err(format!(
-        "unrecognised REAPER transport format (len={})",
-        parts.len()
+        "unrecognised REAPER transport format (len={}, first={:?})",
+        parts.len(),
+        parts.first()
     ))
 }
 
@@ -185,8 +215,10 @@ fn named_action_id(action: &str) -> Option<u32> {
         "play" => Some(1008),
         "stop" => Some(1007),
         "pause" => Some(1016),
-        "record" => Some(1009),
-        "rewind" => Some(40113),
+        "record" => Some(1013),
+        "rewind" => Some(40042),
+        "new_project" => Some(40023),
+        "save" => Some(40022),
         _ => None,
     }
 }
@@ -218,7 +250,7 @@ async fn execute_command(cmd: &ReaperCommandRequest, addr: &str) -> ReaperComman
         url_encode(&cmd.action)
     };
 
-    let url = format!("http://{}/_/command/{}", addr, action_path);
+    let url = format!("http://{}/_/{};", addr, action_path);
     debug!("reaper: sending command GET {}", url);
 
     match client.get(&url).send().await {
@@ -242,6 +274,38 @@ async fn execute_command(cmd: &ReaperCommandRequest, addr: &str) -> ReaperComman
     }
 }
 
+async fn execute_script(cmd: &ReaperScriptRequest, _addr: &str) -> ReaperScriptResult {
+    let scripts_dir = std::env::var("REAPER_WSL_SCRIPTS_PATH")
+        .unwrap_or_else(|_| "/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts".into());
+
+    let cmd_path = format!("{}/ai_mesh_cmd.lua", scripts_dir);
+    let id_path = format!("{}/ai_mesh_id.txt", scripts_dir);
+
+    if let Err(e) = tokio::fs::write(&cmd_path, cmd.code.as_bytes()).await {
+        return ReaperScriptResult {
+            request_id: cmd.request_id.clone(),
+            ok: false,
+            message: format!("failed to write command to {cmd_path}: {e}"),
+        };
+    }
+
+    if let Err(e) = tokio::fs::write(&id_path, cmd.request_id.as_bytes()).await {
+        return ReaperScriptResult {
+            request_id: cmd.request_id.clone(),
+            ok: false,
+            message: format!("failed to write id to {id_path}: {e}"),
+        };
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    ReaperScriptResult {
+        request_id: cmd.request_id.clone(),
+        ok: true,
+        message: "dispatched to daemon".into(),
+    }
+}
+
 fn url_encode(s: &str) -> String {
     s.chars()
         .flat_map(|c| {
@@ -252,4 +316,76 @@ fn url_encode(s: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_maps_to_1013_not_play_stop() {
+        // Regression: 1009 is "Transport: Play/stop" and silently plays instead of
+        // recording. The record action is 1013.
+        assert_eq!(named_action_id("record"), Some(1013));
+    }
+
+    #[test]
+    fn rewind_maps_to_go_to_start() {
+        // Regression: 40113 is not "go to start"; 40042 is.
+        assert_eq!(named_action_id("rewind"), Some(40042));
+    }
+
+    #[test]
+    fn known_transport_actions_resolve() {
+        assert_eq!(named_action_id("play"), Some(1008));
+        assert_eq!(named_action_id("stop"), Some(1007));
+        assert_eq!(named_action_id("pause"), Some(1016));
+        assert_eq!(named_action_id("new_project"), Some(40023));
+        assert_eq!(named_action_id("save"), Some(40022));
+    }
+
+    #[test]
+    fn unknown_action_is_none() {
+        assert_eq!(named_action_id("frobnicate"), None);
+    }
+
+    #[test]
+    fn url_encode_passes_unreserved_and_escapes_rest() {
+        assert_eq!(url_encode("_SWS_ABOUT"), "_SWS_ABOUT");
+        assert_eq!(url_encode("40075"), "40075");
+        assert_eq!(url_encode("a b"), "a%20b");
+    }
+
+    #[tokio::test]
+    async fn execute_script_writes_daemon_files() {
+        let dir = std::env::temp_dir().join(format!("ai_mesh_test_{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        // SAFETY: single-threaded test, no concurrent env access.
+        unsafe {
+            std::env::set_var("REAPER_WSL_SCRIPTS_PATH", &dir);
+        }
+
+        let req = ReaperScriptRequest {
+            request_id: "req-42".into(),
+            code: "reaper.InsertTrackAtIndex(0, true)".into(),
+        };
+        let result = execute_script(&req, "127.0.0.1:8080").await;
+
+        assert!(result.ok);
+        assert_eq!(result.request_id, "req-42");
+
+        let cmd = tokio::fs::read_to_string(dir.join("ai_mesh_cmd.lua"))
+            .await
+            .unwrap();
+        let id = tokio::fs::read_to_string(dir.join("ai_mesh_id.txt"))
+            .await
+            .unwrap();
+        assert_eq!(cmd, "reaper.InsertTrackAtIndex(0, true)");
+        assert_eq!(id, "req-42");
+
+        unsafe {
+            std::env::remove_var("REAPER_WSL_SCRIPTS_PATH");
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 }

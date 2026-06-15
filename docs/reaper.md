@@ -14,13 +14,18 @@ Coordinator (pi1) — intent router
     │  ReaperCommand message
     ▼
 OmniLink1 agent (WSL2, --features reaper)
-    │  HTTP GET http://127.0.0.1:8080/_/command/{id}
+    │  HTTP GET http://127.0.0.1:8080/_/{id};   (numeric transport actions)
     ▼
 REAPER Web Browser Control (Windows, port 8080)
     │
     ▼
 REAPER DAW
 ```
+
+For arbitrary Lua (track creation, arming, project state) the web server is not
+enough — `csurf` can only dispatch **numeric** action IDs, not named (`RS...`)
+script actions. The `reaper_script` tool instead drives a **Lua daemon** running
+inside REAPER (see [ReaScript daemon bridge](#reascript-daemon-bridge)).
 
 REAPER runs on the Windows side of OmniLink1. The WSL2 agent reaches it over loopback via mirrored networking (`.wslconfig` `networkingMode=mirrored`). Note: use `127.0.0.1` explicitly — `localhost` resolves to IPv6 first on WSL2 and will fail.
 
@@ -87,6 +92,18 @@ just set-fingerprint omnilink1
 
 This runs locally (no SSH) when `NODE_HOST=127.0.0.1`.
 
+### 5. Install the ReaScript daemon
+
+Required for the `reaper_script` tool and `just test-record` (anything beyond the
+numeric transport actions). See [ReaScript daemon bridge](#reascript-daemon-bridge).
+
+```bash
+just setup-reaper-daemon
+```
+
+Then register `ai_mesh_daemon.lua` in REAPER's action list and **add it to startup
+actions** (required — see the daemon section), as the recipe instructs.
+
 ---
 
 ## Environment Variables
@@ -95,6 +112,7 @@ This runs locally (no SSH) when `NODE_HOST=127.0.0.1`.
 |---|---|---|
 | `REAPER_HOST` | `localhost` | Host of the REAPER web server. Use `127.0.0.1` on WSL2. |
 | `REAPER_PORT` | `8080` | Port of the REAPER web server. |
+| `REAPER_WSL_SCRIPTS_PATH` | `/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts` | WSL-visible path to REAPER's Scripts folder, where the daemon bridge command files live. |
 
 ---
 
@@ -126,6 +144,56 @@ TRANSPORT \t play_state \t play_rate \t repeat \t position \t loop_mode \t tempo
 
 ---
 
+## ReaScript daemon bridge
+
+The csurf web server executes **numeric action IDs only** — it cannot run a named
+`RS...` ReaScript action, and it has no endpoint for evaluating arbitrary Lua. To
+run Lua we use a small long-lived daemon registered inside REAPER:
+
+```
+reaper_script(code)
+    │  agent writes:
+    │    Scripts/ai_mesh_cmd.lua  ← the Lua to run
+    │    Scripts/ai_mesh_id.txt   ← a fresh id (request_id / epoch-ns)
+    ▼
+ai_mesh_daemon.lua  (reaper.defer loop, polls ai_mesh_id.txt)
+    │  on id change: pcall(dofile, ai_mesh_cmd.lua)
+    ▼
+REAPER DAW
+```
+
+The daemon re-schedules itself via `reaper.defer` and runs for the life of the
+REAPER process. It is **fire-and-forget**: the agent returns `ok` once the files
+are written; it does not read a result back from the Lua. Errors inside the Lua
+are printed to REAPER's console (`Actions → Show REAPER console`), prefixed
+`[ai-mesh]`.
+
+### One-time setup
+
+```bash
+just setup-reaper-daemon
+```
+
+This writes `ai_mesh_daemon.lua` (plus the seed `ai_mesh_cmd.lua` / `ai_mesh_id.txt`)
+into REAPER's Scripts folder and prints the registration steps:
+
+1. `Actions → Show Action List → Load` → select `ai_mesh_daemon.lua`
+2. Run it once — the console prints `[ai-mesh] daemon started`
+3. **Right-click the action → `Add to startup actions`.** This is required — the
+   daemon lives in the REAPER process, so without a startup action it dies on every
+   REAPER restart and `reaper_script` goes silent until you re-run it by hand.
+
+### Verifying end-to-end
+
+```bash
+just test-record
+```
+
+Creates an armed mic track, records 5 s from the default input, stops, rewinds,
+and plays back — exercising both the numeric transport path and the daemon bridge.
+
+---
+
 ## Supported Actions
 
 ### Named transport actions (`reaper_transport` tool)
@@ -135,8 +203,13 @@ TRANSPORT \t play_state \t play_rate \t repeat \t position \t loop_mode \t tempo
 | `play` | 1008 |
 | `stop` | 1007 |
 | `pause` | 1016 |
-| `record` | 1009 |
-| `rewind` | 40113 |
+| `record` | 1013 |
+| `rewind` | 40042 |
+| `new_project` | 40023 |
+| `save` | 40022 |
+
+> Note: `record` is **1013**, not 1009 — `1009` is *Play/stop* and will silently
+> play instead of record. `rewind` is **40042** (*Go to start of project*).
 
 ### Arbitrary actions (`reaper_action` tool)
 
@@ -147,7 +220,23 @@ Pass any numeric command ID (as a string) or named action string:
 "action_id": "_SWS_ABOUT"  # SWS extension action
 ```
 
-The action is sent as `GET http://127.0.0.1:8080/_/command/{action_id}`.
+The action is sent as `GET http://127.0.0.1:8080/_/{action_id};`. The trailing
+semicolon is the csurf command separator — without it the request is ignored.
+
+### Arbitrary Lua (`reaper_script` tool)
+
+Runs Lua/ReaScript inside REAPER via the daemon bridge. Used for anything the
+numeric actions can't express — creating/naming/arming tracks, setting record
+inputs, querying project state. Example: create an armed mono vocal track.
+
+```lua
+reaper.InsertTrackAtIndex(0, true)
+local t = reaper.GetTrack(0, 0)
+reaper.GetSetMediaTrackInfo_String(t, "P_NAME", "Vocals", true)
+reaper.SetMediaTrackInfo_Value(t, "I_RECINPUT", 0)   -- 0 = mono input 1
+reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 1)
+reaper.UpdateArrange()
+```
 
 ---
 
@@ -170,7 +259,7 @@ All DOM elements are null-guarded so the panel is safe to render before the firs
 
 - Dashboard REAPER tab wired in nav (panel renders but tab link not yet added to `index.html`)
 - Tempo / time-sig write via intent (read-only today)
-- Track list / project state queries
+- Result read-back from `reaper_script` (currently fire-and-forget; errors only surface in REAPER's console)
 - REAPER on macOS (planned for next machine)
 - Multi-REAPER instances (one per node, routed by node ID)
 
