@@ -851,6 +851,13 @@ async fn process_message(
             }
             None
         }
+        MeshMessage::ReaperScriptResult(result) => {
+            let entry = pending_intents.lock().unwrap().remove(&result.request_id);
+            if let Some(otx) = entry {
+                let _ = otx.send(MeshMessage::ReaperScriptResult(result));
+            }
+            None
+        }
         _ => None,
     }
 }

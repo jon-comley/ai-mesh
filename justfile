@@ -348,24 +348,35 @@ deploy-node node:
 
     case "$NODE_OS" in
       linux)
-        NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
-        if [ "$NODE_ARCH" = "x86_64" ]; then
-            echo ">>> Building Linux x86_64 agent..."
-            cargo build --release --target x86_64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
-            AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
+        if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
+            echo ">>> Building Linux x86_64 agent (local)..."
+            cargo build --release -p agent --features ${NODE_FEATURES:-llm}
+            AGENT_BIN="target/release/agent"
+            echo ">>> Stopping local agent service..."
+            sudo systemctl stop ai-mesh-agent 2>/dev/null || true
+            sudo systemctl kill ai-mesh-agent 2>/dev/null || true
+            echo ">>> Installing agent binary..."
+            sudo install -m 755 ${AGENT_BIN} /home/${NODE_USER}/agent
+            sudo systemctl start ai-mesh-agent
         else
-            echo ">>> Building Linux ARM64 agent..."
-            cargo build --release --target aarch64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
-            AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
+            NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
+            if [ "$NODE_ARCH" = "x86_64" ]; then
+                echo ">>> Building Linux x86_64 agent..."
+                cargo build --release --target x86_64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
+                AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
+            else
+                echo ">>> Building Linux ARM64 agent..."
+                cargo build --release --target aarch64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
+                AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
+            fi
+            ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
+            scp_dots ">>> Uploading agent binary" \
+                scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
+            scp_dots ">>> Uploading install script" \
+                scp -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
+            ssh -t ${NODE_USER}@${NODE_HOST} \
+                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER} ${MQTT_HOST:-} ${MQTT_PORT:-1883}"
         fi
-
-        ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
-        scp_dots ">>> Uploading agent binary" \
-            scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
-        scp_dots ">>> Uploading install script" \
-            scp -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
-        ssh -t ${NODE_USER}@${NODE_HOST} \
-            "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER} ${MQTT_HOST:-} ${MQTT_PORT:-1883}"
         ;;
 
       windows)
@@ -423,9 +434,13 @@ deploy-node node:
         echo ">>> Coordinator is running — pushing credentials to {{node}}..."
         just set-fingerprint {{node}} \
             || echo ">>> Warning: could not push credentials to {{node}} — run: just set-fingerprint {{node}}"
-        echo ">>> Auto-loading best-fit model on {{node}} (agent restart kills llama-server)..."
-        just auto-load-model {{node}} \
-            || echo ">>> Warning: could not load model on {{node}} — run: just auto-load-model {{node}}"
+        if [[ "${NODE_ROLE}" == "compute" ]] && [[ "${NODE_FEATURES:-llm}" == *"llm"* ]]; then
+            echo ">>> Auto-loading best-fit model on {{node}} (agent restart kills llama-server)..."
+            just auto-load-model {{node}} \
+                || echo ">>> Warning: could not load model on {{node}} — run: just auto-load-model {{node}}"
+        else
+            echo ">>> {{node}} is a ${NODE_ROLE} node — skipping model load."
+        fi
     else
         echo ">>> No coordinator running yet — run 'just start-cluster' (or 'just set-fingerprint {{node}}' after starting the coordinator)"
     fi
@@ -1429,21 +1444,13 @@ start-cluster: update-portproxy
         echo ""
     fi
 
-    echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
+    echo ">>> Pushing TLS fingerprint and auth token to all nodes..."
     for f in nodes/*.env; do
         source "$f"
         NODE_NAME=$(basename "$f" .env)
-        [ "${NODE_ROLE}" = "compute" ] || continue
         just set-fingerprint ${NODE_NAME} \
             || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
     done
-
-    echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
-    # Point the local controller at the real coordinator — {{coordinator_ip}} is
-    # 127.0.0.1 in local mode and pi1's IP in remote mode.  Hardcoding 127.0.0.1
-    # left this node (OmniLink1) connecting to nothing when the coordinator runs
-    # remotely, so it showed offline/red in the Nodes view.
-    AGENT_ROLE=controller COORDINATOR_IP={{coordinator_ip}} cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
 
     echo ">>> Starting remote compute agents..."
     just start-agents
@@ -1555,21 +1562,13 @@ restart-coordinator: update-portproxy
         echo ""
     fi
 
-    echo ">>> Pushing TLS fingerprint and auth token to all compute nodes..."
+    echo ">>> Pushing TLS fingerprint and auth token to all nodes..."
     for f in nodes/*.env; do
         source "$f"
         NODE_NAME=$(basename "$f" .env)
-        [ "${NODE_ROLE}" = "compute" ] || continue
         just set-fingerprint ${NODE_NAME} \
             || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
     done
-
-    echo ">>> Starting local controller (log: /tmp/mesh-agent.log)..."
-    # Point the local controller at the real coordinator — {{coordinator_ip}} is
-    # 127.0.0.1 in local mode and pi1's IP in remote mode.  Hardcoding 127.0.0.1
-    # left this node (OmniLink1) connecting to nothing when the coordinator runs
-    # remotely, so it showed offline/red in the Nodes view.
-    AGENT_ROLE=controller COORDINATOR_IP={{coordinator_ip}} cargo run -q -p agent > /tmp/mesh-agent.log 2>&1 &
 
     # Wait for coordinator to finish clearing stale model state from the
     # agent restarts above before load-models-retry checks node status.
@@ -2041,6 +2040,230 @@ test-deploy-creds node:
     [ "$FAIL" -eq 0 ]
 
 # Run an end-to-end live inference loop across the whole cluster.
+# Smoke-test the REAPER integration end-to-end:
+#   1. Check REAPER web server is reachable
+#   2. Send play via chat → confirm transport flips to playing
+#   3. Check coordinator REAPER snapshot is live
+#   4. Send stop via chat → confirm transport returns to stopped
+# Requires REAPER running on this machine with web server enabled (Preferences → Control/OSC/web).
+# One-time setup for the REAPER Lua bridge daemon.
+# The csurf web server can only dispatch numeric action IDs, not named (RS...) script
+# actions, so we use a daemon: a long-running Lua script registered in REAPER that polls
+# ai_mesh_id.txt and runs whatever Lua we drop into ai_mesh_cmd.lua. The agent (and the
+# justfile reaper_lua helper) trigger it by writing the command file and bumping the id file.
+# Usage: just setup-reaper-daemon
+setup-reaper-daemon:
+    #!/usr/bin/env bash
+    set -e
+
+    SCRIPT_DIR="${REAPER_WSL_SCRIPTS_PATH:-/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts}"
+
+    if [ ! -d "$SCRIPT_DIR" ]; then
+        echo "✗ REAPER Scripts folder not found: $SCRIPT_DIR"
+        echo "  Make sure REAPER is installed and has been launched at least once."
+        exit 1
+    fi
+
+    printf '%s\n' \
+        '-- ai-mesh bridge daemon. Register once in REAPER (Actions list) and add to' \
+        '-- startup actions; it re-schedules itself via defer for the life of REAPER.' \
+        '-- The agent writes Lua to ai_mesh_cmd.lua and a new id to ai_mesh_id.txt;' \
+        '-- this daemon notices the id change and dofiles the command.' \
+        'local base = reaper.GetResourcePath() .. "/Scripts/"' \
+        'local id_file = base .. "ai_mesh_id.txt"' \
+        'local cmd_file = base .. "ai_mesh_cmd.lua"' \
+        'local last_id = ""' \
+        'local function check()' \
+        '  local f = io.open(id_file, "r")' \
+        '  if f then' \
+        '    local id = f:read("*l") or ""' \
+        '    f:close()' \
+        '    if id ~= "" and id ~= last_id then' \
+        '      last_id = id' \
+        '      local ok, err = pcall(dofile, cmd_file)' \
+        '      if not ok then reaper.ShowConsoleMsg("[ai-mesh] error: " .. tostring(err) .. "\\n") end' \
+        '    end' \
+        '  end' \
+        '  reaper.defer(check)' \
+        'end' \
+        'reaper.ShowConsoleMsg("[ai-mesh] daemon started\\n")' \
+        'check()' \
+        > "${SCRIPT_DIR}/ai_mesh_daemon.lua"
+
+    # Seed the command/trigger files so the daemon has something valid to poll.
+    : > "${SCRIPT_DIR}/ai_mesh_id.txt"
+    printf '%s\n' '-- no command yet' > "${SCRIPT_DIR}/ai_mesh_cmd.lua"
+
+    echo "✓ Daemon written to: ${SCRIPT_DIR}/ai_mesh_daemon.lua"
+    echo ""
+    echo "One-time REAPER setup:"
+    echo "  1. Actions → Show Action List → 'Load' (ReaScript) → select ai_mesh_daemon.lua"
+    echo "  2. Run it once (double-click). The console should print '[ai-mesh] daemon started'."
+    echo "  3. Optional: right-click the action → 'Add to startup actions' so it auto-loads."
+    echo ""
+    echo "After that, 'just test-record' and the chat reaper_script tool can run Lua in REAPER."
+
+# Usage: just test-reaper
+test-reaper:
+    #!/usr/bin/env bash
+    set -e
+
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ ! -f "$STATE" ]; then
+        echo "✗ coordinator state not found — run: just start-cluster"
+        exit 1
+    fi
+    source "$STATE"
+
+    REAPER_URL="http://127.0.0.1:${REAPER_PORT:-8080}"
+    COORD_URL="http://{{coordinator_ip}}:9001"
+    PASS=0
+    FAIL=0
+
+    ok()   { echo "  ✓ $*"; PASS=$((PASS+1)); }
+    fail() { echo "  ✗ $*"; FAIL=$((FAIL+1)); }
+
+    chat() {
+        curl -s -X POST "${COORD_URL}/api/chat?token=${MESH_AUTH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"$1\", \"context\": []}"
+    }
+
+    transport_state() {
+        curl -s --max-time 3 "${REAPER_URL}/_/TRANSPORT" | cut -f2
+    }
+
+    echo ""
+    echo "=== REAPER smoke test ==="
+    echo ""
+
+    # 1. REAPER web server reachable
+    echo "[1/5] REAPER web server..."
+    RAW=$(curl -s --max-time 3 "${REAPER_URL}/_/TRANSPORT" || true)
+    if [ -n "$RAW" ]; then
+        ok "REAPER reachable at ${REAPER_URL}"
+    else
+        fail "REAPER not reachable at ${REAPER_URL} — is REAPER running with web server enabled?"
+        echo "  Enable in REAPER: Preferences → Control/OSC/web → enable web interface"
+        exit 1
+    fi
+
+    # 2. Play via chat
+    echo "[2/4] Play command via chat..."
+    RESP=$(chat "play the track in reaper")
+    TOOL=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); calls=d.get('tool_calls',[]); print(calls[0]['tool'] if calls else '')" 2>/dev/null || true)
+    RESULT=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); calls=d.get('tool_calls',[]); print(calls[0]['result'] if calls else '')" 2>/dev/null || true)
+    if [ "$TOOL" = "reaper_transport" ] && [ "$RESULT" = "ok" ]; then
+        ok "LLM called reaper_transport(play) → ok"
+    else
+        fail "Expected reaper_transport tool call, got: $(echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP")"
+    fi
+    sleep 1
+    STATE_AFTER=$(transport_state)
+    if [ "$STATE_AFTER" = "1" ]; then
+        ok "REAPER transport is playing (state=1)"
+    else
+        echo "  ⚠ transport state=${STATE_AFTER} after play (expected 1 — open a project with tracks in REAPER to verify)"
+    fi
+
+    # 3. Coordinator REAPER snapshot
+    echo "[3/4] Coordinator REAPER snapshot..."
+    SNAP=$(curl -s --max-time 5 "${COORD_URL}/api/reaper/state?token=${MESH_AUTH_TOKEN}" || true)
+    ONLINE=$(echo "$SNAP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('reaper_online',''))" 2>/dev/null || true)
+    PLAY=$(echo "$SNAP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('play_state',''))" 2>/dev/null || true)
+    if [ "$ONLINE" = "True" ] || [ "$ONLINE" = "true" ]; then
+        ok "Coordinator snapshot: online=true play_state=${PLAY}"
+    else
+        fail "Coordinator snapshot: reaper_online=${ONLINE} (expected true)"
+    fi
+
+    # 4. Stop via chat
+    echo "[4/4] Stop command via chat..."
+    RESP=$(chat "stop reaper")
+    TOOL=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); calls=d.get('tool_calls',[]); print(calls[0]['tool'] if calls else '')" 2>/dev/null || true)
+    RESULT=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); calls=d.get('tool_calls',[]); print(calls[0]['result'] if calls else '')" 2>/dev/null || true)
+    if [ "$TOOL" = "reaper_transport" ] && [ "$RESULT" = "ok" ]; then
+        ok "LLM called reaper_transport(stop) → ok"
+    else
+        fail "Expected reaper_transport stop call, got: $(echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP")"
+    fi
+    sleep 1
+    STATE_AFTER=$(transport_state)
+    if [ "$STATE_AFTER" = "0" ]; then
+        ok "REAPER transport is stopped (state=0)"
+    else
+        echo "  ⚠ transport state=${STATE_AFTER} after stop (expected 0)"
+    fi
+
+    echo ""
+    echo "=== Results: ${PASS} passed, ${FAIL} failed ==="
+    echo ""
+    [ "$FAIL" -eq 0 ]
+
+# End-to-end recording test using the laptop mic (no Scarlett needed).
+# Creates a new project, records 5 s, stops, rewinds, plays back.
+# Requires the REAPER Lua bridge daemon (just setup-reaper-daemon) to be running.
+# Usage: just test-record
+test-record:
+    #!/usr/bin/env bash
+    set -e
+
+    REAPER_URL="http://127.0.0.1:${REAPER_PORT:-8080}"
+    DROPIN="/etc/systemd/system/ai-mesh-agent.service.d/reaper.conf"
+
+    REAPER_SCRIPTS="${REAPER_WSL_SCRIPTS_PATH:-/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts}"
+    CMD_FILE="${REAPER_SCRIPTS}/ai_mesh_cmd.lua"
+    ID_FILE="${REAPER_SCRIPTS}/ai_mesh_id.txt"
+
+    reaper_action() { curl -s --max-time 5 "${REAPER_URL}/_/$1;" > /dev/null; }
+
+    reaper_lua() {
+        printf '%s\n' "$1" > "${CMD_FILE}"
+        echo "$(date +%s%N)" > "${ID_FILE}"
+        sleep 0.5
+    }
+
+    echo ""
+    echo "=== REAPER recording test ==="
+    echo ""
+
+    if ! curl -s --max-time 3 "${REAPER_URL}/_/TRANSPORT" > /dev/null 2>&1; then
+        echo "✗ REAPER not reachable at ${REAPER_URL} — is REAPER running?"
+        exit 1
+    fi
+    echo "✓ REAPER reachable"
+
+    echo ">>> Setting up mic track..."
+    reaper_lua 'for i=reaper.GetNumTracks()-1,0,-1 do reaper.DeleteTrack(reaper.GetTrack(0,i)) end; reaper.InsertTrackAtIndex(0,true); local t=reaper.GetTrack(0,0); reaper.GetSetMediaTrackInfo_String(t,"P_NAME","Test Mic",true); reaper.SetMediaTrackInfo_Value(t,"I_RECINPUT",0); reaper.SetMediaTrackInfo_Value(t,"I_RECARM",1); reaper.SetMediaTrackInfo_Value(t,"I_RECMON",1); reaper.UpdateArrange()'
+    sleep 2
+    echo "✓ Track ready — check REAPER: is the track arm button red?"
+
+    echo ""
+    echo ">>> Recording in 3..."
+    sleep 1
+    echo ">>> 2..."
+    sleep 1
+    echo ">>> 1..."
+    sleep 1
+    reaper_action 1013
+    echo ">>> RECORDING — say something! (5 seconds)"
+    sleep 5
+    reaper_action 1007
+    echo "✓ Recording stopped"
+
+    sleep 0.5
+    echo ""
+    echo ">>> Rewinding and playing back..."
+    reaper_action 40042
+    sleep 0.5
+    reaper_action 1008
+    sleep 6
+    reaper_action 1007
+    echo "✓ Playback done"
+
+    echo ""
+    echo "=== Recording test complete ==="
+
 test-inference: update-portproxy
     #!/usr/bin/env bash
     set -e
@@ -2303,9 +2526,10 @@ verify-coordinator target_host:
         exit 1
     }
 
-    # Check 2: HTTP endpoint is responding
-    echo "[2/5] Checking HTTP endpoint at ${NODE_HOST}:{{coordinator_port}}..."
-    if curl -s http://${NODE_HOST}:{{coordinator_port}}/ | grep -q "<!DOCTYPE\|<html"; then
+    # Check 2: HTTP endpoint is responding (dashboard is on port 9001, not the TLS agent port 9000)
+    DASH_PORT=9001
+    echo "[2/5] Checking HTTP endpoint at ${NODE_HOST}:${DASH_PORT}..."
+    if curl -s "http://${NODE_HOST}:${DASH_PORT}/" | grep -q "<!DOCTYPE\|<html"; then
         echo "      ✓ Dashboard HTML loaded"
     else
         echo "      ✗ Dashboard did not respond with HTML"
@@ -2337,7 +2561,7 @@ verify-coordinator target_host:
     echo ""
     echo "=== Verification complete ==="
     echo ""
-    echo "Dashboard URL: http://${NODE_HOST}:{{coordinator_port}}/?token=..."
+    echo "Dashboard URL: http://${NODE_HOST}:9001/?token=..."
     echo ""
     echo "Manual next steps:"
     echo "  - Repoint agents: just start-agents"

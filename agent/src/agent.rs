@@ -123,25 +123,28 @@ impl Agent {
             return Ok(false); // channel closed — connection already gone
         }
 
+        let capabilities = detect_capabilities().map_err(|e| {
+            warn!(error = %e, "capability detection failed");
+            e
+        })?;
+        if self
+            .tx
+            .send(MeshMessage::Capabilities(capabilities))
+            .await
+            .is_err()
+        {
+            return Ok(false);
+        }
+
         if self.config.role == NodeRole::Compute {
             info!("detecting hardware and capabilities");
             let hardware = detect_hardware().map_err(|e| {
                 warn!(error = %e, "hardware detection failed");
                 e
             })?;
-            let capabilities = detect_capabilities()?;
-            // If the channel closed while we were detecting hardware, exit cleanly.
             if self
                 .tx
                 .send(MeshMessage::HardwareReport(hardware))
-                .await
-                .is_err()
-            {
-                return Ok(false);
-            }
-            if self
-                .tx
-                .send(MeshMessage::Capabilities(capabilities))
                 .await
                 .is_err()
             {
@@ -207,7 +210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn controller_mode_sends_only_heartbeat() {
+    async fn controller_mode_sends_heartbeat_and_capabilities() {
         let config = AgentConfig {
             role: NodeRole::Controller,
             heartbeat_interval_secs: 5,
@@ -221,8 +224,14 @@ mod tests {
             msgs.push(msg);
         }
 
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs.len(), 2);
         assert!(matches!(msgs[0], MeshMessage::Heartbeat(_)));
+        assert!(matches!(msgs[1], MeshMessage::Capabilities(_)));
+        assert!(
+            !msgs
+                .iter()
+                .any(|m| matches!(m, MeshMessage::HardwareReport(_)))
+        );
     }
 
     #[tokio::test]

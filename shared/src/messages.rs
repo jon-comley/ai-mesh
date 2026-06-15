@@ -226,6 +226,20 @@ pub struct ReaperStatusReport {
     pub ts_denom: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReaperScriptRequest {
+    pub request_id: String,
+    /// Lua code to execute inside REAPER's scripting environment.
+    pub code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReaperScriptResult {
+    pub request_id: String,
+    pub ok: bool,
+    pub message: String,
+}
+
 // ── Intent routing types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,6 +330,8 @@ pub enum MeshMessage {
     ReaperCommand(ReaperCommandRequest),
     ReaperCommandResult(ReaperCommandResult),
     ReaperStatus(ReaperStatusReport),
+    ReaperScript(ReaperScriptRequest),
+    ReaperScriptResult(ReaperScriptResult),
 }
 
 /// Structured admin messages for coordinator control.
