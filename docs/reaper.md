@@ -113,6 +113,7 @@ Then fully quit and reopen REAPER — the daemon auto-starts via `__startup.lua`
 | `REAPER_HOST` | `localhost` | Host of the REAPER web server. Use `127.0.0.1` on WSL2. |
 | `REAPER_PORT` | `8080` | Port of the REAPER web server. |
 | `REAPER_WSL_SCRIPTS_PATH` | `/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts` | WSL-visible path to REAPER's Scripts folder, where the daemon bridge command files live. |
+| `REAPER_SCRIPT_TIMEOUT_MS` | `5000` | How long the agent waits for the daemon to write `ai_mesh_result.txt` before reporting the daemon unresponsive. |
 
 ---
 
@@ -159,22 +160,28 @@ reaper_script(code)
     ▼
 __startup.lua  (reaper.defer loop, polls ai_mesh_id.txt)
     │  on id change: pcall(dofile, ai_mesh_cmd.lua)
+    │  writes Scripts/ai_mesh_result.txt = "<id>\t<ok|err>\t<message>"
     ▼
-REAPER DAW
+    │  agent polls ai_mesh_result.txt for a line whose id matches its request
+    ▼
+ReaperScriptResult  (ok, the Lua error, or "daemon did not respond")
 ```
 
 REAPER automatically runs `Scripts/__startup.lua` at startup (a native feature, no
 SWS required), so the daemon comes up with REAPER and needs no manual registration.
-It re-schedules itself via `reaper.defer` and runs for the life of the REAPER
-process. It is **fire-and-forget**: the agent returns `ok` once the files are
-written; it does not read a result back from the Lua. Errors inside the Lua are
+It re-schedules itself via `reaper.defer` and runs for the life of the REAPER process.
+
+The bridge is **request/response**, not fire-and-forget. After writing the trigger,
+the agent polls `ai_mesh_result.txt` (matching its request id) for up to **5 s**
+(`REAPER_SCRIPT_TIMEOUT_MS` overrides). It returns one of:
+- `ok` — the daemon ran the Lua cleanly,
+- `REAPER Lua error: <msg>` — the Lua raised (e.g. `attempt to index a nil value`),
+- `REAPER daemon did not respond within 5s …` — no result appeared, i.e. the daemon
+  isn't running (missing/stale `__startup.lua`, or REAPER was opened before setup).
+
+So a dead daemon now surfaces in chat instead of a false `ok`. Lua errors are also
 printed to REAPER's console (`ReaScript console output`, which auto-opens), prefixed
 `[ai-mesh]`.
-
-> Gotcha: the daemon lives in the REAPER process. If you ever run REAPER without
-> `__startup.lua` in place, `reaper_script` goes silent — the agent still returns
-> `ok`, but nothing reads the command file. Re-run `just setup-reaper-daemon` and
-> restart REAPER.
 
 ### One-time setup
 
@@ -182,9 +189,9 @@ printed to REAPER's console (`ReaScript console output`, which auto-opens), pref
 just setup-reaper-daemon
 ```
 
-This writes `__startup.lua` (plus the seed `ai_mesh_cmd.lua` / `ai_mesh_id.txt`)
-into REAPER's Scripts folder. Then **fully quit and reopen REAPER** — a `ReaScript
-console output` window should appear on launch printing
+This writes `__startup.lua` (plus the seed `ai_mesh_cmd.lua` / `ai_mesh_id.txt` /
+`ai_mesh_result.txt`) into REAPER's Scripts folder. Then **fully quit and reopen
+REAPER** — a `ReaScript console output` window should appear on launch printing
 `[ai-mesh] daemon started (via __startup.lua)`.
 
 ### Verifying end-to-end
@@ -263,9 +270,13 @@ All DOM elements are null-guarded so the panel is safe to render before the firs
 
 - Dashboard REAPER tab wired in nav (panel renders but tab link not yet added to `index.html`)
 - Tempo / time-sig write via intent (read-only today)
-- Result read-back from `reaper_script` (currently fire-and-forget; errors only surface in REAPER's console)
 - REAPER on macOS (planned for next machine)
 - Multi-REAPER instances (one per node, routed by node ID)
+- The daemon's result-write (`io.open(ai_mesh_result.txt, "w")`) is non-atomic. If it
+  ever collided with the agent's read, the result could be lost and surface as a false
+  "daemon did not respond". Near-zero in practice — commands are gated by multi-second
+  inference, so they're seconds apart — but a temp-file + atomic rename would close the
+  window entirely (awkward in Lua on Windows, where `os.rename` fails on an existing dest).
 
 ---
 
