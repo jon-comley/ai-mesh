@@ -101,8 +101,8 @@ numeric transport actions). See [ReaScript daemon bridge](#reascript-daemon-brid
 just setup-reaper-daemon
 ```
 
-Then register `ai_mesh_daemon.lua` in REAPER's action list and **add it to startup
-actions** (required — see the daemon section), as the recipe instructs.
+Then fully quit and reopen REAPER — the daemon auto-starts via `__startup.lua`
+(see the daemon section).
 
 ---
 
@@ -148,7 +148,8 @@ TRANSPORT \t play_state \t play_rate \t repeat \t position \t loop_mode \t tempo
 
 The csurf web server executes **numeric action IDs only** — it cannot run a named
 `RS...` ReaScript action, and it has no endpoint for evaluating arbitrary Lua. To
-run Lua we use a small long-lived daemon registered inside REAPER:
+run Lua we use a small daemon inside REAPER, installed as REAPER's native
+`__startup.lua` so it auto-starts on every launch:
 
 ```
 reaper_script(code)
@@ -156,17 +157,24 @@ reaper_script(code)
     │    Scripts/ai_mesh_cmd.lua  ← the Lua to run
     │    Scripts/ai_mesh_id.txt   ← a fresh id (request_id / epoch-ns)
     ▼
-ai_mesh_daemon.lua  (reaper.defer loop, polls ai_mesh_id.txt)
+__startup.lua  (reaper.defer loop, polls ai_mesh_id.txt)
     │  on id change: pcall(dofile, ai_mesh_cmd.lua)
     ▼
 REAPER DAW
 ```
 
-The daemon re-schedules itself via `reaper.defer` and runs for the life of the
-REAPER process. It is **fire-and-forget**: the agent returns `ok` once the files
-are written; it does not read a result back from the Lua. Errors inside the Lua
-are printed to REAPER's console (`Actions → Show REAPER console`), prefixed
+REAPER automatically runs `Scripts/__startup.lua` at startup (a native feature, no
+SWS required), so the daemon comes up with REAPER and needs no manual registration.
+It re-schedules itself via `reaper.defer` and runs for the life of the REAPER
+process. It is **fire-and-forget**: the agent returns `ok` once the files are
+written; it does not read a result back from the Lua. Errors inside the Lua are
+printed to REAPER's console (`ReaScript console output`, which auto-opens), prefixed
 `[ai-mesh]`.
+
+> Gotcha: the daemon lives in the REAPER process. If you ever run REAPER without
+> `__startup.lua` in place, `reaper_script` goes silent — the agent still returns
+> `ok`, but nothing reads the command file. Re-run `just setup-reaper-daemon` and
+> restart REAPER.
 
 ### One-time setup
 
@@ -174,14 +182,10 @@ are printed to REAPER's console (`Actions → Show REAPER console`), prefixed
 just setup-reaper-daemon
 ```
 
-This writes `ai_mesh_daemon.lua` (plus the seed `ai_mesh_cmd.lua` / `ai_mesh_id.txt`)
-into REAPER's Scripts folder and prints the registration steps:
-
-1. `Actions → Show Action List → Load` → select `ai_mesh_daemon.lua`
-2. Run it once — the console prints `[ai-mesh] daemon started`
-3. **Right-click the action → `Add to startup actions`.** This is required — the
-   daemon lives in the REAPER process, so without a startup action it dies on every
-   REAPER restart and `reaper_script` goes silent until you re-run it by hand.
+This writes `__startup.lua` (plus the seed `ai_mesh_cmd.lua` / `ai_mesh_id.txt`)
+into REAPER's Scripts folder. Then **fully quit and reopen REAPER** — a `ReaScript
+console output` window should appear on launch printing
+`[ai-mesh] daemon started (via __startup.lua)`.
 
 ### Verifying end-to-end
 

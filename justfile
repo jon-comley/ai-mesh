@@ -2045,12 +2045,12 @@ test-deploy-creds node:
 #   2. Send play via chat → confirm transport flips to playing
 #   3. Check coordinator REAPER snapshot is live
 #   4. Send stop via chat → confirm transport returns to stopped
-# Requires REAPER running on this machine with web server enabled (Preferences → Control/OSC/web).
 # One-time setup for the REAPER Lua bridge daemon.
 # The csurf web server can only dispatch numeric action IDs, not named (RS...) script
-# actions, so we use a daemon: a long-running Lua script registered in REAPER that polls
-# ai_mesh_id.txt and runs whatever Lua we drop into ai_mesh_cmd.lua. The agent (and the
-# justfile reaper_lua helper) trigger it by writing the command file and bumping the id file.
+# actions, so we use a daemon: a Lua script that polls ai_mesh_id.txt and runs whatever
+# Lua we drop into ai_mesh_cmd.lua. The agent triggers it by writing the command file and
+# bumping the id file. The daemon is installed as REAPER's native __startup.lua, so it
+# auto-starts on every launch — no manual action-list registration, no SWS required.
 # Usage: just setup-reaper-daemon
 setup-reaper-daemon:
     #!/usr/bin/env bash
@@ -2065,10 +2065,9 @@ setup-reaper-daemon:
     fi
 
     printf '%s\n' \
-        '-- ai-mesh bridge daemon. Register once in REAPER (Actions list) and add to' \
-        '-- startup actions; it re-schedules itself via defer for the life of REAPER.' \
-        '-- The agent writes Lua to ai_mesh_cmd.lua and a new id to ai_mesh_id.txt;' \
-        '-- this daemon notices the id change and dofiles the command.' \
+        '-- ai-mesh bridge daemon, auto-run by REAPER at startup (native __startup.lua).' \
+        '-- Polls ai_mesh_id.txt; when the id changes, dofiles ai_mesh_cmd.lua. The agent' \
+        '-- writes Lua to ai_mesh_cmd.lua and a new id to ai_mesh_id.txt to trigger it.' \
         'local base = reaper.GetResourcePath() .. "/Scripts/"' \
         'local id_file = base .. "ai_mesh_id.txt"' \
         'local cmd_file = base .. "ai_mesh_cmd.lua"' \
@@ -2086,20 +2085,21 @@ setup-reaper-daemon:
         '  end' \
         '  reaper.defer(check)' \
         'end' \
-        'reaper.ShowConsoleMsg("[ai-mesh] daemon started\\n")' \
+        'reaper.ShowConsoleMsg("[ai-mesh] daemon started (via __startup.lua)\\n")' \
         'check()' \
-        > "${SCRIPT_DIR}/ai_mesh_daemon.lua"
+        > "${SCRIPT_DIR}/__startup.lua"
 
     # Seed the command/trigger files so the daemon has something valid to poll.
     : > "${SCRIPT_DIR}/ai_mesh_id.txt"
     printf '%s\n' '-- no command yet' > "${SCRIPT_DIR}/ai_mesh_cmd.lua"
 
-    echo "✓ Daemon written to: ${SCRIPT_DIR}/ai_mesh_daemon.lua"
+    # Remove the old manually-registered daemon if a previous setup left one behind.
+    rm -f "${SCRIPT_DIR}/ai_mesh_daemon.lua"
+
+    echo "✓ Daemon installed as: ${SCRIPT_DIR}/__startup.lua"
     echo ""
-    echo "One-time REAPER setup:"
-    echo "  1. Actions → Show Action List → 'Load' (ReaScript) → select ai_mesh_daemon.lua"
-    echo "  2. Run it once (double-click). The console should print '[ai-mesh] daemon started'."
-    echo "  3. Optional: right-click the action → 'Add to startup actions' so it auto-loads."
+    echo "Restart REAPER (fully quit and reopen). A 'ReaScript console output' window"
+    echo "should appear on launch printing '[ai-mesh] daemon started (via __startup.lua)'."
     echo ""
     echo "After that, 'just test-record' and the chat reaper_script tool can run Lua in REAPER."
 
