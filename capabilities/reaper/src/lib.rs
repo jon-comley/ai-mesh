@@ -277,32 +277,77 @@ async fn execute_command(cmd: &ReaperCommandRequest, addr: &str) -> ReaperComman
 async fn execute_script(cmd: &ReaperScriptRequest, _addr: &str) -> ReaperScriptResult {
     let scripts_dir = std::env::var("REAPER_WSL_SCRIPTS_PATH")
         .unwrap_or_else(|_| "/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts".into());
+    let timeout = std::env::var("REAPER_SCRIPT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(5));
+    run_script(cmd, std::path::Path::new(&scripts_dir), timeout).await
+}
 
-    let cmd_path = format!("{}/ai_mesh_cmd.lua", scripts_dir);
-    let id_path = format!("{}/ai_mesh_id.txt", scripts_dir);
+/// Drive the daemon bridge: write the Lua + a fresh id, then poll the result file
+/// the daemon writes back (`<id>\t<ok|err>\t<message>`). Returns the daemon's result,
+/// the Lua error it reported, or a "daemon did not respond" error on timeout — never a
+/// blind ok. Split from `execute_script` (which resolves env) so it is unit-testable.
+async fn run_script(
+    cmd: &ReaperScriptRequest,
+    scripts_dir: &std::path::Path,
+    timeout: Duration,
+) -> ReaperScriptResult {
+    let cmd_path = scripts_dir.join("ai_mesh_cmd.lua");
+    let id_path = scripts_dir.join("ai_mesh_id.txt");
+    let result_path = scripts_dir.join("ai_mesh_result.txt");
 
-    if let Err(e) = tokio::fs::write(&cmd_path, cmd.code.as_bytes()).await {
-        return ReaperScriptResult {
-            request_id: cmd.request_id.clone(),
-            ok: false,
-            message: format!("failed to write command to {cmd_path}: {e}"),
-        };
-    }
-
-    if let Err(e) = tokio::fs::write(&id_path, cmd.request_id.as_bytes()).await {
-        return ReaperScriptResult {
-            request_id: cmd.request_id.clone(),
-            ok: false,
-            message: format!("failed to write id to {id_path}: {e}"),
-        };
-    }
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    ReaperScriptResult {
+    let err = |message: String| ReaperScriptResult {
         request_id: cmd.request_id.clone(),
-        ok: true,
-        message: "dispatched to daemon".into(),
+        ok: false,
+        message,
+    };
+
+    // Write the payload first, then the id — the id change is the trigger, so the
+    // command file is guaranteed present when the daemon notices it.
+    if let Err(e) = tokio::fs::write(&cmd_path, cmd.code.as_bytes()).await {
+        return err(format!(
+            "failed to write command to {}: {e}",
+            cmd_path.display()
+        ));
+    }
+    if let Err(e) = tokio::fs::write(&id_path, cmd.request_id.as_bytes()).await {
+        return err(format!("failed to write id to {}: {e}", id_path.display()));
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        // A result is only ours when its leading id matches; a stale result from a
+        // prior request (or a partial write) is ignored until the daemon overwrites it.
+        if let Ok(contents) = tokio::fs::read_to_string(&result_path).await
+            && let Some(line) = contents.lines().next()
+        {
+            let mut parts = line.splitn(3, '\t');
+            let rid = parts.next().unwrap_or("");
+            let status = parts.next().unwrap_or("");
+            let message = parts.next().unwrap_or("");
+            if rid == cmd.request_id && (status == "ok" || status == "err") {
+                return ReaperScriptResult {
+                    request_id: cmd.request_id.clone(),
+                    ok: status == "ok",
+                    message: if status == "ok" {
+                        "ok".into()
+                    } else {
+                        format!("REAPER Lua error: {message}")
+                    },
+                };
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return err(format!(
+                "REAPER daemon did not respond within {}s — is REAPER running with the \
+                 __startup.lua daemon? Run 'just setup-reaper-daemon' and restart REAPER.",
+                timeout.as_secs_f32()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -356,36 +401,98 @@ mod tests {
         assert_eq!(url_encode("a b"), "a%20b");
     }
 
-    #[tokio::test]
-    async fn execute_script_writes_daemon_files() {
-        let dir = std::env::temp_dir().join(format!("ai_mesh_test_{}", std::process::id()));
-        tokio::fs::create_dir_all(&dir).await.unwrap();
-        // SAFETY: single-threaded test, no concurrent env access.
-        unsafe {
-            std::env::set_var("REAPER_WSL_SCRIPTS_PATH", &dir);
+    // A stand-in for the in-REAPER daemon: wait for the agent's id file to carry
+    // `expect_id`, then write the result file the agent polls for.
+    async fn fake_daemon(dir: std::path::PathBuf, expect_id: &str, status: &str, message: &str) {
+        let id_path = dir.join("ai_mesh_id.txt");
+        let result_path = dir.join("ai_mesh_result.txt");
+        let line = format!("{expect_id}\t{status}\t{message}");
+        loop {
+            if let Ok(s) = tokio::fs::read_to_string(&id_path).await
+                && s.lines().next() == Some(expect_id)
+            {
+                tokio::fs::write(&result_path, line.as_bytes())
+                    .await
+                    .unwrap();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    async fn temp_scripts_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ai_mesh_test_{}_{tag}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn run_script_returns_ok_and_writes_command_when_daemon_acks() {
+        let dir = temp_scripts_dir("ok").await;
+        let daemon = tokio::spawn(fake_daemon(dir.clone(), "req-42", "ok", ""));
 
         let req = ReaperScriptRequest {
             request_id: "req-42".into(),
             code: "reaper.InsertTrackAtIndex(0, true)".into(),
         };
-        let result = execute_script(&req, "127.0.0.1:8080").await;
+        let result = run_script(&req, &dir, Duration::from_secs(2)).await;
+        daemon.await.unwrap();
 
-        assert!(result.ok);
-        assert_eq!(result.request_id, "req-42");
-
+        assert!(result.ok, "expected ok, got: {}", result.message);
         let cmd = tokio::fs::read_to_string(dir.join("ai_mesh_cmd.lua"))
             .await
             .unwrap();
-        let id = tokio::fs::read_to_string(dir.join("ai_mesh_id.txt"))
-            .await
-            .unwrap();
         assert_eq!(cmd, "reaper.InsertTrackAtIndex(0, true)");
-        assert_eq!(id, "req-42");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 
-        unsafe {
-            std::env::remove_var("REAPER_WSL_SCRIPTS_PATH");
-        }
+    #[tokio::test]
+    async fn run_script_surfaces_lua_error_from_daemon() {
+        let dir = temp_scripts_dir("err").await;
+        let daemon = tokio::spawn(fake_daemon(
+            dir.clone(),
+            "req-7",
+            "err",
+            "attempt to index a nil value",
+        ));
+
+        let req = ReaperScriptRequest {
+            request_id: "req-7".into(),
+            code: "boom".into(),
+        };
+        let result = run_script(&req, &dir, Duration::from_secs(2)).await;
+        daemon.await.unwrap();
+
+        assert!(!result.ok);
+        assert!(
+            result.message.contains("attempt to index a nil value"),
+            "got: {}",
+            result.message
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn run_script_times_out_when_daemon_silent() {
+        let dir = temp_scripts_dir("timeout").await;
+        // No daemon writes a result — simulate a dead/missing __startup.lua.
+        let req = ReaperScriptRequest {
+            request_id: "req-x".into(),
+            code: "reaper.InsertTrackAtIndex(0, true)".into(),
+        };
+        let result = run_script(&req, &dir, Duration::from_millis(250)).await;
+
+        assert!(!result.ok);
+        assert!(
+            result.message.contains("did not respond"),
+            "got: {}",
+            result.message
+        );
+        // A stale result with a different id must not be mistaken for ours.
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

@@ -2066,11 +2066,13 @@ setup-reaper-daemon:
 
     printf '%s\n' \
         '-- ai-mesh bridge daemon, auto-run by REAPER at startup (native __startup.lua).' \
-        '-- Polls ai_mesh_id.txt; when the id changes, dofiles ai_mesh_cmd.lua. The agent' \
-        '-- writes Lua to ai_mesh_cmd.lua and a new id to ai_mesh_id.txt to trigger it.' \
+        '-- Polls ai_mesh_id.txt; when the id changes, dofiles ai_mesh_cmd.lua and writes' \
+        '-- the outcome to ai_mesh_result.txt as "<id>\\t<ok|err>\\t<message>" so the agent' \
+        '-- can confirm execution (or surface a Lua error) instead of guessing.' \
         'local base = reaper.GetResourcePath() .. "/Scripts/"' \
         'local id_file = base .. "ai_mesh_id.txt"' \
         'local cmd_file = base .. "ai_mesh_cmd.lua"' \
+        'local result_file = base .. "ai_mesh_result.txt"' \
         'local last_id = ""' \
         'local function check()' \
         '  local f = io.open(id_file, "r")' \
@@ -2080,6 +2082,12 @@ setup-reaper-daemon:
         '    if id ~= "" and id ~= last_id then' \
         '      last_id = id' \
         '      local ok, err = pcall(dofile, cmd_file)' \
+        '      local rf = io.open(result_file, "w")' \
+        '      if rf then' \
+        '        if ok then rf:write(id .. "\\tok\\t")' \
+        '        else rf:write(id .. "\\terr\\t" .. tostring(err)) end' \
+        '        rf:close()' \
+        '      end' \
         '      if not ok then reaper.ShowConsoleMsg("[ai-mesh] error: " .. tostring(err) .. "\\n") end' \
         '    end' \
         '  end' \
@@ -2089,8 +2097,9 @@ setup-reaper-daemon:
         'check()' \
         > "${SCRIPT_DIR}/__startup.lua"
 
-    # Seed the command/trigger files so the daemon has something valid to poll.
+    # Seed the command/trigger/result files so the daemon has something valid to poll.
     : > "${SCRIPT_DIR}/ai_mesh_id.txt"
+    : > "${SCRIPT_DIR}/ai_mesh_result.txt"
     printf '%s\n' '-- no command yet' > "${SCRIPT_DIR}/ai_mesh_cmd.lua"
 
     # Remove the old manually-registered daemon if a previous setup left one behind.
