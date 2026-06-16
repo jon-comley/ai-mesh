@@ -65,12 +65,12 @@ When the agent starts a model, it executes `llama-server` with the following har
 - `--port 8080`: Default port for the llama.cpp HTTP API.
 - `--ctx-size 4096`: Default context window.
 - `--n-gpu-layers <N>`: Offloads $N$ layers to GPU (set via `LLAMA_GPU_LAYERS` env).
-- `--flash-attn on`: Enabled if `LLAMA_FLASH_ATTN=1` is set in the environment.
+- `--flash-attn <on|off|auto>`: Flash-attention mode (set via `LLAMA_FLASH_ATTN`, default `auto`).
 
 ### Environment Variables
 The agent's behavior can be tuned via these environment variables:
 - `LLAMA_GPU_LAYERS`: (Default: `0`) Number of layers to offload. Set to `99` for full offload on SER8.
-- `LLAMA_FLASH_ATTN`: (Default: `0`) Set to `1` to enable Flash Attention.
+- `LLAMA_FLASH_ATTN`: (Default: `auto`) Flash-attention mode `on`/`off`/`auto`. `auto` lets llama.cpp enable it where supported (≈2× prefill on Qwen/Llama/Mistral) and skip it where it isn't — forcing `on` hangs Gemma-3 on the Vulkan backend.
 - `LLAMA_HEALTH_TIMEOUT_SECS`: (Default: `180`) How long to wait for the `/health` endpoint after starting the process.
 - `LLAMA_HOST`: (Default: `http://127.0.0.1:8080`) The URL the agent uses to talk to its local child process.
 

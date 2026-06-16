@@ -332,7 +332,9 @@ async fn run_script(
                     request_id: cmd.request_id.clone(),
                     ok: status == "ok",
                     message: if status == "ok" {
-                        "ok".into()
+                        // Structured tools return a summary string; relay it. A bare
+                        // script returns nothing → empty message → caller shows "ok".
+                        message.to_string()
                     } else {
                         format!("REAPER Lua error: {message}")
                     },
@@ -447,6 +449,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cmd, "reaper.InsertTrackAtIndex(0, true)");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn run_script_relays_daemon_success_summary() {
+        // Structured tools `return` a summary string; the daemon forwards it as the
+        // result message and the agent must surface it verbatim (not a blind "ok").
+        let dir = temp_scripts_dir("summary").await;
+        let daemon = tokio::spawn(fake_daemon(
+            dir.clone(),
+            "req-7",
+            "ok",
+            "Added 'Vocals 2' as track 5 (armed)",
+        ));
+
+        let req = ReaperScriptRequest {
+            request_id: "req-7".into(),
+            code: "return \"x\"".into(),
+        };
+        let result = run_script(&req, &dir, Duration::from_secs(2)).await;
+        daemon.await.unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.message, "Added 'Vocals 2' as track 5 (armed)");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

@@ -2067,33 +2067,37 @@ setup-reaper-daemon:
     printf '%s\n' \
         '-- ai-mesh bridge daemon, auto-run by REAPER at startup (native __startup.lua).' \
         '-- Polls ai_mesh_id.txt; when the id changes, dofiles ai_mesh_cmd.lua and writes' \
-        '-- the outcome to ai_mesh_result.txt as "<id>\\t<ok|err>\\t<message>" so the agent' \
+        '-- the outcome to ai_mesh_result.txt as "<id>\t<ok|err>\t<message>" so the agent' \
         '-- can confirm execution (or surface a Lua error) instead of guessing.' \
         'local base = reaper.GetResourcePath() .. "/Scripts/"' \
         'local id_file = base .. "ai_mesh_id.txt"' \
         'local cmd_file = base .. "ai_mesh_cmd.lua"' \
         'local result_file = base .. "ai_mesh_result.txt"' \
-        'local last_id = ""' \
-        'local function check()' \
+        'local function read_id()' \
         '  local f = io.open(id_file, "r")' \
-        '  if f then' \
-        '    local id = f:read("*l") or ""' \
-        '    f:close()' \
-        '    if id ~= "" and id ~= last_id then' \
-        '      last_id = id' \
-        '      local ok, err = pcall(dofile, cmd_file)' \
-        '      local rf = io.open(result_file, "w")' \
-        '      if rf then' \
-        '        if ok then rf:write(id .. "\\tok\\t")' \
-        '        else rf:write(id .. "\\terr\\t" .. tostring(err)) end' \
-        '        rf:close()' \
-        '      end' \
-        '      if not ok then reaper.ShowConsoleMsg("[ai-mesh] error: " .. tostring(err) .. "\\n") end' \
+        '  if not f then return "" end' \
+        '  local id = f:read("*l") or ""' \
+        '  f:close()' \
+        '  return id' \
+        'end' \
+        '-- Seed from the current id so a relaunch does not re-run the last command.' \
+        'local last_id = read_id()' \
+        'local function check()' \
+        '  local id = read_id()' \
+        '  if id ~= "" and id ~= last_id then' \
+        '    last_id = id' \
+        '    local ok, ret = pcall(dofile, cmd_file)' \
+        '    local rf = io.open(result_file, "w")' \
+        '    if rf then' \
+        '      if ok then rf:write(id .. "\tok\t" .. (type(ret) == "string" and ret or ""))' \
+        '      else rf:write(id .. "\terr\t" .. tostring(ret)) end' \
+        '      rf:close()' \
         '    end' \
+        '    if not ok then reaper.ShowConsoleMsg("[ai-mesh] error: " .. tostring(ret) .. "\n") end' \
         '  end' \
         '  reaper.defer(check)' \
         'end' \
-        'reaper.ShowConsoleMsg("[ai-mesh] daemon started (via __startup.lua)\\n")' \
+        'reaper.ShowConsoleMsg("[ai-mesh] daemon started (via __startup.lua)\n")' \
         'check()' \
         > "${SCRIPT_DIR}/__startup.lua"
 

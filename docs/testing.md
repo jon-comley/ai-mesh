@@ -36,7 +36,7 @@ Tests the pure functions that map model names to GGUF file specs and the deseria
 | `resolve_gguf_shards_agree_on_total_count` | All shards embed the same total count |
 | `llama_host_returns_http_url` | `LLAMA_HOST` env var produces an http:// URL |
 | `gpu_layers_defaults_to_zero_when_unset` | `LLAMA_GPU_LAYERS` unset → 0 |
-| `flash_attn_defaults_to_false_when_unset` | `LLAMA_FLASH_ATTN` unset → false |
+| `flash_attn_defaults_to_auto_when_unset` | `LLAMA_FLASH_ATTN` unset → `auto` (forcing `on` hangs Gemma-3 on Vulkan) |
 | `model_dir_ends_with_ai_mesh_models_when_unset` | Default model dir ends with `.ai-mesh/models` |
 | `chat_response_parses_full_response` | Full JSON with choices, usage, timings all deserialised correctly |
 | `chat_response_usage_and_timings_default_when_absent` | Missing usage/timings fields default to zero |

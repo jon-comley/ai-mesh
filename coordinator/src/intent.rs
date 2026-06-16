@@ -27,6 +27,7 @@ pub async fn handle_intent(
     pending_intents: PendingIntents,
     device_states: Vec<LightStateReport>,
 ) -> IntentResponse {
+    let started = std::time::Instant::now();
     let fail = |msg: String| IntentResponse {
         request_id: request.request_id.clone(),
         node_id: String::new(),
@@ -37,6 +38,7 @@ pub async fn handle_intent(
         duration_ms: 0,
         tokens_generated: 0,
         prompt_eval_ms: 0,
+        total_ms: started.elapsed().as_millis() as u64,
     };
 
     // 1. Collect tool schemas from nodes that advertise a given feature
@@ -236,6 +238,7 @@ pub async fn handle_intent(
             duration_ms,
             tokens_generated,
             prompt_eval_ms,
+            total_ms: started.elapsed().as_millis() as u64,
         };
     }
 
@@ -249,6 +252,7 @@ pub async fn handle_intent(
         duration_ms,
         tokens_generated,
         prompt_eval_ms,
+        total_ms: started.elapsed().as_millis() as u64,
     }
 }
 
@@ -458,64 +462,207 @@ async fn dispatch_tool(
             }
         }
         "reaper_script" => {
-            let reaper_node_id = {
-                let reg = registry.lock().unwrap();
-                let nodes: Vec<String> = reg
-                    .nodes_with_feature("reaper")
-                    .into_iter()
-                    .map(|n| n.id)
-                    .collect();
-                drop(reg);
-                let conns = connections.lock().unwrap();
-                nodes.into_iter().find(|id| conns.contains_key(id))
-            };
-            let Some(reaper_node_id) = reaper_node_id else {
-                return "no REAPER node connected".into();
-            };
-
             // `code` is required by the schema; empty -> daemon runs an empty file
             // (harmless no-op), matching the unwrap_or("") convention used by
             // reaper_transport/reaper_action above.
             let code = args["code"].as_str().unwrap_or("").to_string();
-            let req = ReaperScriptRequest {
-                request_id: request_id.to_string(),
-                code,
-            };
-
-            let (otx, orx) = oneshot::channel();
-            pending_intents
-                .lock()
-                .unwrap()
-                .insert(request_id.to_string(), otx);
-
-            let sent = connections
-                .lock()
-                .unwrap()
-                .get(&reaper_node_id)
-                .map(|tx| tx.try_send(MeshMessage::ReaperScript(req)).is_ok())
-                .unwrap_or(false);
-
-            if !sent {
-                pending_intents.lock().unwrap().remove(request_id);
-                return "failed to send ReaperScript to node".into();
+            run_reaper_lua(request_id, code, registry, connections, pending_intents).await
+        }
+        "reaper_add_track" => {
+            let name = args["name"].as_str().unwrap_or("").trim().to_string();
+            if name.is_empty() {
+                return "reaper_add_track requires a non-empty track name".into();
             }
-
-            match timeout(Duration::from_secs(10), orx).await {
-                Ok(Ok(MeshMessage::ReaperScriptResult(r))) => {
-                    if r.ok {
-                        "ok".into()
-                    } else {
-                        r.message
-                    }
-                }
-                _ => {
-                    pending_intents.lock().unwrap().remove(request_id);
-                    "REAPER script timed out".into()
-                }
+            // rec_input may arrive as a number or a numeric string from the model.
+            let rec_input = args["rec_input"].as_i64().or_else(|| {
+                args["rec_input"]
+                    .as_str()
+                    .and_then(|s| s.trim().parse().ok())
+            });
+            // New tracks default to armed (and exclusively so) — adding a track is
+            // almost always a prelude to recording into it.
+            let arm = args["arm"].as_bool().unwrap_or(true);
+            let code = build_add_track_lua(&name, rec_input, arm);
+            run_reaper_lua(request_id, code, registry, connections, pending_intents).await
+        }
+        "reaper_remove_track" => {
+            let name = args["name"].as_str().unwrap_or("").trim().to_string();
+            if name.is_empty() {
+                return "reaper_remove_track requires a track name".into();
             }
+            let code = build_remove_track_lua(&name);
+            run_reaper_lua(request_id, code, registry, connections, pending_intents).await
         }
         other => format!("unknown tool: {other}"),
     }
+}
+
+/// Send a Lua snippet to the connected REAPER node and await its result.
+/// Shared by `reaper_script` (model-authored code) and the structured REAPER
+/// tools that compile their own Lua, so the dispatch/timeout path lives once.
+async fn run_reaper_lua(
+    request_id: &str,
+    code: String,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    pending_intents: &PendingIntents,
+) -> String {
+    let reaper_node_id = {
+        let reg = registry.lock().unwrap();
+        let nodes: Vec<String> = reg
+            .nodes_with_feature("reaper")
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        drop(reg);
+        let conns = connections.lock().unwrap();
+        nodes.into_iter().find(|id| conns.contains_key(id))
+    };
+    let Some(reaper_node_id) = reaper_node_id else {
+        return "no REAPER node connected".into();
+    };
+
+    let req = ReaperScriptRequest {
+        request_id: request_id.to_string(),
+        code,
+    };
+
+    let (otx, orx) = oneshot::channel();
+    pending_intents
+        .lock()
+        .unwrap()
+        .insert(request_id.to_string(), otx);
+
+    let sent = connections
+        .lock()
+        .unwrap()
+        .get(&reaper_node_id)
+        .map(|tx| tx.try_send(MeshMessage::ReaperScript(req)).is_ok())
+        .unwrap_or(false);
+
+    if !sent {
+        pending_intents.lock().unwrap().remove(request_id);
+        return "failed to send ReaperScript to node".into();
+    }
+
+    match timeout(Duration::from_secs(10), orx).await {
+        Ok(Ok(MeshMessage::ReaperScriptResult(r))) => {
+            // Structured tools `return` a human-readable summary the daemon relays
+            // back in `message`; surface it. Bare scripts that return nothing fall
+            // back to a plain "ok".
+            if r.ok && r.message.trim().is_empty() {
+                "ok".into()
+            } else {
+                r.message
+            }
+        }
+        _ => {
+            pending_intents.lock().unwrap().remove(request_id);
+            "REAPER script timed out".into()
+        }
+    }
+}
+
+/// Escape a string for a single-quoted Lua literal so quotes/backslashes/newlines
+/// can't break out of it.
+fn lua_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace(['\n', '\r'], " ")
+}
+
+/// Title-case a track name: each whitespace-separated word gets a capital first
+/// letter and lowercase rest ("vocal track" → "Vocal Track", "DRUM bus" → "Drum Bus").
+fn title_case(name: &str) -> String {
+    name.split_whitespace()
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Build correct Lua to add a named track to the open project. Centralising this
+/// is the whole point of `reaper_add_track`: small models routinely mishandle the
+/// `InsertTrackAtIndex` (returns nothing) → `GetTrack` → `GetSetMediaTrackInfo_String`
+/// sequence and produce a blank-named track.
+///
+/// Names are title-cased (`vocal` → `Vocal`). The Lua resolves a unique name
+/// (appending ` 2`, ` 3`, … if the requested name is already taken), arms exclusively
+/// when asked, and `return`s a human-readable summary the daemon relays back so the
+/// chat reports the *actual* name/position.
+fn build_add_track_lua(name: &str, rec_input: Option<i64>, arm: bool) -> String {
+    let base = lua_escape(&title_case(name));
+    let mut lua = String::new();
+    // Resolve a unique name against existing tracks before inserting.
+    lua.push_str("local function name_taken(n)\n");
+    lua.push_str("  for i = 0, reaper.CountTracks(0) - 1 do\n");
+    lua.push_str(
+        "    local _, nm = reaper.GetSetMediaTrackInfo_String(reaper.GetTrack(0, i), 'P_NAME', '', false)\n",
+    );
+    lua.push_str("    if nm == n then return true end\n");
+    lua.push_str("  end\n");
+    lua.push_str("  return false\n");
+    lua.push_str("end\n");
+    lua.push_str(&format!("local base = '{base}'\n"));
+    lua.push_str("local name = base\n");
+    lua.push_str("local suffix = 2\n");
+    lua.push_str(
+        "while name_taken(name) do name = base .. ' ' .. suffix; suffix = suffix + 1 end\n",
+    );
+    lua.push_str("local idx = reaper.CountTracks(0)\n");
+    lua.push_str("reaper.InsertTrackAtIndex(idx, true)\n");
+    lua.push_str("local t = reaper.GetTrack(0, idx)\n");
+    lua.push_str("reaper.GetSetMediaTrackInfo_String(t, 'P_NAME', name, true)\n");
+    if let Some(input) = rec_input {
+        lua.push_str(&format!(
+            "reaper.SetMediaTrackInfo_Value(t, 'I_RECINPUT', {input})\n"
+        ));
+    }
+    if arm {
+        // Exclusive record-arm: disarm every track first, then arm + monitor the
+        // new one, so only the freshly-added track is record-ready.
+        lua.push_str("for i = 0, reaper.CountTracks(0) - 1 do\n");
+        lua.push_str("  reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, i), 'I_RECARM', 0)\n");
+        lua.push_str("end\n");
+        lua.push_str("reaper.SetMediaTrackInfo_Value(t, 'I_RECARM', 1)\n");
+        lua.push_str("reaper.SetMediaTrackInfo_Value(t, 'I_RECMON', 1)\n");
+    }
+    lua.push_str("reaper.UpdateArrange()\n");
+    let armed = if arm { " (armed)" } else { "" };
+    lua.push_str(&format!(
+        "return \"Added '\" .. name .. \"' as track \" .. (idx + 1) .. \"{armed}\"\n"
+    ));
+    lua
+}
+
+/// Build Lua to delete the first track whose name matches `name`. Returns a summary
+/// the daemon relays back (or a "not found" note if no track matched).
+fn build_remove_track_lua(name: &str) -> String {
+    // Match case-insensitively: tracks are stored Title Case but the user (or model)
+    // usually types the name lowercase. `display` keeps their spelling for messages.
+    let target = lua_escape(&name.to_lowercase());
+    let display = lua_escape(name);
+    let mut lua = String::new();
+    lua.push_str(&format!("local target = '{target}'\n"));
+    lua.push_str(&format!("local display = '{display}'\n"));
+    lua.push_str("local removed = nil\n");
+    lua.push_str("local rname = nil\n");
+    lua.push_str("for i = 0, reaper.CountTracks(0) - 1 do\n");
+    lua.push_str("  local tr = reaper.GetTrack(0, i)\n");
+    lua.push_str("  local _, nm = reaper.GetSetMediaTrackInfo_String(tr, 'P_NAME', '', false)\n");
+    lua.push_str("  if nm:lower() == target then reaper.DeleteTrack(tr); removed = i + 1; rname = nm; break end\n");
+    lua.push_str("end\n");
+    lua.push_str("reaper.UpdateArrange()\n");
+    lua.push_str("if removed then return \"Removed track '\" .. rname .. \"' (was track \" .. removed .. \")\"\n");
+    lua.push_str("else return \"No track named '\" .. display .. \"' found\" end\n");
+    lua
 }
 
 fn extract_color_from_text(text: &str) -> Option<&'static str> {
@@ -646,29 +793,69 @@ fn strip_think_blocks(s: &str) -> String {
     out.trim().to_string()
 }
 
-pub fn try_parse_tool_calls(output: &str) -> Option<Vec<serde_json::Value>> {
-    let stripped = output
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
+fn is_tool_call(v: &serde_json::Value) -> bool {
+    v.get("tool").is_some() && v["args"].is_object()
+}
 
-    let parsed = serde_json::from_str::<serde_json::Value>(stripped)
-        .or_else(|_| serde_json::from_str::<serde_json::Value>(&format!("{stripped}}}")));
-
-    let v = parsed.ok()?;
-    if let Some(arr) = v.as_array() {
-        let calls: Vec<_> = arr
-            .iter()
-            .filter(|el| el.get("tool").is_some() && el["args"].is_object())
-            .cloned()
-            .collect();
-        if calls.is_empty() { None } else { Some(calls) }
-    } else if v.get("tool").is_some() && v["args"].is_object() {
-        Some(vec![v])
-    } else {
-        None
+/// Lift arguments a small model nested under a stray `properties` key. Some models
+/// (e.g. gemma3) mirror the JSON-Schema and emit `args: {properties: {name: …}}`
+/// instead of `args: {name: …}`; without this the real args are a level too deep
+/// and every field reads as missing. Existing top-level keys win over nested ones.
+fn normalize_tool_args(mut call: serde_json::Value) -> serde_json::Value {
+    let nested = call
+        .get("args")
+        .and_then(|a| a.get("properties"))
+        .and_then(|p| p.as_object())
+        .cloned();
+    if let Some(nested) = nested
+        && let Some(args) = call.get_mut("args").and_then(|a| a.as_object_mut())
+    {
+        for (k, v) in nested {
+            args.entry(k).or_insert(v);
+        }
     }
+    call
+}
+
+/// Collect tool calls a value yields: a bare object is one call; an array is
+/// flattened. Non-tool-call values contribute nothing.
+fn collect_tool_calls(v: serde_json::Value, out: &mut Vec<serde_json::Value>) {
+    match v {
+        serde_json::Value::Array(arr) => {
+            for el in arr {
+                if is_tool_call(&el) {
+                    out.push(normalize_tool_args(el));
+                }
+            }
+        }
+        other if is_tool_call(&other) => out.push(normalize_tool_args(other)),
+        _ => {}
+    }
+}
+
+pub fn try_parse_tool_calls(output: &str) -> Option<Vec<serde_json::Value>> {
+    // Small models often wrap each tool call in its own ```json … ``` block and
+    // may emit several per reply (or several bare objects back-to-back). Strip all
+    // fence markers, then read consecutive JSON values rather than a single one.
+    let cleaned = output.replace("```json", " ").replace("```", " ");
+    let cleaned = cleaned.trim();
+
+    let mut calls: Vec<serde_json::Value> = Vec::new();
+    let mut saw_value = false;
+    for v in serde_json::Deserializer::from_str(cleaned).into_iter::<serde_json::Value>() {
+        let Ok(v) = v else { break }; // stop at first non-JSON / trailing junk
+        saw_value = true;
+        collect_tool_calls(v, &mut calls);
+    }
+
+    // No complete value parsed → try repairing a single object missing its closing
+    // brace (a common small-model truncation).
+    if !saw_value && let Ok(v) = serde_json::from_str::<serde_json::Value>(&format!("{cleaned}}}"))
+    {
+        collect_tool_calls(v, &mut calls);
+    }
+
+    if calls.is_empty() { None } else { Some(calls) }
 }
 
 fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
@@ -768,6 +955,42 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["code"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_add_track",
+                "description": "Add a new named track to the open REAPER project. ALWAYS use this for any 'add/create a track called X' request instead of reaper_script — it cannot produce a blank-named track. The 'name' must be the label only, WITHOUT the word 'track' (for 'add another vocal track' use name 'vocal', not 'vocal track'). The name is auto-formatted to Title Case and auto-numbered if it already exists ('vocal' → 'Vocal', then 'Vocal 2'). The new track is armed for recording by default and all other tracks are disarmed, so only the new one is record-ready. Optionally set a mono record input.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Track name, e.g. 'guitar', 'lead vocal'"
+                        },
+                        "rec_input": {
+                            "type": "integer",
+                            "description": "Optional mono record input index (0 = input 1, 1 = input 2). Omit if not recording."
+                        },
+                        "arm": {
+                            "type": "boolean",
+                            "description": "Optional — defaults to true: arms the new track (with input monitoring) and disarms all other tracks. Set false only to leave existing record-arm states untouched and add the track unarmed."
+                        }
+                    },
+                    "required": ["name"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_remove_track",
+                "description": "Delete a track from the open REAPER project by its name (the first track with that exact name). Use for 'remove/delete the track called X'.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Exact name of the track to delete, e.g. 'Guitar'"
+                        }
+                    },
+                    "required": ["name"]
                 }
             }),
         ],
@@ -952,6 +1175,35 @@ mod tests {
         let result = try_parse_tool_calls(raw).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["tool"], "scene_load");
+    }
+
+    #[test]
+    fn try_parse_tool_calls_multiple_fenced_blocks() {
+        // Small models sometimes emit one ```json block per call instead of a
+        // single array — both must execute (the Guitar/guitar2 regression).
+        let raw = "```json\n{\"tool\":\"reaper_add_track\",\"args\":{\"name\":\"Guitar\"}}\n```\n\n```json\n{\"tool\":\"reaper_add_track\",\"args\":{\"name\":\"guitar2\"}}\n```";
+        let result = try_parse_tool_calls(raw).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["args"]["name"], "Guitar");
+        assert_eq!(result[1]["args"]["name"], "guitar2");
+    }
+
+    #[test]
+    fn try_parse_tool_calls_consecutive_bare_objects() {
+        let raw = r#"{"tool":"reaper_add_track","args":{"name":"a"}} {"tool":"reaper_add_track","args":{"name":"b"}}"#;
+        let result = try_parse_tool_calls(raw).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn try_parse_tool_calls_unwraps_schema_properties_wrapper() {
+        // gemma3 mirrors the schema and nests args under "properties"; the real
+        // fields must be lifted so name/arm aren't read as missing.
+        let raw = "```json\n[{\"tool\": \"reaper_add_track\", \"args\": {\"properties\": {\"name\": \"vocal\", \"arm\": true}}}]\n```";
+        let result = try_parse_tool_calls(raw).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["args"]["name"], "vocal");
+        assert_eq!(result[0]["args"]["arm"], true);
     }
 
     #[test]
@@ -1319,5 +1571,103 @@ mod tests {
         // Unknown target → not in states → treat as online (let it through;
         // the lighting node decides if it actually exists).
         assert!(!device_is_offline("unknown_bulb", &states));
+    }
+
+    #[test]
+    fn add_track_lua_names_via_gettrack_not_insert_return() {
+        let lua = build_add_track_lua("guitar", None, false);
+        // The new track handle MUST come from GetTrack, never the (nil) return
+        // of InsertTrackAtIndex — that was the original blank-name bug.
+        assert!(lua.contains("local t = reaper.GetTrack(0, idx)"));
+        assert!(lua.contains("local base = 'Guitar'")); // title-cased
+        assert!(lua.contains("reaper.GetSetMediaTrackInfo_String(t, 'P_NAME', name, true)"));
+        assert!(!lua.contains("= reaper.InsertTrackAtIndex"));
+        // No input requested, not armed → those lines are absent.
+        assert!(!lua.contains("I_RECINPUT"));
+        assert!(!lua.contains("I_RECARM"));
+        assert!(lua.contains("reaper.UpdateArrange()"));
+    }
+
+    #[test]
+    fn add_track_lua_resolves_unique_name_and_returns_summary() {
+        let lua = build_add_track_lua("guitar", None, true);
+        // Dedup: scan existing names and append a suffix until unique.
+        assert!(lua.contains("local function name_taken(n)"));
+        assert!(lua.contains("while name_taken(name) do name = base .. ' ' .. suffix"));
+        // Returns a human-readable summary using the *resolved* name + position.
+        assert!(lua.contains(
+            "return \"Added '\" .. name .. \"' as track \" .. (idx + 1) .. \" (armed)\""
+        ));
+    }
+
+    #[test]
+    fn add_track_lua_unarmed_summary_has_no_armed_suffix() {
+        let lua = build_add_track_lua("scratch", None, false);
+        assert!(lua.contains("return \"Added '\" .. name .. \"' as track \" .. (idx + 1) .. \"\""));
+    }
+
+    #[test]
+    fn add_track_lua_input_and_arm() {
+        let lua = build_add_track_lua("vox", Some(1), true);
+        assert!(lua.contains("reaper.SetMediaTrackInfo_Value(t, 'I_RECINPUT', 1)"));
+        assert!(lua.contains("reaper.SetMediaTrackInfo_Value(t, 'I_RECARM', 1)"));
+        assert!(lua.contains("reaper.SetMediaTrackInfo_Value(t, 'I_RECMON', 1)"));
+    }
+
+    #[test]
+    fn add_track_lua_arm_is_exclusive() {
+        // Arming the new track must first disarm every other track so only the
+        // freshly-added one is record-ready.
+        let lua = build_add_track_lua("guitar", None, true);
+        assert!(lua.contains("for i = 0, reaper.CountTracks(0) - 1 do"));
+        assert!(
+            lua.contains("reaper.SetMediaTrackInfo_Value(reaper.GetTrack(0, i), 'I_RECARM', 0)")
+        );
+        // The disarm loop runs before the new track is armed.
+        let disarm = lua.find("'I_RECARM', 0)").unwrap();
+        let arm = lua.find("(t, 'I_RECARM', 1)").unwrap();
+        assert!(disarm < arm);
+    }
+
+    #[test]
+    fn add_track_lua_unarmed_leaves_others_untouched() {
+        // arm=false must not emit the exclusive record-arm calls.
+        let lua = build_add_track_lua("scratch", None, false);
+        assert!(!lua.contains("I_RECARM"));
+        assert!(!lua.contains("I_RECMON"));
+    }
+
+    #[test]
+    fn add_track_lua_escapes_name() {
+        // A name with a single quote and backslash must not break out of the
+        // single-quoted Lua string literal (also title-cased: d → D).
+        let lua = build_add_track_lua("d'n\\b", None, false);
+        assert!(lua.contains("local base = 'D\\'n\\\\b'"));
+    }
+
+    #[test]
+    fn title_case_capitalises_each_word() {
+        assert_eq!(title_case("vocal"), "Vocal");
+        assert_eq!(title_case("vocal track"), "Vocal Track");
+        assert_eq!(title_case("DRUM bus"), "Drum Bus");
+        assert_eq!(title_case("lead   guitar"), "Lead Guitar"); // collapses runs of spaces
+    }
+
+    #[test]
+    fn add_track_lua_title_cases_multiword_name() {
+        let lua = build_add_track_lua("vocal track", None, true);
+        assert!(lua.contains("local base = 'Vocal Track'"));
+    }
+
+    #[test]
+    fn remove_track_lua_deletes_by_name_case_insensitively() {
+        // User types lowercase; tracks are stored Title Case → match on lower().
+        let lua = build_remove_track_lua("vocal");
+        assert!(lua.contains("local target = 'vocal'"));
+        assert!(lua.contains("local display = 'vocal'"));
+        assert!(lua.contains("if nm:lower() == target then"));
+        assert!(lua.contains("reaper.DeleteTrack(tr)"));
+        assert!(lua.contains("if removed then return \"Removed track '\" .. rname .. \"'"));
+        assert!(lua.contains("else return \"No track named '\" .. display .. \"' found\""));
     }
 }

@@ -91,7 +91,7 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - Replaced Ollama with llama-server (llama.cpp) across all nodes
 - Agent downloads GGUF shards from Hugging Face on `ModelLoad`; no pre-caching during provisioning
 - Inference switched to `POST /v1/chat/completions` with system + user message format
-- `--flash-attn on` enabled; `LLAMA_GPU_LAYERS=99` offloads all layers to GPU where available
+- `--flash-attn auto` (llama.cpp picks per model — forcing `on` hangs Gemma-3 on Vulkan); `LLAMA_GPU_LAYERS=99` offloads all layers to GPU where available
 - Windows: Vulkan-enabled llama.cpp ZIP; AMD Radeon 780M at 29/29 GPU layers, 17.6 t/s (qwen2.5:7b)
 - Linux: architecture-aware tarball download (x86_64 or ARM64)
 - `just load-model <node> <model>` replaces `change-model`; `just update-llama <node>` for llama-server updates
@@ -567,12 +567,25 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 - ✓ OmniLink1 registered as a `controller` node with `--features reaper`; REAPER env vars in systemd drop-in (`REAPER_HOST=127.0.0.1`, `REAPER_PORT=8080`).
 - ✓ `just set-fingerprint` and `just restart-node` handle local nodes (`NODE_HOST=127.0.0.1`) without SSH — write drop-ins and restart directly.
 
+**Follow-up (2026-06-16):**
+
+- ✓ Structured track tools `reaper_add_track` / `reaper_remove_track` — coordinator
+  generates correct Lua so small models can't produce blank-named tracks. Auto-suffixes
+  duplicate names (`Vocals`, `Vocals 2`, …), exclusively arms the new track, deletes by name.
+- ✓ Daemon relays the script's `return` value as the result message, so tools report what
+  they did (`Added 'Vocals 2' as track 5 (armed)`) instead of a blind `ok`.
+- ✓ `try_parse_tool_calls` handles multiple fenced JSON blocks / consecutive objects from
+  small models (previously only the first block ran), and lifts args a model nested under a
+  stray schema-mirrored `properties` key (e.g. gemma3 `args: {properties: {name: …}}`).
+
 **Deferred**
 
 - Dashboard REAPER panel exposed in nav (currently rendered but tab not wired in index.html).
 - Tempo / time-sig control via intent (read-only today).
 - Track list / project state queries.
 - REAPER on macOS (next machine).
+- Multi-line daemon result messages — agent reads only the first line of `ai_mesh_result.txt`;
+  fine for today's single-line summaries, but richer multi-line errors would need the full read.
 
 ---
 

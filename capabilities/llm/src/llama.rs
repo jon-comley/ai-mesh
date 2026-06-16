@@ -65,6 +65,23 @@ fn n_batch() -> Option<u32> {
         .and_then(|v| v.trim().parse().ok())
 }
 
+/// Flash-attention mode passed to llama-server as `--flash-attn <on|off|auto>`.
+/// Defaults to `auto`: llama.cpp enables flash-attn where the model + backend support
+/// it (≈2× prefill on Qwen/Llama/Mistral on the Vulkan Radeon 780M, no decode cost) and
+/// disables it where they don't — notably Gemma-3, which hangs on load when FA is forced
+/// `on`. `LLAMA_FLASH_ATTN` overrides; an unrecognised value falls back to `auto`.
+fn flash_attn() -> &'static str {
+    match std::env::var("LLAMA_FLASH_ATTN")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("on") => "on",
+        Some("off") => "off",
+        _ => "auto",
+    }
+}
+
 /// Default health-wait ceiling: 180 s floor, scaled up for larger models
 /// (~30 MB/s worst-case cold read + upload). 8.6 GB (14b) → ~287 s. Capped
 /// at 900 s so pathological model sizes don't stall a node for 20+ minutes.
@@ -339,6 +356,7 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
     if layers > 0 {
         cmd.arg("--n-gpu-layers").arg(layers.to_string());
     }
+    cmd.arg("--flash-attn").arg(flash_attn());
     if let Some(batch) = n_batch() {
         cmd.arg("--n-batch").arg(batch.to_string());
     }
@@ -670,6 +688,15 @@ mod tests {
     fn gpu_layers_defaults_to_zero_when_unset() {
         if std::env::var("LLAMA_GPU_LAYERS").is_err() {
             assert_eq!(gpu_layers(), 0);
+        }
+    }
+
+    #[test]
+    fn flash_attn_defaults_to_auto_when_unset() {
+        // `auto` lets llama.cpp pick per model — forcing `on` hangs Gemma-3 on the
+        // Vulkan backend, so it is not a safe global default.
+        if std::env::var("LLAMA_FLASH_ATTN").is_err() {
+            assert_eq!(flash_attn(), "auto");
         }
     }
 
