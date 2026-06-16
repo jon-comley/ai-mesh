@@ -80,10 +80,10 @@ async function send() {
       } else if (data.tool_calls && data.tool_calls.length > 0) {
         for (const tc of data.tool_calls) {
           const result = tc.result ?? '';
-          appendToolMsg(tc.tool, result, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0);
+          appendToolMsg(tc.tool, result, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
         }
         if (data.text) {
-          appendMsg('assistant', data.text, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0);
+          appendMsg('assistant', data.text, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
         }
         const assistantContent = data.text ||
           data.tool_calls.map(tc => `${tc.tool}: ${tc.result ?? ''}`).join('; ');
@@ -93,7 +93,7 @@ async function send() {
         if (data.node_id && data.model_name) lastModelKey = `${data.node_id}/${data.model_name}`;
       } else {
         const reply = data.text ?? '';
-        appendMsg('assistant', reply, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0);
+        appendMsg('assistant', reply, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
         conversationContext.push({ role: 'User', content: text });
         conversationContext.push({ role: 'Assistant', content: reply });
         trimAndUpdateContext();
@@ -148,7 +148,7 @@ function updateTurnCounter() {
   el.classList.toggle('chat-ctx-near-limit', n >= MAX_CONTEXT_TURNS * 0.8);
 }
 
-function appendMsg(role, text, nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs = 0) {
+function appendMsg(role, text, nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs = 0, serverMs = 0) {
   const div = document.createElement('div');
   div.className = `chat-msg chat-${role}`;
   const bubble = document.createElement('div');
@@ -158,7 +158,7 @@ function appendMsg(role, text, nodeId, modelName, durationMs, tokensGenerated, t
   if (nodeId && role === 'assistant') {
     const meta = document.createElement('div');
     meta.className = 'chat-meta';
-    meta.textContent = metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs);
+    meta.textContent = metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs, serverMs);
     div.appendChild(meta);
   }
   thread.appendChild(div);
@@ -166,7 +166,7 @@ function appendMsg(role, text, nodeId, modelName, durationMs, tokensGenerated, t
   return div;
 }
 
-function appendToolMsg(tool, result, nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs = 0) {
+function appendToolMsg(tool, result, nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs = 0, serverMs = 0) {
   const div = document.createElement('div');
   div.className = 'chat-msg chat-assistant';
   const bubble = document.createElement('div');
@@ -176,7 +176,7 @@ function appendToolMsg(tool, result, nodeId, modelName, durationMs, tokensGenera
   if (nodeId) {
     const meta = document.createElement('div');
     meta.className = 'chat-meta';
-    meta.textContent = metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs);
+    meta.textContent = metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs, serverMs);
     div.appendChild(meta);
   }
   thread.appendChild(div);
@@ -184,15 +184,16 @@ function appendToolMsg(tool, result, nodeId, modelName, durationMs, tokensGenera
   return div;
 }
 
-function metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs = 0) {
+function metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs = 0, serverMs = 0) {
   const host = getHostname(nodeId);
   let line = modelName ? `${host} · ${modelName}` : host;
   if (totalMs > 0) {
     const total  = (totalMs / 1000).toFixed(1);
+    const server = serverMs > 0 ? `${(serverMs / 1000).toFixed(1)}s server · ` : '';
     const prefill = prefillMs > 0 ? `${(prefillMs / 1000).toFixed(1)}s prefill · ` : '';
     const gen    = durationMs > 0 ? `${(durationMs / 1000).toFixed(1)}s gen` : '—';
     const tps    = tokensGenerated > 0 && durationMs > 0 ? ` · ${(tokensGenerated / (durationMs / 1000)).toFixed(1)} tok/s` : '';
-    line += ` · ${total}s (${prefill}${gen})${tps}`;
+    line += ` · ${total}s (${server}${prefill}${gen})${tps}`;
   }
   return line;
 }

@@ -28,6 +28,50 @@ bandwidth formula `~80 GB/s ÷ model_size`. Measured values are marked.
 
 ---
 
+## Measured throughput — 2026-06-16
+
+Real `llama-server` numbers (not formula estimates), all **Q4_K_M**, full GPU offload
+(`--n-gpu-layers 99`), `--ctx-size 4096`, flash-attn forced `on` except where noted.
+Measured on beelink1 (192.168.1.14, Ryzen 8745HS + Radeon 780M, Windows, Vulkan llama.cpp build).
+
+| Model (GGUF) | Decode tok/s | Prefill tok/s |
+|---|---|---|
+| Llama-3.2-3B | 36.7 | — |
+| Qwen3-4B | 30.1 | 151.6 |
+| Gemma-3-4B | 29.5 | 36.1 (FA **off** — hangs on load with FA `on`) |
+| Mistral-7B-v0.3 | 18.6 | — |
+| Qwen2.5-7B | 17.9 | 60.6 (FA off) → 135.6 (FA on) |
+| DeepSeek-R1-Distill-Qwen-7B | 17.8 | — |
+| Phi-4 (14B) | 9.0 | — |
+
+Decode is memory-bandwidth bound on the 780M (`tok/s ≈ ~80 GB/s ÷ model_GB`), so the only
+big lever for raw speed is a smaller model/quant — GPU offload is already on.
+
+### Flash attention
+
+Flash attention leaves decode unchanged but roughly doubles prefill (Qwen2.5-7B: 60 → 136
+tok/s). The agent default is **`auto`** (`flash_attn()` in `capabilities/llm/src/llama.rs`,
+override with `LLAMA_FLASH_ATTN`): llama.cpp enables FA where the model + backend support it
+and skips it where they don't. Forcing `on` is **not** safe globally — **Gemma-3 hangs on
+load** with FA `on` on this Vulkan build (loads fine with `off`/`auto`); Qwen, Llama, Mistral,
+DeepSeek-R1, and Phi-4 all run cleanly with it on. This build requires the value form
+`--flash-attn on|off|auto`; bare `--flash-attn` errors.
+
+### How these were measured
+
+Run `llama-server.exe` directly on a spare port (e.g. 8090/8091, leaving the agent's :8080
+untouched), poll `/health`, then POST one non-streaming request to `/v1/chat/completions`
+and read `timings.predicted_per_second` (decode) and `timings.prompt_per_second` (prefill).
+
+- Harness on the box: `C:\Users\jonno\llama-bench.ps1` — params `-ModelFile <name.gguf>`
+  (bare filename; quoting it through ssh→powershell corrupts the path), `-FlashAttn`,
+  `-Port`, `-NGL`, `-Ctx`. Model files live in `C:\Users\jonno\.ai-mesh\models`.
+- Example: `ssh jonno@192.168.1.14 "powershell -ExecutionPolicy Bypass -File C:\\Users\\jonno\\llama-bench.ps1 -ModelFile Qwen3-4B-Q4_K_M.gguf -FlashAttn"`
+- For a quick isolated number use a short prompt (e.g. "Count from 1 to 30") — the harness
+  can stall on a long prompt for some models (which is what first made Gemma-3 look broken).
+
+---
+
 ## Inference time examples
 
 tok/s numbers from the table above. The times below are dominated by output

@@ -277,12 +277,19 @@ pub struct IntentResponse {
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCallRecord>,
     pub error: Option<String>,
+    /// Token-generation (decode) time reported by the node — not the whole request.
     #[serde(default)]
     pub duration_ms: u64,
     #[serde(default)]
     pub tokens_generated: u32,
+    /// Prompt-prefill time reported by the node.
     #[serde(default)]
     pub prompt_eval_ms: u64,
+    /// End-to-end wall time measured by the coordinator: inference dispatch +
+    /// generation + tool execution + parsing. The number that matches what a
+    /// client actually waited for.
+    #[serde(default)]
+    pub total_ms: u64,
 }
 
 // ── MeshMessage ───────────────────────────────────────────────────────────────
@@ -879,6 +886,7 @@ mod tests {
             duration_ms: 1234,
             tokens_generated: 10,
             prompt_eval_ms: 0,
+            total_ms: 1300,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
@@ -896,6 +904,7 @@ mod tests {
             duration_ms: 800,
             tokens_generated: 42,
             prompt_eval_ms: 0,
+            total_ms: 850,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);

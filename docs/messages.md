@@ -331,6 +331,10 @@ Fields:
 - `text: Option<String>` — free-text response (when no tool was called)
 - `tool_calls: Vec<ToolCallRecord>` — tool invocations with args and results
 - `error: Option<String>`
+- `duration_ms: u64` — node-reported token-generation (decode) time
+- `tokens_generated: u32` — tokens produced
+- `prompt_eval_ms: u64` — node-reported prompt-prefill time
+- `total_ms: u64` — coordinator-measured end-to-end wall time (inference dispatch + generation + tool execution + parsing); the latency a client actually waited for. Surfaced in the chat UI as the `… server` figure.
 
 ---
 ---

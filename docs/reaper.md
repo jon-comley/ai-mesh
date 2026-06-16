@@ -174,10 +174,17 @@ It re-schedules itself via `reaper.defer` and runs for the life of the REAPER pr
 The bridge is **request/response**, not fire-and-forget. After writing the trigger,
 the agent polls `ai_mesh_result.txt` (matching its request id) for up to **5 s**
 (`REAPER_SCRIPT_TIMEOUT_MS` overrides). It returns one of:
-- `ok` — the daemon ran the Lua cleanly,
+- `<summary>` — the daemon ran the Lua cleanly. The daemon forwards the script's
+  `return` value (a string) as the result message, so a structured tool can report
+  what it did (e.g. `Added 'Vocals 2' as track 5 (armed)`). A bare script that
+  returns nothing yields an empty message, which the coordinator shows as `ok`.
 - `REAPER Lua error: <msg>` — the Lua raised (e.g. `attempt to index a nil value`),
 - `REAPER daemon did not respond within 5s …` — no result appeared, i.e. the daemon
   isn't running (missing/stale `__startup.lua`, or REAPER was opened before setup).
+
+The daemon captures the return via `local ok, ret = pcall(dofile, cmd_file)` and writes
+`<id>\tok\t<ret>` on success. The agent relays this message; the coordinator's
+`run_reaper_lua` falls back to `ok` only when the message is empty.
 
 So a dead daemon now surfaces in chat instead of a false `ok`. Lua errors are also
 printed to REAPER's console (`ReaScript console output`, which auto-opens), prefixed
@@ -234,11 +241,38 @@ Pass any numeric command ID (as a string) or named action string:
 The action is sent as `GET http://127.0.0.1:8080/_/{action_id};`. The trailing
 semicolon is the csurf command separator — without it the request is ignored.
 
+### Add a track (`reaper_add_track` tool)
+
+Structured track creation — **preferred over `reaper_script` for "add a track called X"**,
+because the coordinator generates guaranteed-correct Lua (small models routinely mishandle
+`InsertTrackAtIndex`, which returns nothing, and produce a blank-named track). Args:
+
+- `name` (required) — the label **only**, without the word "track" (for "add another
+  vocal track" the name is `vocal`, not `vocal track`; the schema description steers the
+  model to this).
+- `rec_input` (optional) — mono record input index (`0` = input 1, `1` = input 2).
+- `arm` (optional, default `true`) — arm the new track for recording, enable input
+  monitoring, and **disarm all other tracks** so only the new one is record-ready.
+
+Behaviour (built in `build_add_track_lua`, `coordinator/src/intent.rs`):
+
+- **Title-cases** the name (`vocal` → `Vocal`, `vocal bus` → `Vocal Bus`).
+- Resolves a unique name: if the name is taken it appends ` 2`, ` 3`, … (`Vocal`,
+  `Vocal 2`, `Vocal 3`).
+- Gets the new track via `GetTrack` (never the nil `InsertTrackAtIndex` return).
+- Returns a summary, e.g. `Added 'Vocal 2' as track 5 (armed)`.
+
+### Remove a track (`reaper_remove_track` tool)
+
+Deletes the first track whose name matches `name`, **case-insensitively** (tracks are
+stored Title Case but you'll usually type lowercase), via `build_remove_track_lua`. Returns
+`Removed track 'Vocal' (was track 4)` or `No track named 'vocal' found`.
+
 ### Arbitrary Lua (`reaper_script` tool)
 
-Runs Lua/ReaScript inside REAPER via the daemon bridge. Used for anything the
-numeric actions can't express — creating/naming/arming tracks, setting record
-inputs, querying project state. Example: create an armed mono vocal track.
+Runs Lua/ReaScript inside REAPER via the daemon bridge. Used for anything the numeric
+actions and structured track tools can't express — setting record inputs on existing
+tracks, querying project state, etc. A script may `return` a string to report a result.
 
 ```lua
 reaper.InsertTrackAtIndex(0, true)
@@ -247,6 +281,7 @@ reaper.GetSetMediaTrackInfo_String(t, "P_NAME", "Vocals", true)
 reaper.SetMediaTrackInfo_Value(t, "I_RECINPUT", 0)   -- 0 = mono input 1
 reaper.SetMediaTrackInfo_Value(t, "I_RECARM", 1)
 reaper.UpdateArrange()
+return "Vocals track created"
 ```
 
 ---
@@ -272,6 +307,10 @@ All DOM elements are null-guarded so the panel is safe to render before the firs
 - Tempo / time-sig write via intent (read-only today)
 - REAPER on macOS (planned for next machine)
 - Multi-REAPER instances (one per node, routed by node ID)
+- Multi-line daemon result messages. The agent reads only the first line of
+  `ai_mesh_result.txt` (`lines().next()` in `run_script`), so a Lua `return` or error
+  spanning multiple lines is truncated. Fine today — results are single-line summaries —
+  but richer multi-line error surfacing would need reading the full file.
 - The daemon's result-write (`io.open(ai_mesh_result.txt, "w")`) is non-atomic. If it
   ever collided with the agent's read, the result could be lost and surface as a false
   "daemon did not respond". Near-zero in practice — commands are gated by multi-second
