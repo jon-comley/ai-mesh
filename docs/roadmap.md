@@ -580,7 +580,6 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 
 **Deferred**
 
-- Dashboard REAPER panel exposed in nav (currently rendered but tab not wired in index.html).
 - Tempo / time-sig control via intent (read-only today).
 - Track list / project state queries.
 - REAPER on macOS (next machine).
