@@ -578,13 +578,19 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
   small models (previously only the first block ran), and lifts args a model nested under a
   stray schema-mirrored `properties` key (e.g. gemma3 `args: {properties: {name: …}}`).
 
-**Deferred**
+**Follow-up (2026-06-17):**
 
-- Tempo / time-sig control via intent (read-only today).
-- Track list / project state queries.
-- REAPER on macOS (next machine).
-- Multi-line daemon result messages — agent reads only the first line of `ai_mesh_result.txt`;
-  fine for today's single-line summaries, but richer multi-line errors would need the full read.
+- ✓ Tempo / time-sig control via intent — `reaper_set_tempo` tool. Tempo-only changes use
+  `SetCurrentBPM` (no marker); a time-signature change writes/reuses the tempo-time-sig marker
+  at the project start, filling any unspecified field from the project's current value.
+- ✓ Track list / project state queries — `reaper_get_project` returns a multi-line summary
+  (name, tempo, time sig, transport, per-track name + armed status).
+- ✓ Multi-line daemon result messages — agent now parses the whole `ai_mesh_result.txt`
+  (`<id>\t<ok|err>\t<message>`, message may span lines) instead of the first line; the daemon
+  writes the result via a temp file + rename so a multi-line result is never read half-written.
+- ◐ REAPER on macOS — code is macOS-ready (`default_scripts_dir()` resolves
+  `~/Library/Application Support/REAPER/Scripts` on macOS, `/mnt/c/...` on WSL2); full
+  provisioning (install script + node setup + testing) still pending the Mac mini (~end Jul 2026).
 
 ---
 

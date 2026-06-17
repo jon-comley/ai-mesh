@@ -493,6 +493,41 @@ async fn dispatch_tool(
             let code = build_remove_track_lua(&name);
             run_reaper_lua(request_id, code, registry, connections, pending_intents).await
         }
+        "reaper_set_tempo" => {
+            // tempo/ts_* may arrive as numbers or numeric strings from the model.
+            let tempo = args["tempo"]
+                .as_f64()
+                .or_else(|| args["tempo"].as_str().and_then(|s| s.trim().parse().ok()));
+            let ts_num = args["ts_num"]
+                .as_u64()
+                .or_else(|| args["ts_num"].as_str().and_then(|s| s.trim().parse().ok()))
+                .map(|n| n as u32);
+            let ts_denom = args["ts_denom"]
+                .as_u64()
+                .or_else(|| {
+                    args["ts_denom"]
+                        .as_str()
+                        .and_then(|s| s.trim().parse().ok())
+                })
+                .map(|n| n as u32);
+            if tempo.is_none() && ts_num.is_none() && ts_denom.is_none() {
+                return "reaper_set_tempo requires a tempo and/or a time signature \
+                        (ts_num/ts_denom)"
+                    .into();
+            }
+            let code = build_set_tempo_lua(tempo, ts_num, ts_denom);
+            run_reaper_lua(request_id, code, registry, connections, pending_intents).await
+        }
+        "reaper_get_project" => {
+            run_reaper_lua(
+                request_id,
+                build_project_info_lua(),
+                registry,
+                connections,
+                pending_intents,
+            )
+            .await
+        }
         other => format!("unknown tool: {other}"),
     }
 }
@@ -663,6 +698,75 @@ fn build_remove_track_lua(name: &str) -> String {
     lua.push_str("if removed then return \"Removed track '\" .. rname .. \"' (was track \" .. removed .. \")\"\n");
     lua.push_str("else return \"No track named '\" .. display .. \"' found\" end\n");
     lua
+}
+
+/// Build Lua to set the project tempo and/or time signature, returning a summary.
+/// A tempo-only change uses `SetCurrentBPM` (no marker injected). A time-signature
+/// change needs a tempo/time-sig marker at the project start; unspecified fields are
+/// filled from the project's current values so "set the time signature to 3/4" keeps
+/// the existing tempo (and vice versa).
+fn build_set_tempo_lua(tempo: Option<f64>, ts_num: Option<u32>, ts_denom: Option<u32>) -> String {
+    let mut lua = String::new();
+    if ts_num.is_some() || ts_denom.is_some() {
+        lua.push_str("local cur_num, cur_denom, cur_bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)\n");
+        match tempo {
+            Some(t) => lua.push_str(&format!("local bpm = {t}\n")),
+            None => lua.push_str("local bpm = cur_bpm\n"),
+        }
+        match ts_num {
+            Some(n) => lua.push_str(&format!("local num = {n}\n")),
+            None => lua.push_str("local num = cur_num\n"),
+        }
+        match ts_denom {
+            Some(d) => lua.push_str(&format!("local denom = {d}\n")),
+            None => lua.push_str("local denom = cur_denom\n"),
+        }
+        // Reuse the marker already at position 0 if present, else insert a new one.
+        lua.push_str("local idx = -1\n");
+        lua.push_str("for i = 0, reaper.CountTempoTimeSigMarkers(0) - 1 do\n");
+        lua.push_str("  local ok, timepos = reaper.GetTempoTimeSigMarker(0, i)\n");
+        lua.push_str("  if ok and timepos == 0 then idx = i; break end\n");
+        lua.push_str("end\n");
+        lua.push_str("reaper.SetTempoTimeSigMarker(0, idx, 0, -1, -1, bpm, num, denom, false)\n");
+        lua.push_str("reaper.UpdateTimeline()\n");
+        lua.push_str(
+            "return 'Set tempo to ' .. string.format('%.4g', bpm) .. ' BPM, ' .. math.floor(num) .. '/' .. math.floor(denom)\n",
+        );
+    } else {
+        let t = tempo.unwrap_or(120.0);
+        lua.push_str(&format!("reaper.SetCurrentBPM(0, {t}, true)\n"));
+        lua.push_str("reaper.UpdateTimeline()\n");
+        lua.push_str(&format!("return 'Set tempo to {t} BPM'\n"));
+    }
+    lua
+}
+
+/// Build Lua that returns a multi-line snapshot of the open project: name, tempo,
+/// time signature, transport state, and the track list (number, name, armed). The
+/// daemon relays the returned string verbatim; the agent reads the whole result file.
+fn build_project_info_lua() -> String {
+    r#"local lines = {}
+local name = reaper.GetProjectName(0, '')
+if name == '' then name = '(unsaved)' end
+table.insert(lines, 'Project: ' .. name)
+local num, denom, bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)
+table.insert(lines, 'Tempo: ' .. string.format('%.4g', bpm) .. ' BPM, ' .. math.floor(num) .. '/' .. math.floor(denom))
+local p = reaper.GetPlayState()
+local ps = 'stopped'
+if p & 4 ~= 0 then ps = 'recording' elseif p & 1 ~= 0 then ps = 'playing' elseif p & 2 ~= 0 then ps = 'paused' end
+table.insert(lines, 'Transport: ' .. ps)
+local n = reaper.CountTracks(0)
+table.insert(lines, 'Tracks: ' .. n)
+for i = 0, n - 1 do
+  local tr = reaper.GetTrack(0, i)
+  local _, nm = reaper.GetSetMediaTrackInfo_String(tr, 'P_NAME', '', false)
+  if nm == '' then nm = '(unnamed)' end
+  local armed = reaper.GetMediaTrackInfo_Value(tr, 'I_RECARM') == 1
+  table.insert(lines, '  ' .. (i + 1) .. '. ' .. nm .. (armed and ' [armed]' or ''))
+end
+return table.concat(lines, '\n')
+"#
+    .to_string()
 }
 
 fn extract_color_from_text(text: &str) -> Option<&'static str> {
@@ -991,6 +1095,35 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["name"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_set_tempo",
+                "description": "Set the REAPER project tempo (BPM) and/or time signature. Use for 'set tempo to 120', 'change the BPM to 90', 'set the time signature to 3/4', 'make it 6/8 at 100 bpm'. Provide tempo, or both ts_num and ts_denom, or all three.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "tempo": {
+                            "type": "number",
+                            "description": "Tempo in beats per minute, e.g. 120. Omit to keep the current tempo when changing only the time signature."
+                        },
+                        "ts_num": {
+                            "type": "integer",
+                            "description": "Time signature numerator (top number), e.g. 3 for 3/4. Provide together with ts_denom."
+                        },
+                        "ts_denom": {
+                            "type": "integer",
+                            "description": "Time signature denominator (bottom number), e.g. 4 for 3/4. Provide together with ts_num."
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_get_project",
+                "description": "Read the current REAPER project state: project name, tempo, time signature, transport (playing/stopped/recording), and the track list (number, name, armed status). Use to answer questions like 'what tracks are in the project?', \"what's the tempo?\", 'how many tracks do I have?'.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
                 }
             }),
         ],
@@ -1669,5 +1802,56 @@ mod tests {
         assert!(lua.contains("reaper.DeleteTrack(tr)"));
         assert!(lua.contains("if removed then return \"Removed track '\" .. rname .. \"'"));
         assert!(lua.contains("else return \"No track named '\" .. display .. \"' found\""));
+    }
+
+    #[test]
+    fn set_tempo_only_uses_set_current_bpm_no_marker() {
+        let lua = build_set_tempo_lua(Some(128.0), None, None);
+        assert!(lua.contains("reaper.SetCurrentBPM(0, 128, true)"));
+        // No time-signature marker is injected for a tempo-only change.
+        assert!(!lua.contains("SetTempoTimeSigMarker"));
+        assert!(lua.contains("return 'Set tempo to 128 BPM'"));
+    }
+
+    #[test]
+    fn set_tempo_with_time_sig_writes_marker() {
+        let lua = build_set_tempo_lua(Some(100.0), Some(6), Some(8));
+        assert!(lua.contains("local bpm = 100"));
+        assert!(lua.contains("local num = 6"));
+        assert!(lua.contains("local denom = 8"));
+        assert!(
+            lua.contains("reaper.SetTempoTimeSigMarker(0, idx, 0, -1, -1, bpm, num, denom, false)")
+        );
+        // Reuses an existing marker at position 0 rather than always appending.
+        assert!(lua.contains("if ok and timepos == 0 then idx = i"));
+        // Lock the exact summary concatenation so a stray edit can't emit invalid Lua.
+        assert!(lua.contains(
+            "return 'Set tempo to ' .. string.format('%.4g', bpm) .. ' BPM, ' .. math.floor(num) .. '/' .. math.floor(denom)"
+        ));
+    }
+
+    #[test]
+    fn set_tempo_time_sig_only_keeps_current_tempo() {
+        // No tempo given → bpm falls back to the project's current value.
+        let lua = build_set_tempo_lua(None, Some(3), Some(4));
+        assert!(
+            lua.contains(
+                "local cur_num, cur_denom, cur_bpm = reaper.TimeMap_GetTimeSigAtTime(0, 0)"
+            )
+        );
+        assert!(lua.contains("local bpm = cur_bpm"));
+        assert!(lua.contains("local num = 3"));
+        assert!(lua.contains("local denom = 4"));
+    }
+
+    #[test]
+    fn project_info_lua_reads_tracks_and_transport() {
+        let lua = build_project_info_lua();
+        assert!(lua.contains("reaper.CountTracks(0)"));
+        assert!(lua.contains("reaper.GetPlayState()"));
+        assert!(lua.contains("reaper.GetProjectName(0, '')"));
+        assert!(lua.contains("reaper.TimeMap_GetTimeSigAtTime(0, 0)"));
+        // Multi-line output joined with newlines (relies on the agent's multi-line read).
+        assert!(lua.contains("table.concat(lines, '\\n')"));
     }
 }

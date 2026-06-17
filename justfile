@@ -594,19 +594,30 @@ update-node node:
 
     case "$NODE_OS" in
       linux)
-        NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
-        if [ "$NODE_ARCH" = "x86_64" ]; then
-            cargo build --release --target x86_64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
-            AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
+        if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
+            # Local node (e.g. the WSL2 controller) — no SSH/scp. Build natively,
+            # swap the binary in place, restart via systemd.
+            cargo build --release -p agent --features ${NODE_FEATURES:-llm}
+            echo ">>> Installing updated agent locally..."
+            timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null || true
+            sudo systemctl kill ai-mesh-agent 2>/dev/null || true
+            install -m 755 target/release/agent /home/${NODE_USER}/agent
+            sudo systemctl start ai-mesh-agent
         else
-            cargo build --release --target aarch64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
-            AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
+            NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
+            if [ "$NODE_ARCH" = "x86_64" ]; then
+                cargo build --release --target x86_64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
+                AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
+            else
+                cargo build --release --target aarch64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
+                AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
+            fi
+            echo ">>> Uploading updated agent to ${NODE_HOST}..."
+            ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
+            scp -q -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
+                ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
+            ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
         fi
-        echo ">>> Uploading updated agent to ${NODE_HOST}..."
-        ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
-        scp -q -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
-            ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
-        ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
         ;;
 
       windows)
@@ -2068,7 +2079,9 @@ setup-reaper-daemon:
         '-- ai-mesh bridge daemon, auto-run by REAPER at startup (native __startup.lua).' \
         '-- Polls ai_mesh_id.txt; when the id changes, dofiles ai_mesh_cmd.lua and writes' \
         '-- the outcome to ai_mesh_result.txt as "<id>\t<ok|err>\t<message>" so the agent' \
-        '-- can confirm execution (or surface a Lua error) instead of guessing.' \
+        '-- can confirm execution (or surface a Lua error) instead of guessing. The message' \
+        '-- may span multiple lines (e.g. a track listing); written via a temp file + rename' \
+        '-- so the agent never reads a half-written result.' \
         'local base = reaper.GetResourcePath() .. "/Scripts/"' \
         'local id_file = base .. "ai_mesh_id.txt"' \
         'local cmd_file = base .. "ai_mesh_cmd.lua"' \
@@ -2087,11 +2100,14 @@ setup-reaper-daemon:
         '  if id ~= "" and id ~= last_id then' \
         '    last_id = id' \
         '    local ok, ret = pcall(dofile, cmd_file)' \
-        '    local rf = io.open(result_file, "w")' \
+        '    local tmp = result_file .. ".tmp"' \
+        '    local rf = io.open(tmp, "w")' \
         '    if rf then' \
         '      if ok then rf:write(id .. "\tok\t" .. (type(ret) == "string" and ret or ""))' \
         '      else rf:write(id .. "\terr\t" .. tostring(ret)) end' \
         '      rf:close()' \
+        '      os.remove(result_file)' \
+        '      os.rename(tmp, result_file)' \
         '    end' \
         '    if not ok then reaper.ShowConsoleMsg("[ai-mesh] error: " .. tostring(ret) .. "\n") end' \
         '  end' \
