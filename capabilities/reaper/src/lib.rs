@@ -275,14 +275,31 @@ async fn execute_command(cmd: &ReaperCommandRequest, addr: &str) -> ReaperComman
 }
 
 async fn execute_script(cmd: &ReaperScriptRequest, _addr: &str) -> ReaperScriptResult {
-    let scripts_dir = std::env::var("REAPER_WSL_SCRIPTS_PATH")
-        .unwrap_or_else(|_| "/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts".into());
+    let scripts_dir =
+        std::env::var("REAPER_WSL_SCRIPTS_PATH").unwrap_or_else(|_| default_scripts_dir());
     let timeout = std::env::var("REAPER_SCRIPT_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(5));
     run_script(cmd, std::path::Path::new(&scripts_dir), timeout).await
+}
+
+/// Default REAPER `Scripts` directory when `REAPER_WSL_SCRIPTS_PATH` is unset.
+/// macOS runs the agent natively against a local REAPER (`~/Library/Application
+/// Support/REAPER/Scripts`); WSL2/Linux reaches the Windows REAPER install over
+/// `/mnt/c`. A *native* Linux REAPER host (`~/.config/REAPER/Scripts`) is
+/// indistinguishable from WSL2 at compile time — no such node exists today, so it
+/// must set `REAPER_WSL_SCRIPTS_PATH` explicitly rather than us guessing here.
+fn default_scripts_dir() -> String {
+    if cfg!(target_os = "macos") {
+        match std::env::var("HOME") {
+            Ok(home) => format!("{home}/Library/Application Support/REAPER/Scripts"),
+            Err(_) => "/Library/Application Support/REAPER/Scripts".into(),
+        }
+    } else {
+        "/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts".into()
+    }
 }
 
 /// Drive the daemon bridge: write the Lua + a fresh id, then poll the result file
@@ -320,13 +337,14 @@ async fn run_script(
     loop {
         // A result is only ours when its leading id matches; a stale result from a
         // prior request (or a partial write) is ignored until the daemon overwrites it.
-        if let Ok(contents) = tokio::fs::read_to_string(&result_path).await
-            && let Some(line) = contents.lines().next()
-        {
-            let mut parts = line.splitn(3, '\t');
+        // Parse the whole file, not just the first line: query tools and Lua errors
+        // return multi-line messages. The header is `<id>\t<ok|err>` and everything
+        // after the second tab — newlines included — is the message.
+        if let Ok(contents) = tokio::fs::read_to_string(&result_path).await {
+            let mut parts = contents.splitn(3, '\t');
             let rid = parts.next().unwrap_or("");
             let status = parts.next().unwrap_or("");
-            let message = parts.next().unwrap_or("");
+            let message = parts.next().unwrap_or("").trim_end();
             if rid == cmd.request_id && (status == "ok" || status == "err") {
                 return ReaperScriptResult {
                     request_id: cmd.request_id.clone(),
@@ -473,6 +491,28 @@ mod tests {
 
         assert!(result.ok);
         assert_eq!(result.message, "Added 'Vocals 2' as track 5 (armed)");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn run_script_relays_multiline_result() {
+        // Query tools (e.g. project info) return a multi-line summary; the agent must
+        // surface the whole thing, not just the first line.
+        let dir = temp_scripts_dir("multiline").await;
+        let body =
+            "Project: Song.rpp\nTempo: 120 BPM, 4/4\nTracks: 2\n  1. Vocals [armed]\n  2. Guitar";
+        let daemon = tokio::spawn(fake_daemon(dir.clone(), "req-ml", "ok", body));
+
+        let req = ReaperScriptRequest {
+            request_id: "req-ml".into(),
+            code: "return summary".into(),
+        };
+        let result = run_script(&req, &dir, Duration::from_secs(2)).await;
+        daemon.await.unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.message, body);
+        assert!(result.message.contains("2. Guitar"));
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
