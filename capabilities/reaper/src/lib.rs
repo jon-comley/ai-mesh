@@ -298,7 +298,13 @@ fn default_scripts_dir() -> String {
             Err(_) => "/Library/Application Support/REAPER/Scripts".into(),
         }
     } else {
-        "/mnt/c/Users/jonno/AppData/Roaming/REAPER/Scripts".into()
+        // WSL2 reaching the Windows REAPER install: the user profile lives at
+        // /mnt/c/Users/<user>. By our node-install convention the Windows and Linux
+        // usernames match (the agent runs as that user), so derive it from $USER
+        // rather than baking in a literal. If they ever differ, set
+        // REAPER_WSL_SCRIPTS_PATH explicitly.
+        let user = std::env::var("USER").unwrap_or_else(|_| "Public".into());
+        format!("/mnt/c/Users/{user}/AppData/Roaming/REAPER/Scripts")
     }
 }
 
@@ -412,6 +418,25 @@ mod tests {
     #[test]
     fn unknown_action_is_none() {
         assert_eq!(named_action_id("frobnicate"), None);
+    }
+
+    #[test]
+    fn default_scripts_dir_targets_reaper_scripts_folder() {
+        let dir = default_scripts_dir();
+        assert!(dir.ends_with("REAPER/Scripts"), "got: {dir}");
+        if cfg!(target_os = "macos") {
+            assert!(dir.contains("Library/Application Support"), "got: {dir}");
+        } else {
+            // WSL2 → the Windows user profile, with the username derived from the
+            // environment rather than a hard-coded literal.
+            assert!(dir.starts_with("/mnt/c/Users/"), "got: {dir}");
+            if let Ok(user) = std::env::var("USER") {
+                assert!(
+                    dir.contains(&format!("/{user}/")),
+                    "should embed $USER, got: {dir}"
+                );
+            }
+        }
     }
 
     #[test]

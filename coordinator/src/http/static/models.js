@@ -30,6 +30,11 @@ const KNOWN_MODELS = [
   { family: 'DeepSeek R1',  name: 'deepseek-r1:32b',  size_mb: 18934 },
 ];
 let dragSrc = null;
+// Nodes mid-unload: the loader stays disabled until the model is gone AND its VRAM
+// has been released. There is no backend "Unloading" state (Ready → Unloaded, then
+// filtered out), so this transition is tracked client-side.
+// nodeId -> { model, startedAt, vramUsedAtStart }
+const unloadingNodes = new Map();
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -90,7 +95,31 @@ function render() {
     return;
   }
   const nodes = applyOrder([...nodesMap.values()], n => n.node_id);
+  for (const n of nodes) clearUnloadIfDone(n);
   modelListEl.innerHTML = nodes.map(nodeCard).join('');
+}
+
+/** Reason a node's loader is disabled, or null if it's free to load. */
+function nodeBusy(node) {
+  if (unloadingNodes.has(node.node_id)) return 'Unloading — freeing VRAM…';
+  if (node.models.some(m => m.state.toLowerCase() === 'loading')) return 'Loading…';
+  return null;
+}
+
+/** Clear a node's unloading lock once the model is gone and its VRAM is released. */
+function clearUnloadIfDone(node) {
+  const u = unloadingNodes.get(node.node_id);
+  if (!u) return;
+  if (node.models.some(m => m.name === u.model)) return; // still tearing down
+  const vramNow = getLatestSample(node.node_id)?.gpu_vram_used_gb ?? null;
+  // VRAM considered cleared when: the node reports no VRAM (CPU-only), usage dropped
+  // ≥0.3 GB from the unload start, or a 30 s safety fallback elapsed (telemetry lag).
+  const vramCleared =
+    u.vramUsedAtStart == null ||
+    vramNow == null ||
+    vramNow <= u.vramUsedAtStart - 0.3 ||
+    Date.now() - u.startedAt > 30000;
+  if (vramCleared) unloadingNodes.delete(node.node_id);
 }
 
 function nodeCard(node) {
@@ -174,36 +203,47 @@ function loadFooter(node) {
     ? sample.disk_free_gb * 1024
     : Infinity;
 
+  const busy = nodeBusy(node);
+
   const available = KNOWN_MODELS.filter(m =>
     !loaded.has(m.name) &&
     m.size_mb <= memLimitMb &&
     m.size_mb * 2 <= diskFreeMb
   );
-  if (available.length === 0) return '';
+  // Nothing to offer and the node isn't busy → no footer at all.
+  if (available.length === 0 && !busy) return '';
 
-  const bestName = available.reduce((a, b) => b.size_mb > a.size_mb ? b : a).name;
+  let options = '';
+  if (available.length > 0) {
+    const bestName = available.reduce((a, b) => b.size_mb > a.size_mb ? b : a).name;
 
-  const byFamily = new Map();
-  for (const m of available) {
-    if (!byFamily.has(m.family)) byFamily.set(m.family, []);
-    byFamily.get(m.family).push(m);
+    const byFamily = new Map();
+    for (const m of available) {
+      if (!byFamily.has(m.family)) byFamily.set(m.family, []);
+      byFamily.get(m.family).push(m);
+    }
+
+    options = [...byFamily.entries()].map(([family, models]) => {
+      const opts = models.map(m => {
+        const sizeLabel = m.size_mb >= 1024
+          ? `${(m.size_mb / 1024).toFixed(1)} GB`
+          : `${m.size_mb} MB`;
+        const sel = m.name === bestName ? ' selected' : '';
+        return `<option value="${esc(m.name)}" data-size="${m.size_mb}"${sel}>${esc(m.name)}  ·  ${sizeLabel}</option>`;
+      }).join('');
+      return `<optgroup label="${esc(family)}">${opts}</optgroup>`;
+    }).join('');
   }
 
-  const options = [...byFamily.entries()].map(([family, models]) => {
-    const opts = models.map(m => {
-      const sizeLabel = m.size_mb >= 1024
-        ? `${(m.size_mb / 1024).toFixed(1)} GB`
-        : `${m.size_mb} MB`;
-      const sel = m.name === bestName ? ' selected' : '';
-      return `<option value="${esc(m.name)}" data-size="${m.size_mb}"${sel}>${esc(m.name)}  ·  ${sizeLabel}</option>`;
-    }).join('');
-    return `<optgroup label="${esc(family)}">${opts}</optgroup>`;
-  }).join('');
+  const disabled = busy ? ' disabled' : '';
+  const note = busy
+    ? `<span class="model-picker-busy">${esc(busy)}</span>`
+    : '<span class="model-load-error"></span>';
 
   return `<div class="model-picker-row" data-picker-node="${esc(node.node_id)}">
-  <select class="model-picker-select">${options}</select>
-  <button class="model-picker-load">Load</button>
-  <span class="model-load-error"></span>
+  <select class="model-picker-select"${disabled}>${options}</select>
+  <button class="model-picker-load"${disabled}>Load</button>
+  ${note}
 </div>`;
 }
 
@@ -233,14 +273,23 @@ async function loadModel(nodeId, modelName, sizeMb, btn, errEl) {
 
 function unloadModel(nodeId, modelName) {
   if (!window.confirm(`Unload "${modelName}" from ${nodeId}?`)) return;
+  // Lock this node's loader until the model is gone and its VRAM is freed.
+  const sample = getLatestSample(nodeId);
+  unloadingNodes.set(nodeId, {
+    model: modelName,
+    startedAt: Date.now(),
+    vramUsedAtStart: sample?.gpu_vram_used_gb ?? null,
+  });
+  render();
   const token = localStorage.getItem('meshToken') ?? '';
+  const release = () => { unloadingNodes.delete(nodeId); render(); };
   fetch(`/api/models/unload?token=${encodeURIComponent(token)}`, {
     method:  'POST',
     headers: { 'content-type': 'application/json' },
     body:    JSON.stringify({ node_id: nodeId, model_name: modelName }),
   })
-    .then(r => { if (!r.ok) window.alert(`Unload failed: HTTP ${r.status}`); })
-    .catch(e => window.alert(`Error: ${e}`));
+    .then(r => { if (!r.ok) { release(); window.alert(`Unload failed: HTTP ${r.status}`); } })
+    .catch(e => { release(); window.alert(`Error: ${e}`); });
 }
 
 // ── Drag-to-reorder ───────────────────────────────────────────────────────────
