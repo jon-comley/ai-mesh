@@ -423,6 +423,10 @@ These are non-blocking UX improvements for after C6 ships:
 - **Sparkline tooltip with exact timestamp** ✓ (2026-06-11) — per-point transparent `<rect>` hit regions (Voronoi midpoint splits, no gaps) each carry a `<title>` showing `CPU: 87.3%  at 14:23:01`; falls back to `(sample N)` labels when timestamps are absent or mismatched. Mini sparklines on the Nodes tab unchanged.
 - **Sparkline fill area** ✓ (2026-06-11) — `<polygon>` at 0.15 fill-opacity closes the area under each line in the stroke colour.
 - **Per-node collapse/expand in Health panel** ✓ (2026-06-12, `4f25eee`) — each health card has a `▾ / ▸` toggle; collapsed cards show only the last value, not the full sparkline; `localStorage` persistence.
+- **Dashboard housekeeping** ✓ (2026-06-18):
+  - **Models leaderboard links** — two pills in the Models tab header (`panel-head`): "Leaderboard" → HF Open LLM Leaderboard (benchmark quality) and "Popularity" → OpenRouter rankings (usage), both `target="_blank" rel="noopener noreferrer"`.
+  - **Model picker locked while unloading** — clicking Unload disables that node's select + Load button (amber "Unloading — freeing VRAM…" note) until the model has left the snapshot **and** VRAM has actually dropped (≥0.3 GB, or no VRAM telemetry, or 30 s fallback). Tracked client-side in `models.js` (`unloadingNodes`/`nodeBusy`/`clearUnloadIfDone`) since there is no backend `Unloading` state.
+  - **Desktop tab bar / double-scrollbar fix** — dropped the desktop `body`+`.panels` dual-scroll overrides; the app-shell flex layout (single scrolling `.panels`, flex-anchored tab bar) now applies at all widths, so the tabs stay visible when maximised. SW cache bumped to `mesh-v5`.
 
 #### Layout view — known issues / deferred fixes (2026-06-05)
 

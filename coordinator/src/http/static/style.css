@@ -89,6 +89,41 @@ body {
   text-align: center;
 }
 
+/* Panel header with a trailing action (e.g. the Models leaderboard link). */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.panel-head h2 { margin-bottom: 0; }
+
+.panel-head-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.panel-head-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+.panel-head-link:hover { color: var(--accent); border-color: var(--accent); }
+.panel-head-link svg { width: 16px; height: 16px; }
+
 /* ── Tab bar ───────────────────────────────────────────────────────────────── */
 .tab-bar {
   height: calc(var(--tab-h) + var(--safe-bottom));
@@ -438,9 +473,19 @@ body {
   white-space: nowrap;
 }
 
-.model-picker-load:disabled {
+.model-picker-load:disabled,
+.model-picker-select:disabled {
   opacity: 0.5;
-  cursor: default;
+  cursor: not-allowed;
+}
+
+/* Informational note shown while a node's loader is locked (unloading/loading). */
+.model-picker-busy {
+  flex: 0 0 100%;
+  font-size: 0.75rem;
+  color: var(--amber);
+  font-style: italic;
+  padding-top: 1px;
 }
 
 .model-load-error {
@@ -1646,22 +1691,11 @@ body {
 
 /* ── Desktop layout (≥ 900px) ──────────────────────────────────────────────── */
 @media (min-width: 900px) {
-  body { overflow: auto; }
-
-  .app-header { position: sticky; top: 0; z-index: 10; }
-
-  /* Tab bar stays at bottom on all screen sizes */
-
-  .panels {
-    overflow: auto;
-    height: auto;
-    min-height: calc(100vh - var(--header-h));
-  }
-
-  /* Tabs still switch panels on desktop */
+  /* Keep the app-shell layout at every size: the body never scrolls (flex column:
+     fixed header, flex:1 scrolling .panels, fixed tab bar). This gives a single
+     scrollbar inside .panels and anchors the tab bar at the bottom without sticky
+     tricks. Desktop only changes visuals (padding, width cap, card grid). */
   .panel.active {
-    height: auto;
-    overflow-y: visible;
     padding: 24px;
     max-width: 1100px;
   }
