@@ -604,6 +604,16 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
   "stop all" fan out), disambiguation when none is specified, and per-instance status keyed by
   node ID in the poller + dashboard panel. Parked until a second REAPER box exists — gated on the
   same Mac mini as the macOS work. Full design notes: `docs/reaper.md` (Deferred).
+- ◐ Plugin stack + FX automation — curated third-party plugin list (vocal + guitar tracking
+  weighted: Analog Obsession, TDR Nova, Valhalla Supermassive, Youlean, Pro-Q 4, GTR ToolRack,
+  Guitar Rig 7, etc.) plus a generic FX-control tool layer. No plugin exposes its own API —
+  control is uniformly via REAPER's `TrackFX_*` ReaScript functions, so it extends the existing
+  structured-tool pattern. Proposed tools: `reaper_set_fx_preset` (build first — highest leverage,
+  no param discovery), `reaper_add_fx`, `reaper_list_fx`, `reaper_list_fx_params`,
+  `reaper_set_fx_param` / `reaper_get_fx_param`, `reaper_bypass_fx`. Must guard against FX index
+  drift (resolve by name in the coordinator, never trust raw LLM indices), `AddByName` format-prefix
+  instability across OS, and lazy param-map init. Melodyne is **not** automatable by us (offline/ARA).
+  Plugins installed manually for now. Full list, pricing, and per-plugin automation: `docs/reaper-plugins.md`.
 
 ---
 
