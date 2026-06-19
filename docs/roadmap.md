@@ -604,16 +604,27 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
   "stop all" fan out), disambiguation when none is specified, and per-instance status keyed by
   node ID in the poller + dashboard panel. Parked until a second REAPER box exists — gated on the
   same Mac mini as the macOS work. Full design notes: `docs/reaper.md` (Deferred).
-- ◐ Plugin stack + FX automation — curated third-party plugin list (vocal + guitar tracking
-  weighted: Analog Obsession, TDR Nova, Valhalla Supermassive, Youlean, Pro-Q 4, GTR ToolRack,
-  Guitar Rig 7, etc.) plus a generic FX-control tool layer. No plugin exposes its own API —
-  control is uniformly via REAPER's `TrackFX_*` ReaScript functions, so it extends the existing
-  structured-tool pattern. Proposed tools: `reaper_set_fx_preset` (build first — highest leverage,
-  no param discovery), `reaper_add_fx`, `reaper_list_fx`, `reaper_list_fx_params`,
-  `reaper_set_fx_param` / `reaper_get_fx_param`, `reaper_bypass_fx`. Must guard against FX index
-  drift (resolve by name in the coordinator, never trust raw LLM indices), `AddByName` format-prefix
-  instability across OS, and lazy param-map init. Melodyne is **not** automatable by us (offline/ARA).
-  Plugins installed manually for now. Full list, pricing, and per-plugin automation: `docs/reaper-plugins.md`.
+- ◐ Plugin stack + FX automation — curated free-first third-party plugin list (vocal + guitar
+  tracking weighted: Analog Obsession, TDR Nova, Valhalla Supermassive, Youlean, …) plus a generic
+  FX-control tool layer. No plugin exposes its own API — control is uniformly via REAPER's
+  `TrackFX_*` ReaScript functions, so it extends the existing structured-tool pattern. Must guard
+  against FX index drift (resolve by name in the coordinator, never trust raw LLM indices),
+  `AddByName` format-prefix instability across OS, and lazy param-map init. Melodyne is **not**
+  automatable by us (offline/ARA). Plugin install is manual (Windows-side, not automated).
+  Execution is **incremental, free-first, one plugin at a time**, and every slice must be
+  verifiable **without recording audio** (insert + read-back) since the studio isn't built yet.
+  First target: **Valhalla Supermassive** (free reverb — famous named presets, the cleanest demo).
+  - Slice 1 — `reaper_add_fx`: insert an FX by name on a named track, with index-by-name
+    resolution baked in. Prove against stock **ReaVerbate** first (always installed, no
+    format-prefix ambiguity), then Valhalla Supermassive.
+  - Slice 2 — `reaper_list_fx` + `reaper_list_fx_params`: discovery. Also resolves the open
+    question of whether Supermassive's modes are REAPER presets (→ `SetPreset`) or internal params.
+  - Slice 3 — `reaper_set_fx_preset` + a small curated preset/mode catalog: the "make it
+    spacious" payoff.
+  - Later — `reaper_set_fx_param` / `reaper_get_fx_param`, `reaper_bypass_fx`, then the next free
+    plugin (TDR Nova / Analog Obsession).
+
+  Full list, pricing, install steps, and per-plugin automation: `docs/reaper-plugins.md`.
 
 ---
 
