@@ -157,7 +157,35 @@ the builders, not the LLM prompt:
 
 ---
 
+## Installation
+
+Plugin installation is **not automated** — it's a manual Windows-side step (download + run
+the vendor installer, then let REAPER rescan). Scripting it later (mirroring
+`scripts/install-reaper-windows.ps1`, which silently installs REAPER itself) is possible but
+not a priority, so the manual steps below are the supported path for now.
+
+The general pattern for any VST on the Windows REAPER host:
+
+1. Download the plugin's Windows installer from the vendor.
+2. Run it; accept the default install locations (VST3 → `C:\Program Files\Common Files\VST3`).
+3. In REAPER: **Options → Preferences → Plug-ins → VST → Re-scan**, or just restart REAPER.
+   The plugin then appears in the FX browser (and is addressable by name from our tools).
+
+### Valhalla Supermassive (first target)
+
+1. Download from <https://valhalladsp.com/shop/reverb/valhalla-supermassive/> — it's free and
+   needs no account.
+2. Run the Windows installer (defaults are fine; it installs VST3 + VST2).
+3. Re-scan / restart REAPER. It shows up as **ValhallaSupermassive** (VST3) in the FX browser.
+4. Confirm REAPER sees it before testing automation — drop it on a track manually once, or
+   (once slice 1 lands) let `reaper_add_fx` insert it by name.
+
+---
+
 ## Status
 
-Planning only — no FX-automation tools are implemented yet. The plugins are installed
-manually on the REAPER host. Tracked under the REAPER section of [`roadmap.md`](roadmap.md).
+Planning + first build slice. No FX-automation tools are implemented yet; plugins are
+installed manually (see above). Work is **incremental, free-first, one plugin at a time**, and
+every slice must be verifiable **without recording audio** (insert + read-back) since the
+studio isn't built yet. First target: **Valhalla Supermassive**. Slice breakdown and ordering
+are tracked under the REAPER section of [`roadmap.md`](roadmap.md).
