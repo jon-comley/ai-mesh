@@ -528,6 +528,15 @@ async fn dispatch_tool(
             )
             .await
         }
+        "reaper_add_fx" => {
+            let track = args["track"].as_str().unwrap_or("").trim().to_string();
+            let fx = args["fx"].as_str().unwrap_or("").trim().to_string();
+            if track.is_empty() || fx.is_empty() {
+                return "reaper_add_fx requires a track name and an fx (plugin) name".into();
+            }
+            let code = build_add_fx_lua(&track, &fx);
+            run_reaper_lua(request_id, code, registry, connections, pending_intents).await
+        }
         other => format!("unknown tool: {other}"),
     }
 }
@@ -697,6 +706,42 @@ fn build_remove_track_lua(name: &str) -> String {
     lua.push_str("reaper.UpdateArrange()\n");
     lua.push_str("if removed then return \"Removed track '\" .. rname .. \"' (was track \" .. removed .. \")\"\n");
     lua.push_str("else return \"No track named '\" .. display .. \"' found\" end\n");
+    lua
+}
+
+/// Build Lua to add an FX (plugin) by name to the first track whose name matches
+/// `track` (case-insensitively, like `build_remove_track_lua`). The plugin is matched
+/// by the bare product name REAPER knows it as — NO `VST:`/`VST3:` prefix is forced,
+/// because the available format varies per machine (the first plugin we tested, Valhalla
+/// Supermassive, surfaced only as VST2 on OmniLink1). `TrackFX_AddByName` returns -1 when
+/// REAPER can't resolve the name, which we relay as a clear "not installed/scanned" note
+/// rather than a silent no-op. Returns a summary the daemon relays back.
+fn build_add_fx_lua(track: &str, fx: &str) -> String {
+    let target = lua_escape(&track.to_lowercase());
+    let display = lua_escape(track);
+    let fx_name = lua_escape(fx);
+    let mut lua = String::new();
+    lua.push_str(&format!("local target = '{target}'\n"));
+    lua.push_str(&format!("local display = '{display}'\n"));
+    lua.push_str(&format!("local fx = '{fx_name}'\n"));
+    lua.push_str("local tr = nil\n");
+    lua.push_str("for i = 0, reaper.CountTracks(0) - 1 do\n");
+    lua.push_str("  local t = reaper.GetTrack(0, i)\n");
+    lua.push_str("  local _, nm = reaper.GetSetMediaTrackInfo_String(t, 'P_NAME', '', false)\n");
+    lua.push_str("  if nm:lower() == target then tr = t; break end\n");
+    lua.push_str("end\n");
+    lua.push_str("if not tr then return \"No track named '\" .. display .. \"' found\" end\n");
+    // instantiate = -1 → always add a new instance; returns the new FX slot index, or -1
+    // if REAPER can't find/scan a plugin matching the name.
+    lua.push_str("local idx = reaper.TrackFX_AddByName(tr, fx, false, -1)\n");
+    lua.push_str("if idx < 0 then return \"FX '\" .. fx .. \"' not found — is it installed and scanned in REAPER?\" end\n");
+    // Read back the name REAPER actually assigned (carries the format prefix, e.g. 'VST: ...').
+    lua.push_str("local _, real = reaper.TrackFX_GetFXName(tr, idx, '')\n");
+    lua.push_str("local _, tn = reaper.GetSetMediaTrackInfo_String(tr, 'P_NAME', '', false)\n");
+    lua.push_str("reaper.UpdateArrange()\n");
+    lua.push_str(
+        "return \"Added '\" .. real .. \"' to track '\" .. tn .. \"' (FX slot \" .. (idx + 1) .. \")\"\n",
+    );
     lua
 }
 
@@ -1124,6 +1169,24 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                 "parameters": {
                     "type": "object",
                     "properties": {}
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_add_fx",
+                "description": "Add an audio effect / plugin (FX) to a named track in REAPER. Use for 'add reverb to the vocal track', 'put ValhallaSupermassive on the guitar', 'add ReaEQ to drums'. 'track' is the track's name; 'fx' is the plugin name as REAPER lists it in the FX browser — pass the bare product name (e.g. 'ValhallaSupermassive', 'ReaVerbate', 'ReaEQ') WITHOUT a 'VST:'/'VST3:' prefix, since the available format differs per machine.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "track": {
+                            "type": "string",
+                            "description": "Name of the track to add the FX to, e.g. 'vocal', 'guitar'"
+                        },
+                        "fx": {
+                            "type": "string",
+                            "description": "Plugin name as shown in REAPER's FX browser, e.g. 'ValhallaSupermassive', 'ReaVerbate', 'ReaEQ'. No 'VST:'/'VST3:' prefix."
+                        }
+                    },
+                    "required": ["track", "fx"]
                 }
             }),
         ],
@@ -1802,6 +1865,49 @@ mod tests {
         assert!(lua.contains("reaper.DeleteTrack(tr)"));
         assert!(lua.contains("if removed then return \"Removed track '\" .. rname .. \"'"));
         assert!(lua.contains("else return \"No track named '\" .. display .. \"' found\""));
+    }
+
+    #[test]
+    fn add_fx_lua_matches_track_by_name_and_adds_by_name() {
+        let lua = build_add_fx_lua("vocal", "ValhallaSupermassive");
+        // Track resolved case-insensitively by name (same loop as remove_track).
+        assert!(lua.contains("local target = 'vocal'"));
+        assert!(lua.contains("if nm:lower() == target then tr = t; break end"));
+        assert!(
+            lua.contains("if not tr then return \"No track named '\" .. display .. \"' found\"")
+        );
+        // FX added by the bare name with instantiate = -1 (always a new instance).
+        assert!(lua.contains("local fx = 'ValhallaSupermassive'"));
+        assert!(lua.contains("local idx = reaper.TrackFX_AddByName(tr, fx, false, -1)"));
+        // Summary reads the *real* assigned name back, not the requested string.
+        assert!(lua.contains("local _, real = reaper.TrackFX_GetFXName(tr, idx, '')"));
+        assert!(lua.contains("return \"Added '\" .. real .. \"' to track '\""));
+    }
+
+    #[test]
+    fn add_fx_lua_reports_unresolved_plugin() {
+        // TrackFX_AddByName returns -1 when REAPER can't find/scan the plugin —
+        // surface that clearly instead of a silent no-op (the install/scan quirk).
+        let lua = build_add_fx_lua("vocal", "Nonexistent");
+        assert!(lua.contains("if idx < 0 then return \"FX '\" .. fx .. \"' not found"));
+    }
+
+    #[test]
+    fn add_fx_lua_does_not_force_a_format_prefix() {
+        // The available format varies per machine (Valhalla surfaced VST2-only on
+        // OmniLink1), so we must pass the bare name with no VST:/VST3: prefix.
+        let lua = build_add_fx_lua("guitar", "ReaVerbate");
+        assert!(lua.contains("local fx = 'ReaVerbate'"));
+        assert!(!lua.contains("VST3:"));
+        assert!(!lua.contains("VST:"));
+    }
+
+    #[test]
+    fn add_fx_lua_escapes_names() {
+        // Quotes/backslashes in either name must not break out of the Lua literals.
+        let lua = build_add_fx_lua("d'n\\b", "weird'fx");
+        assert!(lua.contains("local target = 'd\\'n\\\\b'"));
+        assert!(lua.contains("local fx = 'weird\\'fx'"));
     }
 
     #[test]

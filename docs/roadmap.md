@@ -614,9 +614,10 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
   Execution is **incremental, free-first, one plugin at a time**, and every slice must be
   verifiable **without recording audio** (insert + read-back) since the studio isn't built yet.
   First target: **Valhalla Supermassive** (free reverb — famous named presets, the cleanest demo).
-  - Slice 1 — `reaper_add_fx`: insert an FX by name on a named track, with index-by-name
-    resolution baked in. Prove against stock **ReaVerbate** first (always installed, no
-    format-prefix ambiguity), then Valhalla Supermassive.
+  - Slice 1 — `reaper_add_fx` (◐ code + unit tests done; pending live verification): inserts an
+    FX by name on a named track, matching the bare product name (no `VST:`/`VST3:` prefix) and
+    reporting unresolved plugins instead of a silent no-op. Verify with stock **ReaVerbate** first
+    (always installed, no format ambiguity), then Valhalla Supermassive.
   - Slice 2 — `reaper_list_fx` + `reaper_list_fx_params`: discovery. Also resolves the open
     question of whether Supermassive's modes are REAPER presets (→ `SetPreset`) or internal params.
   - Slice 3 — `reaper_set_fx_preset` + a small curated preset/mode catalog: the "make it
