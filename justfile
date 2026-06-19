@@ -3,6 +3,12 @@
 coordinator_ip   := `f=$(grep -l "^NODE_COORDINATOR=true" nodes/*.env 2>/dev/null | head -1); if [ -n "$f" ]; then grep -h "^NODE_HOST=" "$f" | head -1 | cut -d= -f2; else echo 192.168.1.11; fi`
 coordinator_port := "9000"
 
+# Shared SSH/SCP options for every node operation. ConnectTimeout bounds the connect so
+# an offline/unreachable node fails fast (~10s) instead of hanging forever (the class of
+# silent hang that bit us on local 127.0.0.1 nodes), and LogLevel quiets banner noise.
+# Use as:  ssh {{ssh_opts}} <host> ...   /   scp {{ssh_opts}} <src> <dst>
+ssh_opts := "-o ConnectTimeout=10 -o LogLevel=ERROR"
+
 export PATH := env_var("HOME") / ".cargo/bin" + ":" + env_var("PATH")
 
 default: build
@@ -203,7 +209,7 @@ hardware-report: update-portproxy
             NODE_NAME=$(basename "$f" .env)
             [ "${NODE_ROLE}" = "compute" ] || continue
             just set-fingerprint ${NODE_NAME} \
-                || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
+                || echo ">>> ❌ ERROR: ${NODE_NAME} did NOT receive credentials — its agent will loop on auth until you run: just set-fingerprint ${NODE_NAME}"
         done
     fi
     just start-agents
@@ -359,7 +365,12 @@ deploy-node node:
             sudo install -m 755 ${AGENT_BIN} /home/${NODE_USER}/agent
             sudo systemctl start ai-mesh-agent
         else
-            NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
+            NODE_ARCH=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "")
+            if [ -z "$NODE_ARCH" ]; then
+                echo ">>> ERROR: cannot reach ${NODE_NAME} (${NODE_USER}@${NODE_HOST}) over SSH to detect its arch."
+                echo ">>>        Is the node powered on and reachable? Aborting rather than guessing the arch."
+                exit 1
+            fi
             if [ "$NODE_ARCH" = "x86_64" ]; then
                 echo ">>> Building Linux x86_64 agent..."
                 cargo build --release --target x86_64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
@@ -369,12 +380,12 @@ deploy-node node:
                 cargo build --release --target aarch64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
                 AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
             fi
-            ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
             scp_dots ">>> Uploading agent binary" \
-                scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
+                scp {{ssh_opts}} -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
             scp_dots ">>> Uploading install script" \
-                scp -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
-            ssh -t ${NODE_USER}@${NODE_HOST} \
+                scp {{ssh_opts}} -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
+            ssh {{ssh_opts}} -t ${NODE_USER}@${NODE_HOST} \
                 "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER} ${MQTT_HOST:-} ${MQTT_PORT:-1883}"
         fi
         ;;
@@ -389,10 +400,10 @@ deploy-node node:
             "powershell -Command \"if (-not (Test-Path '${WIN_PATH}')) { New-Item -ItemType Directory -Path '${WIN_PATH}' | Out-Null }\""
 
         scp_dots ">>> Uploading agent.exe" \
-            scp -q target/x86_64-pc-windows-gnu/release/agent.exe \
+            scp {{ssh_opts}} -q target/x86_64-pc-windows-gnu/release/agent.exe \
                 ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"
         scp_dots ">>> Uploading install script" \
-            scp -q scripts/install-node-windows.ps1 \
+            scp {{ssh_opts}} -q scripts/install-node-windows.ps1 \
                 ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
 
         PUBKEY=""
@@ -403,7 +414,7 @@ deploy-node node:
         fi
 
         scp_dots ">>> Stopping service and swapping binary" \
-            ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
                 taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
                 taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
                 sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
@@ -412,7 +423,7 @@ deploy-node node:
             \""
         echo ">>> Running provisioning script (this takes a minute — installing NSSM, llama.cpp, registering service)..."
         scp_dots ">>> Provisioning" \
-            ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
                 & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}'\
             \""
         # Stability hardening (ULPS, AX200 NIC, power plan) is applied by
@@ -428,106 +439,61 @@ deploy-node node:
     echo ">>> Node {{node}} provisioned."
 
     # Push TLS fingerprint + auth token if the coordinator is already running.
-    # Without this the freshly-started agent cannot pass auth and will loop-fail.
+    # Without this the freshly-started agent cannot pass auth and will loop-fail
+    # SILENTLY. A failed push (or a model that never reaches Ready) means the node is
+    # broken, not "provisioned" — so these are hard failures, never warn-and-continue.
     STATE="$HOME/.config/ai-mesh/coordinator.state"
     if [ -f "$STATE" ]; then
         echo ">>> Coordinator is running — pushing credentials to {{node}}..."
-        just set-fingerprint {{node}} \
-            || echo ">>> Warning: could not push credentials to {{node}} — run: just set-fingerprint {{node}}"
+        if ! just set-fingerprint {{node}}; then
+            echo ">>> ERROR: could not push credentials to {{node}} — the agent will loop on auth."
+            echo ">>>        Fix the error above, then re-run: just set-fingerprint {{node}}"
+            exit 1
+        fi
         if [[ "${NODE_ROLE}" == "compute" ]] && [[ "${NODE_FEATURES:-llm}" == *"llm"* ]]; then
             echo ">>> Auto-loading best-fit model on {{node}} (agent restart kills llama-server)..."
-            just auto-load-model {{node}} \
-                || echo ">>> Warning: could not load model on {{node}} — run: just auto-load-model {{node}}"
+            # auto-load-model waits for the model to reach Ready, which only happens once
+            # the agent has reconnected and authenticated — so this doubles as a connection
+            # check. Do NOT swallow its failure: that is exactly how a stuck node hides.
+            if ! just auto-load-model {{node}}; then
+                echo ">>> ERROR: model never reached Ready on {{node}} — the agent likely did not reconnect."
+                echo ">>>        Check: just nodes   (is {{node}} heartbeating?)   and   just logs {{node}}"
+                exit 1
+            fi
         else
-            echo ">>> {{node}} is a ${NODE_ROLE} node — skipping model load."
+            echo ">>> {{node}} is a ${NODE_ROLE} node — no model to load; check 'just nodes' shows it heartbeating."
         fi
     else
         echo ">>> No coordinator running yet — run 'just start-cluster' (or 'just set-fingerprint {{node}}' after starting the coordinator)"
     fi
 
-# Build agent binaries for all platforms, then provision every node.
+# Build agent binaries and provision every node.
+# Delegates to `deploy-node` per node so there is ONE deploy path — it handles local
+# 127.0.0.1 nodes (no SSH, native build), remote linux/windows, and the credential
+# push. This recipe used to carry its own copy of that logic, which had drifted: it
+# SSH'd to every node unconditionally (hanging on local 127.0.0.1 nodes like omnilink1)
+# and probed arch over SSH, defaulting to aarch64 on failure → wrong binary.
 # Usage: just provision-all
 provision-all:
     #!/usr/bin/env bash
     set -e
-
-    scp_dots() {
-        local label="$1"; shift
-        printf "%s" "$label"
-        "$@" &
-        local pid=$!
-        while kill -0 $pid 2>/dev/null; do printf "."; sleep 0.5; done
-        wait $pid; local rc=$?; echo ""; return $rc
-    }
-
+    failed=()
     for f in nodes/*.env; do
-        source "$f"
         NODE_NAME=$(basename "$f" .env)
-        NODE_FEATURES="${NODE_FEATURES:-llm}"
         echo ""
-        echo "=== Provisioning ${NODE_NAME} (${NODE_OS} / ${NODE_HOST}) [features: ${NODE_FEATURES}] ==="
-
-        case "$NODE_OS" in
-          linux)
-            NODE_ARCH=$(ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
-            if [ "$NODE_ARCH" = "x86_64" ]; then
-                TARGET="x86_64-unknown-linux-gnu"
-            else
-                TARGET="aarch64-unknown-linux-gnu"
-            fi
-            AGENT_BIN="target/${TARGET}/release/agent"
-            echo ">>> Building Linux ${NODE_ARCH} agent (features: ${NODE_FEATURES})..."
-            cargo build --release --target "${TARGET}" -p agent --features "${NODE_FEATURES}"
-
-            echo ">>> Stopping agent service..."
-            ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "
-                timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true
-            " || true
-
-            scp_dots ">>> Uploading agent binary" \
-                scp -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
-            scp_dots ">>> Uploading install script" \
-                scp -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
-            ssh -t ${NODE_USER}@${NODE_HOST} \
-                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER} ${MQTT_HOST:-} ${MQTT_PORT:-1883}"
-            ;;
-
-          windows)
-            WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
-
-            echo ">>> Building Windows x86_64 agent (features: ${NODE_FEATURES})..."
-            cargo build --release -p agent --target x86_64-pc-windows-gnu --features "${NODE_FEATURES}"
-
-            echo ">>> Stopping agent service..."
-            ssh -o ConnectTimeout=10 ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
-                taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
-                taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
-                sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-                exit 0\
-            \"" || true
-
-            echo ">>> Creating ${WIN_PATH} on ${NODE_HOST}..."
-            ssh ${NODE_USER}@${NODE_HOST} \
-                "powershell -Command \"if (-not (Test-Path '${WIN_PATH}')) { New-Item -ItemType Directory -Path '${WIN_PATH}' | Out-Null }\""
-
-            scp_dots ">>> Uploading agent.exe" \
-                scp -q target/x86_64-pc-windows-gnu/release/agent.exe \
-                    ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"
-            scp_dots ">>> Uploading install script" \
-                scp -q scripts/install-node-windows.ps1 \
-                    ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
-
-            scp_dots ">>> Swapping binary and provisioning" \
-                ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
-                    Start-Sleep 2;\
-                    cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
-                    & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}'\
-                \""
-            ;;
-        esac
-        echo ">>> ${NODE_NAME} done."
+        echo "=== Provisioning ${NODE_NAME} ==="
+        # Attempt every node; collect failures rather than aborting the whole run on
+        # the first one, but surface them loudly at the end with a non-zero exit.
+        if ! just deploy-node "${NODE_NAME}"; then
+            echo ">>> ${NODE_NAME} FAILED to provision."
+            failed+=("${NODE_NAME}")
+        fi
     done
     echo ""
+    if [ "${#failed[@]}" -gt 0 ]; then
+        echo "=== Provisioning FAILED for: ${failed[*]} — see errors above. ==="
+        exit 1
+    fi
     echo "=== All nodes provisioned. ==="
 
 # Restart the ai-mesh-agent service on a node without touching the binary.
@@ -541,11 +507,11 @@ restart-node node:
         if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
             sudo systemctl restart ai-mesh-agent
         else
-            ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true; sudo systemctl start ai-mesh-agent"
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true; sudo systemctl start ai-mesh-agent"
         fi
         ;;
       windows)
-        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
             taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
             taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
             sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
@@ -604,7 +570,7 @@ update-node node:
             install -m 755 target/release/agent /home/${NODE_USER}/agent
             sudo systemctl start ai-mesh-agent
         else
-            NODE_ARCH=$(ssh ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
+            NODE_ARCH=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
             if [ "$NODE_ARCH" = "x86_64" ]; then
                 cargo build --release --target x86_64-unknown-linux-gnu -p agent --features ${NODE_FEATURES:-llm}
                 AGENT_BIN="target/x86_64-unknown-linux-gnu/release/agent"
@@ -613,10 +579,10 @@ update-node node:
                 AGENT_BIN="target/aarch64-unknown-linux-gnu/release/agent"
             fi
             echo ">>> Uploading updated agent to ${NODE_HOST}..."
-            ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
-            scp -q -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
+            scp {{ssh_opts}} -q -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
                 ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
-            ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
         fi
         ;;
 
@@ -633,7 +599,7 @@ update-node node:
         uploaded=false
         for attempt in 1 2 3; do
             printf ">>> Upload attempt %d/3 (90s timeout)...\n" "$attempt"
-            if timeout 90 scp -o LogLevel=ERROR \
+            if timeout 90 scp {{ssh_opts}} \
                     -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
                     "$STRIPPED" \
                     ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\agent_next.exe"; then
@@ -647,7 +613,7 @@ update-node node:
             echo ">>> Upload failed after 3 attempts. Run 'just update-node {{node}}' to try again."
             exit 1
         fi
-        ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
             taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
             taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
             sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
@@ -659,6 +625,62 @@ update-node node:
         ;;
     esac
     echo ">>> Node {{node}} updated."
+
+# Internal: push the TLS fingerprint + auth token to ONE node's agent service and restart
+# it. The single home for the env-injection that set-fingerprint and set-auth-token both
+# need, so the fragile Windows registry / systemd drop-in logic lives in exactly one place.
+# Local linux (127.0.0.1) writes the drop-in directly (no SSH); remote linux writes it over
+# SSH; windows merges into the NSSM AppEnvironmentExtra registry value.
+# Usage: just _push-node-env <node> <fingerprint> <auth_token>
+_push-node-env node fp token:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    FP='{{fp}}'
+    MESH_AUTH_TOKEN='{{token}}'
+    case "$NODE_OS" in
+      linux)
+        if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
+            sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
+            printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=%s\n' "${FP}" \
+                | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
+            printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=%s\n' "${MESH_AUTH_TOKEN}" \
+                | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
+            sudo systemctl daemon-reload
+            sudo systemctl restart ai-mesh-agent
+        else
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "
+                sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d 2>/dev/null || true
+                printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=${FP}\n' \
+                    | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
+                printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}\n' \
+                    | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
+                sudo systemctl daemon-reload
+                timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true
+                sudo systemctl start ai-mesh-agent
+            "
+        fi
+        ;;
+      windows)
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            \$rp = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\ai-mesh-agent\\Parameters';\
+            \$raw = (Get-ItemProperty -Path \$rp -Name AppEnvironmentExtra -ErrorAction SilentlyContinue).AppEnvironmentExtra;\
+            \$envMap = @{};\
+            if (\$raw) { \$raw | ForEach-Object { if (\$_ -match '^([^=]+)=(.*)$') { \$envMap[\$Matches[1]] = \$Matches[2] } } };\
+            \$envMap['MESH_TLS_FINGERPRINT'] = '${FP}';\
+            \$envMap['MESH_AUTH_TOKEN'] = '${MESH_AUTH_TOKEN}';\
+            \$pairs = @(\$envMap.GetEnumerator() | ForEach-Object { '{0}={1}' -f \$_.Key, \$_.Value });\
+            Set-ItemProperty -Path \$rp -Name AppEnvironmentExtra -Value \$pairs -Type MultiString;\
+            taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
+            taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
+            \$svcpid=(Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
+            if(\$svcpid -gt 0){Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue};\
+            Start-Sleep -Milliseconds 800;\
+            sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
+            exit 0\
+        \""
+        ;;
+    esac
 
 # Push the coordinator TLS fingerprint to a node's agent service and restart it.
 # Reads the fingerprint from /tmp/mesh-coordinator.log automatically.
@@ -684,49 +706,7 @@ set-fingerprint node:
     echo ">>> Setting MESH_TLS_FINGERPRINT=${FP} on {{node}}..."
     [ -n "${MESH_AUTH_TOKEN}" ] && echo ">>> Also pushing MESH_AUTH_TOKEN to {{node}}..."
 
-    case "$NODE_OS" in
-      linux)
-        if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
-            sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
-            printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=%s\n' "${FP}" \
-                | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
-            printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=%s\n' "${MESH_AUTH_TOKEN}" \
-                | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
-            sudo systemctl daemon-reload
-            sudo systemctl restart ai-mesh-agent
-        else
-            ssh ${NODE_USER}@${NODE_HOST} "
-                sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d 2>/dev/null || true
-                printf '[Service]\nEnvironment=MESH_TLS_FINGERPRINT=${FP}\n' \
-                    | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/tls.conf > /dev/null
-                printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${MESH_AUTH_TOKEN}\n' \
-                    | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
-                sudo systemctl daemon-reload
-                timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true
-                sudo systemctl start ai-mesh-agent
-            "
-        fi
-        ;;
-      windows)
-        ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
-            \$rp = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\ai-mesh-agent\\Parameters';\
-            \$raw = (Get-ItemProperty -Path \$rp -Name AppEnvironmentExtra -ErrorAction SilentlyContinue).AppEnvironmentExtra;\
-            \$envMap = @{};\
-            if (\$raw) { \$raw | ForEach-Object { if (\$_ -match '^([^=]+)=(.*)$') { \$envMap[\$Matches[1]] = \$Matches[2] } } };\
-            \$envMap['MESH_TLS_FINGERPRINT'] = '${FP}';\
-            \$envMap['MESH_AUTH_TOKEN'] = '${MESH_AUTH_TOKEN}';\
-            \$pairs = @(\$envMap.GetEnumerator() | ForEach-Object { '{0}={1}' -f \$_.Key, \$_.Value });\
-            Set-ItemProperty -Path \$rp -Name AppEnvironmentExtra -Value \$pairs -Type MultiString;\
-            taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
-            taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
-            \$svcpid=(Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
-            if(\$svcpid -gt 0){Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue};\
-            Start-Sleep -Milliseconds 800;\
-            sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
-            exit 0\
-        \""
-        ;;
-    esac
+    just _push-node-env {{node}} "${FP}" "${MESH_AUTH_TOKEN}"
     echo ">>> {{node}}: fingerprint and auth token set, agent restarted."
 
 # Push MESH_AUTH_TOKEN to all compute nodes and update local ~/.bashrc.
@@ -762,36 +742,9 @@ set-auth-token token:
         NODE_NAME=$(basename "$f" .env)
         [ "${NODE_ROLE}" = "compute" ] || continue
         echo ">>> Pushing MESH_AUTH_TOKEN to ${NODE_NAME}..."
-
-        case "$NODE_OS" in
-          linux)
-            ssh ${NODE_USER}@${NODE_HOST} "
-                sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
-                printf '[Service]\nEnvironment=MESH_AUTH_TOKEN=${TOKEN}\n' \
-                    | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/auth.conf > /dev/null
-                sudo systemctl daemon-reload
-                sudo systemctl restart ai-mesh-agent
-            "
-            ;;
-          windows)
-            ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
-                \$rp = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\ai-mesh-agent\\Parameters';\
-                \$raw = (Get-ItemProperty -Path \$rp -Name AppEnvironmentExtra -ErrorAction SilentlyContinue).AppEnvironmentExtra;\
-                \$envMap = @{};\
-                if (\$raw) { \$raw | ForEach-Object { if (\$_ -match '^([^=]+)=(.*)$') { \$envMap[\$Matches[1]] = \$Matches[2] } } };\
-                \$envMap['MESH_AUTH_TOKEN'] = '${TOKEN}';\
-                \$pairs = @(\$envMap.GetEnumerator() | ForEach-Object { '{0}={1}' -f \$_.Key, \$_.Value });\
-                Set-ItemProperty -Path \$rp -Name AppEnvironmentExtra -Value \$pairs -Type MultiString;\
-                taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
-                taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
-                \$svcpid = (Get-WmiObject Win32_Service -Filter 'Name=''ai-mesh-agent''').ProcessId;\
-                if (\$svcpid -gt 0) { Stop-Process -Id \$svcpid -Force -ErrorAction SilentlyContinue };\
-                Start-Sleep -Milliseconds 800;\
-                sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
-                exit 0\
-            \""
-            ;;
-        esac
+        # Re-pushes the (unchanged) fingerprint alongside the token — idempotent, and keeps
+        # the env-injection logic in one place (_push-node-env).
+        just _push-node-env "${NODE_NAME}" "${FP}" "${TOKEN}"
         echo ">>> ${NODE_NAME}: auth token updated."
     done
     echo ">>> Auth token push complete."
@@ -908,17 +861,17 @@ uninstall-node node:
     case "$NODE_OS" in
       linux)
         echo ">>> Uninstalling ai-mesh-agent on ${NODE_HOST}..."
-        scp scripts/uninstall-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/uninstall-node.sh
-        ssh -t ${NODE_USER}@${NODE_HOST} \
+        scp {{ssh_opts}} scripts/uninstall-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/uninstall-node.sh
+        ssh {{ssh_opts}} -t ${NODE_USER}@${NODE_HOST} \
             "chmod +x /tmp/uninstall-node.sh && sudo /tmp/uninstall-node.sh"
         ;;
 
       windows)
         WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
         echo ">>> Uninstalling ai-mesh-agent on ${NODE_HOST}..."
-        scp scripts/uninstall-node-windows.ps1 \
+        scp {{ssh_opts}} scripts/uninstall-node-windows.ps1 \
             ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\uninstall-node-windows.ps1"
-        ssh ${NODE_USER}@${NODE_HOST} \
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             "powershell -ExecutionPolicy Bypass -Command \"& '${WIN_PATH}\\uninstall-node-windows.ps1'\""
         ;;
     esac
@@ -931,9 +884,9 @@ fix-node node:
     set -e
     source nodes/{{node}}.env
     echo ">>> Pushing stability fix script to {{node}}..."
-    scp scripts/fix-beelink-stability.ps1 ${NODE_USER}@${NODE_HOST}:C:/fix-stability.ps1
+    scp {{ssh_opts}} scripts/fix-beelink-stability.ps1 ${NODE_USER}@${NODE_HOST}:C:/fix-stability.ps1
     echo ">>> Executing fix script as Administrator..."
-    ssh ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File C:/fix-stability.ps1' -Wait\""
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File C:/fix-stability.ps1' -Wait\""
     echo ">>> Fix applied. Please REBOOT {{node}} manually."
 
 # Update llama.cpp to the latest release on a node.
@@ -947,12 +900,12 @@ update-llama node:
     echo "Latest llama.cpp: $LATEST"
     if [ "$NODE_OS" = "windows" ]; then
         ZIP_URL="https://github.com/ggml-org/llama.cpp/releases/download/${LATEST}/llama-${LATEST}-bin-win-vulkan-x64.zip"
-        ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
             Invoke-WebRequest -Uri '${ZIP_URL}' -OutFile '\$env:TEMP\llama-update.zip' -UseBasicParsing; \
             Expand-Archive -Path '\$env:TEMP\llama-update.zip' -DestinationPath '\$env:LOCALAPPDATA\Programs\llama.cpp' -Force; \
             Remove-Item '\$env:TEMP\llama-update.zip' -Force\""
     else
-        ssh ${NODE_USER}@${NODE_HOST} "
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "
             ARCH=\$(uname -m)
             if [ \"\$ARCH\" = \"x86_64\" ]; then
                 ZIP_URL=\"https://github.com/ggml-org/llama.cpp/releases/download/${LATEST}/llama-${LATEST}-bin-ubuntu-x64.tar.gz\"
@@ -1056,7 +1009,7 @@ load-model node model:
     # Outputs mb:gpu_flag (gpu_flag=1 when VRAM detected, 0 for CPU/unified RAM).
     case "$NODE_OS" in
       linux)
-        HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} '
+        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} '
             mem=0; gpu=0
             for f in /sys/class/drm/card*/device/mem_info_vram_total; do
                 [ -f "$f" ] || continue
@@ -1072,7 +1025,7 @@ load-model node model:
         ' 2>/dev/null || echo "0:0")
         ;;
       windows)
-        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
+        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
         ;;
       *) HW_INFO="0:0" ;;
     esac
@@ -1113,7 +1066,7 @@ auto-load-model node:
     [ -f "$STATE" ] && source "$STATE" && export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
     case "$NODE_OS" in
       linux)
-        HW_INFO=$(ssh ${NODE_USER}@${NODE_HOST} '
+        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} '
             mem=0; gpu=0
             for base in /sys/class/drm/card*/device; do
                 [ -f "$base/mem_info_vram_total" ] || continue
@@ -1136,7 +1089,7 @@ auto-load-model node:
         ')
         ;;
       windows)
-        HW_INFO=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
+        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
         ;;
       *)
         echo "Unknown NODE_OS: $NODE_OS"; exit 1 ;;
@@ -1147,11 +1100,11 @@ auto-load-model node:
     # Free disk space on the model directory (need 2× model size: .tmp + final .gguf).
     case "$NODE_OS" in
       linux)
-        DISK_FREE_MB=$(ssh ${NODE_USER}@${NODE_HOST} \
+        DISK_FREE_MB=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             "df --block-size=1M --output=avail \$(echo ~/.ai-mesh/models) 2>/dev/null | tail -1 | tr -d ' '" 2>/dev/null || echo 0)
         ;;
       windows)
-        DISK_FREE_MB=$(ssh -o LogLevel=ERROR ${NODE_USER}@${NODE_HOST} \
+        DISK_FREE_MB=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             'powershell -NoProfile -Command "[int]((Get-PSDrive C).Free/1MB)"' 2>/dev/null || echo 0)
         ;;
       *) DISK_FREE_MB=0 ;;
@@ -1196,11 +1149,11 @@ logs-node node:
 
     case "$NODE_OS" in
       linux)
-        ssh ${NODE_USER}@${NODE_HOST} "journalctl -u ai-mesh-agent -f --no-pager"
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "journalctl -u ai-mesh-agent -f --no-pager"
         ;;
       windows)
         WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
-        ssh ${NODE_USER}@${NODE_HOST} \
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             "powershell -Command \"Get-Content '${WIN_PATH}\\logs\\agent.log' -Tail 20 -Wait\""
         ;;
     esac
@@ -1215,11 +1168,11 @@ sanity-node node:
     echo ">>> Checking ai-mesh-agent on ${NODE_HOST} (${NODE_OS})..."
     case "$NODE_OS" in
       linux)
-        ssh ${NODE_USER}@${NODE_HOST} \
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             "systemctl is-active ai-mesh-agent && echo 'Service: RUNNING' || echo 'Service: NOT RUNNING'"
         ;;
       windows)
-        ssh ${NODE_USER}@${NODE_HOST} \
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             "powershell -Command \"(Get-Service -Name ai-mesh-agent).Status\""
         ;;
     esac
@@ -1399,7 +1352,7 @@ start-cluster: update-portproxy
         # Remote coordinator mode (running on pi1 as systemd service)
         echo ">>> Coordinator is running remotely on {{coordinator_ip}}"
         echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
-        scp -q "jonno@{{coordinator_ip}}:/var/lib/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
+        scp {{ssh_opts}} -q "jonno@{{coordinator_ip}}:/var/lib/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
 
         cargo build -q -p cli
         echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
@@ -1456,12 +1409,14 @@ start-cluster: update-portproxy
     fi
 
     echo ">>> Pushing TLS fingerprint and auth token to all nodes..."
+    cred_failed=()
     for f in nodes/*.env; do
         source "$f"
         NODE_NAME=$(basename "$f" .env)
         just set-fingerprint ${NODE_NAME} \
-            || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
+            || { echo ">>> ❌ ERROR: ${NODE_NAME} did NOT receive credentials — its agent will loop on auth until you run: just set-fingerprint ${NODE_NAME}"; cred_failed+=("${NODE_NAME}"); }
     done
+    [ "${#cred_failed[@]}" -gt 0 ] && echo ">>> ⚠ ${#cred_failed[@]} node(s) failed credentials: ${cred_failed[*]} — they will NOT connect until fixed."
 
     echo ">>> Starting remote compute agents..."
     just start-agents
@@ -1517,7 +1472,7 @@ restart-coordinator: update-portproxy
         # Remote coordinator mode (running on pi1 as systemd service)
         echo ">>> Coordinator is running remotely on {{coordinator_ip}}"
         echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
-        scp -q "jonno@{{coordinator_ip}}:/var/lib/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
+        scp {{ssh_opts}} -q "jonno@{{coordinator_ip}}:/var/lib/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
 
         cargo build -q -p cli
         echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
@@ -1578,7 +1533,7 @@ restart-coordinator: update-portproxy
         source "$f"
         NODE_NAME=$(basename "$f" .env)
         just set-fingerprint ${NODE_NAME} \
-            || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
+            || echo ">>> ❌ ERROR: ${NODE_NAME} did NOT receive credentials — its agent will loop on auth until you run: just set-fingerprint ${NODE_NAME}"
     done
 
     # Wait for coordinator to finish clearing stale model state from the
@@ -1684,7 +1639,7 @@ dev: update-portproxy
             NODE_NAME=$(basename "$f" .env)
             [ "${NODE_ROLE}" = "compute" ] || continue
             just set-fingerprint ${NODE_NAME} \
-                || echo ">>> Warning: could not set credentials on ${NODE_NAME} (skipping)"
+                || echo ">>> ❌ ERROR: ${NODE_NAME} did NOT receive credentials — its agent will loop on auth until you run: just set-fingerprint ${NODE_NAME}"
         done
     fi
 
@@ -1811,13 +1766,13 @@ logs:
         NODE_NAME=$(basename "$f" .env)
         case "$NODE_OS" in
           linux)
-            ssh ${NODE_USER}@${NODE_HOST} \
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
                 "journalctl -u ai-mesh-agent -f --no-pager" 2>/dev/null \
                 | sed "s/^/[${NODE_NAME}]  /" &
             ;;
           windows)
             WIN_PATH="C:\\Users\\${NODE_USER}\\ai-mesh"
-            ssh ${NODE_USER}@${NODE_HOST} \
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
                 "powershell -Command \"Get-Content '${WIN_PATH}\\logs\\agent.log' -Tail 20 -Wait\"" 2>/dev/null \
                 | sed "s/^/[${NODE_NAME}]  /" &
             ;;
@@ -2304,10 +2259,10 @@ test-inference: update-portproxy
             source "$f"
             case "$NODE_OS" in
               linux)
-                ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" 2>/dev/null || true
+                ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" 2>/dev/null || true
                 ;;
               windows)
-                ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+                ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
                     sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
                     Start-Sleep 2;\
                     Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
@@ -2325,10 +2280,10 @@ test-inference: update-portproxy
         source "$f"
         case "$NODE_OS" in
           linux)
-            ssh ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" || true
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true" || true
             ;;
           windows)
-            ssh ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
                 sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
                 Start-Sleep 2;\
                 Get-Process agent -ErrorAction SilentlyContinue | Stop-Process -Force;\
@@ -2360,10 +2315,10 @@ test-inference: update-portproxy
         case "$NODE_OS" in
           linux)
             echo "=== Starting agent service on ${NODE_NAME} (${NODE_HOST}) ==="
-            ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
             ;;
           windows)
-            ssh ${NODE_USER}@${NODE_HOST} \
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
                 "powershell -Command \"sc.exe start ai-mesh-agent 2>&1 | Out-Null; exit 0\""
             ;;
         esac
@@ -2449,7 +2404,7 @@ deploy-coordinator target_host:
 
     # Step 2: Create /var/lib/ai-mesh on target
     echo ">>> Step 2: Ensuring /var/lib/ai-mesh exists on ${TARGET_HOST}..."
-    ssh ${NODE_USER}@${NODE_HOST} "
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "
         set -e
         if [ ! -d /var/lib/ai-mesh ]; then
             sudo mkdir -p /var/lib/ai-mesh
@@ -2465,7 +2420,7 @@ deploy-coordinator target_host:
     echo ">>> Step 3: Copying state files to ${TARGET_HOST}..."
     STATE_DIR="$HOME/.config/ai-mesh"
     if [ -d "$STATE_DIR" ] && [ -n "$(ls -A "$STATE_DIR" 2>/dev/null)" ]; then
-        scp -r "$STATE_DIR"/* ${NODE_USER}@${NODE_HOST}:~/.config/ai-mesh/ 2>/dev/null || {
+        scp {{ssh_opts}} -r "$STATE_DIR"/* ${NODE_USER}@${NODE_HOST}:~/.config/ai-mesh/ 2>/dev/null || {
             echo ">>> Warning: Could not copy state files"
         }
     else
@@ -2474,10 +2429,10 @@ deploy-coordinator target_host:
 
     # Step 4: Seed database (only if the target has none — never clobber live state)
     echo ">>> Step 4: Seeding ai_mesh.db on ${TARGET_HOST} (only if absent)..."
-    if ssh ${NODE_USER}@${NODE_HOST} "[ -f /var/lib/ai-mesh/ai_mesh.db ]"; then
+    if ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "[ -f /var/lib/ai-mesh/ai_mesh.db ]"; then
         echo ">>> Live database already present — leaving it untouched (rooms/scenes preserved)"
     elif [ -f "ai_mesh.db" ]; then
-        scp ai_mesh.db ${NODE_USER}@${NODE_HOST}:/var/lib/ai-mesh/
+        scp {{ssh_opts}} ai_mesh.db ${NODE_USER}@${NODE_HOST}:/var/lib/ai-mesh/
         echo ">>> Seeded fresh database from repo root"
     else
         echo ">>> No repo ai_mesh.db and no live DB (will be created on first run)"
@@ -2485,12 +2440,12 @@ deploy-coordinator target_host:
 
     # Step 5: Copy binary
     echo ">>> Step 5: Copying coordinator binary to ${TARGET_HOST}..."
-    scp target/aarch64-unknown-linux-gnu/release/coordinator ${NODE_USER}@${NODE_HOST}:/tmp/ai-mesh-coordinator
-    ssh ${NODE_USER}@${NODE_HOST} "sudo install -m 755 /tmp/ai-mesh-coordinator /usr/local/bin/ai-mesh-coordinator && rm /tmp/ai-mesh-coordinator"
+    scp {{ssh_opts}} target/aarch64-unknown-linux-gnu/release/coordinator ${NODE_USER}@${NODE_HOST}:/tmp/ai-mesh-coordinator
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo install -m 755 /tmp/ai-mesh-coordinator /usr/local/bin/ai-mesh-coordinator && rm /tmp/ai-mesh-coordinator"
 
     # Step 6: Install systemd unit
     echo ">>> Step 6: Installing systemd unit on ${TARGET_HOST}..."
-    cat systemd/ai-mesh-coordinator.service | ssh ${NODE_USER}@${NODE_HOST} "
+    cat systemd/ai-mesh-coordinator.service | ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "
         set -e
         sudo tee /etc/systemd/system/ai-mesh-coordinator.service > /dev/null
         sudo mkdir -p /etc/systemd/system/ai-mesh-coordinator.service.d
@@ -2505,16 +2460,16 @@ deploy-coordinator target_host:
     if [ -n "${MQTT_HOST:-}" ]; then
         echo ">>> Step 6b: Setting MQTT_HOST=${MQTT_HOST}:${MQTT_PORT:-1883} for coordinator lighting..."
         printf '[Service]\nEnvironment=MQTT_HOST=%s\nEnvironment=MQTT_PORT=%s\n' "${MQTT_HOST}" "${MQTT_PORT:-1883}" \
-            | ssh ${NODE_USER}@${NODE_HOST} "sudo tee /etc/systemd/system/ai-mesh-coordinator.service.d/lighting.conf > /dev/null"
+            | ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo tee /etc/systemd/system/ai-mesh-coordinator.service.d/lighting.conf > /dev/null"
     else
         echo ">>> Step 6b: No MQTT_HOST in nodes/${TARGET_HOST}.env — removing any stale lighting drop-in"
-        ssh ${NODE_USER}@${NODE_HOST} "sudo rm -f /etc/systemd/system/ai-mesh-coordinator.service.d/lighting.conf || true"
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo rm -f /etc/systemd/system/ai-mesh-coordinator.service.d/lighting.conf || true"
     fi
-    ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl daemon-reload"
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo systemctl daemon-reload"
 
     # Step 7: Enable and start the service
     echo ">>> Step 7: Enabling and starting ai-mesh-coordinator service..."
-    ssh ${NODE_USER}@${NODE_HOST} "
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "
         sudo systemctl enable ai-mesh-coordinator
         sudo systemctl restart ai-mesh-coordinator
         echo '>>> Service enabled and started'
@@ -2548,10 +2503,10 @@ verify-coordinator target_host:
 
     # Check 1: Service is running
     echo "[1/5] Checking service status..."
-    ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl is-active ai-mesh-coordinator" > /dev/null && echo "      ✓ Service is active" || {
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo systemctl is-active ai-mesh-coordinator" > /dev/null && echo "      ✓ Service is active" || {
         echo "      ✗ Service is NOT active"
         echo "Logs:"
-        ssh ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 20 --no-pager"
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 20 --no-pager"
         exit 1
     }
 
@@ -2567,7 +2522,7 @@ verify-coordinator target_host:
 
     # Check 3: Recent log output shows expected startup messages
     echo "[3/5] Checking startup logs..."
-    if ssh ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 50 --no-pager | grep -q 'listening on\|TLS\|auth token'"; then
+    if ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 50 --no-pager | grep -q 'listening on\|TLS\|auth token'"; then
         echo "      ✓ Startup messages found"
     else
         echo "      ⚠ Could not find expected startup messages (may still be running)"
@@ -2575,7 +2530,7 @@ verify-coordinator target_host:
 
     # Check 4: Certificate fingerprint matches
     echo "[4/5] Checking certificate fingerprint..."
-    COORDINATOR_LOG=$(ssh ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 100 --no-pager")
+    COORDINATOR_LOG=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo journalctl -u ai-mesh-coordinator -n 100 --no-pager")
     FP=$(echo "$COORDINATOR_LOG" | grep "fingerprint:" | sed 's/.*fingerprint: //' | head -1)
     if [ -n "$FP" ]; then
         echo "      ✓ Fingerprint: $FP"
@@ -2585,7 +2540,7 @@ verify-coordinator target_host:
 
     # Check 5: DB exists
     echo "[5/5] Checking database file..."
-    ssh ${NODE_USER}@${NODE_HOST} "[ -f /var/lib/ai-mesh/ai_mesh.db ] && echo '✓ Database exists' || echo '⚠ Database not yet created (will be on first run)'"
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "[ -f /var/lib/ai-mesh/ai_mesh.db ] && echo '✓ Database exists' || echo '⚠ Database not yet created (will be on first run)'"
 
     echo ""
     echo "=== Verification complete ==="
@@ -2594,7 +2549,7 @@ verify-coordinator target_host:
     echo ""
     echo "Manual next steps:"
     echo "  - Repoint agents: just start-agents"
-    echo "  - Check agent connections: ssh ${NODE_USER}@${NODE_HOST} sudo journalctl -u ai-mesh-coordinator -f"
+    echo "  - Check agent connections: ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} sudo journalctl -u ai-mesh-coordinator -f"
     echo "  - Test light command: click a bulb on-off in the dashboard"
     echo ""
 
@@ -2618,7 +2573,7 @@ rollback-coordinator:
 
     # Stop the remote service
     echo ">>> Stopping coordinator service on ${NODE_HOST}..."
-    ssh ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-coordinator 2>/dev/null || true" || true
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo systemctl stop ai-mesh-coordinator 2>/dev/null || true" || true
     echo "    ✓ Remote coordinator stopped"
 
     # Restart on laptop
