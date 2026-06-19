@@ -341,13 +341,20 @@ async fn run_script(
 
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        // A result is only ours when its leading id matches; a stale result from a
-        // prior request (or a partial write) is ignored until the daemon overwrites it.
-        // Parse the whole file, not just the first line: query tools and Lua errors
-        // return multi-line messages. The header is `<id>\t<ok|err>` and everything
-        // after the second tab — newlines included — is the message.
-        if let Ok(contents) = tokio::fs::read_to_string(&result_path).await {
-            let mut parts = contents.splitn(3, '\t');
+        // A complete result ends with an ASCII record-separator sentinel (U+001E) the
+        // daemon writes last. Until it's present the file is stale/seeded or mid-write
+        // (the daemon truncates then fills it in place) — keep polling rather than parse
+        // a half-written result. This sentinel replaces the daemon's old temp-file +
+        // os.rename, which silently fails on Windows (rename can't overwrite an existing
+        // file) and stranded every result in the `.tmp`, making every call hit the timeout.
+        //
+        // A result is only ours when its leading id matches. Parse the whole body, not
+        // just the first line: query tools and Lua errors return multi-line messages. The
+        // header is `<id>\t<ok|err>` and everything after the second tab is the message.
+        if let Ok(contents) = tokio::fs::read_to_string(&result_path).await
+            && let Some(body) = contents.strip_suffix('\u{1e}')
+        {
+            let mut parts = body.splitn(3, '\t');
             let rid = parts.next().unwrap_or("");
             let status = parts.next().unwrap_or("");
             let message = parts.next().unwrap_or("").trim_end();
@@ -451,7 +458,9 @@ mod tests {
     async fn fake_daemon(dir: std::path::PathBuf, expect_id: &str, status: &str, message: &str) {
         let id_path = dir.join("ai_mesh_id.txt");
         let result_path = dir.join("ai_mesh_result.txt");
-        let line = format!("{expect_id}\t{status}\t{message}");
+        // Terminate with the same RS sentinel the real daemon writes, so the agent
+        // accepts the result as complete.
+        let line = format!("{expect_id}\t{status}\t{message}\u{1e}");
         loop {
             if let Ok(s) = tokio::fs::read_to_string(&id_path).await
                 && s.lines().next() == Some(expect_id)
@@ -584,6 +593,33 @@ mod tests {
             result.message
         );
         // A stale result with a different id must not be mistaken for ours.
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn run_script_ignores_result_without_completion_sentinel() {
+        // A result file matching our id but missing the RS sentinel is a mid-write
+        // (or a result from the pre-sentinel daemon): it must NOT be accepted, so the
+        // agent keeps polling and ultimately times out rather than relaying a partial.
+        let dir = temp_scripts_dir("nosentinel").await;
+        tokio::fs::write(dir.join("ai_mesh_id.txt"), b"req-ns")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("ai_mesh_result.txt"), b"req-ns\tok\tpartial")
+            .await
+            .unwrap();
+        let req = ReaperScriptRequest {
+            request_id: "req-ns".into(),
+            code: "return \"x\"".into(),
+        };
+        let result = run_script(&req, &dir, Duration::from_millis(250)).await;
+
+        assert!(!result.ok);
+        assert!(
+            result.message.contains("did not respond"),
+            "got: {}",
+            result.message
+        );
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }
