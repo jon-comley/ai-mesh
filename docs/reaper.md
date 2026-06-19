@@ -326,6 +326,25 @@ Tracks: 2
   2. Guitar
 ```
 
+### Add an FX / plugin (`reaper_add_fx` tool)
+
+Inserts a plugin onto a named track (built in `build_add_fx_lua`). Args: `track` (track name)
+and `fx` (plugin name). The track is matched case-insensitively (same loop as
+`reaper_remove_track`); the FX is added via `TrackFX_AddByName(tr, fx, false, -1)`.
+
+- **Match the bare product name, no format prefix.** Pass `ValhallaSupermassive` /
+  `ReaVerbate`, **not** `VST3:ValhallaSupermassive` — the installed format varies per machine
+  (Valhalla Supermassive surfaced VST2-only on OmniLink1), and REAPER resolves the bare name to
+  whatever it has. See [`reaper-plugins.md`](reaper-plugins.md).
+- **Unresolved plugins are reported, not silent.** `TrackFX_AddByName` returns -1 when REAPER
+  can't find/scan the name, surfaced as `FX 'X' not found — is it installed and scanned in
+  REAPER?` rather than a no-op.
+- Returns the name REAPER actually assigned (read back via `TrackFX_GetFXName`), e.g.
+  `Added 'VST: ValhallaSupermassive (Valhalla DSP, LLC)' to track 'Vocal' (FX slot 2)`.
+
+This is the first of the FX-automation tools; preset/param/bypass tools follow (see the plugin
+doc and roadmap).
+
 ---
 
 ## Dashboard Panel
