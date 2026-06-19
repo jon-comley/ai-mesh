@@ -595,6 +595,15 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 - ◐ REAPER on macOS — code is macOS-ready (`default_scripts_dir()` resolves
   `~/Library/Application Support/REAPER/Scripts` on macOS, `/mnt/c/...` on WSL2); full
   provisioning (install script + node setup + testing) still pending the Mac mini (~end Jul 2026).
+- ◐ Multi-REAPER instances — route intents to a specific REAPER node once more than one
+  exists (e.g. OmniLink1 + Mac mini). Registry side is ready (`nodes_with_feature` returns all
+  matching nodes); intent routing currently grabs the **first connected** REAPER node (the
+  `extend this to a policy` comment in `intent.rs` is the only code concession). Needs: a target
+  (explicit `node` arg + an active/default instance, since small models can't reliably infer it
+  from the utterance), a **per-tool** selection policy (most intents hit one instance, a few like
+  "stop all" fan out), disambiguation when none is specified, and per-instance status keyed by
+  node ID in the poller + dashboard panel. Parked until a second REAPER box exists — gated on the
+  same Mac mini as the macOS work. Full design notes: `docs/reaper.md` (Deferred).
 
 ---
 
