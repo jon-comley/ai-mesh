@@ -2055,14 +2055,16 @@ setup-reaper-daemon:
         '  if id ~= "" and id ~= last_id then' \
         '    last_id = id' \
         '    local ok, ret = pcall(dofile, cmd_file)' \
-        '    local tmp = result_file .. ".tmp"' \
-        '    local rf = io.open(tmp, "w")' \
+        '    -- Write the result in place, then a record-separator byte (char 30) as a' \
+        '    -- completion marker so the agent never parses a half-written file. (A temp' \
+        '    -- file + os.rename silently fails on Windows: rename cannot overwrite.)' \
+        '    local rf = io.open(result_file, "w")' \
         '    if rf then' \
         '      if ok then rf:write(id .. "\tok\t" .. (type(ret) == "string" and ret or ""))' \
         '      else rf:write(id .. "\terr\t" .. tostring(ret)) end' \
+        '      rf:write("\30")' \
+        '      rf:flush()' \
         '      rf:close()' \
-        '      os.remove(result_file)' \
-        '      os.rename(tmp, result_file)' \
         '    end' \
         '    if not ok then reaper.ShowConsoleMsg("[ai-mesh] error: " .. tostring(ret) .. "\n") end' \
         '  end' \

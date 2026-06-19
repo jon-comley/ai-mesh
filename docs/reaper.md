@@ -160,10 +160,10 @@ reaper_script(code)
     ▼
 __startup.lua  (reaper.defer loop, polls ai_mesh_id.txt)
     │  on id change: pcall(dofile, ai_mesh_cmd.lua)
-    │  writes Scripts/ai_mesh_result.txt = "<id>\t<ok|err>\t<message>"
-    │  (via a temp file + os.rename, so the agent never reads a half-written result)
+    │  writes Scripts/ai_mesh_result.txt = "<id>\t<ok|err>\t<message>\x1e"
+    │  (in place, ending with an RS sentinel \x1e marking a complete write — see below)
     ▼
-    │  agent reads ai_mesh_result.txt whole and matches the leading id to its request
+    │  agent reads ai_mesh_result.txt whole, requires the \x1e, matches the leading id
     ▼
 ReaperScriptResult  (ok, the Lua error, or "daemon did not respond")
 ```
@@ -187,8 +187,13 @@ intact. It returns one of:
   isn't running (missing/stale `__startup.lua`, or REAPER was opened before setup).
 
 The daemon captures the return via `local ok, ret = pcall(dofile, cmd_file)` and writes
-`<id>\tok\t<ret>` on success. The agent relays this message; the coordinator's
-`run_reaper_lua` falls back to `ok` only when the message is empty.
+`<id>\tok\t<ret>\x1e` on success. The trailing **record-separator byte (`\x1e`) marks a
+complete write**: the daemon writes the result file *in place* (truncate + fill), and the
+agent ignores the file until that sentinel is present, so it never relays a half-written
+result. This replaced an earlier temp-file + `os.rename` scheme that **silently fails on
+Windows** — `os.rename` can't overwrite an existing file there, so every result was
+stranded in the `.tmp` and every call hit the timeout despite the Lua having run. The agent
+relays the message; the coordinator's `run_reaper_lua` falls back to `ok` only when it's empty.
 
 So a dead daemon now surfaces in chat instead of a false `ok`. Lua errors are also
 printed to REAPER's console (`ReaScript console output`, which auto-opens), prefixed
