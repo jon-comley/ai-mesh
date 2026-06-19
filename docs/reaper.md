@@ -340,7 +340,27 @@ All DOM elements are null-guarded so the panel is safe to render before the firs
 - REAPER on macOS — the agent code is macOS-ready (`default_scripts_dir()` resolves the
   `~/Library/Application Support/REAPER/Scripts` path), but provisioning (install script + node
   setup + testing) is pending the Mac mini.
-- Multi-REAPER instances (one per node, routed by node ID).
+- Multi-REAPER instances — more than one node running REAPER (e.g. OmniLink1 plus
+  the Mac mini), with intents routed to a specific instance. Today every tool resolves
+  its target the same way (`intent.rs`): `nodes_with_feature("reaper")` then **first
+  connected** — unambiguous only because there's exactly one REAPER node. The comment
+  there (`extend this to a policy`) is the only code concession; this is parked, not
+  half-built. What it needs:
+  - **A target.** Nothing in the utterance or tool args names a node today. Inferring it
+    from natural language ("record on the studio mac") is hard for the small local models,
+    so realistically an explicit arg (`node` / a friendly instance name) plus a notion of
+    the *active/default* instance the user can switch (sticky session state).
+  - **A selection policy** to replace `.find(first connected)` — and it's **per-tool**, not
+    global: most intents ("add a vocal track") must hit exactly one instance; a few ("stop
+    all") could reasonably fan out.
+  - **Disambiguation** when two instances are connected and no target is given — pick the
+    default or ask.
+  - **Per-instance state.** The `ReaperStatus` poller and the dashboard panel assume a
+    single transport; status would need keying by node ID and the panel showing N instances.
+
+  The registry side is already done (`nodes_with_feature` returns *all* matching nodes); the
+  hard part is the targeting UX, which has nothing to disambiguate until a second REAPER box
+  exists — hence deferred alongside the macOS work.
 
 ---
 
