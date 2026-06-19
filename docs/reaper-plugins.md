@@ -173,12 +173,24 @@ The general pattern for any VST on the Windows REAPER host:
 
 ### Valhalla Supermassive (first target)
 
-1. Download from <https://valhalladsp.com/shop/reverb/valhalla-supermassive/> — it's free and
-   needs no account.
-2. Run the Windows installer (defaults are fine; it installs VST3 + VST2).
-3. Re-scan / restart REAPER. It shows up as **ValhallaSupermassive** (VST3) in the FX browser.
-4. Confirm REAPER sees it before testing automation — drop it on a track manually once, or
-   (once slice 1 lands) let `reaper_add_fx` insert it by name.
+1. Go to <https://valhalladsp.com/shop/reverb/valhalla-supermassive/>. It's free and the
+   download **auto-starts — no email or account is required**. There's a subscribe/email prompt
+   on the page, but it's just a marketing capture you can skip; don't enter your email unless you
+   want their newsletter. (Doing so can leave you with a second copy via an emailed link —
+   harmless, just delete one.)
+2. You get a **`.zip`** (e.g. `ValhallaSupermassiveWin_V5_0_0.zip`), not a bare installer.
+   Extract it, then run the installer inside (defaults are fine; installs VST3 + VST2).
+3. Re-scan REAPER: **Options → Preferences → Plug-ins → VST**. **Quirk:** REAPER may not have
+   `C:\Program Files\Common Files\VST2` in its **VST plug-in paths** list by default — if so the
+   plugin installs but stays invisible. Add that path, then click **Re-scan → Clear cache and
+   re-scan all**. (The VST3 copy in `…\Common Files\VST3` is auto-scanned and needs no path entry.)
+4. Confirm REAPER sees it before testing automation — search the Add-FX browser for `valhalla`.
+   On the OmniLink1 box it listed as **`VST: ValhallaSupermassive (Valhalla DSP, LLC)`** — i.e.
+   the **VST2** copy only; the **VST3 entry did not appear** despite being ticked at install and
+   despite VST3 supposedly auto-scanning. **Design implication:** `reaper_add_fx` must match on
+   the bare product name (`ValhallaSupermassive`) and must **not** hardcode a `VST3:` prefix —
+   the available format varies per box. This is quirk #2 (format-prefix instability) hitting in
+   practice on the very first plugin.
 
 ---
 
