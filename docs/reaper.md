@@ -218,6 +218,9 @@ and plays back — exercising both the numeric transport path and the daemon bri
 
 ## Supported Actions
 
+> For third-party plugins (EQ, compression, amp sims, reverb) and the proposed FX-automation
+> tools that drive them via `TrackFX_*`, see [`reaper-plugins.md`](reaper-plugins.md).
+
 ### Named transport actions (`reaper_transport` tool)
 
 | Action | REAPER command ID |
