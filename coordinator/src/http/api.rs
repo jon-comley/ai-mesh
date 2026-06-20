@@ -1350,6 +1350,7 @@ pub async fn chat(
         model_name: body.model_name,
         context: body.context,
     };
+    let reaper_online = state.get_reaper_snapshot().is_some_and(|s| s.reaper_online);
     let resp = crate::intent::handle_intent(
         req,
         registry,
@@ -1357,6 +1358,7 @@ pub async fn chat(
         state.pending_inferences.clone(),
         state.pending_intents.clone(),
         state.get_light_snapshot(),
+        reaper_online,
     )
     .await;
     Json(resp).into_response()

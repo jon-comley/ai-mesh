@@ -114,6 +114,12 @@ Then fully quit and reopen REAPER — the daemon auto-starts via `__startup.lua`
 | `REAPER_PORT` | `8080` | Port of the REAPER web server. |
 | `REAPER_WSL_SCRIPTS_PATH` | WSL2: `/mnt/c/Users/$USER/AppData/Roaming/REAPER/Scripts`; macOS: `$HOME/Library/Application Support/REAPER/Scripts` | WSL-visible path to REAPER's Scripts folder, where the daemon bridge command files live. The default derives from the runtime user (`default_scripts_dir()`); set this explicitly if the Windows and Linux usernames differ. |
 | `REAPER_SCRIPT_TIMEOUT_MS` | `5000` | How long the agent waits for the daemon to write `ai_mesh_result.txt` before reporting the daemon unresponsive. |
+| `REAPER_EXE` | WSL2: `/mnt/c/Program Files/REAPER (x64)/reaper.exe`; macOS: `/Applications/REAPER.app/Contents/MacOS/REAPER` | Path to the REAPER executable, used for auto-launch when a `reaper_*` tool is requested while REAPER is offline. On WSL2 the Windows `.exe` is run directly via interop. Set this if REAPER is installed elsewhere. |
+
+> **Auto-launch behaviour:** when a `reaper_*` tool is requested while REAPER is offline, the
+> coordinator spawns REAPER (above) and asks the user to retry once it has loaded. It opens REAPER
+> with its **own default startup** (last project / recovery file) — it does **not** force a new,
+> empty project. A 30 s per-node cooldown prevents a retry burst opening multiple instances.
 
 ---
 
