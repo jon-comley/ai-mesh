@@ -168,6 +168,8 @@ into 15 review units; each finding independently verified by a skeptic pass).
 
 - **Zigbee latency ceiling** — the observed ~300–500ms bulb switch time is inherent to the Zigbee protocol (RF transmission + bulb processing + optional ACK). The SLZB-06 is network-attached (Ethernet, 192.168.1.16), so moving Z2M ownership to a different machine would not reduce this — the RF path is identical. Meaningful latency improvements would require: Zigbee direct binding (bypass Z2M for switch→bulb, not applicable to software commands), or migrating to Matter/Thread hardware (typically ~50–100ms).
 
+- **Remove the dead device-card view in `lighting.js`** — `dashboard.js` calls `setRoomsActive()` unconditionally at startup with no reset, so `roomsActive` is permanently true and `lighting.js`'s device-card `render()` (and its sibling slider-patch path) always bails: it's unreachable. The lighting tab is exclusively the rooms view (`rooms.js`). Cleanup: delete the dead `render()`/device-card builders and the `roomsActive` flag from `lighting.js`, keeping only what the rooms view still imports (e.g. `buildLightControls`, `formatDeviceName`), and drop the now-unused `.light-card`-only grid styling. Surfaced while fixing the maximised rooms-view layout (the `#lighting-list` card grid only ever applied to this dead path).
+
 ---
 
 ## Phase 10 — Security & Auth ✓ Complete

@@ -1700,11 +1700,13 @@ body {
     max-width: 1100px;
   }
 
-  /* Two-column card grid so cards don't stretch across the full viewport */
+  /* Two-column card grid so cards don't stretch across the full viewport.
+     NOT #lighting-list: the lighting tab is always the rooms view (full-width
+     sections + a .room-list column), so the auto-fill grid would tile those
+     sections into columns and pile every room into the last cell when wide. */
   #nodes-list,
   #health-list,
-  #models-list,
-  #lighting-list {
+  #models-list {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
     gap: 10px;
