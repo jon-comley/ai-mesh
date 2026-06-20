@@ -118,14 +118,15 @@ A generic FX-control layer on the existing structured-tool pattern (builders in
 `coordinator/src/intent.rs`, schemas in the tool list, run via the daemon bridge). Mirrors
 `build_add_track_lua` / `build_set_tempo_lua`:
 
-- `reaper_add_fx` — `TrackFX_AddByName` on a named track (resolve the track by name first,
-  reusing the title-case / name-match helpers already in `intent.rs`).
-- `reaper_list_fx` — `TrackFX_GetFXName` across a track's chain, returning **name + index**
-  for each FX so the coordinator (never the LLM) resolves indices.
-- `reaper_set_fx_preset` — `TrackFX_SetPreset` by name. **Build this first** — highest
-  leverage, no param discovery; covers Valhalla / Pro-Q / TDR Nova "vibe" requests.
-- `reaper_list_fx_params` — `GetNumParams` + `GetParamName` (+ current value). The discovery
-  primitive that makes per-knob control possible for the LLM.
+- ✓ `reaper_add_fx` — `TrackFX_AddByName` on a named track (resolves the track by name first,
+  reusing the title-case / name-match helpers in `intent.rs`).
+- ✓ `reaper_list_fx` — `TrackFX_GetFXName` across a track's chain, returning **name + 1-based
+  slot** (+ bypass flag) for each FX so the coordinator (never the LLM) resolves indices.
+- ✓ `reaper_list_fx_params` — `GetNumParams` + `GetParamName` + formatted/raw value. The
+  discovery primitive that makes per-knob control possible for the LLM; resolves the FX by name
+  match, reports a 0-param result (lazy init) rather than an empty list.
+- `reaper_set_fx_preset` — `TrackFX_SetPreset` by name. **Next** — highest leverage, no param
+  discovery; covers Valhalla / Pro-Q / TDR Nova "vibe" requests.
 - `reaper_set_fx_param` / `reaper_get_fx_param` — `SetParam` / `GetParam` (0–1 normalised).
   `get` doubles as the Youlean LUFS read for a delivery check.
 - `reaper_bypass_fx` — `TrackFX_SetEnabled`.
@@ -196,8 +197,9 @@ The general pattern for any VST on the Windows REAPER host:
 
 ## Status
 
-Planning + first build slice. No FX-automation tools are implemented yet; plugins are
-installed manually (see above). Work is **incremental, free-first, one plugin at a time**, and
-every slice must be verifiable **without recording audio** (insert + read-back) since the
-studio isn't built yet. First target: **Valhalla Supermassive**. Slice breakdown and ordering
-are tracked under the REAPER section of [`roadmap.md`](roadmap.md).
+Slices 1–2 built (pending live verification): `reaper_add_fx` (insert by name) and the discovery
+pair `reaper_list_fx` / `reaper_list_fx_params`. Next is Slice 3 — `reaper_set_fx_preset` + a
+curated preset/mode catalog. Plugins are installed manually (see above). Work is **incremental,
+free-first, one plugin at a time**, and every slice must be verifiable **without recording audio**
+(insert + read-back) since the studio isn't built yet. First target: **Valhalla Supermassive**.
+Slice breakdown and ordering are tracked under the REAPER section of [`roadmap.md`](roadmap.md).

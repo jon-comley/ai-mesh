@@ -333,9 +333,10 @@ and `fx` (plugin name). The track is matched case-insensitively (same loop as
 `reaper_remove_track`); the FX is added via `TrackFX_AddByName(tr, fx, false, -1)`.
 
 - **Match the bare product name, no format prefix.** Pass `ValhallaSupermassive` /
-  `ReaVerbate`, **not** `VST3:ValhallaSupermassive` — the installed format varies per machine
+  `ReaComp`, **not** `VST3:ValhallaSupermassive` — the installed format varies per machine
   (Valhalla Supermassive surfaced VST2-only on OmniLink1), and REAPER resolves the bare name to
-  whatever it has. See [`reaper-plugins.md`](reaper-plugins.md).
+  whatever it has. **Caveat:** this works for **VST**-style names; **JSFX** (e.g. `ReaVerbate`)
+  do **not** resolve via `TrackFX_AddByName` by bare name. See [`reaper-plugins.md`](reaper-plugins.md).
 - **Unresolved plugins are reported, not silent.** `TrackFX_AddByName` returns -1 when REAPER
   can't find/scan the name, surfaced as `FX 'X' not found — is it installed and scanned in
   REAPER?` rather than a no-op.

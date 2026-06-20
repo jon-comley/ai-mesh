@@ -616,10 +616,16 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
   First target: **Valhalla Supermassive** (free reverb — famous named presets, the cleanest demo).
   - Slice 1 — `reaper_add_fx` (◐ code + unit tests done; pending live verification): inserts an
     FX by name on a named track, matching the bare product name (no `VST:`/`VST3:` prefix) and
-    reporting unresolved plugins instead of a silent no-op. Verify with stock **ReaVerbate** first
-    (always installed, no format ambiguity), then Valhalla Supermassive.
-  - Slice 2 — `reaper_list_fx` + `reaper_list_fx_params`: discovery. Also resolves the open
-    question of whether Supermassive's modes are REAPER presets (→ `SetPreset`) or internal params.
+    reporting unresolved plugins instead of a silent no-op. Verify with **Valhalla Supermassive**
+    (a VST that resolves by bare name). **Note:** stock **ReaVerbate** is *not* a safe control —
+    it's a JSFX and does **not** resolve via `TrackFX_AddByName` by bare name (JS plugins need a
+    different name form), so don't use it as the "always installed" fallback.
+  - Slice 2 — `reaper_list_fx` + `reaper_list_fx_params` (◐ code + unit tests done; pending live
+    verification): discovery. `reaper_list_fx` walks a track's chain returning name + 1-based slot
+    (+ bypass flag); `reaper_list_fx_params` resolves the FX by name match (never a raw index) and
+    lists each param's name, formatted value, and raw 0–1 value. Running `reaper_list_fx_params` on
+    Supermassive answers the open question of whether its modes are REAPER presets (→ `SetPreset`)
+    or internal params — if a "mode" param appears, they're params; if not, they're presets.
   - Slice 3 — `reaper_set_fx_preset` + a small curated preset/mode catalog: the "make it
     spacious" payoff.
   - Later — `reaper_set_fx_param` / `reaper_get_fx_param`, `reaper_bypass_fx`, then the next free
