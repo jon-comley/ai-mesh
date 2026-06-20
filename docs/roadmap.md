@@ -592,6 +592,19 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 - ✓ Multi-line daemon result messages — agent now parses the whole `ai_mesh_result.txt`
   (`<id>\t<ok|err>\t<message>`, message may span lines) instead of the first line; the daemon
   writes the result via a temp file + rename so a multi-line result is never read half-written.
+- ✓ REAPER auto-launch (v1) — when a `reaper_*` tool is requested while REAPER is offline,
+  the coordinator asks the node to spawn REAPER (`ReaperCommand` action `launch`; exe via
+  `REAPER_EXE`, default `/mnt/c/Program Files/REAPER (x64)/reaper.exe`, launched through WSL
+  interop) and replies "started it, give it ~15s, ask again" instead of timing out. A 30 s
+  cooldown on the node prevents a retry burst opening several instances. Deliberately does **not**
+  force a new project (REAPER opens its own default). Deferred follow-ups:
+  - **Auto-retry after ready** — poll `/_/TRANSPORT` until online (cap ~30–45 s) and then run the
+    *original* queued command, so the user doesn't have to re-ask. Skipped in v1 because cold
+    start + plugin scan far exceeds the intent timeout; needs an async "resume the intent" path.
+  - **Explicit "start a new project" intent** — expose `new_project` (action 40023, already mapped
+    in capability-reaper) as a tool, keeping auto-launch non-opinionated about the session.
+  - **macOS launch path** — `REAPER_EXE` defaults to the app-bundle binary but is untested; gated
+    on the same Mac mini provisioning as the items below.
 - ◐ REAPER on macOS — code is macOS-ready (`default_scripts_dir()` resolves
   `~/Library/Application Support/REAPER/Scripts` on macOS, `/mnt/c/...` on WSL2); full
   provisioning (install script + node setup + testing) still pending the Mac mini (~end Jul 2026).

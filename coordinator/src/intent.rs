@@ -26,6 +26,7 @@ pub async fn handle_intent(
     pending_inferences: PendingInferences,
     pending_intents: PendingIntents,
     device_states: Vec<LightStateReport>,
+    reaper_online: bool,
 ) -> IntentResponse {
     let started = std::time::Instant::now();
     let fail = |msg: String| IntentResponse {
@@ -210,16 +211,28 @@ pub async fn handle_intent(
                 args["color_name"] = serde_json::Value::String(color.to_string());
             }
 
-            let tool_result = dispatch_tool(
-                &request.request_id,
-                &tool_name,
-                args.clone(),
-                &registry,
-                &connections,
-                &pending_intents,
-                &device_states,
-            )
-            .await;
+            // A REAPER tool was requested but REAPER isn't running: launch it and tell the
+            // user to retry, rather than dispatching into a dead daemon and timing out.
+            let tool_result = if tool_name.starts_with("reaper_") && !reaper_online {
+                launch_reaper_and_advise(
+                    &request.request_id,
+                    &registry,
+                    &connections,
+                    &pending_intents,
+                )
+                .await
+            } else {
+                dispatch_tool(
+                    &request.request_id,
+                    &tool_name,
+                    args.clone(),
+                    &registry,
+                    &connections,
+                    &pending_intents,
+                    &device_states,
+                )
+                .await
+            };
 
             records.push(ToolCallRecord {
                 tool: tool_name,
@@ -627,6 +640,81 @@ async fn dispatch_tool(
             run_reaper_lua(request_id, code, registry, connections, pending_intents).await
         }
         other => format!("unknown tool: {other}"),
+    }
+}
+
+/// REAPER is offline but a REAPER tool was asked for: ask the node to spawn REAPER and
+/// return a message telling the user to retry once it's loaded. We don't wait for REAPER
+/// to become ready here (cold start + plugin scan far exceeds the intent timeout) — that
+/// auto-retry is deferred (see roadmap). The launch reuses the `ReaperCommand` path with
+/// action "launch"; its result is awaited here (via the pending-intent oneshot) to report
+/// whether the spawn succeeded.
+async fn launch_reaper_and_advise(
+    request_id: &str,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    pending_intents: &PendingIntents,
+) -> String {
+    let reaper_node_id = {
+        let reg = registry.lock().unwrap();
+        let nodes: Vec<String> = reg
+            .nodes_with_feature("reaper")
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        drop(reg);
+        let conns = connections.lock().unwrap();
+        nodes.into_iter().find(|id| conns.contains_key(id))
+    };
+    let Some(reaper_node_id) = reaper_node_id else {
+        return "REAPER isn't running and no REAPER node is connected to start it.".into();
+    };
+
+    let cmd = ReaperCommandRequest {
+        request_id: request_id.to_string(),
+        action: "launch".to_string(),
+        params: serde_json::Value::Null,
+    };
+
+    let (otx, orx) = oneshot::channel();
+    pending_intents
+        .lock()
+        .unwrap()
+        .insert(request_id.to_string(), otx);
+
+    let sent = connections
+        .lock()
+        .unwrap()
+        .get(&reaper_node_id)
+        .map(|tx| tx.try_send(MeshMessage::ReaperCommand(cmd)).is_ok())
+        .unwrap_or(false);
+    if !sent {
+        pending_intents.lock().unwrap().remove(request_id);
+        return "REAPER isn't running and I couldn't reach the node to start it.".into();
+    }
+
+    match timeout(Duration::from_secs(8), orx).await {
+        Ok(Ok(MeshMessage::ReaperCommandResult(r))) if r.ok => {
+            if r.message == "REAPER is already starting" {
+                "REAPER is still starting up — give it a few more seconds, then ask again.".into()
+            } else {
+                "REAPER wasn't running, so I've started it. Give it ~15 seconds to finish \
+                 loading, then ask again."
+                    .into()
+            }
+        }
+        Ok(Ok(MeshMessage::ReaperCommandResult(r))) => {
+            format!(
+                "REAPER isn't running and I couldn't start it: {}",
+                r.message
+            )
+        }
+        _ => {
+            pending_intents.lock().unwrap().remove(request_id);
+            "REAPER isn't running; I tried to start it but got no confirmation. Check the \
+             REAPER box, then try again."
+                .into()
+        }
     }
 }
 
