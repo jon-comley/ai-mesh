@@ -228,11 +228,13 @@ pub async fn handle_intent(
             });
         }
 
+        let text = offline_skip_summary(&records, &device_room_map);
+
         return IntentResponse {
             request_id: request.request_id,
             node_id,
             model_name,
-            text: None,
+            text,
             tool_calls: records,
             error: None,
             duration_ms,
@@ -261,6 +263,75 @@ fn device_is_offline(target: &str, states: &[LightStateReport]) -> bool {
         .iter()
         .find(|s| s.device_id == target)
         .is_some_and(|s| !s.online)
+}
+
+/// The tool result `dispatch_tool` returns when it refuses a light command because the
+/// target is offline. Kept as one function so the producer (dispatch) and the parser
+/// ([`parse_offline_skip`], used to build the proactive summary) can never drift apart.
+fn offline_skip_result(target: &str) -> String {
+    format!("device '{target}' is currently offline")
+}
+
+/// Inverse of [`offline_skip_result`]: recover the device target from such a result,
+/// or `None` if the result is anything else.
+fn parse_offline_skip(result: &str) -> Option<&str> {
+    result
+        .strip_prefix("device '")
+        .and_then(|s| s.strip_suffix("' is currently offline"))
+}
+
+/// Build a short, friendly note about light targets that were skipped because they're
+/// offline (powered down / unreachable), grouped by room, so the chat reply proactively
+/// tells the user instead of relying on the model to honour the `[OFFLINE]` markers.
+/// Returns `None` when nothing was skipped.
+fn offline_skip_summary(
+    records: &[ToolCallRecord],
+    device_room_map: &HashMap<String, String>,
+) -> Option<String> {
+    let offline: Vec<&str> = records
+        .iter()
+        .filter(|r| r.tool == "light_command")
+        .filter_map(|r| r.result.as_deref().and_then(parse_offline_skip))
+        .collect();
+    if offline.is_empty() {
+        return None;
+    }
+    // Count per room, preserving first-seen order; targets with no known room are
+    // grouped under an empty key and labelled generically.
+    let mut order: Vec<String> = Vec::new();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for t in &offline {
+        let room = device_room_map.get(*t).cloned().unwrap_or_default();
+        if !counts.contains_key(&room) {
+            order.push(room.clone());
+        }
+        *counts.entry(room).or_insert(0) += 1;
+    }
+    let total = offline.len();
+    let plural = if total == 1 { "light is" } else { "lights are" };
+    let them = if total == 1 { "it" } else { "them" };
+    // Single known room → the natural "the kitchen lights are powered off" phrasing.
+    if order.len() == 1 && !order[0].is_empty() {
+        let room = &order[0];
+        return Some(format!(
+            "Heads up: {total} {room} {plural} powered off (or unreachable), so I skipped {them}."
+        ));
+    }
+    let breakdown = order
+        .iter()
+        .map(|r| {
+            let c = counts[r];
+            if r.is_empty() {
+                format!("{c} with no room")
+            } else {
+                format!("{c} in {r}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Heads up: {total} {plural} powered off (or unreachable), so I skipped {them} ({breakdown})."
+    ))
 }
 
 async fn dispatch_tool(
@@ -340,7 +411,7 @@ async fn dispatch_tool(
                 .unwrap_or("")
                 .to_string();
             if device_is_offline(&final_target, device_states) {
-                return format!("device '{}' is currently offline", final_target);
+                return offline_skip_result(&final_target);
             }
             let Some(cmds) = build_light_command(request_id, &args) else {
                 return "unrecognised colour — no command sent".into();
@@ -535,6 +606,24 @@ async fn dispatch_tool(
                 return "reaper_add_fx requires a track name and an fx (plugin) name".into();
             }
             let code = build_add_fx_lua(&track, &fx);
+            run_reaper_lua(request_id, code, registry, connections, pending_intents).await
+        }
+        "reaper_list_fx" => {
+            let track = args["track"].as_str().unwrap_or("").trim().to_string();
+            if track.is_empty() {
+                return "reaper_list_fx requires a track name".into();
+            }
+            let code = build_list_fx_lua(&track);
+            run_reaper_lua(request_id, code, registry, connections, pending_intents).await
+        }
+        "reaper_list_fx_params" => {
+            let track = args["track"].as_str().unwrap_or("").trim().to_string();
+            let fx = args["fx"].as_str().unwrap_or("").trim().to_string();
+            if track.is_empty() || fx.is_empty() {
+                return "reaper_list_fx_params requires a track name and an fx (plugin) name"
+                    .into();
+            }
+            let code = build_list_fx_params_lua(&track, &fx);
             run_reaper_lua(request_id, code, registry, connections, pending_intents).await
         }
         other => format!("unknown tool: {other}"),
@@ -742,6 +831,91 @@ fn build_add_fx_lua(track: &str, fx: &str) -> String {
     lua.push_str(
         "return \"Added '\" .. real .. \"' to track '\" .. tn .. \"' (FX slot \" .. (idx + 1) .. \")\"\n",
     );
+    lua
+}
+
+/// Build Lua that lists every FX in a named track's chain as `name + 1-based slot`,
+/// flagging bypassed slots. The discovery primitive that lets the coordinator (never
+/// the LLM) resolve a plugin name → chain index, guarding against FX index drift
+/// (quirk #1): callers see what's actually loaded before touching params or presets.
+fn build_list_fx_lua(track: &str) -> String {
+    let target = lua_escape(&track.to_lowercase());
+    let display = lua_escape(track);
+    let mut lua = String::new();
+    lua.push_str(&format!("local target = '{target}'\n"));
+    lua.push_str(&format!("local display = '{display}'\n"));
+    lua.push_str("local tr = nil\n");
+    lua.push_str("for i = 0, reaper.CountTracks(0) - 1 do\n");
+    lua.push_str("  local t = reaper.GetTrack(0, i)\n");
+    lua.push_str("  local _, nm = reaper.GetSetMediaTrackInfo_String(t, 'P_NAME', '', false)\n");
+    lua.push_str("  if nm:lower() == target then tr = t; break end\n");
+    lua.push_str("end\n");
+    lua.push_str("if not tr then return \"No track named '\" .. display .. \"' found\" end\n");
+    lua.push_str("local _, tn = reaper.GetSetMediaTrackInfo_String(tr, 'P_NAME', '', false)\n");
+    lua.push_str("local n = reaper.TrackFX_GetCount(tr)\n");
+    lua.push_str("if n == 0 then return \"Track '\" .. tn .. \"' has no FX\" end\n");
+    lua.push_str("local lines = { \"FX on track '\" .. tn .. \"':\" }\n");
+    lua.push_str("for i = 0, n - 1 do\n");
+    lua.push_str("  local _, fxname = reaper.TrackFX_GetFXName(tr, i, '')\n");
+    lua.push_str("  local on = reaper.TrackFX_GetEnabled(tr, i)\n");
+    lua.push_str(
+        "  table.insert(lines, '  ' .. (i + 1) .. '. ' .. fxname .. (on and '' or ' [bypassed]'))\n",
+    );
+    lua.push_str("end\n");
+    lua.push_str("return table.concat(lines, '\\n')\n");
+    lua
+}
+
+/// Build Lua that lists every parameter of a named FX on a named track: index, name,
+/// formatted value (e.g. '12.0 dB') and the raw 0–1 normalised value. The FX is
+/// resolved by **name match** against the live chain (quirk #1 — never trust a raw
+/// index from the model); the bare product name is matched as a substring so a
+/// format-prefixed real name ('VST: ValhallaSupermassive …') still resolves (quirk #2).
+/// A 0-param result is reported rather than shown empty, since heavy plugins build
+/// their param map lazily on UI init (quirk #3). This is the discovery step that maps
+/// param names↔indices, and reveals whether a plugin's "modes" are params or presets.
+fn build_list_fx_params_lua(track: &str, fx: &str) -> String {
+    let target = lua_escape(&track.to_lowercase());
+    let display = lua_escape(track);
+    let fx_lc = lua_escape(&fx.to_lowercase());
+    let fx_disp = lua_escape(fx);
+    let mut lua = String::new();
+    lua.push_str(&format!("local target = '{target}'\n"));
+    lua.push_str(&format!("local display = '{display}'\n"));
+    lua.push_str(&format!("local fx = '{fx_lc}'\n"));
+    lua.push_str(&format!("local fxdisplay = '{fx_disp}'\n"));
+    lua.push_str("local tr = nil\n");
+    lua.push_str("for i = 0, reaper.CountTracks(0) - 1 do\n");
+    lua.push_str("  local t = reaper.GetTrack(0, i)\n");
+    lua.push_str("  local _, nm = reaper.GetSetMediaTrackInfo_String(t, 'P_NAME', '', false)\n");
+    lua.push_str("  if nm:lower() == target then tr = t; break end\n");
+    lua.push_str("end\n");
+    lua.push_str("if not tr then return \"No track named '\" .. display .. \"' found\" end\n");
+    // Resolve the FX by matching the bare name as a plain substring of the real name.
+    lua.push_str("local fxidx = -1\n");
+    lua.push_str("local realname = ''\n");
+    lua.push_str("for i = 0, reaper.TrackFX_GetCount(tr) - 1 do\n");
+    lua.push_str("  local _, nm = reaper.TrackFX_GetFXName(tr, i, '')\n");
+    lua.push_str("  if nm:lower():find(fx, 1, true) then fxidx = i; realname = nm; break end\n");
+    lua.push_str("end\n");
+    lua.push_str(
+        "if fxidx < 0 then return \"No FX matching '\" .. fxdisplay .. \"' on track '\" .. display .. \"'\" end\n",
+    );
+    lua.push_str("local np = reaper.TrackFX_GetNumParams(tr, fxidx)\n");
+    lua.push_str(
+        "if np == 0 then return \"FX '\" .. realname .. \"' reports 0 parameters (it may still be initialising)\" end\n",
+    );
+    lua.push_str("local lines = { realname .. ' parameters:' }\n");
+    lua.push_str("for i = 0, np - 1 do\n");
+    lua.push_str("  local _, pname = reaper.TrackFX_GetParamName(tr, fxidx, i, '')\n");
+    lua.push_str("  local val = reaper.TrackFX_GetParam(tr, fxidx, i)\n");
+    lua.push_str("  local _, fmt = reaper.TrackFX_GetFormattedParamValue(tr, fxidx, i, '')\n");
+    lua.push_str("  if fmt == '' then fmt = string.format('%.3f', val) end\n");
+    lua.push_str(
+        "  table.insert(lines, '  ' .. i .. '. ' .. pname .. ' = ' .. fmt .. ' (' .. string.format('%.3f', val) .. ')')\n",
+    );
+    lua.push_str("end\n");
+    lua.push_str("return table.concat(lines, '\\n')\n");
     lua
 }
 
@@ -1173,7 +1347,7 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
             }),
             serde_json::json!({
                 "name": "reaper_add_fx",
-                "description": "Add an audio effect / plugin (FX) to a named track in REAPER. Use for 'add reverb to the vocal track', 'put ValhallaSupermassive on the guitar', 'add ReaEQ to drums'. 'track' is the track's name; 'fx' is the plugin name as REAPER lists it in the FX browser — pass the bare product name (e.g. 'ValhallaSupermassive', 'ReaVerbate', 'ReaEQ') WITHOUT a 'VST:'/'VST3:' prefix, since the available format differs per machine.",
+                "description": "Add an audio effect / plugin (FX) to a named track in REAPER. Use for 'add reverb to the vocal track', 'put ValhallaSupermassive on the guitar', 'add ReaEQ to drums'. 'track' is the track's name; 'fx' is the plugin name as REAPER lists it in the FX browser — pass the bare product name (e.g. 'ValhallaSupermassive', 'ReaComp', 'ReaEQ') WITHOUT a 'VST:'/'VST3:' prefix, since the available format differs per machine.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1183,7 +1357,39 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         },
                         "fx": {
                             "type": "string",
-                            "description": "Plugin name as shown in REAPER's FX browser, e.g. 'ValhallaSupermassive', 'ReaVerbate', 'ReaEQ'. No 'VST:'/'VST3:' prefix."
+                            "description": "Plugin name as shown in REAPER's FX browser, e.g. 'ValhallaSupermassive', 'ReaComp', 'ReaEQ'. No 'VST:'/'VST3:' prefix."
+                        }
+                    },
+                    "required": ["track", "fx"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_list_fx",
+                "description": "List the audio effects / plugins (FX) currently loaded on a named track in REAPER, in chain order, flagging any that are bypassed. Use for 'what FX are on the vocal track?', 'list the plugins on the guitar', 'what reverb is on drums?'. 'track' is the track's name.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "track": {
+                            "type": "string",
+                            "description": "Name of the track whose FX chain to list, e.g. 'vocal', 'guitar'"
+                        }
+                    },
+                    "required": ["track"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_list_fx_params",
+                "description": "List the parameters (controllable knobs) of one plugin on a named track, with each parameter's name, current value, and index. Use to discover what can be tweaked before changing it, e.g. 'what can I adjust on ValhallaSupermassive?', 'show the parameters of the reverb on the vocal'. 'track' is the track's name; 'fx' is the plugin name as REAPER lists it (bare product name, no 'VST:'/'VST3:' prefix).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "track": {
+                            "type": "string",
+                            "description": "Name of the track the plugin is on, e.g. 'vocal', 'guitar'"
+                        },
+                        "fx": {
+                            "type": "string",
+                            "description": "Plugin name as shown in REAPER's FX browser, e.g. 'ValhallaSupermassive', 'ReaEQ'. No 'VST:'/'VST3:' prefix."
                         }
                     },
                     "required": ["track", "fx"]
@@ -1769,6 +1975,79 @@ mod tests {
         assert!(!device_is_offline("unknown_bulb", &states));
     }
 
+    fn light_record(target: &str, result: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            tool: "light_command".into(),
+            args: serde_json::json!({ "target": target }),
+            result: Some(result.into()),
+        }
+    }
+
+    #[test]
+    fn offline_skip_result_round_trips() {
+        // Producer and parser must stay in lockstep — this is the contract the
+        // proactive summary depends on.
+        let msg = offline_skip_result("0x00178801");
+        assert_eq!(parse_offline_skip(&msg), Some("0x00178801"));
+        assert_eq!(parse_offline_skip("ok"), None);
+    }
+
+    #[test]
+    fn offline_skip_summary_none_when_nothing_skipped() {
+        let records = vec![light_record("bulb_a", "ok")];
+        assert!(offline_skip_summary(&records, &HashMap::new()).is_none());
+    }
+
+    #[test]
+    fn offline_skip_summary_groups_a_single_room() {
+        let mut rooms = HashMap::new();
+        rooms.insert("bulb_a".to_string(), "Kitchen".to_string());
+        rooms.insert("bulb_b".to_string(), "Kitchen".to_string());
+        let records = vec![
+            light_record("bulb_a", &offline_skip_result("bulb_a")),
+            light_record("bulb_b", &offline_skip_result("bulb_b")),
+        ];
+        let summary = offline_skip_summary(&records, &rooms).unwrap();
+        assert!(
+            summary.contains("2 Kitchen lights are powered off"),
+            "{summary}"
+        );
+        assert!(summary.contains("skipped them"), "{summary}");
+    }
+
+    #[test]
+    fn offline_skip_summary_singular_and_only_counts_offline() {
+        let mut rooms = HashMap::new();
+        rooms.insert("bulb_a".to_string(), "Office".to_string());
+        let records = vec![
+            light_record("bulb_a", &offline_skip_result("bulb_a")),
+            light_record("bulb_b", "ok"), // online — must not be counted
+        ];
+        let summary = offline_skip_summary(&records, &rooms).unwrap();
+        assert!(
+            summary.contains("1 Office light is powered off"),
+            "{summary}"
+        );
+        assert!(summary.contains("skipped it"), "{summary}");
+    }
+
+    #[test]
+    fn offline_skip_summary_mixed_rooms_lists_breakdown() {
+        let mut rooms = HashMap::new();
+        rooms.insert("bulb_a".to_string(), "Kitchen".to_string());
+        rooms.insert("bulb_b".to_string(), "Hall".to_string());
+        let records = vec![
+            light_record("bulb_a", &offline_skip_result("bulb_a")),
+            light_record("bulb_b", &offline_skip_result("bulb_b")),
+            light_record("bulb_c", &offline_skip_result("bulb_c")), // no room
+        ];
+        let summary = offline_skip_summary(&records, &rooms).unwrap();
+        assert!(summary.contains("3 lights are powered off"), "{summary}");
+        assert!(summary.contains("1 in Kitchen"), "{summary}");
+        assert!(summary.contains("1 in Hall"), "{summary}");
+        assert!(summary.contains("1 with no room"), "{summary}");
+    }
+
     #[test]
     fn add_track_lua_names_via_gettrack_not_insert_return() {
         let lua = build_add_track_lua("guitar", None, false);
@@ -1896,8 +2175,8 @@ mod tests {
     fn add_fx_lua_does_not_force_a_format_prefix() {
         // The available format varies per machine (Valhalla surfaced VST2-only on
         // OmniLink1), so we must pass the bare name with no VST:/VST3: prefix.
-        let lua = build_add_fx_lua("guitar", "ReaVerbate");
-        assert!(lua.contains("local fx = 'ReaVerbate'"));
+        let lua = build_add_fx_lua("guitar", "ReaComp");
+        assert!(lua.contains("local fx = 'ReaComp'"));
         assert!(!lua.contains("VST3:"));
         assert!(!lua.contains("VST:"));
     }
@@ -1906,6 +2185,60 @@ mod tests {
     fn add_fx_lua_escapes_names() {
         // Quotes/backslashes in either name must not break out of the Lua literals.
         let lua = build_add_fx_lua("d'n\\b", "weird'fx");
+        assert!(lua.contains("local target = 'd\\'n\\\\b'"));
+        assert!(lua.contains("local fx = 'weird\\'fx'"));
+    }
+
+    #[test]
+    fn list_fx_lua_resolves_track_and_lists_chain() {
+        let lua = build_list_fx_lua("vocal");
+        // Track resolved case-insensitively by name (same loop as add_fx/remove_track).
+        assert!(lua.contains("local target = 'vocal'"));
+        assert!(lua.contains("if nm:lower() == target then tr = t; break end"));
+        assert!(
+            lua.contains("if not tr then return \"No track named '\" .. display .. \"' found\"")
+        );
+        // Walks the chain by index, emitting name + 1-based slot and a bypass flag.
+        assert!(lua.contains("local n = reaper.TrackFX_GetCount(tr)"));
+        assert!(lua.contains("local _, fxname = reaper.TrackFX_GetFXName(tr, i, '')"));
+        assert!(lua.contains("local on = reaper.TrackFX_GetEnabled(tr, i)"));
+        assert!(lua.contains("(on and '' or ' [bypassed]')"));
+        // Empty chain reports rather than returning an empty list.
+        assert!(lua.contains("if n == 0 then return \"Track '\" .. tn .. \"' has no FX\""));
+    }
+
+    #[test]
+    fn list_fx_params_lua_resolves_fx_by_name_not_index() {
+        // Quirk #1: never trust a raw index — resolve the FX by matching the bare name
+        // as a plain substring of the (possibly format-prefixed) real name (quirk #2).
+        let lua = build_list_fx_params_lua("vocal", "ValhallaSupermassive");
+        assert!(lua.contains("local fx = 'valhallasupermassive'"));
+        assert!(lua.contains("if nm:lower():find(fx, 1, true) then fxidx = i; realname = nm"));
+        assert!(lua.contains(
+            "if fxidx < 0 then return \"No FX matching '\" .. fxdisplay .. \"' on track '\""
+        ));
+        // Enumerates params: name, formatted value, raw 0–1 value.
+        assert!(lua.contains("local np = reaper.TrackFX_GetNumParams(tr, fxidx)"));
+        assert!(lua.contains("local _, pname = reaper.TrackFX_GetParamName(tr, fxidx, i, '')"));
+        assert!(lua.contains("local val = reaper.TrackFX_GetParam(tr, fxidx, i)"));
+        assert!(
+            lua.contains("local _, fmt = reaper.TrackFX_GetFormattedParamValue(tr, fxidx, i, '')")
+        );
+    }
+
+    #[test]
+    fn list_fx_params_lua_reports_zero_params_for_lazy_init() {
+        // Quirk #3: heavy plugins build their param map lazily on UI init — a 0-param
+        // result is reported, not shown as an empty list.
+        let lua = build_list_fx_params_lua("vocal", "Kontakt");
+        assert!(
+            lua.contains("if np == 0 then return \"FX '\" .. realname .. \"' reports 0 parameters")
+        );
+    }
+
+    #[test]
+    fn list_fx_params_lua_escapes_names() {
+        let lua = build_list_fx_params_lua("d'n\\b", "weird'fx");
         assert!(lua.contains("local target = 'd\\'n\\\\b'"));
         assert!(lua.contains("local fx = 'weird\\'fx'"));
     }
