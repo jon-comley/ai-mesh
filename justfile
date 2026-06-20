@@ -1354,12 +1354,20 @@ start-cluster: update-portproxy
         echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
         scp {{ssh_opts}} -q "jonno@{{coordinator_ip}}:/var/lib/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
 
+        # Load the freshly-synced TLS fingerprint + auth token BEFORE the connectivity
+        # check — the CLI needs them for the mesh TLS handshake. Without re-sourcing here
+        # the check uses a stale fingerprint (none, or one read before this scp) and fails
+        # even when the coordinator is healthy, e.g. after its cert was regenerated.
+        STATE="$HOME/.config/ai-mesh/coordinator.state"
+        if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN; fi
+
         cargo build -q -p cli
         echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
-        if cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes > /dev/null 2>&1; then
+        if check_err=$(cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes 2>&1 >/dev/null); then
             echo ">>> Coordinator ready."
         else
             echo ">>> ERROR: Could not reach coordinator at {{coordinator_ip}}:{{coordinator_port}}"
+            echo ">>>        CLI error: ${check_err:-<none>}"
             echo ">>>        Is it running? Check: ssh jonno@{{coordinator_ip}} systemctl status ai-mesh-coordinator"
             exit 1
         fi
@@ -1474,12 +1482,20 @@ restart-coordinator: update-portproxy
         echo ">>> Syncing coordinator state from {{coordinator_ip}}..."
         scp {{ssh_opts}} -q "jonno@{{coordinator_ip}}:/var/lib/ai-mesh/coordinator.state" "$HOME/.config/ai-mesh/coordinator.state" || echo ">>> Warning: could not sync state from {{coordinator_ip}}"
 
+        # Load the freshly-synced TLS fingerprint + auth token BEFORE the connectivity
+        # check — the CLI needs them for the mesh TLS handshake. Without re-sourcing here
+        # the check uses a stale fingerprint (none, or one read before this scp) and fails
+        # even when the coordinator is healthy, e.g. after its cert was regenerated.
+        STATE="$HOME/.config/ai-mesh/coordinator.state"
+        if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN; fi
+
         cargo build -q -p cli
         echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
-        if cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes > /dev/null 2>&1; then
+        if check_err=$(cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes 2>&1 >/dev/null); then
             echo ">>> Coordinator ready."
         else
             echo ">>> ERROR: Could not reach coordinator at {{coordinator_ip}}:{{coordinator_port}}"
+            echo ">>>        CLI error: ${check_err:-<none>}"
             echo ">>>        Is it running? Check: ssh jonno@{{coordinator_ip}} systemctl status ai-mesh-coordinator"
             exit 1
         fi
@@ -2179,6 +2195,79 @@ test-reaper:
         ok "REAPER transport is stopped (state=0)"
     else
         echo "  ⚠ transport state=${STATE_AFTER} after stop (expected 0)"
+    fi
+
+    # ── FX automation (Slices 1–2) ────────────────────────────────────────────
+    # Keys on Valhalla Supermassive (a VST that resolves by bare name), NOT a stock
+    # plugin: ReaVerbate is a JSFX and did NOT resolve via TrackFX_AddByName by bare
+    # name, so it is unsafe as a control case. Uses a throwaway track and removes it
+    # afterwards so the smoke test leaves the project as it found it. (Plugin must be
+    # installed + scanned in REAPER — see docs/reaper-plugins.md.)
+    # Single-token track name: small models mangle multi-word names on recall (e.g.
+    # "the fx smoke track" → "smoke"), which breaks the name-match the FX tools rely on.
+    FXTRACK="fxsmoke"
+    FXPLUGIN="ValhallaSupermassive"
+
+    tool_of()   { python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('tool_calls',[]); print(c[0]['tool'] if c else '')" 2>/dev/null; }
+    result_of() { python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('tool_calls',[]); print(c[0]['result'] if c else '')" 2>/dev/null; }
+
+    echo ""
+    echo "=== REAPER FX smoke test (Slices 1–2) ==="
+    echo ""
+
+    echo "[F1/5] Create throwaway track..."
+    RESP=$(chat "add a track called ${FXTRACK}")
+    if [ "$(echo "$RESP" | tool_of)" = "reaper_add_track" ]; then
+        ok "reaper_add_track → $(echo "$RESP" | result_of)"
+    else
+        fail "Expected reaper_add_track, got: $(echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP")"
+    fi
+
+    echo "[F2/5] Slice 1 — add ${FXPLUGIN} (reaper_add_fx)..."
+    RESP=$(chat "add ${FXPLUGIN} to the ${FXTRACK} track")
+    TOOL=$(echo "$RESP" | tool_of); RESULT=$(echo "$RESP" | result_of)
+    if [ "$TOOL" = "reaper_add_fx" ] && [[ "$RESULT" == Added* ]]; then
+        ok "reaper_add_fx → ${RESULT}"
+    else
+        fail "Expected reaper_add_fx 'Added …', got tool=${TOOL} result=${RESULT}"
+    fi
+
+    echo "[F3/5] Slice 2a — list FX (reaper_list_fx)..."
+    # Imperative phrasing ("list …"), not a question ("what FX …"): the coordinator's
+    # system prompt tells the model to answer state *questions* in plain text without
+    # JSON, which suppresses the tool call. A command nudges it to emit the tool.
+    RESP=$(chat "list the FX on the ${FXTRACK} track")
+    TOOL=$(echo "$RESP" | tool_of); RESULT=$(echo "$RESP" | result_of)
+    if [ "$TOOL" = "reaper_list_fx" ] && echo "$RESULT" | grep -qi "supermassive"; then
+        ok "reaper_list_fx lists the plugin"
+    else
+        fail "Expected reaper_list_fx listing Supermassive, got tool=${TOOL} result=${RESULT}"
+    fi
+
+    echo "[F4/5] Slice 2b — list FX params (reaper_list_fx_params)..."
+    RESP=$(chat "list the parameters of ${FXPLUGIN} on the ${FXTRACK} track")
+    TOOL=$(echo "$RESP" | tool_of); RESULT=$(echo "$RESP" | result_of)
+    if [ "$TOOL" = "reaper_list_fx_params" ] && echo "$RESULT" | grep -qi "parameters:"; then
+        ok "reaper_list_fx_params returns a param list"
+        # Settles the Slice 3 open question: are Supermassive's modes params or presets?
+        if echo "$RESULT" | grep -qi "mode"; then
+            echo "  → 'mode' param present: modes are PARAMS (Slice 3 → SetParam)"
+        else
+            echo "  → no 'mode' param: modes are likely PRESETS (Slice 3 → SetPreset)"
+        fi
+    else
+        fail "Expected reaper_list_fx_params, got tool=${TOOL} result=${RESULT}"
+    fi
+
+    echo "[F5/5] Cleanup — remove throwaway track..."
+    RESP=$(chat "remove the ${FXTRACK} track")
+    TOOL=$(echo "$RESP" | tool_of); RESULT=$(echo "$RESP" | result_of)
+    # Soft (don't fail the suite on cleanup), but verify the track was actually removed —
+    # a reaper_remove_track call that returns "No track named …" is NOT a successful cleanup.
+    if [ "$TOOL" = "reaper_remove_track" ] && [[ "$RESULT" == Removed* ]]; then
+        ok "cleanup: ${RESULT}"
+    else
+        echo "  ⚠ cleanup did not remove '${FXTRACK}' (tool=${TOOL} result=${RESULT}) — remove it manually in REAPER"
     fi
 
     echo ""
