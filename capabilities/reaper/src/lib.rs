@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use capability_core::Capability;
@@ -8,11 +8,17 @@ use shared::{
     ReaperScriptResult, ReaperStatusReport,
 };
 use tokio::sync::mpsc::Sender;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+/// Window after firing a launch during which we won't spawn REAPER again, so a burst
+/// of "REAPER is offline" retries can't open several instances while it's still loading.
+const REAPER_LAUNCH_COOLDOWN_SECS: u64 = 30;
 
 pub struct ReaperCapability {
     node_id: String,
     coordinator_tx: Arc<Mutex<Option<Sender<MeshMessage>>>>,
+    /// When we last spawned REAPER, for the cooldown above.
+    last_launch: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ReaperCapability {
@@ -20,6 +26,7 @@ impl ReaperCapability {
         Self {
             node_id: node_id.into(),
             coordinator_tx: Arc::new(Mutex::new(None)),
+            last_launch: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -38,6 +45,58 @@ impl ReaperCapability {
     fn tx(&self) -> Option<Sender<MeshMessage>> {
         self.coordinator_tx.lock().unwrap().clone()
     }
+
+    /// Spawn the REAPER application (it's closed, so the daemon/web server are down).
+    /// Fire-and-forget: we don't wait for it to finish loading — the coordinator tells
+    /// the user to retry shortly. A cooldown stops a burst of retries opening several
+    /// instances. On WSL2 the binary is a Windows `.exe` launched via interop.
+    fn launch_reaper(&self, cmd: &ReaperCommandRequest) -> ReaperCommandResult {
+        let result = |ok: bool, message: String| ReaperCommandResult {
+            request_id: cmd.request_id.clone(),
+            ok,
+            message,
+        };
+        {
+            let mut last = self.last_launch.lock().unwrap();
+            if let Some(t) = *last
+                && t.elapsed() < Duration::from_secs(REAPER_LAUNCH_COOLDOWN_SECS)
+            {
+                return result(true, "REAPER is already starting".into());
+            }
+            *last = Some(Instant::now());
+        }
+        let exe = reaper_exe_path();
+        match std::process::Command::new(&exe).spawn() {
+            Ok(_child) => {
+                info!("reaper: launched REAPER ({exe})");
+                result(true, format!("launched REAPER ({exe})"))
+            }
+            Err(e) => {
+                // Clear the cooldown so a corrected REAPER_EXE can be retried at once.
+                *self.last_launch.lock().unwrap() = None;
+                warn!("reaper: failed to launch REAPER at '{exe}': {e}");
+                result(
+                    false,
+                    format!(
+                        "failed to launch REAPER at '{exe}': {e} — set REAPER_EXE if it's installed elsewhere"
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/// Path to the REAPER executable. `REAPER_EXE` overrides it; otherwise default to the
+/// standard install — a Windows `.exe` under `/mnt/c` (WSL2 interop runs it directly)
+/// or the macOS app bundle binary.
+fn reaper_exe_path() -> String {
+    std::env::var("REAPER_EXE").unwrap_or_else(|_| {
+        if cfg!(target_os = "macos") {
+            "/Applications/REAPER.app/Contents/MacOS/REAPER".into()
+        } else {
+            "/mnt/c/Program Files/REAPER (x64)/reaper.exe".into()
+        }
+    })
 }
 
 #[async_trait]
@@ -115,7 +174,13 @@ impl Capability for ReaperCapability {
         let addr = Self::reaper_addr();
         match msg {
             MeshMessage::ReaperCommand(cmd) => {
-                let result = execute_command(&cmd, &addr).await;
+                // "launch" is special: REAPER is closed, so there's no web server to
+                // hit — spawn the app instead of issuing an HTTP action.
+                let result = if cmd.action == "launch" {
+                    self.launch_reaper(&cmd)
+                } else {
+                    execute_command(&cmd, &addr).await
+                };
                 if let Some(tx) = self.tx()
                     && tx
                         .send(MeshMessage::ReaperCommandResult(result))
@@ -425,6 +490,27 @@ mod tests {
     #[test]
     fn unknown_action_is_none() {
         assert_eq!(named_action_id("frobnicate"), None);
+    }
+
+    #[test]
+    fn launch_is_not_a_transport_action() {
+        // "launch" must fall through named_action_id so it isn't url-encoded into an
+        // HTTP action — handle() intercepts it and spawns the app instead.
+        assert_eq!(named_action_id("launch"), None);
+    }
+
+    #[test]
+    fn reaper_exe_path_defaults_per_platform_or_env() {
+        // SAFETY: single-threaded test; we set then remove the override.
+        unsafe { std::env::set_var("REAPER_EXE", "/custom/reaper") };
+        assert_eq!(reaper_exe_path(), "/custom/reaper");
+        unsafe { std::env::remove_var("REAPER_EXE") };
+        let def = reaper_exe_path();
+        if cfg!(target_os = "macos") {
+            assert!(def.contains("REAPER.app"), "got: {def}");
+        } else {
+            assert!(def.ends_with("reaper.exe"), "got: {def}");
+        }
     }
 
     #[test]
