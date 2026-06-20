@@ -1,4 +1,4 @@
-import { getHostname, getReadyLlmModel } from '/static/models.js';
+import { getHostname } from '/static/models.js';
 
 let thread = null;
 let input = null;
@@ -46,16 +46,11 @@ async function send() {
   const text = input.value.trim();
   if (!text || busy) return;
 
-  const currentModelKey = getReadyLlmModel();
-  if (currentModelKey && lastModelKey && currentModelKey !== lastModelKey) {
-    newContext('model changed — new conversation');
-  }
-
   input.value = '';
   busy = true;
   sendBtn.disabled = true;
 
-  appendMsg('user', text);
+  const userDiv = appendMsg('user', text);
 
   const thinking = appendThinking();
 
@@ -77,27 +72,43 @@ async function send() {
       const data = await res.json();
       if (data.error) {
         appendMsg('assistant', `Error: ${data.error}`);
-      } else if (data.tool_calls && data.tool_calls.length > 0) {
-        for (const tc of data.tool_calls) {
-          const result = tc.result ?? '';
-          appendToolMsg(tc.tool, result, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
+      } else {
+        // Detect a model switch from the model that ACTUALLY served this response.
+        // Server-side routing picks the node/model and the request carries no
+        // model_name, so the dashboard cannot reliably predict it pre-send — the old
+        // pre-send guess (first Ready model in the map) mismatched the served model
+        // whenever >1 model was Ready, wiping context on every turn. Only reset when
+        // the served model genuinely changes between turns.
+        const servedKey = (data.node_id && data.model_name)
+          ? `${data.node_id}/${data.model_name}` : null;
+        if (servedKey && lastModelKey && servedKey !== lastModelKey) {
+          conversationContext = [];
+          updateTurnCounter();
+          const divider = document.createElement('div');
+          divider.className = 'chat-divider';
+          divider.textContent = 'model changed — new conversation';
+          thread.insertBefore(divider, userDiv);
         }
-        if (data.text) {
-          appendMsg('assistant', data.text, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
+        // Render the reply (tool rows and/or a text bubble), then record one
+        // User/Assistant turn — the context push + trim is shared by both shapes.
+        let assistantContent;
+        if (data.tool_calls && data.tool_calls.length > 0) {
+          for (const tc of data.tool_calls) {
+            appendToolMsg(tc.tool, tc.result ?? '', data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
+          }
+          if (data.text) {
+            appendMsg('assistant', data.text, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
+          }
+          assistantContent = data.text ||
+            data.tool_calls.map(tc => `${tc.tool}: ${tc.result ?? ''}`).join('; ');
+        } else {
+          assistantContent = data.text ?? '';
+          appendMsg('assistant', assistantContent, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
         }
-        const assistantContent = data.text ||
-          data.tool_calls.map(tc => `${tc.tool}: ${tc.result ?? ''}`).join('; ');
         conversationContext.push({ role: 'User', content: text });
         conversationContext.push({ role: 'Assistant', content: assistantContent });
         trimAndUpdateContext();
-        if (data.node_id && data.model_name) lastModelKey = `${data.node_id}/${data.model_name}`;
-      } else {
-        const reply = data.text ?? '';
-        appendMsg('assistant', reply, data.node_id, data.model_name, data.duration_ms, data.tokens_generated, totalMs, data.prompt_eval_ms ?? 0, data.total_ms ?? 0);
-        conversationContext.push({ role: 'User', content: text });
-        conversationContext.push({ role: 'Assistant', content: reply });
-        trimAndUpdateContext();
-        if (data.node_id && data.model_name) lastModelKey = `${data.node_id}/${data.model_name}`;
+        if (data.node_id && data.model_name) lastModelKey = servedKey;
       }
     }
   } catch (err) {
