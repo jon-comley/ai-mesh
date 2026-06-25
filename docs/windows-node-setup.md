@@ -424,7 +424,7 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 **⚠️ REGRESSED 2026-06-02:** the `0x133`/`param2=0x1e00` storm returned (5 dumps) — fTPM appears to have re-enabled itself (BIOS defaults restored after a power event / suspected weak CMOS battery). Re-disable fTPM in BIOS. See 2026-06-02 entry.
 
-**⚠️ REGRESSED AGAIN 2026-06-24/25 (4th recurrence):** 8× `0x133`/`param2=0x1e00` bugchecks across 06-24→06-25, ~every 2–3 hours, with TPM-WMI Event 1025 re-provisioning on every boot (incl. immediately after the latest reboot) = **fTPM/Pluton active again**. Triggered when the BIOS golden state was lost during the ISP router→the mesh router network/power upheaval. Disabling Pluton in BIOS is still pending as of writing. See 2026-06-25 entry.
+**⚠️ REGRESSED 2026-06-24/25, then ROOT-CAUSE CORRECTED + RESOLVED:** 8× `0x133`/`param2=0x1e00` across 06-24→06-25 with TPM-WMI 1025 on every boot. This was **not** a wiped golden state — Pluton was Disabled the whole time. **Disabling Pluton alone never stopped fTPM** (it kept running via the TPM level). The actual fix (2026-06-25) was setting the **Trusted Platform Module level itself to `Disabled`**, after which fTPM stayed off (`Get-Tpm`=False, no 1025) and the box ran 7+ h with zero `0x133`. See the 2026-06-25 entry + corrected golden-state caution.
 
 **Diagnostics — run after any recovery:**
 ```bash
@@ -678,7 +678,7 @@ Kernel-Power 41 + Event 6008 (dirty shutdown) chains match each crash.
 TPM-WMI 1025 (fTPM re-provision) at 06-25 04:19:55 — i.e. immediately after the latest boot => fTPM ACTIVE NOW.
 Minidumps: 062526-8859-01.dmp (02:46) + four 062426-*.dmp, ~3.4-3.8 MB each.
 ```
-Same root cause as every prior recurrence — BIOS golden state lost (this time during the network/power upheaval), Pluton re-enabled, SPI bus lock → DPC watchdog. **Action still pending: disable Pluton in BIOS (golden state below).** Until then beelink will keep BSODing every few hours even though the agent now runs. Also set the mesh router DHCP reservations so the `10.0.0.x` leases don't move.
+**Root cause was NOT a wiped golden state** — Pluton was Disabled the whole time (BIOS settings unchanged since the last apply). The real cause: **disabling Pluton alone leaves fTPM running via the TPM level** — TPM-WMI 1025 fired on every boot, SPI bus lock → DPC watchdog. **RESOLVED 2026-06-25**: set the Trusted Platform Module level itself to `Disabled` (not just Pluton). After the 14:55 reboot — `Get-Tpm` reports `TpmPresent=False`, no Event 1025, and **7+ hours uptime with zero `0x133`** (vs. one every 2–3 h before). Fix confirmed; see the corrected golden-state caution below. Also set the mesh router DHCP reservations so the `10.0.0.x` leases don't move.
 
 ---
 
@@ -713,13 +713,15 @@ These are the exact settings required for stable 24/7 operation. **Every CMOS re
 
 | Setting | Value | Path |
 |---|---|---|
+| **Trusted Platform Module** | **Disabled** | Advanced → AMD CBS → SOC Misc Control → Trusted Platform Modules |
 | Pluton Security Processor | **Disabled** | Advanced → AMD CBS → SOC Misc Control |
 | Restore on AC Power Loss | **Always On** | Advanced → FCH Common Options → Ac Power Loss Options → Ac Loss Control |
 
-> Pluton = the SPI bus lock that triggers crash storms. **CRUCIAL.** Restore on AC = self-heals after power cuts.
+> The firmware TPM (fTPM) holding a SPI bus lock during flash writes is what triggers the `0x133` storms. **CRUCIAL.** Restore on AC = self-heals after power cuts.
 
-**⚠️ CAUTION — Trusted Platform Modules setting:**
-Setting "Trusted Platform Modules" to "dTPM Level 3" caused the machine to get stuck in "Automatic Repair" (boot loop). **Leave it on the default setting.** Only "Pluton Security Processor → Disabled" is needed; do not touch the TPM level.
+**⚠️ Trusted Platform Modules — CORRECTED 2026-06-25 (earlier guidance here was wrong):**
+Disabling **only** "Pluton Security Processor" is **NOT enough** — the fTPM keeps running via the TPM level and re-provisions on **every boot** (TPM-WMI Event 1025), so the `0x133` storm continues even with Pluton off. This was misdiagnosed for four recurrences as "the golden state got wiped"; in fact Pluton was disabled the whole time and fTPM was still active. **You must also set "Trusted Platform Module" itself to `Disabled`.** Verified menu (`Advanced → AMD CBS → SOC Misc Control → Trusted Platform Modules`): Trusted Platform Module = **Disabled**, Pluton Security Processor = **Disabled** (Microsoft Security Levels then reads "Customized" — that's a status, leave it). Confirm it took: `Get-Tpm` should show `TpmPresent=False`, and **no** new Event 1025 after boot.
+Do **not** use "dTPM Level 3" — that caused an "Automatic Repair" boot loop (it tries to enable a discrete TPM chip the SER8 doesn't have). `Disabled` boots fine; nothing on this box uses the TPM (no BitLocker / Windows Hello).
 
 **After BIOS — run the software hardening script:**
 ```
@@ -734,7 +736,9 @@ This applies: AMD ULPS/sleep registry tweaks, Intel AX200 NIC power management f
 ```bash
 # 1. fTPM disabled — MOST IMPORTANT. CMOS reset restores BIOS defaults (fTPM enabled).
 #    After any CMOS reset, go back into BIOS and disable fTPM before booting Windows.
-#    No software check for this — verify in BIOS: Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor (and Pluton Security Processor → Disabled)
+#    Verify in BIOS: Advanced → AMD CBS → SOC Misc Control → Trusted Platform Modules →
+#    Trusted Platform Module = Disabled AND Pluton Security Processor = Disabled (NOT dTPM Level 3 — boot loop).
+#    Software check: Get-Tpm should report TpmPresent=False, and no TPM-WMI Event 1025 after boot.
 
 # 2. ULPS disabled (harmless belt-and-braces, baked into boot task)
 ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
@@ -767,6 +771,6 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxE
 
 #### DO NOTs
 
-- **Never leave fTPM enabled.** AMD PSP holds a SPI bus lock during flash writes, stalling all CPU cores and triggering `0x00000133` at idle. Disable in BIOS: Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor (and Pluton Security Processor → Disabled). **This is reset by a CMOS clear** — always re-disable after any CMOS reset.
+- **Never leave fTPM enabled.** AMD PSP holds a SPI bus lock during flash writes, stalling all CPU cores and triggering `0x00000133` at idle. Disable in BIOS: `Advanced → AMD CBS → SOC Misc Control → Trusted Platform Modules` → set **Trusted Platform Module = Disabled AND Pluton Security Processor = Disabled** — disabling Pluton alone is NOT enough; fTPM keeps running via the TPM level (confirmed 2026-06-25: 7+ h crash-free only after the TPM level itself was disabled). Do not use dTPM Level 3 (boot loop). **Reset by a CMOS clear** — re-disable after any CMOS reset; verify with `Get-Tpm` (TpmPresent=False).
 - **Never set `TdrDelay` > 2s.** Caused GPU to overheat in May 2026 — let Windows reset a stuck GPU quickly rather than waiting. Documented in `install-node-windows.ps1`.
 - **Never enable ULPS** (`EnableUlps=1`) — belt-and-braces, leave disabled via boot task.
