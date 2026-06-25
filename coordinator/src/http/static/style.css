@@ -1695,9 +1695,24 @@ body {
      fixed header, flex:1 scrolling .panels, fixed tab bar). This gives a single
      scrollbar inside .panels and anchors the tab bar at the bottom without sticky
      tricks. Desktop only changes visuals (padding, width cap, card grid). */
+  /* Panels span the full width so each panel's scrollbar anchors to the window's right
+     edge; content is centred in a readable ≤1100px column. (Capping the panel itself and
+     left-aligning it left the scrollbar floating ~1100px in on wide screens.) */
   .panel.active {
     padding: 24px;
+    max-width: none;
+  }
+  /* Centre each panel's direct children in the column. Chat and reaper are excluded (both
+     carry .panel-chat) — their .chat-thread scroller centres its own content via
+     padding-inline. */
+  .panel.active:not(.panel-chat) > * {
     max-width: 1100px;
+    margin-inline: auto;
+  }
+  /* The lighting 3D layout view manages its own full-width flex layout. */
+  #panel-lighting.layout-open > #lighting-list {
+    max-width: none;
+    margin-inline: 0;
   }
 
   /* Two-column card grid so cards don't stretch across the full viewport.
@@ -3210,8 +3225,11 @@ body {
 }
 
 /* ── Chat tab ─────────────────────────────────────────────────────────────── */
+/* NB: no `display` here. `.panel-chat { display: flex }` would tie .panel's
+   `display: none` on specificity but win on source order, so the chat panel would
+   render on EVERY tab (its input box bleeding onto e.g. the reaper tab). Display is
+   set only by `.panel-chat.active` above, so inactive panels stay hidden. */
 .panel-chat {
-  display: flex;
   flex-direction: column;
   padding: 0;
   overflow: hidden;
@@ -3226,16 +3244,20 @@ body {
   gap: 0.75rem;
 }
 
-/* Desktop: the shared `.panel.active { max-width: 1100px }` is left-aligned, so the
-   chat thread's scrollbar floats ~1100px from the left instead of at the window edge
-   when the window is wide/maximised. Let the chat panel span the full width (scrollbar
-   anchors right) and keep the thread + input bar in a centred, readable column via
-   symmetric inline padding rather than a width cap on the scrolling element. */
+/* Desktop: the chat panel is full-width (via the global `.panel.active` rule) so its
+   scrollbar anchors to the window edge. The scroller is the inner .chat-thread, so it's
+   excluded from the global child-centring and instead centres its content in the column
+   via symmetric inline padding (keeping the scrollbar at the edge). The input bar is a
+   contained, centred block so its background/border sit inside the same column as the
+   other tabs' content rather than bleeding across the full window. */
 @media (min-width: 900px) {
-  .panel-chat.active { max-width: none; }
-  .chat-thread,
-  .chat-input-bar {
+  .chat-thread {
     padding-inline: max(1rem, (100% - 1100px) / 2);
+  }
+  .chat-input-bar {
+    max-width: 1100px;
+    margin-inline: auto;
+    width: 100%;
   }
 }
 
@@ -3387,4 +3409,60 @@ body {
   flex: 1;
   height: 1px;
   background: var(--border, #2a3040);
+}
+
+/* ── Reaper tab ───────────────────────────────────────────────────────────────
+   Same layout/machinery as the chat tab: the section carries .panel-chat (see
+   index.html) so it's a flex column that hides off-tab and gets the desktop 24px
+   padding. A compact live-status header sits at the top; below it a full chat widget
+   (createChatWidget) is mounted into .reaper-chat — its own reaper-scoped conversation
+   posting to /api/chat, with the reply thread acting as the command record. */
+
+/* Compact one-line status header: online badge + transport/tempo/time-sig. */
+.reaper-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border, #2a3040);
+}
+
+.reaper-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  background: var(--surface-2, #21262d);
+  color: var(--text-muted, #8b949e);
+  border: 1px solid var(--border, #2a3040);
+}
+
+.reaper-badge[data-online="1"] {
+  background: color-mix(in srgb, var(--green) 18%, var(--surface-2, #21262d));
+  color: var(--green, #3fb950);
+  border-color: color-mix(in srgb, var(--green) 40%, var(--border, #2a3040));
+}
+
+.reaper-state {
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.reaper-hdr-field {
+  font-size: 0.85rem;
+  color: var(--text-muted, #8b949e);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Host for the mounted chat widget: a flex column so the inner .chat-thread grows
+   and the .chat-input-bar pins to the bottom, exactly like the Chat tab. */
+.reaper-chat {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
