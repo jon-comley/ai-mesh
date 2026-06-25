@@ -3,7 +3,7 @@
 // never reached the browser (the SW bypasses the server's Cache-Control). Now we
 // always hit the live coordinator and only fall back to cache when offline, so
 // deploys take effect on the next load. Bump CACHE to purge any stale entries.
-const CACHE = 'mesh-v5';
+const CACHE = 'mesh-v6';
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.add('/')));

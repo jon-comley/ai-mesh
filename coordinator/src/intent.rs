@@ -875,14 +875,22 @@ fn build_remove_track_lua(name: &str) -> String {
     lua.push_str(&format!("local display = '{display}'\n"));
     lua.push_str("local removed = nil\n");
     lua.push_str("local rname = nil\n");
+    // Collect every track name so a miss can report what DOES exist — lets the model
+    // (which often guesses a default like 'Track 1') self-correct on the next turn
+    // instead of looping on the same wrong name, and makes "delete all tracks" work.
+    lua.push_str("local names = {}\n");
     lua.push_str("for i = 0, reaper.CountTracks(0) - 1 do\n");
     lua.push_str("  local tr = reaper.GetTrack(0, i)\n");
     lua.push_str("  local _, nm = reaper.GetSetMediaTrackInfo_String(tr, 'P_NAME', '', false)\n");
     lua.push_str("  if nm:lower() == target then reaper.DeleteTrack(tr); removed = i + 1; rname = nm; break end\n");
+    lua.push_str("  local label = nm\n");
+    lua.push_str("  if label == '' then label = 'Track ' .. (i + 1) end\n");
+    lua.push_str("  names[#names + 1] = label\n");
     lua.push_str("end\n");
     lua.push_str("reaper.UpdateArrange()\n");
     lua.push_str("if removed then return \"Removed track '\" .. rname .. \"' (was track \" .. removed .. \")\"\n");
-    lua.push_str("else return \"No track named '\" .. display .. \"' found\" end\n");
+    lua.push_str("elseif #names == 0 then return \"No track named '\" .. display .. \"' found (project has no tracks)\"\n");
+    lua.push_str("else return \"No track named '\" .. display .. \"' found. Tracks: \" .. table.concat(names, \", \") end\n");
     lua
 }
 
@@ -2231,7 +2239,11 @@ mod tests {
         assert!(lua.contains("if nm:lower() == target then"));
         assert!(lua.contains("reaper.DeleteTrack(tr)"));
         assert!(lua.contains("if removed then return \"Removed track '\" .. rname .. \"'"));
-        assert!(lua.contains("else return \"No track named '\" .. display .. \"' found\""));
+        // On a miss, the project's track names are listed so the model can self-correct.
+        assert!(lua.contains("local names = {}"));
+        assert!(lua.contains(
+            "else return \"No track named '\" .. display .. \"' found. Tracks: \" .. table.concat(names, \", \") end"
+        ));
     }
 
     #[test]
