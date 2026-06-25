@@ -40,7 +40,11 @@ const unloadingNodes = new Map();
 
 export function handleModelUpdate(evt) {
   nodesMap.clear();
-  for (const node of evt.nodes) nodesMap.set(node.node_id, node);
+  // Skip the 'chaos' security-test harness — not a real node, not model-pickable.
+  for (const node of evt.nodes) {
+    if (node.hostname === 'chaos') continue;
+    nodesMap.set(node.node_id, node);
+  }
   render();
 }
 

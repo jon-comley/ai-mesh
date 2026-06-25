@@ -59,8 +59,10 @@ function setConnState(state) {
 // ── Event dispatch ──────────────────────────────────────────────────────────
 const handlers = {
   TopologyUpdate: evt => {
-    topology.handleEvent(evt);
-    health.handleTopology(evt.nodes);
+    // Drop the 'chaos' security-test harness once, before any consumer (node list / health) sees it.
+    const nodes = evt.nodes.filter(n => n.name !== 'chaos');
+    topology.handleEvent({ ...evt, nodes });
+    health.handleTopology(nodes);
   },
   HealthUpdate: evt => {
     health.handleHealth(evt);
