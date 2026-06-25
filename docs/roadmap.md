@@ -2,6 +2,12 @@
 
 ---
 
+## Infra note — the mesh router network migration (2026-06-25)
+
+Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x` → `10.0.0.x` (pi1 `10.0.0.10`, beelink1 `10.0.0.11`, SLZB-06 `10.0.0.12`). `nodes/*.env`, `justfile`, `README.md`, and `handover.md` updated. Follow-ups: set the mesh router DHCP reservations (leases still dynamic); re-verify beelink BIOS Pluton/fTPM golden state (crash storm regressed during the move — `docs/windows-node-setup.md`). beelink also needed Smart App Control disabled to run the self-built agent after its earlier Windows reinstall.
+
+---
+
 ## Code Audit — Findings to Action (2026-06-02)
 
 Whole-codebase adversarial bug audit (all Rust crates + frontend JS, partitioned

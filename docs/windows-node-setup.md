@@ -328,6 +328,30 @@ ssh user@host 'dir "%LOCALAPPDATA%\Programs\llama.cpp\llama-server.exe"'
 
 **Note on ROCm:** ROCm does not detect the 780M iGPU on Windows at all (it only sees discrete GPUs, and even then requires Linux for iGPU support). ROCm is not used — Vulkan is the correct backend for this hardware.
 
+### Smart App Control blocks the agent (service won't start, no logs) ⚠️
+
+**Symptom:** `ai-mesh-agent` service refuses to start. `Start-Service` reports `StartServiceFailed`; SCM logs Event `7034` "service terminated unexpectedly". Critically, **`agent.log` gets no new lines at all** — the binary dies before it can initialise logging. The node shows as a stale entry on the coordinator (old `Last Seen`).
+
+**Root cause:** **Smart App Control (SAC)** — a Windows 11 reputation-based code-integrity policy — blocks the self-built `agent.exe` because it is unsigned/unknown. Windows 11 **auto-enables SAC after a clean install**, so this appears specifically after the box has done a self-reinstall (see incident history). A previously-launched agent keeps running because it started *before* the policy took effect, but any fresh start is blocked.
+
+**Detect it:**
+```powershell
+# 1 = Enforced (blocking), 2 = Evaluation, 0 = Off
+(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy').VerifiedAndReputablePolicyState
+# Confirm the block event (look for id 3077 / 3118 "Smart App Control Block")
+Get-WinEvent -LogName 'Microsoft-Windows-CodeIntegrity/Operational' -MaxEvents 5
+```
+Or prove it directly by running the binary by hand — the error is unambiguous:
+```powershell
+Start-Process 'C:\Users\jonno\ai-mesh\agent.exe' -PassThru   # -> "An Application Control policy has blocked this file."
+```
+
+**Fix — turn Smart App Control off (⚠️ one-way switch):** Once turned **Off, SAC cannot be re-enabled without a clean Windows reinstall.** This is the correct trade for a dedicated compute node running a self-built binary.
+- GUI: Windows Security → App & browser control → Smart App Control → Settings → **Off**.
+- Or registry + reboot (elevated): `Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' -Name VerifiedAndReputablePolicyState -Value 0; Restart-Computer`
+
+After reboot the agent launches normally. Longer term, code-signing `agent.exe` would let SAC stay on, but that is not currently set up.
+
 ### wmic — deprecated / encoding issues on Windows 11
 
 Do not use `wmic` for hardware detection. It is deprecated on Windows 11, may not be installed, and outputs UTF-16 which is awkward to parse from Rust. Use the `sysinfo` crate instead (already used in `hardware.rs`).
@@ -399,6 +423,8 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 **✅ CONFIRMED ROOT CAUSE (2026-05-28):** AMD fTPM (firmware TPM) — see incident entry below. Fix: disable fTPM in BIOS.
 
 **⚠️ REGRESSED 2026-06-02:** the `0x133`/`param2=0x1e00` storm returned (5 dumps) — fTPM appears to have re-enabled itself (BIOS defaults restored after a power event / suspected weak CMOS battery). Re-disable fTPM in BIOS. See 2026-06-02 entry.
+
+**⚠️ REGRESSED AGAIN 2026-06-24/25 (4th recurrence):** 8× `0x133`/`param2=0x1e00` bugchecks across 06-24→06-25, ~every 2–3 hours, with TPM-WMI Event 1025 re-provisioning on every boot (incl. immediately after the latest reboot) = **fTPM/Pluton active again**. Triggered when the BIOS golden state was lost during the ISP router→the mesh router network/power upheaval. Disabling Pluton in BIOS is still pending as of writing. See 2026-06-25 entry.
 
 **Diagnostics — run after any recovery:**
 ```bash
@@ -619,6 +645,40 @@ Power plan: High Performance                  ✅
 2. Boot Windows → `just fix-node beelink1` (or `just deploy-node beelink1` for a full reinstall)
 3. Reboot to activate
 4. `just start-cluster`
+
+---
+
+#### 2026-06-24/25 — the mesh router network migration + fTPM storm regression (4th) + Smart App Control discovered
+
+Context: home network migrated from the ISP router to a mesh router. Subnet changed `192.168.1.x` → `10.0.0.x` (new: pi1 `10.0.0.10`, beelink1 `10.0.0.11`, SLZB-06 `10.0.0.12` — dynamic leases, reservations pending). Getting beelink back on the mesh surfaced three stacked problems:
+
+**1. Stale `COORDINATOR_IP` (network migration).** Every agent had `COORDINATOR_IP=192.168.1.11` baked in from the old network and looped `No route to host` / `os error 10060`. On beelink this lives in the nssm registry env, not a file:
+```powershell
+# read it
+(Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\ai-mesh-agent\Parameters').AppEnvironmentExtra
+# surgically rewrite only COORDINATOR_IP (elevated), preserving the other 8 entries + the fingerprint/token
+$k='HKLM:\SYSTEM\CurrentControlSet\Services\ai-mesh-agent\Parameters'
+$e=(Get-ItemProperty $k).AppEnvironmentExtra | ForEach-Object { $_ -replace '^COORDINATOR_IP=.*','COORDINATOR_IP=10.0.0.10' }
+Set-ItemProperty $k -Name AppEnvironmentExtra -Value $e -Type MultiString
+```
+The TLS fingerprint and auth token already matched (both persist in coordinator state across restarts), so `set-fingerprint` was **not** needed — only the IP. (On pi1 the equivalent fix was a drop-in `coordinator.conf` pointing the co-located agent at `127.0.0.1`, immune to future LAN changes.)
+
+**2. Orphan process + nssm "failed to start".** Env is read once at process start, so the registry change had no effect until the running agent was restarted — but a stale `agent.exe` **orphan** (nssm lost track of it; service showed STOPPED while the child kept running on the old IP) blocked a clean restart. Killing all `agent.exe` first is required: `Get-Process agent | Stop-Process -Force` then `Start-Service`.
+
+**3. Smart App Control blocked the binary (the real blocker).** Even after the IP fix and killing the orphan, the service still wouldn't start — `agent.exe` was blocked by **Smart App Control** (`VerifiedAndReputablePolicyState=1`, CodeIntegrity Event 3118 "Smart App Control Block"), auto-enabled after the box's earlier self-reinstall. See the dedicated troubleshooting section above. Fix: SAC off + reboot. After that the agent launched, connected to `10.0.0.10`, and loaded `phi4:14b` (the 16 G UMA golden state now auto-selects 14b over the old 7b).
+
+**Note — non-elevated SSH.** `LocalAccountTokenFilterPolicy` was lost in the reinstall, so SSH sessions land **non-elevated**: registry writes under `HKLM\SYSTEM`, `Start-Service`, and BIOS-adjacent work must be done from a **local elevated** PowerShell (or re-enable it: `New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force`). ICMP stays firewalled (ping is useless for liveness — use TCP/22).
+
+**fTPM/Pluton `0x133` storm — REGRESSED (4th time).** Event-log pull on 2026-06-25 (uptime ~6 min):
+```
+BugCheck (Event 1001), all 0x00000133 param2=0x1e00 (fTPM signature):
+  06-25 02:46:58   06-24 17:47:26   06-24 15:25:08   06-24 13:02:49
+  06-24 11:15:28   06-24 10:08:12   06-24 06:15:49   06-24 03:08:29   (~every 2-3 h)
+Kernel-Power 41 + Event 6008 (dirty shutdown) chains match each crash.
+TPM-WMI 1025 (fTPM re-provision) at 06-25 04:19:55 — i.e. immediately after the latest boot => fTPM ACTIVE NOW.
+Minidumps: 062526-8859-01.dmp (02:46) + four 062426-*.dmp, ~3.4-3.8 MB each.
+```
+Same root cause as every prior recurrence — BIOS golden state lost (this time during the network/power upheaval), Pluton re-enabled, SPI bus lock → DPC watchdog. **Action still pending: disable Pluton in BIOS (golden state below).** Until then beelink will keep BSODing every few hours even though the agent now runs. Also set the mesh router DHCP reservations so the `10.0.0.x` leases don't move.
 
 ---
 

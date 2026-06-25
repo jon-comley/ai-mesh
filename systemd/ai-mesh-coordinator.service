@@ -16,8 +16,9 @@ RestartSec=5s
 
 # Environment
 Environment="RUST_LOG=info"
-# MDNS_ADVERTISE_IP should be set to pi1's LAN IP (192.168.1.11) or overridden via /etc/systemd/system/ai-mesh-coordinator.service.d/override.conf
-Environment="MDNS_ADVERTISE_IP=192.168.1.11"
+# No MDNS_ADVERTISE_IP: the coordinator auto-detects its outbound LAN IP (see mdns.rs),
+# so it advertises correctly on whatever subnet pi1 is on. Set this env var via a
+# service.d/override.conf drop-in only to force a specific advertise address.
 Environment="MESH_HTTP_PORT=9001"
 Environment="MESH_STATE_DIR=/var/lib/ai-mesh"
 

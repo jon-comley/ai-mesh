@@ -1,6 +1,6 @@
 # Coordinator host is derived from whichever nodes/*.env carries NODE_COORDINATOR=true
 # (single source of truth). Falls back to pi1's IP if no marker is found.
-coordinator_ip   := `f=$(grep -l "^NODE_COORDINATOR=true" nodes/*.env 2>/dev/null | head -1); if [ -n "$f" ]; then grep -h "^NODE_HOST=" "$f" | head -1 | cut -d= -f2; else echo 192.168.1.11; fi`
+coordinator_ip   := `f=$(grep -l "^NODE_COORDINATOR=true" nodes/*.env 2>/dev/null | head -1); if [ -n "$f" ]; then grep -h "^NODE_HOST=" "$f" | head -1 | cut -d= -f2; else echo 10.0.0.10; fi`
 coordinator_port := "9000"
 
 # Shared SSH/SCP options for every node operation. ConnectTimeout bounds the connect so
@@ -297,7 +297,7 @@ nodes:
 
 # Set heartbeat interval for a node. Accepts hostname, IP, or UUID.
 # Usage: just set-heartbeat beelink1 10
-# Usage: just set-heartbeat 192.168.1.14 30
+# Usage: just set-heartbeat 10.0.0.11 30
 set-heartbeat node secs:
     #!/usr/bin/env bash
     STATE="$HOME/.config/ai-mesh/coordinator.state"
@@ -386,7 +386,7 @@ deploy-node node:
             scp_dots ">>> Uploading install script" \
                 scp {{ssh_opts}} -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
             ssh {{ssh_opts}} -t ${NODE_USER}@${NODE_HOST} \
-                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh {{coordinator_ip}} ${NODE_ROLE} ${NODE_USER} ${MQTT_HOST:-} ${MQTT_PORT:-1883}"
+                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh ${NODE_ROLE} ${NODE_USER} ${MQTT_HOST:-} ${MQTT_PORT:-1883}"
         fi
         ;;
 
@@ -424,7 +424,7 @@ deploy-node node:
         echo ">>> Running provisioning script (this takes a minute — installing NSSM, llama.cpp, registering service)..."
         scp_dots ">>> Provisioning" \
             ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
-                & '${WIN_PATH}\\install-node-windows.ps1' -CoordinatorIp '{{coordinator_ip}}' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}'\
+                & '${WIN_PATH}\\install-node-windows.ps1' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}'\
             \""
         # Stability hardening (ULPS, AX200 NIC, power plan) is applied by
         # install-node-windows.ps1's Harden-Stability function above — no
@@ -1801,7 +1801,7 @@ logs:
 # Usage: just pair-bulb
 pair-bulb:
     #!/usr/bin/env bash
-    PI_MQTT="192.168.1.11"
+    PI_MQTT="10.0.0.10"
     echo ">>> Opening 5-minute pairing window on Zigbee network..."
     mosquitto_pub -h ${PI_MQTT} -t 'zigbee2mqtt/bridge/request/permit_join' \
         -m '{"value":true,"time":254}'
@@ -1837,7 +1837,7 @@ intent text:
 # Validate that each model routes to the correct hardware node.
 # Assumes the cluster is already running with hardware-selected models loaded
 # (i.e. run `just start-cluster` first).
-# Pi (192.168.1.11) should serve qwen2.5:1.5b; Beelink (192.168.1.14) should serve qwen2.5:7b.
+# Pi (10.0.0.10) should serve qwen2.5:1.5b; Beelink (10.0.0.11) should serve qwen2.5:7b.
 # Usage: just validate-routing
 validate-routing: update-portproxy chaos
     #!/usr/bin/env bash

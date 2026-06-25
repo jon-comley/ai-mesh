@@ -1,7 +1,6 @@
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$CoordinatorIp,
-
+    # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
+    # (Set COORDINATOR_IP in the agent service environment to override discovery for debugging.)
     [string]$Role = "compute",
 
     [string]$AuthorizedKey = ""
@@ -443,7 +442,6 @@ function Ensure-AgentService {
     }
     & $nssm set $agentService AppDirectory $aiMeshRoot
     & $nssm set $agentService AppEnvironmentExtra `
-        "COORDINATOR_IP=$CoordinatorIp" `
         "AGENT_ROLE=$Role" `
         "LLAMA_MODEL_DIR=$env:USERPROFILE\.ai-mesh\models" `
         "LLAMA_SERVER_BIN=$(Join-Path $llamaInstallDir 'llama-server.exe')" `
