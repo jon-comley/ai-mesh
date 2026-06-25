@@ -1,5 +1,10 @@
 # Beelink SER8 — Model Inference Guide
 
+> This guide ranks models by **general quality + throughput**. For picking a model for
+> **command/control generation** (reliable tool-calling for REAPER + lights), see
+> [`docs/model-selection.md`](docs/model-selection.md) — that ranking weights tool-calling
+> reliability over raw quality and differs from this one.
+
 **Hardware:** AMD Radeon 780M · 16 GB UMA VRAM · ~80 GB/s shared memory bandwidth
 
 ---
