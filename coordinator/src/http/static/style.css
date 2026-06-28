@@ -3224,6 +3224,23 @@ body {
   word-break: break-word;
 }
 
+/* Mobile: four columns can't share a ~360px row without crushing the message
+   into one character per line. Restack so time/level/target sit on the top row
+   and the message spans its own full-width row below, where it can wrap. */
+@media (max-width: 899px) {
+  .error-entry {
+    grid-template-columns: 70px 50px minmax(0, 1fr);
+    grid-template-areas:
+      "time level target"
+      "msg  msg   msg";
+    row-gap: 3px;
+  }
+  .err-time   { grid-area: time; }
+  .err-level  { grid-area: level; }
+  .err-target { grid-area: target; }
+  .err-msg    { grid-area: msg; }
+}
+
 /* ── Chat tab ─────────────────────────────────────────────────────────────── */
 /* NB: no `display` here. `.panel-chat { display: flex }` would tie .panel's
    `display: none` on specificity but win on source order, so the chat panel would
