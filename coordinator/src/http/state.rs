@@ -109,6 +109,56 @@ pub enum DashboardEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         last_command: Option<(String, bool, String)>,
     },
+    GatewayUpdate(GatewaySnapshot),
+}
+
+/// Combined gateway config (masked) + cumulative stats. Served by
+/// `GET /api/gateway`, returned by `POST /api/gateway`, and broadcast as a
+/// `GatewayUpdate` event so the Gateway tab updates live. The API key itself is
+/// never included — only `key_set` and a non-revealing `key_hint`.
+#[derive(Clone, Debug, Serialize, Default)]
+pub struct GatewaySnapshot {
+    pub enabled: bool,
+    /// Compress history before forwarding (false = pure backend swap).
+    pub compress: bool,
+    /// Compression engine id: "statistical" | "local_llm_distiller" | "llmlingua2".
+    pub engine: String,
+    pub selected_model: String,
+    pub base_url: String,
+    pub key_set: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_hint: Option<String>,
+    pub available_models: Vec<String>,
+    /// One-click endpoint presets (OpenRouter / Anthropic / Groq / Gemini).
+    pub presets: Vec<GatewayPreset>,
+    pub calls: u64,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    pub tokens_saved: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_call_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// A selectable endpoint preset surfaced to the Gateway tab.
+#[derive(Clone, Debug, Serialize)]
+pub struct GatewayPreset {
+    pub id: String,
+    pub label: String,
+    pub base_url: String,
+    pub models: Vec<String>,
+}
+
+/// Cumulative, in-memory cloud-gateway usage stats (reset on coordinator restart).
+#[derive(Clone, Debug, Default)]
+pub struct GatewayStats {
+    pub calls: u64,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    pub tokens_saved: u64,
+    pub last_call_at: Option<i64>,
+    pub last_error: Option<String>,
 }
 
 /// Snapshot of the currently-active effect (if any) for one room. Pushed to a
@@ -258,6 +308,8 @@ pub struct DashboardState {
     pub pending_intents: PendingIntents,
     /// Last-known REAPER status — replayed to new WS clients on connect.
     reaper_snapshot: Mutex<Option<ReaperStatusReport>>,
+    /// Cumulative cloud-gateway usage stats (in-memory; reset on restart).
+    gateway_stats: Mutex<GatewayStats>,
 }
 
 impl DashboardState {
@@ -291,7 +343,40 @@ impl DashboardState {
             pending_inferences: Arc::new(Mutex::new(HashMap::new())),
             pending_intents: Arc::new(Mutex::new(HashMap::new())),
             reaper_snapshot: Mutex::new(None),
+            gateway_stats: Mutex::new(GatewayStats::default()),
         })
+    }
+
+    /// Record a successful cloud-gateway call and its context token before/after
+    /// counts. Clears any prior error. Does not broadcast — the caller assembles
+    /// and broadcasts a full `GatewaySnapshot` afterwards.
+    pub fn record_gateway_call(&self, tokens_before: u64, tokens_after: u64) {
+        let mut s = self.gateway_stats.lock().unwrap();
+        s.calls += 1;
+        s.tokens_before += tokens_before;
+        s.tokens_after += tokens_after;
+        s.tokens_saved += tokens_before.saturating_sub(tokens_after);
+        s.last_call_at = Some(chrono::Utc::now().timestamp());
+        s.last_error = None;
+    }
+
+    /// Record a cloud-gateway failure (the request still falls back to local).
+    pub fn record_gateway_error(&self, msg: String) {
+        let mut s = self.gateway_stats.lock().unwrap();
+        s.last_call_at = Some(chrono::Utc::now().timestamp());
+        s.last_error = Some(msg);
+    }
+
+    /// Snapshot of cumulative gateway stats.
+    pub fn get_gateway_stats(&self) -> GatewayStats {
+        self.gateway_stats.lock().unwrap().clone()
+    }
+
+    /// Broadcast a gateway snapshot to connected dashboards (no-op if none).
+    pub fn push_gateway_update(&self, snapshot: GatewaySnapshot) {
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::GatewayUpdate(snapshot));
+        }
     }
 
     /// Send `msg` to the named node's open TCP channel.

@@ -3483,3 +3483,51 @@ body {
   display: flex;
   flex-direction: column;
 }
+
+/* ── Online-AI gateway tab ─────────────────────────────────────────────────── */
+.gw { display: flex; flex-direction: column; gap: 16px; max-width: 640px; }
+.gw-modes { display: flex; gap: 10px; flex-wrap: wrap; }
+.gw-toggle {
+  flex: 1 1 auto; min-width: 180px; padding: 12px 14px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.gw-toggle[data-on="1"] {
+  background: color-mix(in srgb, var(--green) 22%, transparent);
+  border-color: var(--green); color: var(--green);
+}
+.gw-banner {
+  padding: 10px 12px; border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 18%, transparent);
+  color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent);
+  font-size: 14px;
+}
+.gw-field { display: flex; flex-direction: column; gap: 6px; }
+.gw-field > label, .gw-label { font-size: 13px; color: var(--text-muted); }
+.gw-field.gw-inline { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 8px; }
+.gw-field.gw-inline > label { flex: 0 0 64px; }
+.gw select, .gw input[type="text"], .gw input[type="password"] {
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; font-size: 14px;
+}
+.gw input { flex: 1 1 160px; }
+.gw button:not(.gw-toggle) {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 9px 14px;
+  font-size: 14px; cursor: pointer;
+}
+.gw-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+.gw-btns button[data-active="1"] { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.gw-btns button[disabled] { opacity: .5; cursor: not-allowed; }
+.gw-btns button em { font-style: normal; color: var(--text-muted); font-size: 12px; }
+.gw-hint { font-size: 13px; color: var(--text-muted); }
+.gw-hint[data-ok="1"] { color: var(--green); }
+.gw-hint[data-ok="0"] { color: var(--red); }
+.gw-stats {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
+}
+.gw-stat { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+.gw-stat > span { color: var(--text-muted); }
+.gw-stat.gw-err > strong { color: var(--red); font-weight: 500; }

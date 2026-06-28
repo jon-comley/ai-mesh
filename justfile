@@ -247,6 +247,11 @@ lint:
     cargo fmt --all
     cargo clippy --all-targets --all-features -- -D warnings
 
+# Phase-A prompt-compression measurement — prints token savings on a sample
+# corpus (multilingual + a long history). Set PROMPT_COMPRESS_RATIO to sweep.
+measure-compression:
+    cargo run -p coordinator --example measure_compression
+
 run-agent:
     #!/usr/bin/env bash
     set -e
@@ -1232,10 +1237,17 @@ start-agents:
             echo ">>> Starting agent on ${NODE_NAME} (${NODE_HOST})..."
             case "$NODE_OS" in
               linux)
-                ssh -o ConnectTimeout=10 "${NODE_USER}@${NODE_HOST}" \
-                    "sudo systemctl start ai-mesh-agent" 2>/dev/null \
-                    && echo ">>> ${NODE_NAME} service started." \
-                    || echo ">>> Warning: could not reach ${NODE_NAME} (will self-register if online)"
+                if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
+                    # Local node (this machine) — run directly; there's no sshd on localhost.
+                    sudo systemctl start ai-mesh-agent 2>/dev/null \
+                        && echo ">>> ${NODE_NAME} service started (local)." \
+                        || echo ">>> Warning: could not start ${NODE_NAME} locally (run: sudo systemctl start ai-mesh-agent)"
+                else
+                    ssh -o ConnectTimeout=10 "${NODE_USER}@${NODE_HOST}" \
+                        "sudo systemctl start ai-mesh-agent" 2>/dev/null \
+                        && echo ">>> ${NODE_NAME} service started." \
+                        || echo ">>> Warning: could not reach ${NODE_NAME} (will self-register if online)"
+                fi
                 ;;
               windows)
                 ssh -o ConnectTimeout=10 -o LogLevel=ERROR "${NODE_USER}@${NODE_HOST}" \

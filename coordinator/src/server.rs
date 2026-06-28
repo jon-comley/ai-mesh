@@ -723,6 +723,7 @@ async fn process_message(
                 pending_intents.clone(),
                 device_states,
                 reaper_online,
+                None, // mesh-originated intents stay local; the cloud gateway is dashboard-driven
             )
             .await;
             Some(MeshMessage::IntentResponse(response))
