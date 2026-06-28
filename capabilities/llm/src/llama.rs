@@ -100,13 +100,127 @@ fn child_lock() -> &'static Mutex<Option<Child>> {
     LLAMA_CHILD.get_or_init(|| Mutex::new(None))
 }
 
+/// Fixed port llama-server is launched on (see `pull_model`).
+const LLAMA_PORT: u16 = 8080;
+
 async fn kill_existing() {
     let mut guard = child_lock().lock().await;
     if let Some(mut child) = guard.take() {
         let _ = child.kill().await;
         let _ = child.wait().await;
     }
+    drop(guard);
+    // Belt-and-braces: SIGKILL any *untracked* process still holding the llama
+    // port — an orphan from an agent restart that outlived its parent, or a
+    // previous run that didn't reap cleanly — so the fresh server can bind it.
+    kill_stray_on_port(LLAMA_PORT);
 }
+
+/// Socket inodes of LISTEN-state sockets bound to `port`, read from
+/// `/proc/net/tcp{,6}`. Pure /proc so it needs no lsof/fuser on minimal nodes.
+#[cfg(unix)]
+fn listening_inodes(port: u16) -> std::collections::HashSet<u64> {
+    const TCP_LISTEN: &str = "0A";
+    let mut inodes = std::collections::HashSet::new();
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in content.lines().skip(1) {
+            // sl local_address rem_address st ... inode
+            //  0       1           2        3        9
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            let (Some(local), Some(st), Some(inode)) = (cols.get(1), cols.get(3), cols.get(9))
+            else {
+                continue;
+            };
+            if *st != TCP_LISTEN {
+                continue;
+            }
+            let Some((_ip, hex_port)) = local.rsplit_once(':') else {
+                continue;
+            };
+            if u16::from_str_radix(hex_port, 16).ok() != Some(port) {
+                continue;
+            }
+            if let Ok(i) = inode.parse::<u64>() {
+                inodes.insert(i);
+            }
+        }
+    }
+    inodes
+}
+
+/// `/proc/<pid>/cmdline` rendered as a space-joined string for logging, or the
+/// PID as a string if it can't be read (process gone, permission).
+#[cfg(unix)]
+fn proc_cmdline(pid: u32) -> String {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .map(|raw| {
+            raw.split(|&b| b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| String::from_utf8_lossy(s))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("pid {pid}"))
+}
+
+/// Best-effort SIGKILL of every process listening on `port` that we don't
+/// otherwise track. Matches `/proc/<pid>/fd` socket links against the listening
+/// inodes; skips our own PID; ignores all errors (permission, races). Linux-only
+/// — on Windows the agent has no /proc and the deploy script taskkills orphans.
+#[cfg(unix)]
+fn kill_stray_on_port(port: u16) {
+    let inodes = listening_inodes(port);
+    if inodes.is_empty() {
+        return;
+    }
+    let self_pid = std::process::id();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in procs.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        if pid == self_pid {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let matches_socket = target
+                .to_str()
+                .and_then(|s| s.strip_prefix("socket:["))
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|s| s.parse::<u64>().ok())
+                .is_some_and(|inode| inodes.contains(&inode));
+            if matches_socket {
+                tracing::warn!(
+                    pid,
+                    port,
+                    cmdline = %proc_cmdline(pid),
+                    "killing stray process holding llama port"
+                );
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// No /proc on Windows; orphan llama-server.exe is reaped by the deploy script.
+#[cfg(not(unix))]
+fn kill_stray_on_port(_port: u16) {}
 
 // ── Model map ─────────────────────────────────────────────────────────────────
 
@@ -259,9 +373,27 @@ async fn download_shard(
         ));
     }
 
-    let tmp = dest.with_extension("tmp");
-    let std_file =
-        std::fs::File::create(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    // Unique per-attempt temp name (pid + nanos) so two downloads of the same
+    // shard can never write the same file and then race on the final rename —
+    // the second rename would otherwise fail with ENOENT once the first moved
+    // the temp into place. The load guard already serialises loads within a
+    // process; this also protects against a stale temp from a crashed attempt.
+    let stem = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("download");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dest.with_file_name(format!("{stem}.{}.{nonce}.tmp", std::process::id()));
+    // create_new: the name is meant to be unique, so refuse rather than silently
+    // truncate if a freak nonce collision ever hands us an existing file.
+    let std_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
     // Pre-allocate the full file size so the kernel claims space up front:
     // fails immediately if the disk is too full rather than mid-stream.
     if size_hint_bytes > 0 {
@@ -298,6 +430,20 @@ async fn download_shard(
     Ok(())
 }
 
+/// Delete leftover `*.tmp` download files in `dir` (best-effort). Called before
+/// a pull so orphans from a crashed attempt don't pile up — the live download
+/// uses a unique name, so nothing in-flight matches.
+async fn remove_stale_tmp(dir: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.path().extension().is_some_and(|e| e == "tmp") {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
 // ── /api/pull equivalent: download + start server ────────────────────────────
 
 pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
@@ -306,6 +452,11 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("cannot create model dir {}: {e}", dir.display()))?;
+
+    // Sweep stale `*.tmp` left by a crashed/killed earlier download. Unique
+    // per-attempt names mean these are never reused, so without this they'd
+    // accumulate and eat the disk-space headroom checked below.
+    remove_stale_tmp(&dir).await;
 
     // Require 2× the model size free: one copy for the .tmp in-progress file
     // and one for the final .gguf so we never silently fill the disk.
@@ -349,7 +500,7 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
-        .arg("8080")
+        .arg(LLAMA_PORT.to_string())
         .arg("--ctx-size")
         .arg(ctx_size().to_string());
 
