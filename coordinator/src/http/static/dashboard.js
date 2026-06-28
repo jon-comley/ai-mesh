@@ -10,6 +10,7 @@ import * as errors from '/static/errors.js';
 import * as security from '/static/security.js';
 import * as chat from '/static/chat.js';
 import * as reaper from '/static/reaper.js';
+import * as gateway from '/static/gateway.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -81,6 +82,7 @@ const handlers = {
   ErrorUpdate: evt => errors.handleErrorUpdate(evt),
   SecurityUpdate: evt => security.handleSecurityUpdate(evt),
   ReaperUpdate: evt => reaper.handleReaperUpdate(evt),
+  GatewayUpdate: evt => gateway.handleGatewayUpdate(evt),
 };
 
 function dispatch(evt) {
@@ -131,6 +133,7 @@ errors.init(document.getElementById('error-feed'));
 security.init(document.getElementById('security-table'));
 chat.init(document.getElementById('panel-chat'));
 reaper.init(document.getElementById('panel-reaper'));
+gateway.init(document.getElementById('panel-gateway'));
 lighting.setRoomsActive();
 
 // Ask for token on very first visit when auth is likely needed.

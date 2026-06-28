@@ -1,3 +1,5 @@
+pub mod cloud;
+pub mod compress;
 pub mod coordinator;
 pub mod effects;
 pub mod http;

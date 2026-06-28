@@ -45,6 +45,7 @@ const INDICATORS_JS: &str = include_str!("static/indicators.js");
 const LAYOUT_JS: &str = include_str!("static/layout.js");
 const PREFS_JS: &str = include_str!("static/prefs.js");
 const REAPER_JS: &str = include_str!("static/reaper.js");
+const GATEWAY_JS: &str = include_str!("static/gateway.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
@@ -119,6 +120,8 @@ pub fn router(
         .route("/api/scenes/{id}/recall", post(api::recall_scene))
         .route("/api/scenes/{id}", delete(api::delete_scene))
         .route("/api/chat", post(api::chat))
+        .route("/api/gateway", get(api::get_gateway).post(api::set_gateway))
+        .route("/api/gateway/test", post(api::test_gateway))
         .route("/api/preferences", get(api::get_preferences))
         .route(
             "/api/preferences/{key}",
@@ -164,6 +167,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/layout.js", LAYOUT_JS, JS),
         ("/static/prefs.js", PREFS_JS, JS),
         ("/static/reaper.js", REAPER_JS, JS),
+        ("/static/gateway.js", GATEWAY_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
     ];

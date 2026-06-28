@@ -290,6 +290,16 @@ pub struct IntentResponse {
     /// client actually waited for.
     #[serde(default)]
     pub total_ms: u64,
+    /// Whether prompt compression was actually applied to the context (Phase A:
+    /// measured in shadow — the local prompt is unchanged).
+    #[serde(default)]
+    pub compression_applied: bool,
+    /// Estimated context tokens before compression (0 when not measured).
+    #[serde(default)]
+    pub prompt_tokens_before: u32,
+    /// Estimated context tokens after compression (0 when not measured).
+    #[serde(default)]
+    pub prompt_tokens_after: u32,
 }
 
 // ── MeshMessage ───────────────────────────────────────────────────────────────
@@ -887,6 +897,9 @@ mod tests {
             tokens_generated: 10,
             prompt_eval_ms: 0,
             total_ms: 1300,
+            compression_applied: false,
+            prompt_tokens_before: 0,
+            prompt_tokens_after: 0,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
@@ -905,6 +918,9 @@ mod tests {
             tokens_generated: 42,
             prompt_eval_ms: 0,
             total_ms: 850,
+            compression_applied: false,
+            prompt_tokens_before: 0,
+            prompt_tokens_after: 0,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
