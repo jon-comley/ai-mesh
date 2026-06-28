@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use capability_core::Capability;
 use shared::{InferenceResult, MeshMessage, ModelLifecycleState, ModelStatusReport, WIRE_VERSION};
 use std::sync::OnceLock;
-use tokio::sync::{Semaphore, mpsc::Sender};
+use tokio::sync::{Mutex, Semaphore, mpsc::Sender};
 use tracing::{info, warn};
 
 // Process-wide: only one llama-server inference at a time.
@@ -12,6 +12,18 @@ use tracing::{info, warn};
 static INFER_SEM: OnceLock<Semaphore> = OnceLock::new();
 fn infer_sem() -> &'static Semaphore {
     INFER_SEM.get_or_init(|| Semaphore::new(1))
+}
+
+// Single-flight model loads. Serializes every ModelLoad so only one pull_model
+// runs at a time, and holds the name of the model currently loaded so a
+// duplicate ModelLoad (double-click, auto-placement retry, reconnect re-send)
+// is a no-op instead of racing a second download into the same temp file
+// (the "rename failed … No such file or directory" error) or stomping the
+// running llama-server. The inner Option is None while nothing is loaded or a
+// load is in progress; it is set to Some(model) only once a load reports Ready.
+static LOAD_GUARD: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+fn load_guard() -> &'static Mutex<Option<String>> {
+    LOAD_GUARD.get_or_init(|| Mutex::new(None))
 }
 
 pub struct LlmCapability {
@@ -68,9 +80,37 @@ impl Capability for LlmCapability {
                 let mname = req.model_name.clone();
                 let size = req.model_size_mb;
                 tokio::spawn(async move {
+                    // Hold the load guard for the whole pull so concurrent
+                    // ModelLoad messages run one at a time instead of racing the
+                    // same download temp file or stomping each other's server.
+                    let mut loaded = match load_guard().try_lock() {
+                        Ok(g) => g,
+                        Err(_) => {
+                            info!(model = %mname, "another model load in progress — queuing behind it");
+                            load_guard().lock().await
+                        }
+                    };
+                    if loaded.as_deref() == Some(mname.as_str()) {
+                        info!(model = %mname, "model already loaded — skipping duplicate load");
+                        let _ = tx2
+                            .send(MeshMessage::ModelStatus(ModelStatusReport {
+                                node_id: nid,
+                                model_name: mname,
+                                size_mb: size,
+                                state: ModelLifecycleState::Ready,
+                                wire_version: WIRE_VERSION,
+                            }))
+                            .await;
+                        return;
+                    }
+                    // A switch to a different model invalidates the current one;
+                    // clear it up front so a mid-load crash doesn't leave a stale
+                    // "loaded" marker that would suppress a later reload.
+                    *loaded = None;
                     let state = match llama::pull_model(&mname, size).await {
                         Ok(()) => {
                             info!(model = %mname, "llama pull complete");
+                            *loaded = Some(mname.clone());
                             Some(ModelLifecycleState::Ready)
                         }
                         Err(e) if e == "unloaded" => {
@@ -149,6 +189,9 @@ impl Capability for LlmCapability {
 
             MeshMessage::ModelUnload(req) => {
                 info!("Received command to unload model {}", req.model_name);
+                // Drop the single-flight marker so a later load of the same
+                // model re-pulls instead of being deduped away.
+                *load_guard().lock().await = None;
                 match llama::unload_model().await {
                     Ok(()) => info!(model = %req.model_name, "model unloaded"),
                     Err(e) => {
