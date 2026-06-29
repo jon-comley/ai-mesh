@@ -64,6 +64,14 @@ impl ZigbeeClient {
                 std::collections::HashMap::new();
             let mut known_groups: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            // Last-known availability per device, from `<device>/availability`.
+            // Used to stamp the `online` flag on state reports: z2m answers a
+            // `/get` poll with the device's *cached* state even when the device
+            // is unreachable, so a naive state report would re-mark an offline
+            // bulb online and clobber the availability=offline. Default true
+            // (assume reachable until told otherwise).
+            let mut availability: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
             loop {
                 match eventloop.poll().await {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
@@ -156,7 +164,14 @@ impl ZigbeeClient {
                             // for the explicit /state form; base topics receive many non-state
                             // event types (actions, linkquality, etc.) so we skip silently.
                             match parse_state_report(topic, p.payload.as_ref(), &node_id) {
-                                Some(report) if !known_groups.contains(&report.device_id) => {
+                                Some(mut report) if !known_groups.contains(&report.device_id) => {
+                                    // Stamp the real availability: a `/get` poll reply for an
+                                    // unreachable device carries stale cached state, and we must
+                                    // not let it flip an offline bulb back to online.
+                                    report.online = availability
+                                        .get(&report.device_id)
+                                        .copied()
+                                        .unwrap_or(true);
                                     // Debounce: Z2M fires multiple partial updates per action.
                                     // Cancel any pending emit for this device and restart the timer.
                                     // Sweep completed handles (amortised on each state event).
@@ -200,6 +215,7 @@ impl ZigbeeClient {
                                 } else {
                                     continue;
                                 };
+                                availability.insert(device_id.clone(), online);
                                 let _ = tx_loop
                                     .send(ZigbeeEvent::DeviceAvailability { device_id, online });
                             }
