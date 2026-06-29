@@ -14,7 +14,7 @@ node by creating a `nodes/<name>.env` file and running `just deploy-node <name>`
 1. **Create a node config file**
    ```bash
    # nodes/mynode.env
-   NODE_HOST=192.168.1.x
+   NODE_HOST=10.0.0.x
    NODE_USER=youruser
    NODE_OS=linux      # or windows
    NODE_ROLE=compute
@@ -45,7 +45,7 @@ The coordinator is the central hub of the mesh. It:
 - Routes model load, inference, lighting, and intent commands to the correct agent
 - Writes `/var/lib/ai-mesh/coordinator.state` on startup
 
-The coordinator binds to `0.0.0.0:9000` and runs on **pi1** (`192.168.1.11`) as an always-on systemd service; nodes connect there directly. (Historically it ran in WSL2 behind a Windows portproxy — that portproxy is now vestigial.)
+The coordinator binds to `0.0.0.0:9000` and runs on **pi1** (`10.0.0.10`) as an always-on systemd service; nodes connect there directly. (Historically it ran in WSL2 behind a Windows portproxy — that portproxy is now vestigial.)
 
 ### Message Handling
 

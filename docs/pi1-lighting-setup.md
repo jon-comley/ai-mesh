@@ -1,6 +1,6 @@
 # pi1 Lighting Infrastructure Setup
 
-One-time manual setup on pi1 (192.168.1.11) to support the `lighting` capability.
+One-time manual setup on pi1 (10.0.0.10) to support the `lighting` capability.
 The agent binary handles MQTT automatically once Mosquitto and Z2M are running.
 
 ---
@@ -9,7 +9,11 @@ The agent binary handles MQTT automatically once Mosquitto and Z2M are running.
 
 - **Raspberry Pi 5** — 8 GB RAM, runs Mosquitto + Z2M + ai-mesh agent
 - **SLZB-06** Zigbee coordinator — PoE device; power via USB-C, network via ethernet
-  - IP: `192.168.1.16`, port `6638`
+  - IP: `10.0.0.12`, port `6638` — **set a DHCP reservation** for this on the
+    the mesh router. Z2M's `serial.port` hard-codes this address; if the lease changes,
+    Z2M fails with `EHOSTUNREACH` and crash-loops, and all lights go dead with no
+    error on the dashboard (this is exactly what the 2026-06-25 the mesh router migration broke
+    — the SLZB-06 moved off `192.168.1.16` but the Z2M config still pointed at it).
   - Firmware: EmberZNet 8.0.2 / EZSP v14 (Z2M adapter type: `ember`)
 
 ---
@@ -17,7 +21,7 @@ The agent binary handles MQTT automatically once Mosquitto and Z2M are running.
 ## 1. Install Mosquitto
 
 ```bash
-ssh jonno@192.168.1.11
+ssh jonno@10.0.0.10
 sudo apt update
 sudo apt install -y mosquitto mosquitto-clients
 sudo systemctl enable --now mosquitto
@@ -42,8 +46,8 @@ sudo systemctl restart mosquitto
 Verify from OmniLink1:
 
 ```bash
-mosquitto_pub -h 192.168.1.11 -t test -m hello
-mosquitto_sub -h 192.168.1.11 -t test -C 1   # should print "hello"
+mosquitto_pub -h 10.0.0.10 -t test -m hello
+mosquitto_sub -h 10.0.0.10 -t test -C 1   # should print "hello"
 ```
 
 ---
@@ -79,12 +83,21 @@ nano /opt/zigbee2mqtt/data/configuration.yaml
 ```yaml
 mqtt:
   server: mqtt://127.0.0.1
+  retain: true            # broker holds last per-device state so agents get it on subscribe
 
 serial:
-  port: tcp://192.168.1.16:6638
+  port: tcp://10.0.0.12:6638
   adapter: ember          # required for EZSP v13+; was 'ezsp' on older firmware
 
 permit_join: false        # set true temporarily when pairing
+
+availability:
+  enabled: true           # REQUIRED: without this, z2m never marks unreachable
+                          # bulbs offline, so a powered-off light keeps showing its
+                          # last "on" state in the dashboard forever. With it on, z2m
+                          # actively pings mains devices (active.timeout, default 10
+                          # min) and publishes <device>/availability offline, which
+                          # the lighting capability turns into an offline card.
 ```
 
 ### 2d. Verify it starts
@@ -135,7 +148,7 @@ sudo systemctl status zigbee2mqtt
 
 ## 4. SLZB-06 Firmware
 
-If Z2M reports EZSP version < 13, update the EFR32 radio firmware via the SLZB-06 web UI at `http://192.168.1.16`:
+If Z2M reports EZSP version < 13, update the EFR32 radio firmware via the SLZB-06 web UI at `http://10.0.0.12`:
 
 1. Open the web UI → Firmware tab
 2. Select the latest EmberZNet release (v3.x.x) and flash
@@ -157,7 +170,7 @@ bulb to trigger pairing. When it joins, Z2M will interview it and log the IEEE a
 **Rename the device** after pairing:
 
 ```bash
-mosquitto_pub -h 192.168.1.11 \
+mosquitto_pub -h 10.0.0.10 \
   -t 'zigbee2mqtt/bridge/request/device/rename' \
   -m '{"from":"0xXXXXXXXXXXXXXXXX","to":"my_bulb"}'
 ```
@@ -165,7 +178,7 @@ mosquitto_pub -h 192.168.1.11 \
 Confirm:
 
 ```bash
-mosquitto_sub -h 192.168.1.11 -t 'zigbee2mqtt/bridge/devices' -C 1 \
+mosquitto_sub -h 10.0.0.10 -t 'zigbee2mqtt/bridge/devices' -C 1 \
   | python3 -m json.tool | grep friendly_name
 ```
 
@@ -177,11 +190,11 @@ Groups let you control multiple bulbs with one command. Create an `all` group
 and add devices to it:
 
 ```bash
-mosquitto_pub -h 192.168.1.11 \
+mosquitto_pub -h 10.0.0.10 \
   -t 'zigbee2mqtt/bridge/request/group/add' \
   -m '{"friendly_name":"all"}'
 
-mosquitto_pub -h 192.168.1.11 \
+mosquitto_pub -h 10.0.0.10 \
   -t 'zigbee2mqtt/bridge/request/group/members/add' \
   -m '{"group":"all","device":"my_bulb"}'
 ```

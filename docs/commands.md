@@ -35,7 +35,7 @@ What it does:
 
 After setup:
 ```bash
-just provision-all    # deploy agent to all nodes, pointed at pi1 (the coordinator, 192.168.1.11)
+just provision-all    # deploy agent to all nodes, pointed at pi1 (the coordinator, 10.0.0.10)
 just start-cluster    # bring the full cluster up
 ```
 
@@ -60,7 +60,7 @@ just start-cluster    # bring the full cluster up
 Node config lives in `nodes/<name>.env`. Each file defines four variables:
 
 ```bash
-NODE_HOST=192.168.1.x
+NODE_HOST=10.0.0.x
 NODE_USER=youruser
 NODE_OS=linux        # or windows
 NODE_ROLE=compute    # or controller
@@ -192,7 +192,7 @@ Defined at the top of `justfile`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `coordinator_ip` | `192.168.1.11` | pi1's LAN IP — where the coordinator runs (always-on systemd service); all nodes connect here. This is pi1's IP, **not** the laptop's; only change it if pi1's IP changes, then run `just provision-all` |
+| `coordinator_ip` | `10.0.0.10` | pi1's LAN IP — where the coordinator runs (always-on systemd service); all nodes connect here. This is pi1's IP, **not** the laptop's; only change it if pi1's IP changes, then run `just provision-all` |
 | `coordinator_port` | `9000` | Coordinator TCP port |
 | `MESH_HTTP_PORT` | `9001` | Dashboard HTTP port (env var, not a justfile variable) |
 
