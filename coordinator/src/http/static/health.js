@@ -11,6 +11,7 @@ const intervalsMap = new Map(); // nodeId -> secs (last successfully set)
 
 const healthChartsEl = document.getElementById('health-charts');
 let dragSrc = null;
+let zigbeeOnline = null; // null = no report yet, then true/false
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,12 @@ export function handleHealth(evt) {
   samplesMap.set(evt.node_id, evt.samples);
   renderHealthPanel();
   paintMiniSparkline(evt.node_id);
+}
+
+/** Called on each ZigbeeStatus event — drives the bridge health card. */
+export function handleZigbeeStatus(online) {
+  zigbeeOnline = online;
+  renderHealthPanel();
 }
 
 /** Refill all mini sparklines — call after topology re-renders node cards. */
@@ -59,12 +66,37 @@ if (healthChartsEl) {
 
 function renderHealthPanel() {
   if (!healthChartsEl || dragSrc) return;
-  if (samplesMap.size === 0) {
-    healthChartsEl.innerHTML = '<p class="placeholder">No health data yet.</p>';
-    return;
-  }
   const entries = applyOrder([...samplesMap.entries()], ([id]) => id);
-  healthChartsEl.innerHTML = entries.map(([id, samp]) => healthCard(id, samp)).join('');
+  const nodeCards = entries.map(([id, samp]) => healthCard(id, samp)).join('')
+    || '<p class="placeholder">No node health data yet.</p>';
+  // Bridge card sits above the node cards and is never drag-reordered (no
+  // data-drag-id), so the infrastructure status is always the first thing seen.
+  healthChartsEl.innerHTML = bridgeCard() + nodeCards;
+}
+
+/** Infrastructure card: the Zigbee bridge the lighting/blinds/HVAC crates depend on. */
+function bridgeCard() {
+  let cls, label, detail;
+  if (zigbeeOnline === null) {
+    cls = 'bridge-unknown';
+    label = 'Unknown';
+    detail = 'No report from the lighting node yet.';
+  } else if (zigbeeOnline) {
+    cls = 'bridge-online';
+    label = 'Online';
+    detail = 'Connected to zigbee2mqtt.';
+  } else {
+    cls = 'bridge-offline';
+    label = 'Offline';
+    detail = 'Bridge down, or MQTT_HOST unset (stub mode) — light commands will not reach devices.';
+  }
+  return `<div class="health-card bridge-card">
+  <div class="health-card-header">
+    <span class="health-node-name">⚡ Zigbee bridge</span>
+    <span class="bridge-pill ${cls}">${label}</span>
+  </div>
+  <p class="bridge-detail">${detail}</p>
+</div>`;
 }
 
 function healthCard(nodeId, samp) {

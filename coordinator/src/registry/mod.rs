@@ -789,6 +789,16 @@ impl Registry {
             .collect()
     }
 
+    /// True if the node `id` currently advertises `feature`. Used on disconnect to
+    /// decide whether losing this node means we've lost the lighting/bridge source.
+    pub fn node_has_feature(&self, id: &str, feature: &str) -> bool {
+        self.nodes
+            .get(id)
+            .and_then(|n| n.capabilities.as_ref())
+            .map(|c| c.features.iter().any(|f| f == feature))
+            .unwrap_or(false)
+    }
+
     /// Returns the name of any model in Ready state on any LLM-capable Compute node.
     /// Used by the intent router when no model_name is specified.
     /// Returns the name of the largest ready LLM model across all compute nodes.
@@ -1751,6 +1761,11 @@ mod tests {
         let lighting_nodes = reg.nodes_with_feature("lighting");
         assert_eq!(lighting_nodes.len(), 1);
         assert_eq!(lighting_nodes[0].id, "llm-and-lighting");
+
+        // node_has_feature mirrors the same membership for a single node.
+        assert!(reg.node_has_feature("llm-and-lighting", "lighting"));
+        assert!(!reg.node_has_feature("llm-only", "lighting"));
+        assert!(!reg.node_has_feature("nonexistent", "lighting"));
     }
 
     #[test]
