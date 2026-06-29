@@ -124,9 +124,12 @@ systemctl restart ai-mesh-agent
 systemctl is-active ai-mesh-agent
 echo ">>> ai-mesh-agent installed and started."
 
-# Allow the controller machine to push TLS fingerprints and restart the service
-# over SSH without a password prompt (needed by `just set-fingerprint`).
-echo "${AGENT_USER} ALL=(ALL) NOPASSWD: /usr/bin/tee, /bin/systemctl" \
+# Allow the controller machine to drive this node over SSH without a password
+# prompt: pushing TLS fingerprints (`just set-fingerprint`), and re-running this
+# installer headlessly (`just deploy-node`, which calls `sudo /tmp/install-node.sh`
+# — a target that can't be safely whitelisted by path since /tmp is world-writable).
+# Solo home-lab node: full NOPASSWD for the owner account is the pragmatic choice.
+echo "${AGENT_USER} ALL=(ALL) NOPASSWD: ALL" \
     > /etc/sudoers.d/ai-mesh-agent
 chmod 440 /etc/sudoers.d/ai-mesh-agent
-echo ">>> Passwordless sudo configured for tee and systemctl."
+echo ">>> Passwordless sudo configured for ${AGENT_USER} (headless deploys)."
