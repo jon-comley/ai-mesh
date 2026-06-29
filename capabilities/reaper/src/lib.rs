@@ -118,13 +118,19 @@ impl Capability for ReaperCapability {
         let node_id = self.node_id.clone();
         let addr = Self::reaper_addr();
         let url = format!("http://{}/_/TRANSPORT", addr);
-        let coordinator_tx = self.coordinator_tx.clone();
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
             .build()
             .map_err(|e| format!("reaper: failed to build HTTP client: {e}"))?;
 
+        // Bind the poller to THIS connection's sender (moved in), not the shared
+        // swappable `coordinator_tx`. start() is re-run on every coordinator
+        // reconnect; if the poller read the shared slot it would find the freshly
+        // swapped-in live sender, never hit the break, and survive — accumulating
+        // one extra ReaperStatus poller per reconnect. Bound to its own `tx`, the
+        // poller's send fails when this connection's receiver is dropped, so the
+        // old poller exits and the new start() owns the only live one.
         tokio::spawn(async move {
             let mut first_success = true;
             loop {
@@ -155,10 +161,7 @@ impl Capability for ReaperCapability {
                     }
                 };
 
-                let tx_guard = coordinator_tx.lock().unwrap().clone();
-                if let Some(tx) = tx_guard
-                    && tx.send(MeshMessage::ReaperStatus(report)).await.is_err()
-                {
+                if tx.send(MeshMessage::ReaperStatus(report)).await.is_err() {
                     debug!("reaper: coordinator channel closed, stopping poller");
                     break;
                 }
