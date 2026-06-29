@@ -14,7 +14,7 @@ use socket2::{SockRef, TcpKeepalive};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tracing::{info, warn};
 
 #[tokio::main]
@@ -143,7 +143,14 @@ async fn main() {
         let caps_reader = caps.clone();
         let reader_key = hmac_key;
         let reader_interval = interval_handle.clone();
-        tokio::spawn(async move {
+        // Signalled when the read half closes or errors. This is the *reliable*
+        // dead-connection signal: a vanished coordinator (e.g. after a WSL2
+        // suspend/resume) shows up here as EOF, whereas the writer can keep
+        // buffering small 5s heartbeats into a half-open socket for many minutes
+        // without ever returning an error — so the read side must drive reconnect.
+        let conn_dead = Arc::new(Notify::new());
+        let reader_dead = conn_dead.clone();
+        let reader_handle = tokio::spawn(async move {
             use std::sync::atomic::Ordering;
             loop {
                 let buf = match read_bounded_frame(&mut reader).await {
@@ -189,31 +196,45 @@ async fn main() {
                     other => dispatch(other, &caps_reader, tx_in.clone()).await,
                 }
             }
+            // Read half closed/errored — wake the writer loop so we reconnect.
+            reader_dead.notify_one();
         });
 
         // Writer loop — drains the outbound mpsc channel onto the TCP stream.
         // When HMAC is active, every outgoing message is wrapped in a SignedFrame.
         loop {
-            if let Some(msg) = rx.recv().await {
-                let data = if let Some(key) = &hmac_key {
-                    let payload = serde_json::to_vec(&msg).unwrap();
-                    let frame = SignedFrame::sign(key, payload);
-                    serde_json::to_vec(&frame).unwrap()
-                } else {
-                    serde_json::to_vec(&msg).unwrap()
-                };
-                let len = (data.len() as u32).to_le_bytes();
+            let msg = tokio::select! {
+                maybe = rx.recv() => match maybe {
+                    Some(msg) => msg,
+                    None => break, // all senders dropped
+                },
+                _ = conn_dead.notified() => {
+                    warn!("Coordinator closed the connection (read side).");
+                    break;
+                }
+            };
+            let data = if let Some(key) = &hmac_key {
+                let payload = serde_json::to_vec(&msg).unwrap();
+                let frame = SignedFrame::sign(key, payload);
+                serde_json::to_vec(&frame).unwrap()
+            } else {
+                serde_json::to_vec(&msg).unwrap()
+            };
+            let len = (data.len() as u32).to_le_bytes();
 
-                if let Err(e) = writer.write_all(&len).await {
-                    warn!("Write error: {}", e);
-                    break;
-                }
-                if let Err(e) = writer.write_all(&data).await {
-                    warn!("Write error: {}", e);
-                    break;
-                }
+            if let Err(e) = writer.write_all(&len).await {
+                warn!("Write error: {}", e);
+                break;
+            }
+            if let Err(e) = writer.write_all(&data).await {
+                warn!("Write error: {}", e);
+                break;
             }
         }
+
+        // Abort the reader so it doesn't linger on the dead read half while we
+        // reconnect; the next iteration spawns a fresh reader on the new socket.
+        reader_handle.abort();
 
         warn!("Disconnected from coordinator. Reconnecting in 5s...");
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
