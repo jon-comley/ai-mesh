@@ -11,9 +11,18 @@ async fn main() {
         .install_default()
         .expect("failed to install ring crypto provider");
     {
+        use tracing_subscriber::EnvFilter;
         use tracing_subscriber::prelude::*;
+        // Filter only the console/journal output — default to `info` (honouring
+        // RUST_LOG when set). Without this the fmt layer has no level filter and
+        // logs everything, flooding the journal with TRACE (notably mdns_sd) and
+        // ignoring the RUST_LOG=info the unit already sets. The filter is attached
+        // to the fmt layer only, so ErrorCaptureLayer still sees every WARN/ERROR
+        // for the dashboard error feed regardless of console verbosity.
+        let fmt_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
         tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_filter(fmt_filter))
             .with(coordinator::logging::ErrorCaptureLayer)
             .init();
     }
