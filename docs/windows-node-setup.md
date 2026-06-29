@@ -2,6 +2,14 @@
 
 Step-by-step guide for adding a fresh Windows 11 machine to the ai-mesh cluster as a compute node. Captures every gotcha encountered during the Beelink SER8 provisioning.
 
+> **Network note (2026-06-25 the mesh router migration).** The home subnet moved
+> `192.168.1.x` → `10.0.0.x`. Current addresses: **pi1 `10.0.0.10`**,
+> **beelink1 `10.0.0.11`**, **SLZB-06 Zigbee `10.0.0.12`** (set the mesh router DHCP
+> reservations so they don't move). **Any `192.168.1.x` address below is
+> historical** — substitute the current address when following the steps. The
+> troubleshooting section near the end intentionally keeps the old IPs because it
+> documents the migration itself.
+
 ---
 
 ## Prerequisites

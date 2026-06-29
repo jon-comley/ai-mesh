@@ -6,6 +6,8 @@
 
 Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x` → `10.0.0.x` (pi1 `10.0.0.10`, beelink1 `10.0.0.11`, SLZB-06 `10.0.0.12`). `nodes/*.env`, `justfile`, `README.md`, and `handover.md` updated. Follow-ups: set the mesh router DHCP reservations (leases still dynamic); re-verify beelink BIOS Pluton/fTPM golden state (crash storm regressed during the move — `docs/windows-node-setup.md`). beelink also needed Smart App Control disabled to run the self-built agent after its earlier Windows reinstall.
 
+**Follow-up (2026-06-29) — z2m crash-loop from a missed stale IP; all lights dead.** The migration updated runtime config but **not** zigbee2mqtt's `configuration.yaml` on pi1: its `serial.port` still pointed at the SLZB-06's old `tcp://192.168.1.16:6638`. Z2M failed with `connect EHOSTUNREACH` → `Failed to start EZSP layer (HOST_FATAL_ERROR)` and crash-looped every ~6 s, so the Zigbee bridge was down and every light command published into MQTT and vanished — with **no error on the dashboard** (the coordinator's lighting capability was happily connected to Mosquitto on `127.0.0.1`; the break was downstream at z2m↔radio). *Fixed:* repointed `serial.port` → `tcp://10.0.0.12:6638` (backup saved alongside) and restarted z2m — it reconnected (`Coordinator firmware … EmberZNet 8.0.2`, `9 devices joined`, `Connected to MQTT`); a test command round-tripped (`test_bulb` off/on → 204). **Root-cause prevention: set the mesh router DHCP reservation for the SLZB-06** (`10.0.0.12`) — z2m hard-codes it, so a lease change re-breaks this. Repo-side, the stale `192.168.1.x` sweep found no runtime config affected (`nodes/*.env`/`justfile` were already correct); only **docs** lagged — `docs/pi1-lighting-setup.md` (the z2m config source), `docs/{commands,mesh,reaper}.md` updated inline, `docs/windows-node-setup.md` got the historical-IP disclaimer. Plan docs + in-code test fixtures left as historical.
+
 ---
 
 ## Code Audit — Findings to Action (2026-06-02)
@@ -653,6 +655,102 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
     plugin (TDR Nova / Analog Obsession).
 
   Full list, pricing, install steps, and per-plugin automation: `docs/reaper-plugins.md`.
+
+---
+
+## Phase 11.8 — Multi-Device Home (Blinds, HVAC) + Room-Centric Control (Design)
+
+Captured 2026-06-29 from a design discussion. Nothing built yet except the first
+piece (the Zigbee bridge health card, below). The home is about to grow well past
+lights — **~7 blinds and aircon/HVAC** are coming, each as its own Zigbee device
+class — so this records the navigation/architecture model before the device count
+forces an ad-hoc answer.
+
+### Guiding principle (from how the competitors do it)
+
+The serious platforms all converge on one split: **room/area is the primary axis
+for *control*; device-type is the *data model* and a *secondary* (management)
+view.** Nobody makes you visit a "Lights" page, then a "Blinds" page, to operate
+one room.
+
+- **Home Assistant** — the closest model to ours. It rigorously separates the
+  **registry** (entities → devices → **areas**) from the **dashboard**
+  (presentation). Areas are first-class; device *type* is just the entity domain
+  (`light`, `cover` = blinds, `climate` = HVAC) which decides the *widget*, not
+  the navigation. Domain views exist but are for bulk/management.
+- **Apple Home** — aggressively room-centric; accessory *type* only chooses the
+  control widget (blind = slider, thermostat = dial). No "all lights" daily driver.
+- **SmartThings / Google Home** — rooms primary, device tiles within, scenes/
+  routines on top. **Homey** — hierarchical "Zones"; **Hubitat** — more
+  device/admin-centric (power-user skew) but still room-grouped.
+
+Takeaway: **crate-per-device-type is the right *backend* boundary and is
+independent of the UI axis.** Keep it. Make rooms primary for control; demote
+type-tabs to setup/management.
+
+### Architecture decisions
+
+- **Keep crate-per-capability** as the backend/data-model boundary — `lighting`,
+  and future `blinds` (Z2M `cover`) + `hvac` (Z2M `climate`) — each owns its MQTT
+  topics and command schema. This is honest 1:1 with the UI's per-type management
+  surfaces.
+- **Decouple room membership from lighting (the enabling refactor).** Rooms are
+  currently lights-specific (`all_light_device_names`, `room_devices` assume light
+  devices, room positions live on the lighting map). Generalise to a
+  device-type-agnostic **room/device registry**: a room holds devices of *any*
+  type; each device knows its crate/type. Do this **before blinds lands** so we
+  don't deepen the lighting coupling and then have to unpick it.
+- **Rooms/House tab becomes the *primary* control surface** (HA/Apple model): open
+  "Living Room" → see its lights + blinds + climate, each rendered by its type's
+  widget. **Per-type tabs (Lights, Blinds, HVAC) demote to setup/bulk**: pairing,
+  naming, calibration, firmware, "all blinds down".
+- **One widget per type, shared across both surfaces.** The room view and the
+  type-tab must reuse the *same* per-type control component (one "blind control"
+  used in both places). Building control logic twice is the thing to avoid.
+- **Infrastructure ≠ control.** The Zigbee bridge/dongle, MQTT broker, and z2m are
+  plumbing every device crate depends on — they have a *health state*, not buttons.
+  They belong on **Health/Nodes**, never as a control tab and never as a fake peer
+  in the node list.
+- **Tab-sprawl rule.** Flat tabs (one per control domain) while control tabs ≤ ~5.
+  When they exceed that, fold them under a single **Devices** hub with a left
+  sub-nav (Lights / Blinds / Climate / …). Build the hub *then*, not now (YAGNI).
+  Projected near-term set (~8, still readable): Nodes · Health · Chat · Online AI ·
+  Lighting · Blinds · HVAC · REAPER.
+
+### Concrete steps
+
+- **Zigbee bridge health card** ✓ (2026-06-29) — first instance of the infra-vs-
+  control split. A "Zigbee bridge" card on the Health tab shows Online / Offline /
+  Unknown, driven by the existing `ZigbeeStatus` signal. Two backend fixes make it
+  honest: (1) stub mode (`MQTT_HOST` unset) now *explicitly reports the bridge
+  offline* (`capability-lighting` start); (2) the coordinator's stored status is
+  now **tri-state** — `DashboardState::zigbee_status: Option<bool>` defaulting to
+  `None` (Unknown) instead of the old `AtomicBool` default-`true`, so the card
+  reads amber "Unknown" until a lighting node actually reports, rather than a
+  misleading green "Online" when no node is connected at all. `ZigbeeStatus`
+  (dashboard event) carries `Option<bool>` → serialises `null`; `rooms.js` is
+  unaffected (its `inferZigbeeStatus` re-derives from device state each render).
+  (3) On the lighting node's **disconnect**, the coordinator resets the status to
+  `None` (`server.rs` cleanup → `reset_zigbee_status`, gated on
+  `Registry::node_has_feature(id, "lighting")`), so a node that dies *silently*
+  (TCP drop without first sending `offline`) no longer leaves a stale "Online".
+  Together these close the blind spot where light commands vanished with nothing
+  on the dashboard to explain why.
+- **When blinds land** (`capability-blinds`, Z2M `cover`): join the *generalised*
+  room model, not the lighting-specific path. New `cover` widget (position + tilt).
+  Good moment to replace raw feature strings (`"lighting"`, `"reaper"`, soon
+  `"cover"`/`"climate"`) with a feature **enum** — there'll finally be enough
+  variants (`nodes_with_feature` / `node_has_feature` / capability registration)
+  to justify the type safety. Premature while only lighting exists.
+- **Defer the full room-centric view** until a second device type exists to justify
+  it; until then don't over-invest in per-domain navigation a room view will
+  replace.
+
+### Open question (resolved)
+
+Room-centric vs device-type-centric was the tension. **Decision: room-centric
+primary for control, device-type for the data model + management** — matching HA
+and Apple. The crate boundaries are unaffected by that choice.
 
 ---
 
