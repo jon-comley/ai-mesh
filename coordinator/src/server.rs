@@ -299,10 +299,19 @@ where
         // Tokio cancels tasks before cleanup runs, so DB model state is preserved.
         {
             let mut reg = registry.lock().unwrap();
+            // Was this the lighting node? Check before clearing anything.
+            let was_lighting = reg.node_has_feature(&id, "lighting");
             reg.clear_node_models(&id);
             if let Some(dash) = &dashboard {
                 let snapshot = build_model_snapshot(&reg);
                 dash.push_model_update(snapshot);
+                // Losing the lighting node means we can no longer trust the last
+                // bridge status it sent — reset to unknown so the dashboard stops
+                // showing a stale "online" the node can't refute.
+                if was_lighting {
+                    info!(node_id = %id, "lighting node disconnected — bridge status → unknown");
+                    dash.reset_zigbee_status();
+                }
             }
         }
 

@@ -45,6 +45,12 @@ impl Capability for LightingCapability {
 
         let Ok(host) = std::env::var("MQTT_HOST") else {
             info!("lighting: MQTT_HOST not set — running as stub");
+            // A stub bridge is not a healthy bridge: tell the coordinator it's
+            // offline so the dashboard reflects reality instead of the default
+            // "online" (otherwise light commands silently vanish into the stub
+            // and nothing on the dashboard explains why).
+            self.send_to_coordinator(MeshMessage::ZigbeeStatus { online: false })
+                .await;
             return Ok(());
         };
         let port: u16 = std::env::var("MQTT_PORT")
