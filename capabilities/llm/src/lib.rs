@@ -15,14 +15,15 @@ fn infer_sem() -> &'static Semaphore {
 }
 
 // Single-flight model loads. Serializes every ModelLoad so only one pull_model
-// runs at a time, and holds the name of the model currently loaded so a
+// runs at a time, and holds the (name, size_mb) of the model currently loaded so a
 // duplicate ModelLoad (double-click, auto-placement retry, reconnect re-send)
 // is a no-op instead of racing a second download into the same temp file
 // (the "rename failed … No such file or directory" error) or stomping the
 // running llama-server. The inner Option is None while nothing is loaded or a
-// load is in progress; it is set to Some(model) only once a load reports Ready.
-static LOAD_GUARD: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-fn load_guard() -> &'static Mutex<Option<String>> {
+// load is in progress; it is set to Some((model, size)) only once a load reports
+// Ready. The size is kept so `start()` can re-report the loaded model on reconnect.
+static LOAD_GUARD: OnceLock<Mutex<Option<(String, u64)>>> = OnceLock::new();
+fn load_guard() -> &'static Mutex<Option<(String, u64)>> {
     LOAD_GUARD.get_or_init(|| Mutex::new(None))
 }
 
@@ -53,8 +54,28 @@ impl Capability for LlmCapability {
         )
     }
 
-    async fn start(&self, _tx: Sender<MeshMessage>) -> Result<(), String> {
-        Ok(()) // llama-server is launched on ModelLoad; no background loop needed
+    async fn start(&self, tx: Sender<MeshMessage>) -> Result<(), String> {
+        // Re-report a currently-loaded model on every (re)connect. The coordinator
+        // clears a node's model state whenever its connection drops (e.g. a
+        // read-timeout close while the node is briefly silent), so without this a
+        // model still resident in llama-server would vanish from the dashboard
+        // until the next explicit load. The guard is process-static: if it holds a
+        // model, this process loaded it and llama-server is still serving it (an
+        // agent restart resets the guard and kills llama-server together), so
+        // re-reporting Ready is safe. On the first connect the guard is None.
+        if let Some((model_name, size_mb)) = load_guard().lock().await.clone() {
+            info!(model = %model_name, "re-reporting loaded model to coordinator on (re)connect");
+            let _ = tx
+                .send(MeshMessage::ModelStatus(ModelStatusReport {
+                    node_id: self.node_id.clone(),
+                    model_name,
+                    size_mb,
+                    state: ModelLifecycleState::Ready,
+                    wire_version: WIRE_VERSION,
+                }))
+                .await;
+        }
+        Ok(())
     }
 
     async fn handle(&self, msg: MeshMessage, tx: Sender<MeshMessage>) {
@@ -90,7 +111,7 @@ impl Capability for LlmCapability {
                             load_guard().lock().await
                         }
                     };
-                    if loaded.as_deref() == Some(mname.as_str()) {
+                    if loaded.as_ref().map(|(n, _)| n.as_str()) == Some(mname.as_str()) {
                         info!(model = %mname, "model already loaded — skipping duplicate load");
                         let _ = tx2
                             .send(MeshMessage::ModelStatus(ModelStatusReport {
@@ -110,7 +131,7 @@ impl Capability for LlmCapability {
                     let state = match llama::pull_model(&mname, size).await {
                         Ok(()) => {
                             info!(model = %mname, "llama pull complete");
-                            *loaded = Some(mname.clone());
+                            *loaded = Some((mname.clone(), size));
                             Some(ModelLifecycleState::Ready)
                         }
                         Err(e) if e == "unloaded" => {
