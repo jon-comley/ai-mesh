@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -219,13 +219,50 @@ where
         }
     });
 
+    // Read timeout: a node that goes silent (e.g. a WSL2 suspend/resume that
+    // leaves a half-open socket) must be detected, because nothing else will —
+    // without this we block on read forever, never close the socket, and so the
+    // agent's read half never sees EOF to drive its own reconnect. Closing here
+    // sends a FIN that lets the agent notice and reconnect.
+    //
+    // The interval is configurable up to MAX_HEARTBEAT_SECS, so the timeout is
+    // sized from each node's *observed* heartbeat cadence (3× the gap, floored at
+    // 15s). It starts generous and only tightens once we've seen a real gap
+    // between two heartbeats — the first heartbeat arrives immediately on connect,
+    // so it isn't a representative interval and must not drive the timeout.
+    const MAX_HEARTBEAT_SECS: u64 = 3600; // mirrors the bound in http::api::set_heartbeat_interval
+    // Grace granted while a model is loading. Sized to the agent's own worst-case
+    // load: `health_timeout_secs` caps at 900s for the largest models (180s for the
+    // ≤7b models here), so the agent always reports Ready/Failed within this window.
+    // Bounds a node that dies mid-load to ~15 min cleanup rather than the full cap.
+    const MODEL_LOAD_GRACE_SECS: u64 = 900;
+    let cap = Duration::from_secs(MAX_HEARTBEAT_SECS + 30);
+    let load_grace = Duration::from_secs(MODEL_LOAD_GRACE_SECS);
+    let mut read_timeout = cap;
+    let mut last_gap: Option<Duration> = None;
+    let mut last_heartbeat: Option<Instant> = None;
+    // A model load goes silent for a long stretch — the node is CPU-pegged
+    // downloading / launching llama-server and heartbeats stall — so while a model
+    // is Loading we must grant a generous grace or we'd close the connection
+    // mid-load. The agent sends ModelStatus{Loading} before that stretch and
+    // Ready/Failed after, so this stays sticky across the silence.
+    let mut loading = false;
+
     loop {
-        let buf = match read_bounded_frame(&mut reader).await {
-            Ok(buf) => buf,
-            Err(FrameReadError::Closed) => break,
-            Err(FrameReadError::TooLarge(n)) => {
+        let buf = match timeout(read_timeout, read_bounded_frame(&mut reader)).await {
+            Ok(Ok(buf)) => buf,
+            Ok(Err(FrameReadError::Closed)) => break,
+            Ok(Err(FrameReadError::TooLarge(n))) => {
                 warn!(
                     "dropping connection from {peer_addr}: frame length {n} exceeds MAX_FRAME_LEN"
+                );
+                break;
+            }
+            Err(_elapsed) => {
+                warn!(
+                    %peer_addr,
+                    timeout_secs = read_timeout.as_secs(),
+                    "no frame within read timeout — closing stale connection so the node can reconnect"
                 );
                 break;
             }
@@ -257,6 +294,25 @@ where
                 Err(e) => return Err(ServerError::Json(e)),
             }
         };
+
+        // Size the next read timeout. Normally it's 3× the heartbeat cadence,
+        // measured between two real heartbeats (the first arrives immediately on
+        // connect and is not a representative interval, so it must not drive the
+        // timeout). While a model is Loading we use the generous cap instead.
+        match &msg {
+            MeshMessage::Heartbeat(_) => {
+                let now = Instant::now();
+                if let Some(prev) = last_heartbeat {
+                    last_gap = Some(now.duration_since(prev));
+                }
+                last_heartbeat = Some(now);
+            }
+            MeshMessage::ModelStatus(report) => {
+                loading = matches!(report.state, ModelLifecycleState::Loading);
+            }
+            _ => {}
+        }
+        read_timeout = next_read_timeout(loading, last_gap, cap, load_grace);
 
         let reply = process_message(
             msg,
@@ -377,6 +433,31 @@ fn build_model_snapshot(registry: &Registry) -> Vec<NodeModelInfo> {
             }
         })
         .collect()
+}
+
+/// Size the next read timeout from the gap between two heartbeats: 3× the gap
+/// (generous tolerance for jitter), floored at 15s so a fast 5s cadence still
+/// detects a dead peer promptly, and capped so a slow-heartbeat node configured
+/// near the maximum interval is never falsely dropped.
+fn read_timeout_from_gap(gap: Duration, cap: Duration) -> Duration {
+    (gap * 3).clamp(Duration::from_secs(15), cap)
+}
+
+/// The next read timeout for a connection. While a model is loading the node goes
+/// silent (no heartbeats during a long download / llama-server launch), so we use
+/// `load_grace` and never trip the cadence timeout mid-load. Otherwise the timeout
+/// is sized from the observed heartbeat cadence (`cap` until one is known).
+fn next_read_timeout(
+    loading: bool,
+    last_gap: Option<Duration>,
+    cap: Duration,
+    load_grace: Duration,
+) -> Duration {
+    if loading {
+        load_grace
+    } else {
+        last_gap.map_or(cap, |gap| read_timeout_from_gap(gap, cap))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -882,6 +963,48 @@ mod tests {
     use crate::http::state::DashboardState;
     use shared::{HeartbeatPayload, LightStateReport, NodeIdentity, NodeRole};
     use tokio::net::TcpStream;
+
+    #[test]
+    fn read_timeout_sizes_to_heartbeat_cadence() {
+        let cap = Duration::from_secs(3630);
+        // Fast 5s cadence → 3× = 15s, which is also the floor.
+        assert_eq!(
+            read_timeout_from_gap(Duration::from_secs(5), cap),
+            Duration::from_secs(15)
+        );
+        // A sub-second gap (e.g. a burst of frames) is floored, never tighter than 15s.
+        assert_eq!(
+            read_timeout_from_gap(Duration::from_millis(200), cap),
+            Duration::from_secs(15)
+        );
+        // A 60s cadence scales linearly: 3× = 180s.
+        assert_eq!(
+            read_timeout_from_gap(Duration::from_secs(60), cap),
+            Duration::from_secs(180)
+        );
+        // A near-max cadence is capped so the node is never falsely dropped.
+        assert_eq!(read_timeout_from_gap(Duration::from_secs(3600), cap), cap);
+    }
+
+    #[test]
+    fn read_timeout_grants_grace_while_loading() {
+        let cap = Duration::from_secs(3630);
+        let grace = Duration::from_secs(900);
+        // While a model is loading, use the (bounded) load grace regardless of
+        // cadence — a load goes silent for minutes and must not be timed out, but
+        // the grace is far shorter than the cap so a dead-mid-load node is cleaned up.
+        assert_eq!(
+            next_read_timeout(true, Some(Duration::from_secs(5)), cap, grace),
+            grace
+        );
+        assert_eq!(next_read_timeout(true, None, cap, grace), grace);
+        // Not loading: fall back to the cadence-sized timeout (cap until known).
+        assert_eq!(next_read_timeout(false, None, cap, grace), cap);
+        assert_eq!(
+            next_read_timeout(false, Some(Duration::from_secs(5)), cap, grace),
+            Duration::from_secs(15)
+        );
+    }
 
     // Build the process_message arg set with an empty registry + dashboard, no TCP.
     #[allow(clippy::type_complexity)]

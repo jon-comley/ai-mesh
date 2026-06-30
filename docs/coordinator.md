@@ -37,6 +37,12 @@ Each inbound connection passes through three layers before any message is proces
 2. **AuthToken first-frame** — when `MESH_AUTH_TOKEN` is configured, the first frame must be a plain (unsigned) `AuthToken(token)`. Wrong or missing token → connection closed.
 3. **HMAC SignedFrame** — all subsequent frames must be `SignedFrame { ts, payload, sig }`. The coordinator verifies HMAC-SHA256 (key derived via HKDF from the auth token) and rejects frames with invalid signatures or timestamps older than ±30s. Stale-frame log messages include a "check NTP" hint.
 
+### Read timeout (stale-connection detection)
+
+The per-connection read loop is wrapped in a timeout sized from the node's observed heartbeat cadence (`read_timeout_from_gap` — 3× the gap between the last two heartbeats, floored at 15s, capped at the max interval + slack). If a node goes silent (e.g. a WSL2 suspend/resume that leaves a half-open socket), the read times out and the coordinator closes the connection. This is essential: without it the coordinator would block on read forever, never send a FIN, and the agent's read half would never see EOF — so the agent's own read-half-driven reconnect (see `docs/agent.md`) would never fire. Closing here is what lets a suspended node notice and reconnect. The first heartbeat (sent immediately on connect) is not used to size the timeout, so a slow-cadence node is never falsely dropped before its real interval is known.
+
+**Model-load grace.** A model load goes silent for a long stretch — the node is CPU-pegged downloading and launching llama-server, and its heartbeats stall — which would otherwise trip the timeout mid-load. The agent sends `ModelStatus{Loading}` *before* that stretch and `Ready`/`Failed` after, so the read loop tracks a sticky `loading` flag (`next_read_timeout`) and falls back to the generous cap while loading. The grace is still bounded (the cap, ~1 h), so a node that dies mid-load is eventually cleaned up.
+
 ## Message Handling
 
 | Message | Action |
