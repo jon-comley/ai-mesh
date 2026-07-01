@@ -131,14 +131,28 @@ async fn main() {
         };
         let agent = Agent::new_with_config(config, tx.clone());
         let interval_handle = agent.interval_handle();
-        tokio::spawn(async move {
-            if let Err(e) = agent.run().await {
-                warn!("agent run loop exited: {}", e);
+        // Send the startup burst (heartbeat first) BEFORE the capabilities start,
+        // so the coordinator's clear-on-first-heartbeat lands ahead of any
+        // capability re-report. Otherwise the LLM capability re-reporting a loaded
+        // model could race ahead of the clearing heartbeat and get wiped. The
+        // heartbeat is enqueued on the FIFO channel here, before the caps below.
+        match agent.start_once().await {
+            Ok(true) => {}
+            Ok(false) => {
+                // Channel closed — connection already gone; reconnect.
+                warn!("connection dropped during startup burst. Reconnecting in 5s...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
             }
+            Err(e) => warn!("startup burst failed: {e}"),
+        }
+        tokio::spawn(async move {
+            agent.run_periodic().await;
         });
 
-        // Spawn start() for each capability. LLM's start is a no-op; lighting's
-        // start will run the MQTT event loop. Both get the current connection's tx.
+        // Spawn start() for each capability. LLM's start re-reports any loaded
+        // model; lighting's start runs the MQTT event loop. Both get the current
+        // connection's tx.
         for cap in &caps {
             let cap = Arc::clone(cap);
             let tx = tx.clone();

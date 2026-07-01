@@ -160,7 +160,16 @@ impl Agent {
         if !self.start_once().await? {
             return Ok(()); // connection dropped before we could start
         }
+        self.run_periodic().await;
+        Ok(())
+    }
 
+    /// The periodic heartbeat loop only — assumes `start_once()` has already run.
+    /// Split out so the caller can await the startup burst (heartbeat first) before
+    /// capabilities announce their state, guaranteeing the coordinator's
+    /// clear-on-first-heartbeat lands before any capability re-report (e.g. the LLM
+    /// re-reporting a loaded model) rather than racing it.
+    pub async fn run_periodic(&self) {
         loop {
             sleep(Duration::from_secs(
                 self.interval_secs.load(Ordering::Relaxed),
@@ -175,7 +184,6 @@ impl Agent {
                 break; // channel closed — connection dropped
             }
         }
-        Ok(())
     }
 }
 
