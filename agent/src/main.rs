@@ -37,6 +37,18 @@ async fn main() {
         });
 
     let caps = build_capabilities(&node_id);
+    // Floor for the reader's read timeout (see the reader loop). LLM nodes go
+    // silent for a long stretch during a model load / inference (heartbeats stall
+    // while llama-server is CPU-pegged), so their timeout must be generous enough
+    // never to trip mid-load — the coordinator's own 15s close is their normal
+    // recovery path anyway, and they're always-on (don't suspend). Non-LLM nodes
+    // (e.g. a laptop controller that does suspend) get a tight floor for fast
+    // suspend recovery, where the agent-side timeout is the only thing that fires.
+    let read_floor_secs: u64 = if caps.iter().any(|c| c.name() == "llm") {
+        1200
+    } else {
+        30
+    };
     if caps.is_empty() {
         warn!("no capabilities loaded — agent will not handle inference or lighting commands");
     } else {
@@ -153,12 +165,36 @@ async fn main() {
         let reader_handle = tokio::spawn(async move {
             use std::sync::atomic::Ordering;
             loop {
-                let buf = match read_bounded_frame(&mut reader).await {
-                    Ok(buf) => buf,
-                    Err(FrameReadError::Closed) => break,
-                    Err(FrameReadError::TooLarge(n)) => {
+                // Read timeout — a backup to the coordinator's own close. The
+                // coordinator acks every heartbeat, so we should hear from it at
+                // least once per interval; if we hear nothing for 3× that (floored
+                // at `read_floor_secs` — tight for controllers, generous for LLM
+                // nodes that go silent during loads), the connection is dead. This
+                // catches the case the EOF signal can't: a long WSL2 suspend where,
+                // on resume, neither EOF nor a write error surfaces on the half-open
+                // socket. The coordinator's 15s close stays the normal path.
+                let timeout_secs = reader_interval
+                    .load(Ordering::Relaxed)
+                    .saturating_mul(3)
+                    .max(read_floor_secs);
+                let buf = match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(timeout_secs),
+                    read_bounded_frame(&mut reader),
+                )
+                .await
+                {
+                    Ok(Ok(buf)) => buf,
+                    Ok(Err(FrameReadError::Closed)) => break,
+                    Ok(Err(FrameReadError::TooLarge(n))) => {
                         warn!(
                             "dropping coordinator connection: frame length {n} exceeds MAX_FRAME_LEN"
+                        );
+                        break;
+                    }
+                    Err(_elapsed) => {
+                        warn!(
+                            timeout_secs,
+                            "no frame from coordinator within read timeout — assuming dead, reconnecting"
                         );
                         break;
                     }
