@@ -690,6 +690,10 @@ async fn dispatch_tool(
             let code = build_remove_track_lua(&name);
             run_reaper_lua(request_id, code, registry, connections, pending_intents).await
         }
+        "reaper_remove_all_tracks" => {
+            let code = build_remove_all_tracks_lua();
+            run_reaper_lua(request_id, code, registry, connections, pending_intents).await
+        }
         "reaper_set_tempo" => {
             // tempo/ts_* may arrive as numbers or numeric strings from the model.
             let tempo = args["tempo"]
@@ -1004,6 +1008,22 @@ fn build_remove_track_lua(name: &str) -> String {
     lua.push_str("if removed then return \"Removed track '\" .. rname .. \"' (was track \" .. removed .. \")\"\n");
     lua.push_str("elseif #names == 0 then return \"No track named '\" .. display .. \"' found (project has no tracks)\"\n");
     lua.push_str("else return \"No track named '\" .. display .. \"' found. Tracks: \" .. table.concat(names, \", \") end\n");
+    lua
+}
+
+/// Build Lua to delete every track in the project. Iterates back-to-front so
+/// deleting a track doesn't shift the indices of ones not yet visited. Returns a
+/// summary the daemon relays back.
+fn build_remove_all_tracks_lua() -> String {
+    let mut lua = String::new();
+    lua.push_str("local n = reaper.CountTracks(0)\n");
+    lua.push_str("for i = n - 1, 0, -1 do\n");
+    lua.push_str("  reaper.DeleteTrack(reaper.GetTrack(0, i))\n");
+    lua.push_str("end\n");
+    lua.push_str("reaper.UpdateArrange()\n");
+    lua.push_str("if n == 0 then return \"Project already had no tracks\"\n");
+    lua.push_str("elseif n == 1 then return \"Removed 1 track\"\n");
+    lua.push_str("else return \"Removed \" .. n .. \" tracks\" end\n");
     lua
 }
 
@@ -1523,6 +1543,15 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                         }
                     },
                     "required": ["name"]
+                }
+            }),
+            serde_json::json!({
+                "name": "reaper_remove_all_tracks",
+                "description": "Delete EVERY track from the open REAPER project. ALWAYS use this for 'remove/delete all tracks', 'clear all tracks', 'empty the project' — never reaper_script and never reaper_remove_track (which only removes one named track). Takes no arguments.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
                 }
             }),
             serde_json::json!({
@@ -2357,6 +2386,19 @@ mod tests {
         assert!(lua.contains(
             "else return \"No track named '\" .. display .. \"' found. Tracks: \" .. table.concat(names, \", \") end"
         ));
+    }
+
+    #[test]
+    fn remove_all_tracks_lua_deletes_back_to_front_and_counts() {
+        let lua = build_remove_all_tracks_lua();
+        // Back-to-front iteration so deleting a track doesn't shift unvisited indices.
+        assert!(lua.contains("for i = n - 1, 0, -1 do"));
+        assert!(lua.contains("reaper.DeleteTrack(reaper.GetTrack(0, i))"));
+        assert!(lua.contains("reaper.UpdateArrange()"));
+        // Reports the count captured before deletion (pluralised).
+        assert!(lua.contains("local n = reaper.CountTracks(0)"));
+        assert!(lua.contains("Removed \" .. n .. \" tracks"));
+        assert!(lua.contains("Project already had no tracks"));
     }
 
     #[test]
