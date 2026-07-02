@@ -743,30 +743,16 @@ pub async fn generate_stream(
     temperature: f32,
     delta_tx: tokio::sync::mpsc::Sender<String>,
 ) -> Result<GenerateResult, String> {
-    let url = format!("{}/v1/chat/completions", llama_host());
     let wall_start = Instant::now();
-    let messages = build_messages(model_name, turns);
-
-    let resp = stream_http_client()
-        .post(&url)
-        .json(&ChatRequest {
-            model: model_name,
-            messages,
-            max_tokens,
-            stream: true,
-            repeat_penalty: 1.1,
-            temperature,
-            cache_prompt: true,
-        })
-        .send()
-        .await
-        .map_err(|e| format!("stream request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("stream returned HTTP {status}: {body}"));
-    }
+    let resp = post_chat(
+        stream_http_client(),
+        model_name,
+        turns,
+        max_tokens,
+        temperature,
+        true,
+    )
+    .await?;
 
     let idle = std::time::Duration::from_secs(stream_idle_timeout_secs());
     let mut byte_stream = resp.bytes_stream();
@@ -830,6 +816,37 @@ pub async fn generate_stream(
     })
 }
 
+/// POST a chat completion to llama-server, mapping a non-success status to Err.
+async fn post_chat(
+    client: &reqwest::Client,
+    model_name: &str,
+    turns: &[shared::ChatTurn],
+    max_tokens: u32,
+    temperature: f32,
+    stream: bool,
+) -> Result<reqwest::Response, String> {
+    let resp = client
+        .post(format!("{}/v1/chat/completions", llama_host()))
+        .json(&ChatRequest {
+            model: model_name,
+            messages: build_messages(model_name, turns),
+            max_tokens,
+            stream,
+            repeat_penalty: 1.1,
+            temperature,
+            cache_prompt: true,
+        })
+        .send()
+        .await
+        .map_err(|e| format!("chat request failed: {e}"))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("llama-server returned HTTP {status}: {body}"));
+    }
+    Ok(resp)
+}
+
 /// Run inference over a full conversation.
 pub async fn generate(
     model_name: &str,
@@ -837,33 +854,16 @@ pub async fn generate(
     max_tokens: u32,
     temperature: f32,
 ) -> Result<GenerateResult, String> {
-    let client = http_client();
-    let url = format!("{}/v1/chat/completions", llama_host());
-
     let wall_start = Instant::now();
-
-    let messages = build_messages(model_name, turns);
-
-    let resp = client
-        .post(&url)
-        .json(&ChatRequest {
-            model: model_name,
-            messages,
-            max_tokens,
-            stream: false,
-            repeat_penalty: 1.1,
-            temperature,
-            cache_prompt: true,
-        })
-        .send()
-        .await
-        .map_err(|e| format!("generate request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("generate returned HTTP {status}: {body}"));
-    }
+    let resp = post_chat(
+        http_client(),
+        model_name,
+        turns,
+        max_tokens,
+        temperature,
+        false,
+    )
+    .await?;
 
     let body: ChatResponse = resp
         .json()

@@ -39,6 +39,26 @@ fn select_connected_node(
     Ok((llm_node_id, agent_tx))
 }
 
+fn build_infer_request(
+    request_id: &str,
+    model_name: &str,
+    messages: Vec<ChatTurn>,
+    stream: bool,
+    max_tokens: u32,
+    temperature: Option<f32>,
+) -> InferenceRequest {
+    InferenceRequest {
+        request_id: request_id.to_string(),
+        node_id: None,
+        model_name: model_name.to_string(),
+        messages,
+        stream,
+        max_tokens,
+        temperature,
+        wire_version: WIRE_VERSION,
+    }
+}
+
 /// Dispatch an inference to a connected local node and await the result.
 /// `request_id` is used verbatim on the wire, so callers namespace it
 /// themselves (`intent-…`, `chatcmpl-…`). Returns the node's
@@ -56,17 +76,14 @@ pub async fn dispatch_local_inference(
     pending_inferences: &PendingInferences,
 ) -> Result<shared::InferenceResult, String> {
     let (llm_node_id, agent_tx) = select_connected_node(model_name, registry, connections)?;
-
-    let infer_req = InferenceRequest {
-        request_id: request_id.to_string(),
-        node_id: None,
-        model_name: model_name.to_string(),
+    let infer_req = build_infer_request(
+        request_id,
+        model_name,
         messages,
-        stream: false,
+        false,
         max_tokens,
         temperature,
-        wire_version: WIRE_VERSION,
-    };
+    );
 
     let (otx, orx) = oneshot::channel();
     pending_inferences
@@ -113,17 +130,14 @@ pub async fn dispatch_local_inference_stream(
     pending_streams: &PendingStreams,
 ) -> Result<mpsc::Receiver<MeshMessage>, String> {
     let (llm_node_id, agent_tx) = select_connected_node(model_name, registry, connections)?;
-
-    let infer_req = InferenceRequest {
-        request_id: request_id.to_string(),
-        node_id: None,
-        model_name: model_name.to_string(),
+    let infer_req = build_infer_request(
+        request_id,
+        model_name,
         messages,
-        stream: true,
+        true,
         max_tokens,
         temperature,
-        wire_version: WIRE_VERSION,
-    };
+    );
 
     let (stx, srx) = mpsc::channel(STREAM_CHANNEL_CAP);
     pending_streams

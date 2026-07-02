@@ -822,6 +822,45 @@ local and cloud routes (`docs/openai-api.md` → Streaming).
 - **Deploy ordering: coordinator FIRST**, then agents (a v4 agent can't parse
   v3 requests; a v3 agent under a v4 coordinator degrades cleanly)
 - 20 new tests (745 total); `just openai-stream` recipe
+- **Post-deploy fix (verified live)**: client hang-up now cancels generation
+  on the node via `CancelInference` — measured 54s → 924ms follow-up recovery;
+  node-death mid-stream → error event + `[DONE]` in 9ms
+
+---
+
+## OpenAI API — Per-Key Auth, Usage Attribution & Rate Limiting (Next)
+
+The third productization step (`an internal productization plan` item 3): one
+shared mesh token is fine at home, but a client site needs per-user/team API
+keys, per-key usage accounting, and per-key rate limits. This is the feature
+that produces the monthly "here's what each team used, and what it saved you
+versus cloud pricing" report — the ongoing-value justification.
+
+Design sketch:
+
+- **`api_keys` SQLite table** (registry DB): `key_hash` (SHA-256 — never store
+  the raw key), `label` ("finance-team"), `created_ms`, `revoked` flag,
+  optional `rate_limit_per_min`. Keys minted/revoked via new dashboard
+  Security-tab UI + `/api/keys` CRUD (mesh-token-auth only, like every
+  existing `/api/*` route).
+- **/v1 auth resolution order**: mesh token (admin, as today) → `api_keys`
+  lookup by hash. The resolved key label rides the request for attribution.
+- **`usage_log` table**: `ts_ms`, `key_label`, `model`, `prompt_tokens`,
+  `completion_tokens`, `duration_ms`, `served_by` (node / cloud), `stream`.
+  Written once per completed request (terminal result / finish chunk) —
+  both /v1 paths already have every field in hand.
+- **Rate limiting**: fixed-window per key (requests/min) checked at the top of
+  `chat_completions`; over-limit → the existing 429 `rate_limit_error`
+  envelope. No token-bucket sophistication until a client needs it. Optional
+  per-key token ceiling per calendar month alongside it (same check site,
+  reads `usage_log`) — the "no runaway spend" guarantee in the pitch.
+- **Reporting**: `GET /api/usage?from=&to=` aggregates per key/model/day;
+  dashboard panel later — CSV/JSON export first (the monthly PDF is generated
+  off-mesh). Include a cloud-equivalent-cost column (tokens × configurable
+  per-model cloud price) for the money-saved line.
+- **Non-goals for this phase**: multi-tenancy isolation (all keys see all
+  models), per-key model allowlists, OAuth — all deferred until a real client
+  asks.
 
 ---
 
