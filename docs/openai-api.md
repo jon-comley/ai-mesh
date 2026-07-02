@@ -87,8 +87,9 @@ for 60 s between tokens, 300 s before the first), or the stream buffer
 overflows, the client receives one final event —
 `data: {"error":{"message":"…","type":"api_error","code":"upstream_error"}}` —
 followed by `[DONE]`, and the connection closes. A stream never hangs.
-Killing the client mid-stream cancels generation on the node (the whole
-chain tears down), freeing the model for the next request.
+Killing the client mid-stream cancels generation on the node: the next chunk
+the node emits comes back with a `CancelInference`, which aborts the
+generation task and frees the model within roughly one token's latency.
 
 Note: a node serves one generation at a time, so a long stream holds that
 node's inference slot for its full duration; concurrent non-stream requests

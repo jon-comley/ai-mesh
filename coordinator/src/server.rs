@@ -760,9 +760,10 @@ async fn process_message(
                 .unwrap()
                 .get(&chunk.request_id)
                 .map(|(stx, _)| stx.clone());
+            let request_id = chunk.request_id.clone();
+            let mut consumer_gone = false;
             if let Some(stx) = entry {
                 use tokio::sync::mpsc::error::TrySendError;
-                let request_id = chunk.request_id.clone();
                 match stx.try_send(MeshMessage::ModelInferenceChunk(chunk)) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
@@ -772,13 +773,22 @@ async fn process_message(
                         warn!(request_id = %request_id,
                               "stream buffer full — dropping slow stream");
                         pending_streams.lock().unwrap().remove(&request_id);
+                        consumer_gone = true;
                     }
                     Err(TrySendError::Closed(_)) => {
                         pending_streams.lock().unwrap().remove(&request_id);
+                        consumer_gone = true;
                     }
                 }
+            } else {
+                // No entry: the client hung up (adapter removed it) or it was
+                // already killed. Either way nobody is listening.
+                consumer_gone = true;
             }
-            None
+            // Tell the node to stop generating for a stream nobody consumes;
+            // replying on this same connection reaches the serving agent.
+            // Idempotent — repeated cancels for the same id are no-ops.
+            consumer_gone.then_some(MeshMessage::CancelInference { request_id })
         }
         MeshMessage::ModelLoad(mut req) => {
             // Auto-place: if no node_id supplied, pick the best-fit node by headroom.
@@ -1098,6 +1108,80 @@ mod tests {
             auth_tokens,
             dashboard,
         )
+    }
+
+    // A chunk for a stream nobody consumes (client hung up → adapter removed
+    // the entry) must be answered with CancelInference so the node stops
+    // generating instead of holding its inference slot to completion.
+    #[tokio::test]
+    async fn orphan_chunk_replies_with_cancel() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        let mut node_id = Some("node-1".to_string());
+
+        let reply = process_message(
+            MeshMessage::ModelInferenceChunk(shared::InferenceChunk {
+                request_id: "chatcmpl-gone".into(),
+                node_id: "node-1".into(),
+                delta: "tok".into(),
+                wire_version: shared::WIRE_VERSION,
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        assert_eq!(
+            reply,
+            Some(MeshMessage::CancelInference {
+                request_id: "chatcmpl-gone".into()
+            })
+        );
+    }
+
+    // A chunk for a live stream is forwarded and NOT answered with a cancel.
+    #[tokio::test]
+    async fn live_chunk_is_forwarded_without_cancel() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        let mut node_id = Some("node-1".to_string());
+
+        let (stx, mut srx) = mpsc::channel(4);
+        ps.lock()
+            .unwrap()
+            .insert("chatcmpl-live".into(), (stx, "node-1".into()));
+
+        let reply = process_message(
+            MeshMessage::ModelInferenceChunk(shared::InferenceChunk {
+                request_id: "chatcmpl-live".into(),
+                node_id: "node-1".into(),
+                delta: "tok".into(),
+                wire_version: shared::WIRE_VERSION,
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        assert_eq!(reply, None);
+        match srx.try_recv().unwrap() {
+            MeshMessage::ModelInferenceChunk(c) => assert_eq!(c.delta, "tok"),
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 
     // A light report carrying a stale/'unknown' node_id must be routed by the
