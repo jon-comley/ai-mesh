@@ -379,6 +379,13 @@ pub enum MeshMessage {
     RequestModelInference(InferenceRequest),
     ModelInferenceResult(InferenceResult),
     ModelInferenceChunk(InferenceChunk),
+    /// Coordinator → Compute node: abort an in-flight (streaming) inference.
+    /// Sent when the consumer of a stream is gone (client hang-up, emitter
+    /// timeout, buffer overflow) so the node frees its inference slot instead
+    /// of generating to completion for nobody.
+    CancelInference {
+        request_id: String,
+    },
     ModelLoad(ModelLoadRequest),
     ModelUnload(ModelUnloadRequest),
     ModelStatus(ModelStatusReport),
@@ -398,10 +405,14 @@ pub enum MeshMessage {
     // Phase 10 — auth: sent as the first message on every new connection
     AuthToken(String),
     // Phase 11C — coordinator pushes a new heartbeat interval to a specific node
-    SetHeartbeatInterval { secs: u64 },
+    SetHeartbeatInterval {
+        secs: u64,
+    },
     // Zigbee bridge up/down — emitted by the lighting capability when MQTT
     // connection to zigbee2mqtt is lost or restored
-    ZigbeeStatus { online: bool },
+    ZigbeeStatus {
+        online: bool,
+    },
     // REAPER DAW capability messages
     ReaperCommand(ReaperCommandRequest),
     ReaperCommandResult(ReaperCommandResult),
@@ -693,6 +704,15 @@ mod tests {
         // missing it must fail to deserialize rather than default silently.
         let json = r#"{"request_id":"r1","model_name":"llama","messages":[{"role":"user","content":"hi"}],"max_tokens":64}"#;
         assert!(serde_json::from_str::<InferenceRequest>(json).is_err());
+    }
+
+    #[test]
+    fn cancel_inference_roundtrip() {
+        let msg = MeshMessage::CancelInference {
+            request_id: "chatcmpl-1".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
     }
 
     #[test]

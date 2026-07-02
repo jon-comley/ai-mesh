@@ -201,6 +201,16 @@ Fields:
 - `delta: String` — incremental output text
 - `wire_version: u32`
 
+### `CancelInference`
+Coordinator → Compute node
+Abort an in-flight inference whose consumer is gone (client hang-up, emitter
+timeout, stream-buffer overflow). Sent as the reply to a `ModelInferenceChunk`
+that no longer has a registered stream; the node aborts the generation task,
+freeing its inference slot. Idempotent — unknown ids are ignored.
+
+Fields:
+- `request_id: String`
+
 ### `RequestModelInference`
 CLI → Coordinator  
 Requests inference for a named model. The coordinator uses the scheduler to select a ready node.

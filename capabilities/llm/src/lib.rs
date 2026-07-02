@@ -94,6 +94,17 @@ fn infer_sem() -> &'static Semaphore {
     INFER_SEM.get_or_init(|| Semaphore::new(1))
 }
 
+// In-flight inference tasks by request_id, so a `CancelInference` from the
+// coordinator can abort one (dropping the task releases the semaphore permit
+// and drops the llama-server connection, which cancels generation).
+static INFLIGHT: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>,
+> = OnceLock::new();
+fn inflight()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>> {
+    INFLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 // Single-flight model loads. Serializes every ModelLoad so only one pull_model
 // runs at a time, and holds the (name, size_mb) of the model currently loaded so a
 // duplicate ModelLoad (double-click, auto-placement retry, reconnect re-send)
@@ -131,6 +142,7 @@ impl Capability for LlmCapability {
             MeshMessage::ModelLoad(_)
                 | MeshMessage::ModelUnload(_)
                 | MeshMessage::RequestModelInference(_)
+                | MeshMessage::CancelInference { .. }
         )
     }
 
@@ -246,7 +258,8 @@ impl Capability for LlmCapability {
                 );
                 let tx2 = tx.clone();
                 let nid = self.node_id.clone();
-                tokio::spawn(async move {
+                let rid = req.request_id.clone();
+                let task = tokio::spawn(async move {
                     let _permit = infer_sem().acquire().await.unwrap();
                     let request_id = req.request_id.clone();
                     // If the connection drops while waiting for the GPU (or
@@ -261,7 +274,19 @@ impl Capability for LlmCapability {
                             let _ = tx2.send(MeshMessage::ModelInferenceResult(result)).await;
                         }
                     }
+                    inflight().lock().unwrap().remove(&request_id);
                 });
+                inflight().lock().unwrap().insert(rid, task.abort_handle());
+            }
+
+            MeshMessage::CancelInference { request_id } => {
+                let handle = inflight().lock().unwrap().remove(&request_id);
+                if let Some(handle) = handle {
+                    // Aborting the task drops the llama-server connection
+                    // (cancelling generation) and releases the infer permit.
+                    handle.abort();
+                    info!(request_id = %request_id, "inference cancelled by coordinator");
+                }
             }
 
             MeshMessage::ModelUnload(req) => {
@@ -335,6 +360,14 @@ mod tests {
             temperature: None,
             wire_version: WIRE_VERSION,
         });
+        assert!(make_cap().handles(&msg));
+    }
+
+    #[test]
+    fn handles_cancel_inference() {
+        let msg = MeshMessage::CancelInference {
+            request_id: "r4".into(),
+        };
         assert!(make_cap().handles(&msg));
     }
 

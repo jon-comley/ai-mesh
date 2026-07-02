@@ -811,7 +811,10 @@ local and cloud routes (`docs/openai-api.md` → Streaming).
   usage chunk, `[DONE]` sentinel; first-chunk 300s / inter-chunk 60s
   deadlines; **failure semantics**: node death / stall / overflow → one SSE
   error event + `[DONE]`, never a hang; client hang-up cancels generation on
-  the node end-to-end
+  the node via `CancelInference` (found in live verification: without it the
+  agent generated to completion for nobody, holding the inference slot — the
+  demux now replies to any orphan chunk with a cancel and the agent aborts
+  the task, freeing the slot within ~one token)
 - **Cloud passthrough**: `OpenAiCompatProvider::complete_stream` (1h cap) +
   the same `shared::sse` parser; gateway stats recorded
 - **Graceful degradation**: a terminal-only reply (pre-v4 agent) is emitted

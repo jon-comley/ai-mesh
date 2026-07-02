@@ -25,14 +25,19 @@ impl SseParser {
     /// are JSON, so real streams are always UTF-8).
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
         self.buf.push_str(&String::from_utf8_lossy(bytes));
-        // Normalise CRLF after appending so pairs split across feeds reunite
-        // first; event delimiting below then only considers \n\n.
-        if self.buf.contains('\r') {
-            self.buf = self.buf.replace("\r\n", "\n");
-        }
         let mut out = Vec::new();
-        while let Some(pos) = self.buf.find("\n\n") {
-            let event: String = self.buf.drain(..pos + 2).collect();
+        // Events end at a blank line: \n\n, or \r\n\r\n on CRLF streams.
+        // Matching both directly (rather than normalising the buffer) avoids
+        // reallocating the buffer on every feed; `str::lines()` below strips
+        // any remaining \r from line ends.
+        loop {
+            let (pos, delim_len) = match (self.buf.find("\n\n"), self.buf.find("\r\n\r\n")) {
+                (Some(lf), Some(crlf)) if crlf < lf => (crlf, 4),
+                (Some(lf), _) => (lf, 2),
+                (None, Some(crlf)) => (crlf, 4),
+                (None, None) => break,
+            };
+            let event: String = self.buf.drain(..pos + delim_len).collect();
             let mut data_lines = Vec::new();
             for line in event.lines() {
                 if let Some(rest) = line.strip_prefix("data:") {
