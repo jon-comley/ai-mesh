@@ -819,6 +819,26 @@ impl Registry {
             .map(|(name, _)| name.clone())
     }
 
+    /// All model names in Ready state on LLM-capable Compute nodes, deduped
+    /// and sorted. Used by the OpenAI-compatible API for routing and /v1/models.
+    pub fn ready_llm_models(&self) -> Vec<String> {
+        self.nodes
+            .values()
+            .filter(|n| {
+                n.identity.role == NodeRole::Compute
+                    && n.capabilities
+                        .as_ref()
+                        .map(|c| c.features.iter().any(|f| f == "llm"))
+                        .unwrap_or(false)
+            })
+            .flat_map(|n| n.models.iter())
+            .filter(|(_, alloc)| alloc.state == ModelLifecycleState::Ready)
+            .map(|(name, _)| name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     /// Store the list of known Zigbee devices and groups reported by a lighting node.
     pub fn update_light_devices(
         &mut self,
@@ -1818,6 +1838,50 @@ mod tests {
             reg.update_model_status(id, model, mb, ModelLifecycleState::Ready);
         }
         assert_eq!(reg.any_ready_llm_model(), Some("qwen2.5:7b".into()));
+    }
+
+    #[test]
+    fn ready_llm_models_lists_all_ready_deduped_sorted() {
+        let mut reg = Registry::new();
+        for (id, model, mb) in [
+            ("pi1", "qwen2.5:1.5b", 1024u64),
+            ("beelink1", "qwen2.5:7b", 4096u64),
+            ("omnilink1", "qwen2.5:7b", 4096u64), // duplicate model on a second node
+        ] {
+            reg.update_heartbeat(make_identity(id));
+            reg.update_capabilities(
+                id,
+                NodeCapabilities {
+                    features: vec!["llm".into()],
+                    ..NodeCapabilities::default()
+                },
+            );
+            reg.update_model_status(id, model, mb, ModelLifecycleState::Ready);
+        }
+        assert_eq!(
+            reg.ready_llm_models(),
+            vec!["qwen2.5:1.5b".to_string(), "qwen2.5:7b".to_string()]
+        );
+    }
+
+    #[test]
+    fn ready_llm_models_excludes_loading_and_non_llm() {
+        let mut reg = Registry::new();
+        reg.update_heartbeat(make_identity("node-1"));
+        reg.update_capabilities(
+            "node-1",
+            NodeCapabilities {
+                features: vec!["llm".into()],
+                ..NodeCapabilities::default()
+            },
+        );
+        reg.update_model_status("node-1", "qwen2.5:7b", 4096, ModelLifecycleState::Loading);
+        // A node without the llm feature never contributes, even with a Ready model.
+        reg.update_heartbeat(make_identity("node-2"));
+        reg.update_capabilities("node-2", NodeCapabilities::default());
+        reg.update_model_status("node-2", "qwen2.5:1.5b", 1024, ModelLifecycleState::Ready);
+
+        assert!(reg.ready_llm_models().is_empty());
     }
 
     #[test]

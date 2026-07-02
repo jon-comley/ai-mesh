@@ -754,6 +754,44 @@ and Apple. The crate boundaries are unaffected by that choice.
 
 ---
 
+## OpenAI-Compatible Inbound API ✓ Complete (2026-07-02)
+
+The coordinator now speaks the OpenAI API inbound (`docs/openai-api.md`) — the
+first productization step from `an internal productization plan` (mesh as a
+drop-in private AI gateway).
+
+- **`POST /v1/chat/completions`** (non-streaming) + **`GET /v1/models`** on the
+  dashboard port; `Authorization: Bearer <mesh token>` (SDK-style) with
+  `?token=` fallback; OpenAI error envelope with per-case codes
+  (`model_not_found`, `stream_not_supported`, `no_model_ready`, …)
+- **Pure chat semantics** — caller messages verbatim, no device-schema
+  injection or tool execution (that stays on `/api/chat`); qwen `/no_think` /
+  DeepSeek-R1 prefill quirks stay on the agent and respect caller turns
+- **Model routing**: Ready local model → scheduler dispatch; gateway's
+  selected model (enabled + configured) → cloud, no silent fallback; omitted
+  model → largest ready local, else gateway
+- **Wire v3**: `InferenceRequest` carries `messages: Vec<ChatTurn>` (roles
+  serialize as OpenAI strings) replacing `system_prompt`+`prompt`, so
+  llama-server applies real chat templates to multi-turn history;
+  `InferenceResult` gains `prompt_tokens` for honest `usage` accounting;
+  intent path + CLI build 2-turn arrays; `OpenAiCompatProvider::complete`
+  takes the turns array; local dispatch extracted to
+  `coordinator/src/inference.rs` (shared by intent + openai handlers)
+- `Registry::ready_llm_models()`; `just openai <text> [model]` recipe;
+  21 new tests (725 total)
+- **Deploy note**: v2 agents fail fast on v3 frames — ship coordinator and all
+  agents in one pass
+- Next phase (not started): SSE streaming (`stream: true`) — design must
+  handle mid-stream node death/timeouts (emit an SSE error event +
+  `finish_reason` rather than hanging the held connection); per-user API keys
+  with usage attribution, and coordinator-side rate limiting alongside them
+  (a limit needs a key identity to attach to)
+- Deferred until a third model family lands: replace the hard-coded
+  qwen/deepseek checks in `llama::build_messages` with a model-quirk registry
+  (same premature-abstraction call as the feature enum in Phase 11.8)
+
+---
+
 ## Phase 12 — Distributed Execution
 
 - Multi-node inference

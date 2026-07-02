@@ -1,4 +1,5 @@
 mod api;
+mod openai;
 pub mod state;
 mod ws;
 
@@ -120,6 +121,8 @@ pub fn router(
         .route("/api/scenes/{id}/recall", post(api::recall_scene))
         .route("/api/scenes/{id}", delete(api::delete_scene))
         .route("/api/chat", post(api::chat))
+        .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/v1/models", get(openai::list_models))
         .route("/api/gateway", get(api::get_gateway).post(api::set_gateway))
         .route("/api/gateway/test", post(api::test_gateway))
         .route("/api/preferences", get(api::get_preferences))

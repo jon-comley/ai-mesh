@@ -280,11 +280,11 @@ impl OpenAiCompatProvider {
         &self.model
     }
 
-    /// Run a chat completion. `system` is optional; `prompt` is the user content.
+    /// Run a chat completion over a full conversation.
     pub async fn complete(
         &self,
-        system: Option<&str>,
-        prompt: &str,
+        messages: &[shared::ChatTurn],
+        temperature: f32,
     ) -> Result<CloudReply, CloudError> {
         if self.api_key.is_empty() {
             return Err(CloudError::NoKey);
@@ -294,15 +294,11 @@ impl OpenAiCompatProvider {
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        let mut messages = Vec::new();
-        if let Some(sys) = system {
-            messages.push(serde_json::json!({ "role": "system", "content": sys }));
-        }
-        messages.push(serde_json::json!({ "role": "user", "content": prompt }));
+        // ChatTurn serializes with OpenAI role names, so the array passes straight through.
         let body = serde_json::json!({
             "model": self.model,
             "messages": messages,
-            "temperature": 0.4,
+            "temperature": temperature,
         });
 
         // OpenRouter throttles/rejects free-tier requests lacking these headers.

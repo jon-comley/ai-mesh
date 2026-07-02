@@ -174,16 +174,17 @@ impl Capability for LlmCapability {
                             warn!(request_id = %req.request_id,
                                   "inference cancelled: connection dropped");
                         }
-                        res = llama::generate(&req.model_name, req.system_prompt.as_deref(), &req.prompt, req.max_tokens, req.temperature.unwrap_or(0.8)) => {
+                        res = llama::generate(&req.model_name, &req.messages, req.max_tokens, req.temperature.unwrap_or(0.8)) => {
                             let result = match res {
-                                Ok((output, tokens, duration_ms, prompt_eval_ms)) => InferenceResult {
+                                Ok(outcome) => InferenceResult {
                                     request_id: req.request_id,
                                     node_id: nid,
                                     model_name: req.model_name,
-                                    output,
-                                    tokens_generated: tokens,
-                                    duration_ms,
-                                    prompt_eval_ms,
+                                    output: outcome.output,
+                                    tokens_generated: outcome.tokens_generated,
+                                    prompt_tokens: outcome.prompt_tokens,
+                                    duration_ms: outcome.duration_ms,
+                                    prompt_eval_ms: outcome.prompt_eval_ms,
                                     error: None,
                                     wire_version: WIRE_VERSION,
                                 },
@@ -195,6 +196,7 @@ impl Capability for LlmCapability {
                                         model_name: req.model_name,
                                         output: String::new(),
                                         tokens_generated: 0,
+                                        prompt_tokens: 0,
                                         duration_ms: 0,
                                         prompt_eval_ms: 0,
                                         error: Some(e),
@@ -273,8 +275,7 @@ mod tests {
             request_id: "r3".into(),
             node_id: Some("node-1".into()),
             model_name: "qwen2.5:7b".into(),
-            system_prompt: None,
-            prompt: "hello".into(),
+            messages: vec![shared::ChatTurn::user("hello")],
             max_tokens: 64,
             temperature: None,
             wire_version: WIRE_VERSION,

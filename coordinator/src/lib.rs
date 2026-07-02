@@ -3,6 +3,7 @@ pub mod compress;
 pub mod coordinator;
 pub mod effects;
 pub mod http;
+pub mod inference;
 pub mod intent;
 pub mod logging;
 pub mod mdns;

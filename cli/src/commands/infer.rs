@@ -1,4 +1,4 @@
-use shared::{messages::WIRE_VERSION, InferenceRequest, MeshMessage};
+use shared::{messages::WIRE_VERSION, ChatTurn, InferenceRequest, MeshMessage};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
@@ -50,12 +50,16 @@ async fn send_infer(
     prompt: String,
     system_prompt: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut messages = Vec::new();
+    if let Some(sys) = system_prompt {
+        messages.push(ChatTurn::system(sys));
+    }
+    messages.push(ChatTurn::user(prompt));
     let msg = MeshMessage::RequestModelInference(InferenceRequest {
         request_id: Uuid::new_v4().to_string(),
         node_id: None,
         model_name,
-        system_prompt,
-        prompt,
+        messages,
         max_tokens: 256,
         temperature: None,
         wire_version: WIRE_VERSION,
