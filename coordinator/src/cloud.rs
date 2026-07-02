@@ -348,6 +348,59 @@ impl OpenAiCompatProvider {
             completion_tokens: parsed.usage.completion_tokens,
         })
     }
+
+    /// Open a streaming chat completion. Returns the raw response after the
+    /// status check; the caller consumes `bytes_stream()` with `shared::sse`.
+    /// A generous 1h cap replaces the normal request timeout so a wedged
+    /// provider still can't pin a connection forever — liveness during the
+    /// stream is the caller's per-chunk timeout.
+    pub async fn complete_stream(
+        &self,
+        messages: &[shared::ChatTurn],
+        temperature: f32,
+    ) -> Result<reqwest::Response, CloudError> {
+        if self.api_key.is_empty() {
+            return Err(CloudError::NoKey);
+        }
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+        });
+
+        let referer = std::env::var("CLOUD_HTTP_REFERER")
+            .unwrap_or_else(|_| "https://github.com/ai-mesh".into());
+        let title = std::env::var("CLOUD_X_TITLE").unwrap_or_else(|_| "ai-mesh".into());
+
+        let resp = http_client()
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .header("HTTP-Referer", referer)
+            .header("X-Title", title)
+            .timeout(Duration::from_secs(3600))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    CloudError::Timeout
+                } else {
+                    CloudError::Network(e.to_string())
+                }
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(match status.as_u16() {
+                401 | 403 => CloudError::Unauthorized,
+                429 => CloudError::RateLimited,
+                other => CloudError::Status(other),
+            });
+        }
+        Ok(resp)
+    }
 }
 
 /// Persist a single gateway config field (writes through the registry K/V store).

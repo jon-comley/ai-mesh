@@ -781,14 +781,44 @@ drop-in private AI gateway).
   21 new tests (725 total)
 - **Deploy note**: v2 agents fail fast on v3 frames — ship coordinator and all
   agents in one pass
-- Next phase (not started): SSE streaming (`stream: true`) — design must
-  handle mid-stream node death/timeouts (emit an SSE error event +
-  `finish_reason` rather than hanging the held connection); per-user API keys
-  with usage attribution, and coordinator-side rate limiting alongside them
-  (a limit needs a key identity to attach to)
+- Next phase (not started): per-user API keys with usage attribution, and
+  coordinator-side rate limiting alongside them (a limit needs a key identity
+  to attach to)
 - Deferred until a third model family lands: replace the hard-coded
   qwen/deepseek checks in `llama::build_messages` with a model-quirk registry
   (same premature-abstraction call as the feature enum in Phase 11.8)
+
+---
+
+## OpenAI API — SSE Streaming ✓ Complete (2026-07-02)
+
+`stream: true` on `/v1/chat/completions` now returns OpenAI-spec SSE on both
+local and cloud routes (`docs/openai-api.md` → Streaming).
+
+- **Wire v4**: required `stream: bool` on `InferenceRequest`; new
+  `ModelInferenceChunk` message (delta batches), terminated by the usual
+  `ModelInferenceResult` carrying totals/error
+- **Agent**: `llama::generate_stream` — dedicated no-total-timeout reqwest
+  client (the shared 90s client kills long streams), incremental SSE parse via
+  new pure `shared::sse` module, per-chunk idle timeout
+  (`LLAMA_STREAM_IDLE_TIMEOUT_SECS`, default 300s to cover 14b prefill);
+  forwarder drains before the terminal result so chunks never trail it
+- **Coordinator**: `PendingStreams` map (cap 256, `try_send` — the agent read
+  loop never blocks behind a slow SSE client; overflow kills that stream);
+  disconnect teardown fails in-flight streams exactly like pending oneshots
+- **HTTP**: spawned-emitter SSE (`tokio-stream` ReceiverStream + axum `Sse`),
+  role-first chunk, shared `id`/`created`, `stream_options.include_usage`
+  usage chunk, `[DONE]` sentinel; first-chunk 300s / inter-chunk 60s
+  deadlines; **failure semantics**: node death / stall / overflow → one SSE
+  error event + `[DONE]`, never a hang; client hang-up cancels generation on
+  the node end-to-end
+- **Cloud passthrough**: `OpenAiCompatProvider::complete_stream` (1h cap) +
+  the same `shared::sse` parser; gateway stats recorded
+- **Graceful degradation**: a terminal-only reply (pre-v4 agent) is emitted
+  as a single-delta stream, so coordinator-first deploys stay safe
+- **Deploy ordering: coordinator FIRST**, then agents (a v4 agent can't parse
+  v3 requests; a v3 agent under a v4 coordinator degrades cleanly)
+- 20 new tests (745 total); `just openai-stream` recipe
 
 ---
 

@@ -2,10 +2,90 @@ mod llama;
 
 use async_trait::async_trait;
 use capability_core::Capability;
-use shared::{InferenceResult, MeshMessage, ModelLifecycleState, ModelStatusReport, WIRE_VERSION};
+use shared::{
+    InferenceChunk, InferenceRequest, InferenceResult, MeshMessage, ModelLifecycleState,
+    ModelStatusReport, WIRE_VERSION,
+};
 use std::sync::OnceLock;
-use tokio::sync::{Mutex, Semaphore, mpsc::Sender};
+use tokio::sync::{Mutex, Semaphore, mpsc, mpsc::Sender};
 use tracing::{info, warn};
+
+/// Run one inference (streamed or not) and build the terminal result.
+/// In streaming mode the deltas are forwarded to the coordinator as
+/// `ModelInferenceChunk` messages via `tx`; the forwarder is drained before
+/// returning so no chunk can trail the terminal `ModelInferenceResult` on the
+/// connection's FIFO writer channel.
+async fn run_inference(
+    req: InferenceRequest,
+    node_id: String,
+    tx: Sender<MeshMessage>,
+) -> InferenceResult {
+    let temperature = req.temperature.unwrap_or(0.8);
+    let res = if req.stream {
+        let (dtx, mut drx) = mpsc::channel::<String>(32);
+        let fwd_tx = tx;
+        let fwd_nid = node_id.clone();
+        let fwd_rid = req.request_id.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(delta) = drx.recv().await {
+                let chunk = InferenceChunk {
+                    request_id: fwd_rid.clone(),
+                    node_id: fwd_nid.clone(),
+                    delta,
+                    wire_version: WIRE_VERSION,
+                };
+                if fwd_tx
+                    .send(MeshMessage::ModelInferenceChunk(chunk))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let res = llama::generate_stream(
+            &req.model_name,
+            &req.messages,
+            req.max_tokens,
+            temperature,
+            dtx,
+        )
+        .await;
+        let _ = forwarder.await;
+        res
+    } else {
+        llama::generate(&req.model_name, &req.messages, req.max_tokens, temperature).await
+    };
+    match res {
+        Ok(outcome) => InferenceResult {
+            request_id: req.request_id,
+            node_id,
+            model_name: req.model_name,
+            output: outcome.output,
+            tokens_generated: outcome.tokens_generated,
+            prompt_tokens: outcome.prompt_tokens,
+            duration_ms: outcome.duration_ms,
+            prompt_eval_ms: outcome.prompt_eval_ms,
+            error: None,
+            wire_version: WIRE_VERSION,
+        },
+        Err(e) => {
+            warn!(error = %e, "llama generate failed");
+            InferenceResult {
+                request_id: req.request_id,
+                node_id,
+                model_name: req.model_name,
+                output: String::new(),
+                tokens_generated: 0,
+                prompt_tokens: 0,
+                duration_ms: 0,
+                prompt_eval_ms: 0,
+                error: Some(e),
+                wire_version: WIRE_VERSION,
+            }
+        }
+    }
+}
 
 // Process-wide: only one llama-server inference at a time.
 // Prevents concurrent requests (e.g. after reconnect) from doubling GPU memory usage.
@@ -161,49 +241,23 @@ impl Capability for LlmCapability {
                 info!(
                     request_id = %req.request_id,
                     model = %req.model_name,
+                    stream = req.stream,
                     "received inference request"
                 );
                 let tx2 = tx.clone();
                 let nid = self.node_id.clone();
                 tokio::spawn(async move {
                     let _permit = infer_sem().acquire().await.unwrap();
-                    // If the connection drops while waiting for the GPU, cancel
-                    // the reqwest future so llama-server frees memory immediately.
+                    let request_id = req.request_id.clone();
+                    // If the connection drops while waiting for the GPU (or
+                    // mid-stream), cancel the reqwest future so llama-server
+                    // frees the slot immediately.
                     tokio::select! {
                         _ = tx2.closed() => {
-                            warn!(request_id = %req.request_id,
+                            warn!(request_id = %request_id,
                                   "inference cancelled: connection dropped");
                         }
-                        res = llama::generate(&req.model_name, &req.messages, req.max_tokens, req.temperature.unwrap_or(0.8)) => {
-                            let result = match res {
-                                Ok(outcome) => InferenceResult {
-                                    request_id: req.request_id,
-                                    node_id: nid,
-                                    model_name: req.model_name,
-                                    output: outcome.output,
-                                    tokens_generated: outcome.tokens_generated,
-                                    prompt_tokens: outcome.prompt_tokens,
-                                    duration_ms: outcome.duration_ms,
-                                    prompt_eval_ms: outcome.prompt_eval_ms,
-                                    error: None,
-                                    wire_version: WIRE_VERSION,
-                                },
-                                Err(e) => {
-                                    warn!(error = %e, "llama generate failed");
-                                    InferenceResult {
-                                        request_id: req.request_id,
-                                        node_id: nid,
-                                        model_name: req.model_name,
-                                        output: String::new(),
-                                        tokens_generated: 0,
-                                        prompt_tokens: 0,
-                                        duration_ms: 0,
-                                        prompt_eval_ms: 0,
-                                        error: Some(e),
-                                        wire_version: WIRE_VERSION,
-                                    }
-                                }
-                            };
+                        result = run_inference(req, nid, tx2.clone()) => {
                             let _ = tx2.send(MeshMessage::ModelInferenceResult(result)).await;
                         }
                     }
@@ -276,6 +330,7 @@ mod tests {
             node_id: Some("node-1".into()),
             model_name: "qwen2.5:7b".into(),
             messages: vec![shared::ChatTurn::user("hello")],
+            stream: false,
             max_tokens: 64,
             temperature: None,
             wire_version: WIRE_VERSION,

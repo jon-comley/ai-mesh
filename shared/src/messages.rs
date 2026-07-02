@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 3;
+pub const WIRE_VERSION: u32 = 4;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -61,11 +61,27 @@ pub struct InferenceRequest {
     pub model_name: String,
     /// Full conversation, forwarded to the model as-is (system prompt included).
     pub messages: Vec<ChatTurn>,
+    /// When true the agent streams `ModelInferenceChunk` messages as tokens
+    /// arrive, then sends the usual `ModelInferenceResult` as the terminator.
+    pub stream: bool,
     pub max_tokens: u32,
     /// Sampling temperature. `None` lets the agent use its default (0.8).
     /// Set to `0.0` for greedy/deterministic output (faster, better for JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u32,
+}
+
+/// One streamed token batch, sent by a Compute node while a streaming
+/// inference is in flight. The stream is terminated by the usual
+/// `InferenceResult` (which carries totals and any error).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InferenceChunk {
+    pub request_id: String,
+    pub node_id: String,
+    /// Incremental output text (one or more tokens).
+    pub delta: String,
     #[serde(default = "default_wire_version")]
     pub wire_version: u32,
 }
@@ -362,6 +378,7 @@ pub enum MeshMessage {
     // Phase 6 — model scheduling
     RequestModelInference(InferenceRequest),
     ModelInferenceResult(InferenceResult),
+    ModelInferenceChunk(InferenceChunk),
     ModelLoad(ModelLoadRequest),
     ModelUnload(ModelUnloadRequest),
     ModelStatus(ModelStatusReport),
@@ -665,9 +682,29 @@ mod tests {
     #[test]
     fn wire_version_defaults_when_field_absent() {
         // Simulate an older agent that sends InferenceRequest without wire_version.
-        let json = r#"{"request_id":"r1","node_id":"n1","model_name":"llama","messages":[{"role":"user","content":"hi"}],"max_tokens":64}"#;
+        let json = r#"{"request_id":"r1","node_id":"n1","model_name":"llama","messages":[{"role":"user","content":"hi"}],"stream":false,"max_tokens":64}"#;
         let req: InferenceRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.wire_version, WIRE_VERSION);
+    }
+
+    #[test]
+    fn inference_request_without_stream_fails_fast() {
+        // `stream` is deliberately required (no serde default): a v3 frame
+        // missing it must fail to deserialize rather than default silently.
+        let json = r#"{"request_id":"r1","model_name":"llama","messages":[{"role":"user","content":"hi"}],"max_tokens":64}"#;
+        assert!(serde_json::from_str::<InferenceRequest>(json).is_err());
+    }
+
+    #[test]
+    fn inference_chunk_roundtrip() {
+        let msg = MeshMessage::ModelInferenceChunk(InferenceChunk {
+            request_id: "chatcmpl-1".into(),
+            node_id: "node-1".into(),
+            delta: "hel".into(),
+            wire_version: WIRE_VERSION,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
     }
 
     #[test]
@@ -677,6 +714,7 @@ mod tests {
             node_id: Some("node-1".into()),
             model_name: "llama3".into(),
             messages: vec![ChatTurn::user("hello")],
+            stream: false,
             max_tokens: 128,
             temperature: None,
             wire_version: WIRE_VERSION,
@@ -700,6 +738,7 @@ mod tests {
                 ChatTurn::assistant("done"),
                 ChatTurn::user("and the other one"),
             ],
+            stream: true,
             max_tokens: 128,
             temperature: Some(0.0),
             wire_version: WIRE_VERSION,

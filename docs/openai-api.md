@@ -17,7 +17,7 @@ no tool calls are executed — that behaviour stays on the dashboard's
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/chat/completions` | POST | Chat completion (non-streaming) |
+| `/v1/chat/completions` | POST | Chat completion (JSON or SSE streaming) |
 | `/v1/models` | GET | Models the mesh can serve right now |
 
 Base URL: `http://pi1:9001/v1` (or `http://10.0.0.10:9001/v1` on the LAN,
@@ -59,12 +59,40 @@ OpenAI error envelope with `code: "invalid_api_key"`.
 | `model` | ✅ | Optional (see routing above) |
 | `max_tokens` | ✅ | Default 2048; `max_completion_tokens` accepted as alias |
 | `temperature` | ✅ | Default 0.8 local, 0.4 cloud |
-| `stream` | ❌ | `true` → `400` `stream_not_supported` (streaming is a planned phase) |
+| `stream` | ✅ | OpenAI-spec SSE (`chat.completion.chunk` events) — see Streaming below |
+| `stream_options.include_usage` | ✅ | Adds the final usage chunk (empty `choices`) before `[DONE]` |
 | `tools` / `tool_calls` | ❌ | Rejected via role validation — tool execution lives on `/api/chat` |
 | Array-of-parts `content` (vision style) | ❌ | `400 invalid_body` |
 
 Unknown fields (`top_p`, `n`, `stream_options`, …) are ignored, as OpenAI
 clients expect.
+
+## Streaming
+
+`"stream": true` returns `text/event-stream` with the standard OpenAI chunk
+sequence, on both local and cloud routes:
+
+1. A role-first chunk (`delta: {"role":"assistant","content":""}`).
+2. One `chat.completion.chunk` per token batch (`delta.content`).
+3. A finish chunk (empty delta, `finish_reason: "stop"` / `"length"`).
+4. If `stream_options.include_usage` was set: a usage chunk (`choices: []`,
+   real `usage` counts).
+5. `data: [DONE]`.
+
+Every chunk shares one `id` and `created`. SSE keep-alive comments are sent
+during long prefill so proxies don't drop the idle connection.
+
+**Failure semantics:** if the serving node dies mid-stream, stalls (no data
+for 60 s between tokens, 300 s before the first), or the stream buffer
+overflows, the client receives one final event —
+`data: {"error":{"message":"…","type":"api_error","code":"upstream_error"}}` —
+followed by `[DONE]`, and the connection closes. A stream never hangs.
+Killing the client mid-stream cancels generation on the node (the whole
+chain tears down), freeing the model for the next request.
+
+Note: a node serves one generation at a time, so a long stream holds that
+node's inference slot for its full duration; concurrent non-stream requests
+for the same model queue behind it.
 
 ## Response
 
@@ -123,7 +151,8 @@ curl -s http://pi1:9001/v1/chat/completions \
   }' | jq
 ```
 
-Or `just openai "why is the sky blue?"` (optional second arg pins a model).
+Or `just openai "why is the sky blue?"` (optional second arg pins a model),
+and `just openai-stream "count to 20"` to watch the SSE chunks live.
 
 OpenAI Python SDK:
 
@@ -137,11 +166,19 @@ reply = client.chat.completions.create(
 )
 print(reply.choices[0].message.content)
 print(reply.usage)
+
+# Streaming:
+for chunk in client.chat.completions.create(
+    model="qwen2.5:7b",
+    messages=[{"role": "user", "content": "Count to 20."}],
+    stream=True,
+):
+    if chunk.choices and chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
 ## Limits
 
-- Non-streaming only for now; `stream: true` errors clearly instead of faking it.
 - One `choices` entry per response (`n` is ignored).
 - String message content only — no image/vision parts.
 - Tool calling is not exposed here yet; the intent pipeline (`/api/chat`)
