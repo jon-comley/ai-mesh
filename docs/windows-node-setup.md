@@ -434,6 +434,8 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 **⚠️ REGRESSED 2026-06-24/25, then ROOT-CAUSE CORRECTED + RESOLVED:** 8× `0x133`/`param2=0x1e00` across 06-24→06-25 with TPM-WMI 1025 on every boot. This was **not** a wiped golden state — Pluton was Disabled the whole time. **Disabling Pluton alone never stopped fTPM** (it kept running via the TPM level). The actual fix (2026-06-25) was setting the **Trusted Platform Module level itself to `Disabled`**, after which fTPM stayed off (`Get-Tpm`=False, no 1025) and the box ran 7+ h with zero `0x133`. See the 2026-06-25 entry + corrected golden-state caution.
 
+**⚠️ REGRESSED 2026-07-01/02 — worst storm on record.** The 06-11 stable state regressed again. Live event-log pull: **20× `0x133`/`param2=0x1e00` bugchecks in 24h** (07-01 03:57 → 07-02 01:28), accelerating into a **crash every ~22 min** since ~21:46 on 07-01 (11 in a row on a near-exact 22-min cadence); uptime never exceeded ~40 min → node effectively unusable. Kernel-Power 41/6008 + minidumps (`070126-*.dmp`) confirm. Fix unchanged (TPM level = Disabled), but this is the **fourth regression** (05-28, 06-02, 06-04, 07-01) → the board clearly isn't holding BIOS settings across power events: **replace the CMOS battery** is now the prime durable fix, else execute the standing move-to-Linux/LTSC plan. Fallout while crashing: constant model loss, `deploy-node` hangs, TLS-fingerprint crash-loop, coordinator read-timeout closes — all downstream of the reboots, not ai-mesh bugs.
+
 **Diagnostics — run after any recovery:**
 ```bash
 ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
@@ -766,6 +768,15 @@ ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoControlle
 # 6. No recent unexpected shutdowns (Event ID 41)
 ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
 ```
+
+---
+
+#### 2026-07-01/02 — fTPM storm regression (5th), worst on record (~22-min cycle)
+
+- **Trigger:** the 2026-06-11 golden state regressed again — fTPM back on. No CMOS reset was consciously done this time, which reinforces the weak-CMOS-battery theory (settings not surviving power events on their own).
+- **Evidence (live event-log pull, SSH):** 20× `0x00000133` / `param2=0x1e00` bugchecks in 24h — 07-01 03:57, 04:19, 07:12, 07:34, 09:41, 13:47, 16:39, 17:01, 19:39, then a tight run every ~22 min: 21:46, 22:08, 22:30, 22:53, 23:15, 23:37, 23:59, 00:21, 00:43, 01:06, 01:28. Kernel-Power 41 + 6008 on each; minidumps `070126-*.dmp` / `070226-*.dmp` in `C:\Windows\Minidump`.
+- **Impact:** uptime capped at ~22–40 min → node unusable. Everything else observed this session was fallout: models vanish on every reboot (agent + llama-server die), `deploy-node beelink1` hangs (deploying mid-crash), a TLS-fingerprint crash-loop after reboots (`MESH_TLS_FINGERPRINT` unset on some restarts), and repeated coordinator read-timeout closes as heartbeats stalled toward each crash. pi1/coordinator/lighting unaffected.
+- **Action:** reapply the golden state (TPM level = Disabled). This is the **4th BIOS-setting regression** (05-28, 06-02, 06-04, 07-01) — **replace the CMOS battery** is now the leading durable fix; otherwise execute the standing plan to move beelink to Linux / Win IoT LTSC to eliminate the fTPM/PSP class entirely. Until then, route models to pi1 and treat beelink as offline.
 
 ---
 
