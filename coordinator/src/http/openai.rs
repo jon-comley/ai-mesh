@@ -4,20 +4,27 @@
 //! device-schema injection and no tool execution (that stays on `/api/chat`).
 //! Auth accepts `Authorization: Bearer <token>` (what OpenAI SDKs send) with
 //! `?token=` as a fallback, both validated against the same mesh token set.
-//! Streaming is not yet supported: `stream: true` is rejected with a clear
-//! error rather than silently returning a non-streamed body.
+//! `stream: true` returns OpenAI-spec SSE (`chat.completion.chunk` events,
+//! `stream_options.include_usage` honoured, `data: [DONE]` sentinel); a
+//! mid-stream node death or stall emits an SSE error event and terminates
+//! rather than holding the connection open.
 
 use super::api::TokenQuery;
-use super::state::DashboardState;
+use super::state::{DashboardState, PendingStreams};
 use crate::registry::Registry;
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use shared::{ChatRole, ChatTurn};
+use shared::{ChatRole, ChatTurn, MeshMessage};
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{info, warn};
 
 // ── Request / response shapes ─────────────────────────────────────────────────
@@ -33,6 +40,14 @@ pub struct ChatCompletionRequest {
     temperature: Option<f32>,
     #[serde(default)]
     stream: Option<bool>,
+    #[serde(default)]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Deserialize)]
+struct StreamOptions {
+    #[serde(default)]
+    include_usage: bool,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +84,32 @@ struct Usage {
     prompt_tokens: u32,
     completion_tokens: u32,
     total_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct ChatCompletionChunk {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+    choices: Vec<ChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<Usage>,
+}
+
+#[derive(Serialize)]
+struct ChunkChoice {
+    index: u32,
+    delta: Delta,
+    finish_reason: Option<&'static str>,
+}
+
+#[derive(Serialize, Default)]
+struct Delta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -268,6 +309,299 @@ fn parse_turns(messages: &[InMessage]) -> Result<Vec<ChatTurn>, ApiError> {
         .collect()
 }
 
+// ── SSE streaming ─────────────────────────────────────────────────────────────
+
+/// Nothing arriving for this long before the first token aborts the stream.
+/// Generous because llama-server emits nothing during prefill, which on a 14b
+/// model with a long prompt can take minutes.
+const FIRST_CHUNK_TIMEOUT_SECS: u64 = 300;
+/// Max silence between tokens once generation has started.
+const INTER_CHUNK_TIMEOUT_SECS: u64 = 60;
+
+/// Provider-agnostic stream events — the local mesh adapter and the cloud
+/// passthrough adapter both reduce to this, so one emitter serves both.
+enum StreamItem {
+    Delta(String),
+    Done {
+        finish_reason: &'static str,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+    },
+    Error(String),
+}
+
+/// Build the SSE response: a spawned emitter task converts `StreamItem`s into
+/// OpenAI `chat.completion.chunk` events (single shared `id`/`created`), with
+/// the role-first chunk, finish chunk, optional usage chunk, `[DONE]`
+/// sentinel, and the failure-semantics guarantee: any error, upstream close,
+/// or stall becomes an SSE error event + termination — never a hang.
+fn sse_response(
+    request_id: String,
+    model: String,
+    include_usage: bool,
+    mut rx: mpsc::Receiver<StreamItem>,
+) -> Response {
+    let (etx, erx) = mpsc::channel::<Result<Event, Infallible>>(64);
+    let created = unix_now();
+
+    tokio::spawn(async move {
+        let chunk = |delta: Delta, finish: Option<&'static str>, usage: Option<Usage>| {
+            let body = ChatCompletionChunk {
+                id: request_id.clone(),
+                object: "chat.completion.chunk",
+                created,
+                model: model.clone(),
+                choices: match usage {
+                    // The dedicated usage chunk has an empty choices array.
+                    Some(_) => vec![],
+                    None => vec![ChunkChoice {
+                        index: 0,
+                        delta,
+                        finish_reason: finish,
+                    }],
+                },
+                usage,
+            };
+            Event::default().data(serde_json::to_string(&body).unwrap_or_default())
+        };
+        let done_event = Event::default().data("[DONE]");
+
+        // Role-first chunk, per the OpenAI streaming shape.
+        if etx
+            .send(Ok(chunk(
+                Delta {
+                    role: Some("assistant"),
+                    content: Some(String::new()),
+                },
+                None,
+                None,
+            )))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        let mut first = true;
+        loop {
+            let wait = std::time::Duration::from_secs(if first {
+                FIRST_CHUNK_TIMEOUT_SECS
+            } else {
+                INTER_CHUNK_TIMEOUT_SECS
+            });
+            let item = match tokio::time::timeout(wait, rx.recv()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => StreamItem::Error("stream ended without a result".to_string()),
+                Err(_) => StreamItem::Error(format!(
+                    "stream stalled: no data from the model for {}s",
+                    wait.as_secs()
+                )),
+            };
+            first = false;
+            match item {
+                StreamItem::Delta(text) => {
+                    let ev = chunk(
+                        Delta {
+                            role: None,
+                            content: Some(text),
+                        },
+                        None,
+                        None,
+                    );
+                    if etx.send(Ok(ev)).await.is_err() {
+                        return; // client hung up
+                    }
+                }
+                StreamItem::Done {
+                    finish_reason,
+                    prompt_tokens,
+                    completion_tokens,
+                } => {
+                    let _ = etx
+                        .send(Ok(chunk(Delta::default(), Some(finish_reason), None)))
+                        .await;
+                    if include_usage {
+                        let _ = etx
+                            .send(Ok(chunk(
+                                Delta::default(),
+                                None,
+                                Some(Usage {
+                                    prompt_tokens,
+                                    completion_tokens,
+                                    total_tokens: prompt_tokens + completion_tokens,
+                                }),
+                            )))
+                            .await;
+                    }
+                    let _ = etx.send(Ok(done_event)).await;
+                    return;
+                }
+                StreamItem::Error(msg) => {
+                    let err = serde_json::json!({
+                        "error": { "message": msg, "type": "api_error", "code": "upstream_error" }
+                    });
+                    let _ = etx.send(Ok(Event::default().data(err.to_string()))).await;
+                    let _ = etx.send(Ok(done_event)).await;
+                    return;
+                }
+            }
+        }
+    });
+
+    Sse::new(ReceiverStream::new(erx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Adapt the mesh streaming channel (chunks + terminal result) to
+/// `StreamItem`s. Removes the `pending_streams` entry on exit so the TCP
+/// demux stops forwarding and the agent's sends fail (cancelling generation).
+fn spawn_local_stream_adapter(
+    request_id: String,
+    max_tokens: u32,
+    mut mesh_rx: mpsc::Receiver<MeshMessage>,
+    item_tx: mpsc::Sender<StreamItem>,
+    pending_streams: PendingStreams,
+) {
+    tokio::spawn(async move {
+        let mut saw_delta = false;
+        loop {
+            let msg = tokio::select! {
+                // Emitter gone (client hung up / stream ended) — stop consuming.
+                _ = item_tx.closed() => break,
+                msg = mesh_rx.recv() => msg,
+            };
+            match msg {
+                Some(MeshMessage::ModelInferenceChunk(c)) => {
+                    saw_delta = true;
+                    if item_tx.send(StreamItem::Delta(c.delta)).await.is_err() {
+                        break;
+                    }
+                }
+                Some(MeshMessage::ModelInferenceResult(res)) => {
+                    let item = if let Some(e) = res.error {
+                        StreamItem::Error(format!("inference failed on node: {e}"))
+                    } else {
+                        // Old (pre-v4) agents ignore the unknown `stream`
+                        // field and reply non-streamed: surface the whole
+                        // output as one delta so the client still gets a
+                        // valid stream.
+                        if !saw_delta && !res.output.is_empty() {
+                            let _ = item_tx.send(StreamItem::Delta(res.output)).await;
+                        }
+                        StreamItem::Done {
+                            finish_reason: finish_reason(res.tokens_generated, max_tokens),
+                            prompt_tokens: res.prompt_tokens,
+                            completion_tokens: res.tokens_generated,
+                        }
+                    };
+                    let _ = item_tx.send(item).await;
+                    break;
+                }
+                Some(MeshMessage::Error(e)) => {
+                    let _ = item_tx.send(StreamItem::Error(e)).await;
+                    break;
+                }
+                Some(_) => {} // unrelated message type — ignore
+                None => {
+                    // Demux dropped the sender (buffer overflow kill) or the
+                    // entry was removed — emitter turns this into an error.
+                    break;
+                }
+            }
+        }
+        pending_streams.lock().unwrap().remove(&request_id);
+    });
+}
+
+/// Adapt a cloud provider's OpenAI SSE stream to `StreamItem`s and record
+/// gateway stats. Per-read stalls are caught by the emitter's timeouts; the
+/// request itself is capped at 1h in `complete_stream`.
+fn spawn_cloud_stream_adapter(
+    resp: reqwest::Response,
+    max_tokens: u32,
+    item_tx: mpsc::Sender<StreamItem>,
+    state: Arc<DashboardState>,
+) {
+    tokio::spawn(async move {
+        let mut byte_stream = resp.bytes_stream();
+        let mut parser = shared::sse::SseParser::new();
+        let mut prompt_tokens: u32 = 0;
+        let mut completion_tokens: Option<u32> = None;
+        let mut deltas_sent: u32 = 0;
+        let mut finish: Option<&'static str> = None;
+
+        'read: loop {
+            let bytes = tokio::select! {
+                _ = item_tx.closed() => return,
+                chunk = byte_stream.next() => match chunk {
+                    Some(Ok(b)) => b,
+                    Some(Err(e)) => {
+                        state.record_gateway_error(e.to_string());
+                        let _ = item_tx
+                            .send(StreamItem::Error(format!("cloud stream read failed: {e}")))
+                            .await;
+                        return;
+                    }
+                    // EOF without [DONE] — some providers just close.
+                    None => break 'read,
+                },
+            };
+            for payload in parser.feed(&bytes) {
+                if payload == "[DONE]" {
+                    break 'read;
+                }
+                let Some(parsed) = shared::sse::parse_openai_chunk(&payload) else {
+                    continue;
+                };
+                if let Some(err) = parsed.error {
+                    state.record_gateway_error(err.clone());
+                    let _ = item_tx
+                        .send(StreamItem::Error(format!("cloud provider error: {err}")))
+                        .await;
+                    return;
+                }
+                if let Some(pt) = parsed.prompt_tokens {
+                    prompt_tokens = pt;
+                }
+                if let Some(ct) = parsed.completion_tokens {
+                    completion_tokens = Some(ct);
+                }
+                if let Some(fr) = parsed.finish_reason {
+                    finish = Some(if fr == "length" { "length" } else { "stop" });
+                }
+                if let Some(delta) = parsed.delta {
+                    if delta.is_empty() {
+                        continue;
+                    }
+                    deltas_sent += 1;
+                    if item_tx.send(StreamItem::Delta(delta)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+
+        if deltas_sent == 0 {
+            state.record_gateway_error("cloud stream produced no output".to_string());
+            let _ = item_tx
+                .send(StreamItem::Error(
+                    "cloud stream produced no output".to_string(),
+                ))
+                .await;
+        } else {
+            state.record_gateway_call(0, 0);
+            let _ = item_tx
+                .send(StreamItem::Done {
+                    finish_reason: finish.unwrap_or_else(|| finish_reason(deltas_sent, max_tokens)),
+                    prompt_tokens,
+                    completion_tokens: completion_tokens.unwrap_or(deltas_sent),
+                })
+                .await;
+        }
+    });
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 pub async fn chat_completions(
@@ -291,14 +625,6 @@ pub async fn chat_completions(
             );
         }
     };
-    if req.stream.unwrap_or(false) {
-        return openai_error(
-            StatusCode::BAD_REQUEST,
-            "streaming is not yet supported; set stream to false",
-            "invalid_request_error",
-            "stream_not_supported",
-        );
-    }
     if req.max_tokens == Some(0) {
         return openai_error(
             StatusCode::BAD_REQUEST,
@@ -317,8 +643,78 @@ pub async fn chat_completions(
     };
     let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     let request_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let streaming = req.stream.unwrap_or(false);
+    let include_usage = req.stream_options.as_ref().is_some_and(|o| o.include_usage);
 
     match route {
+        Route::Local(model) if streaming => {
+            info!(request_id = %request_id, model = %model, turns = turns.len(),
+                  "openai-api: local streaming inference");
+            let mesh_rx = match crate::inference::dispatch_local_inference_stream(
+                &request_id,
+                &model,
+                turns,
+                max_tokens,
+                req.temperature,
+                &registry,
+                &state.connections,
+                &state.pending_streams,
+            )
+            .await
+            {
+                Ok(rx) => rx,
+                // No SSE bytes sent yet — a plain JSON error is correct here.
+                Err(msg) => {
+                    return openai_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        &msg,
+                        "api_error",
+                        "upstream_error",
+                    );
+                }
+            };
+            let (item_tx, item_rx) = mpsc::channel::<StreamItem>(64);
+            spawn_local_stream_adapter(
+                request_id.clone(),
+                max_tokens,
+                mesh_rx,
+                item_tx,
+                state.pending_streams.clone(),
+            );
+            sse_response(request_id, model, include_usage, item_rx)
+        }
+        Route::Cloud(provider, model) if streaming => {
+            info!(request_id = %request_id, model = %model, turns = turns.len(),
+                  "openai-api: cloud streaming inference");
+            let resp = match provider
+                .complete_stream(&turns, req.temperature.unwrap_or(0.4))
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    state.record_gateway_error(e.to_string());
+                    let (status, code) = match e {
+                        crate::cloud::CloudError::RateLimited => {
+                            (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
+                        }
+                        crate::cloud::CloudError::Unauthorized
+                        | crate::cloud::CloudError::NoKey => {
+                            (StatusCode::INTERNAL_SERVER_ERROR, "gateway_misconfigured")
+                        }
+                        _ => (StatusCode::SERVICE_UNAVAILABLE, "upstream_error"),
+                    };
+                    return openai_error(
+                        status,
+                        &format!("cloud provider error: {e}"),
+                        "api_error",
+                        code,
+                    );
+                }
+            };
+            let (item_tx, item_rx) = mpsc::channel::<StreamItem>(64);
+            spawn_cloud_stream_adapter(resp, max_tokens, item_tx, state.clone());
+            sse_response(request_id, model, include_usage, item_rx)
+        }
         Route::Local(model) => {
             info!(request_id = %request_id, model = %model, turns = turns.len(),
                   "openai-api: local inference");
@@ -628,15 +1024,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_true_returns_400() {
+    async fn stream_with_no_connected_node_returns_json_503() {
+        // Dispatch fails before any SSE bytes are sent, so the error must be
+        // a plain JSON envelope, not a stream.
         let router = v1_router(
             make_state(vec![], empty_connections()),
             ready_registry("node-1", "qwen2.5:7b"),
         );
         let body = r#"{"messages":[{"role":"user","content":"hi"}],"stream":true}"#;
         let (status, json) = send(router, "POST", "/v1/chat/completions", None, Some(body)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(json["error"]["code"], "stream_not_supported");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["error"]["code"], "upstream_error");
     }
 
     #[tokio::test]
@@ -862,5 +1260,263 @@ mod tests {
         let (status, json) = send(router, "GET", "/v1/models", None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(json["error"]["code"], "invalid_api_key");
+    }
+
+    // ── Streaming ────────────────────────────────────────────────────────────
+
+    /// What the fake streaming agent should send after the deltas.
+    enum StreamEnd {
+        Result(InferenceResult),
+        MeshError(String),
+    }
+
+    /// Spawn a fake agent that, on receiving a streaming RequestModelInference,
+    /// pushes `deltas` + the chosen terminal through `state.pending_streams`
+    /// exactly like the TCP demux would.
+    fn fake_stream_agent(
+        connections: &NodeConnections,
+        state: &Arc<DashboardState>,
+        node_id: &str,
+        deltas: Vec<&'static str>,
+        end: StreamEnd,
+    ) -> Arc<Mutex<Option<InferenceRequest>>> {
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert(node_id.into(), tx);
+        let seen: Arc<Mutex<Option<InferenceRequest>>> = Arc::new(Mutex::new(None));
+        let seen2 = seen.clone();
+        let pending = state.pending_streams.clone();
+        let node_id = node_id.to_string();
+        tokio::spawn(async move {
+            if let Some(MeshMessage::RequestModelInference(req)) = rx.recv().await {
+                *seen2.lock().unwrap() = Some(req.clone());
+                // The dispatch inserts the entry before sending the request,
+                // so it is guaranteed to be present here.
+                let stx = pending
+                    .lock()
+                    .unwrap()
+                    .get(&req.request_id)
+                    .map(|(s, _)| s.clone())
+                    .expect("stream entry registered");
+                for d in deltas {
+                    let _ = stx
+                        .send(MeshMessage::ModelInferenceChunk(shared::InferenceChunk {
+                            request_id: req.request_id.clone(),
+                            node_id: node_id.clone(),
+                            delta: d.to_string(),
+                            wire_version: WIRE_VERSION,
+                        }))
+                        .await;
+                }
+                match end {
+                    StreamEnd::Result(mut res) => {
+                        res.request_id = req.request_id.clone();
+                        let _ = stx.send(MeshMessage::ModelInferenceResult(res)).await;
+                    }
+                    StreamEnd::MeshError(e) => {
+                        let _ = stx.send(MeshMessage::Error(e)).await;
+                    }
+                }
+            }
+        });
+        seen
+    }
+
+    fn ok_result(output: &str, tokens_generated: u32) -> InferenceResult {
+        InferenceResult {
+            request_id: String::new(), // filled by the fake agent
+            node_id: "node-1".into(),
+            model_name: "qwen2.5:7b".into(),
+            output: output.into(),
+            tokens_generated,
+            prompt_tokens: 7,
+            duration_ms: 5,
+            prompt_eval_ms: 1,
+            error: None,
+            wire_version: WIRE_VERSION,
+        }
+    }
+
+    /// POST a streaming request and return (content_type, data payloads).
+    async fn send_stream(router: Router, body: &str) -> (String, Vec<String>) {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut parser = shared::sse::SseParser::new();
+        let payloads = parser.feed(text.as_bytes());
+        (content_type, payloads)
+    }
+
+    const STREAM_BODY: &str =
+        r#"{"model":"qwen2.5:7b","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+
+    #[tokio::test]
+    async fn stream_happy_path_emits_openai_chunks() {
+        let connections = empty_connections();
+        let state = make_state(vec![], connections.clone());
+        let seen = fake_stream_agent(
+            &connections,
+            &state,
+            "node-1",
+            vec!["hel", "lo"],
+            StreamEnd::Result(ok_result("hello", 2)),
+        );
+        let router = v1_router(state.clone(), ready_registry("node-1", "qwen2.5:7b"));
+
+        let (content_type, payloads) = send_stream(router, STREAM_BODY).await;
+        assert!(content_type.starts_with("text/event-stream"));
+
+        // role-first chunk, two deltas, finish chunk, [DONE]
+        assert_eq!(payloads.len(), 5, "payloads: {payloads:?}");
+        let first: serde_json::Value = serde_json::from_str(&payloads[0]).unwrap();
+        assert_eq!(first["object"], "chat.completion.chunk");
+        assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
+        let d1: serde_json::Value = serde_json::from_str(&payloads[1]).unwrap();
+        assert_eq!(d1["choices"][0]["delta"]["content"], "hel");
+        let d2: serde_json::Value = serde_json::from_str(&payloads[2]).unwrap();
+        assert_eq!(d2["choices"][0]["delta"]["content"], "lo");
+        let fin: serde_json::Value = serde_json::from_str(&payloads[3]).unwrap();
+        assert_eq!(fin["choices"][0]["finish_reason"], "stop");
+        assert_eq!(payloads[4], "[DONE]");
+
+        // Every chunk shares one id, and the wire request was a stream.
+        assert_eq!(first["id"], d1["id"]);
+        assert_eq!(d1["id"], fin["id"]);
+        let req = seen.lock().unwrap().take().expect("agent saw request");
+        assert!(req.stream);
+        // Adapter cleaned up its entry.
+        assert!(state.pending_streams.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_include_usage_adds_usage_chunk() {
+        let connections = empty_connections();
+        let state = make_state(vec![], connections.clone());
+        let _seen = fake_stream_agent(
+            &connections,
+            &state,
+            "node-1",
+            vec!["hi"],
+            StreamEnd::Result(ok_result("hi", 1)),
+        );
+        let router = v1_router(state, ready_registry("node-1", "qwen2.5:7b"));
+
+        let body = r#"{"model":"qwen2.5:7b","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}"#;
+        let (_, payloads) = send_stream(router, body).await;
+        // role, delta, finish, usage, [DONE]
+        assert_eq!(payloads.len(), 5, "payloads: {payloads:?}");
+        let usage: serde_json::Value = serde_json::from_str(&payloads[3]).unwrap();
+        assert_eq!(usage["usage"]["prompt_tokens"], 7);
+        assert_eq!(usage["usage"]["completion_tokens"], 1);
+        assert_eq!(usage["usage"]["total_tokens"], 8);
+        assert_eq!(usage["choices"], serde_json::json!([]));
+        assert_eq!(payloads[4], "[DONE]");
+    }
+
+    #[tokio::test]
+    async fn stream_error_terminal_emits_error_event() {
+        let connections = empty_connections();
+        let state = make_state(vec![], connections.clone());
+        let mut failed = ok_result("", 0);
+        failed.error = Some("GPU exploded".into());
+        let _seen = fake_stream_agent(
+            &connections,
+            &state,
+            "node-1",
+            vec!["par"],
+            StreamEnd::Result(failed),
+        );
+        let router = v1_router(state, ready_registry("node-1", "qwen2.5:7b"));
+
+        let (_, payloads) = send_stream(router, STREAM_BODY).await;
+        // role, one delta, error event, [DONE]
+        let err: serde_json::Value = serde_json::from_str(&payloads[2]).unwrap();
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("GPU exploded")
+        );
+        assert_eq!(err["error"]["code"], "upstream_error");
+        assert_eq!(payloads.last().unwrap(), "[DONE]");
+    }
+
+    #[tokio::test]
+    async fn stream_node_death_emits_error_event() {
+        // The disconnect teardown sends MeshMessage::Error into the channel.
+        let connections = empty_connections();
+        let state = make_state(vec![], connections.clone());
+        let _seen = fake_stream_agent(
+            &connections,
+            &state,
+            "node-1",
+            vec![],
+            StreamEnd::MeshError("compute node 'node-1' disconnected during inference".into()),
+        );
+        let router = v1_router(state, ready_registry("node-1", "qwen2.5:7b"));
+
+        let (_, payloads) = send_stream(router, STREAM_BODY).await;
+        let err: serde_json::Value = serde_json::from_str(&payloads[1]).unwrap();
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("disconnected")
+        );
+        assert_eq!(payloads.last().unwrap(), "[DONE]");
+    }
+
+    #[tokio::test]
+    async fn stream_terminal_only_result_degrades_to_single_delta() {
+        // A pre-v4 agent ignores the unknown `stream` field and replies
+        // non-streamed: the full output must still reach the client.
+        let connections = empty_connections();
+        let state = make_state(vec![], connections.clone());
+        let _seen = fake_stream_agent(
+            &connections,
+            &state,
+            "node-1",
+            vec![],
+            StreamEnd::Result(ok_result("full answer", 3)),
+        );
+        let router = v1_router(state, ready_registry("node-1", "qwen2.5:7b"));
+
+        let (_, payloads) = send_stream(router, STREAM_BODY).await;
+        // role, degradation delta, finish, [DONE]
+        assert_eq!(payloads.len(), 4, "payloads: {payloads:?}");
+        let d: serde_json::Value = serde_json::from_str(&payloads[1]).unwrap();
+        assert_eq!(d["choices"][0]["delta"]["content"], "full answer");
+        let fin: serde_json::Value = serde_json::from_str(&payloads[2]).unwrap();
+        assert_eq!(fin["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[tokio::test]
+    async fn stream_finish_reason_length_at_max_tokens() {
+        let connections = empty_connections();
+        let state = make_state(vec![], connections.clone());
+        let _seen = fake_stream_agent(
+            &connections,
+            &state,
+            "node-1",
+            vec!["a", "b"],
+            StreamEnd::Result(ok_result("ab", 2)),
+        );
+        let router = v1_router(state, ready_registry("node-1", "qwen2.5:7b"));
+
+        let body = r#"{"model":"qwen2.5:7b","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":2}"#;
+        let (_, payloads) = send_stream(router, body).await;
+        let fin: serde_json::Value = serde_json::from_str(&payloads[3]).unwrap();
+        assert_eq!(fin["choices"][0]["finish_reason"], "length");
     }
 }

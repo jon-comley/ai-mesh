@@ -50,6 +50,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                     conns,
                     pend,
                     pending_intents,
+                    Arc::new(Mutex::new(HashMap::new())),
                     Arc::new(vec![]),
                     None,
                 )
@@ -75,6 +76,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                     conns,
                     pend,
                     pending_intents,
+                    Arc::new(Mutex::new(HashMap::new())),
                     Arc::new(vec![]),
                     None,
                 )
@@ -166,6 +168,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                     node_id: None,
                     model_name: "llama3".into(),
                     messages: vec![shared::ChatTurn::user("hello world")],
+                    stream: false,
                     max_tokens: 64,
                     temperature: None,
                     wire_version: WIRE_VERSION,

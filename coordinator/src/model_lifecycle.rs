@@ -149,6 +149,7 @@ mod tests {
             node_id: Some("node-1".into()),
             model_name: "llama3".into(),
             messages: vec![shared::ChatTurn::user("hello")],
+            stream: false,
             max_tokens: 64,
             temperature: None,
             wire_version: WIRE_VERSION,

@@ -164,7 +164,7 @@ Phase 6 introduces a set of **model-aware wire-protocol messages** used for:
 All Phase 6 messages include a `wire_version: u32` field with:
 
 ```rust
-pub const WIRE_VERSION: u32 = 3;
+pub const WIRE_VERSION: u32 = 4;
 #[serde(default = "default_wire_version")]
 ```
 
@@ -183,6 +183,24 @@ Older agents that do not send `wire_version` will still deserialize safely.
 > `InferenceResult` gains `prompt_tokens`. v2 agents fail fast on v3 frames
 > (missing `prompt` field) — deploy coordinator and agents together.
 
+> **Wire v4 (SSE streaming):** `InferenceRequest` gains a **required**
+> `stream: bool`; new `ModelInferenceChunk(InferenceChunk)` message carries
+> incremental deltas while a streaming inference runs, terminated by the
+> usual `ModelInferenceResult`. Deploy the **coordinator first**: a v3 agent
+> ignores the unknown `stream` field and replies non-streamed (the API
+> degrades to a single-delta stream), but a v4 agent cannot parse a v3
+> coordinator's requests (missing `stream`).
+
+### `ModelInferenceChunk`
+Compute node → Coordinator
+One streamed token batch for an in-flight streaming inference.
+
+Fields:
+- `request_id: String`
+- `node_id: String`
+- `delta: String` — incremental output text
+- `wire_version: u32`
+
 ### `RequestModelInference`
 CLI → Coordinator  
 Requests inference for a named model. The coordinator uses the scheduler to select a ready node.
@@ -192,6 +210,7 @@ Fields:
 - `node_id: Option<String>` — caller-supplied pin; `null`/absent means "let the scheduler decide" (`#[serde(default)]`)
 - `model_name: String`
 - `messages: Vec<ChatTurn>` — full conversation, forwarded to the model verbatim
+- `stream: bool` — stream `ModelInferenceChunk`s before the terminal result
 - `max_tokens: u32`
 - `temperature: Option<f32>` — `None` = agent default (0.8)
 - `wire_version: u32`

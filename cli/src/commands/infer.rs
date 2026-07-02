@@ -60,6 +60,7 @@ async fn send_infer(
         node_id: None,
         model_name,
         messages,
+        stream: false,
         max_tokens: 256,
         temperature: None,
         wire_version: WIRE_VERSION,

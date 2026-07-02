@@ -46,6 +46,7 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
                     conns,
                     pending,
                     pending_intents,
+                    Arc::new(Mutex::new(HashMap::new())),
                     Arc::new(vec![]),
                     None,
                 )
@@ -71,6 +72,7 @@ async fn test_coordinator_forwards_model_load_to_registered_agent() {
                     conns,
                     pending,
                     pending_intents,
+                    Arc::new(Mutex::new(HashMap::new())),
                     Arc::new(vec![]),
                     None,
                 )

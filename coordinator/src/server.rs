@@ -23,7 +23,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 pub use crate::http::state::NodeConnections as Connections;
-pub use crate::http::state::{PendingInferences, PendingIntents};
+pub use crate::http::state::{PendingInferences, PendingIntents, PendingStreams};
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -47,6 +47,7 @@ pub struct Server {
     pub connections: Connections,
     pub pending_inferences: PendingInferences,
     pub pending_intents: PendingIntents,
+    pub pending_streams: PendingStreams,
     /// Valid auth tokens. Empty = no authentication (dev/test mode).
     pub auth_tokens: Arc<Vec<String>>,
     /// TLS acceptor. None = plain TCP (tests and MESH_INSECURE=1 mode).
@@ -63,6 +64,7 @@ impl Server {
             connections: Arc::new(Mutex::new(HashMap::new())),
             pending_inferences: Arc::new(Mutex::new(HashMap::new())),
             pending_intents: Arc::new(Mutex::new(HashMap::new())),
+            pending_streams: Arc::new(Mutex::new(HashMap::new())),
             auth_tokens: Arc::new(vec![]),
             tls: None,
             dashboard: None,
@@ -78,6 +80,7 @@ impl Server {
             let connections = self.connections.clone();
             let pending_inferences = self.pending_inferences.clone();
             let pending_intents = self.pending_intents.clone();
+            let pending_streams = self.pending_streams.clone();
             let auth_tokens = self.auth_tokens.clone();
             let dashboard = self.dashboard.clone();
 
@@ -93,6 +96,7 @@ impl Server {
                                 connections,
                                 pending_inferences,
                                 pending_intents,
+                                pending_streams,
                                 auth_tokens,
                                 dashboard,
                             )
@@ -110,6 +114,7 @@ impl Server {
                         connections,
                         pending_inferences,
                         pending_intents,
+                        pending_streams,
                         auth_tokens,
                         dashboard,
                     )
@@ -128,6 +133,7 @@ pub async fn handle_connection<S>(
     connections: Connections,
     pending_inferences: PendingInferences,
     pending_intents: PendingIntents,
+    pending_streams: PendingStreams,
     auth_tokens: Arc<Vec<String>>,
     dashboard: Option<Arc<DashboardState>>,
 ) -> Result<(), ServerError>
@@ -320,6 +326,7 @@ where
             &connections,
             &pending_inferences,
             &pending_intents,
+            &pending_streams,
             &tx,
             &mut node_id,
             &auth_tokens,
@@ -383,6 +390,25 @@ where
             if let Some((otx, _)) = pending.remove(&req_id) {
                 warn!(node_id = %id, request_id = %req_id, "failing pending inference: agent disconnected");
                 let _ = otx.send(MeshMessage::Error(format!(
+                    "compute node '{}' disconnected during inference",
+                    id
+                )));
+            }
+        }
+        drop(pending);
+
+        // Same for in-flight streams: the SSE emitter turns this Error into
+        // an error event + termination instead of holding the connection open.
+        let mut streams = pending_streams.lock().unwrap();
+        let to_fail: Vec<String> = streams
+            .iter()
+            .filter(|(_, (_, nid))| nid == &id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for req_id in to_fail {
+            if let Some((stx, _)) = streams.remove(&req_id) {
+                warn!(node_id = %id, request_id = %req_id, "failing in-flight stream: agent disconnected");
+                let _ = stx.try_send(MeshMessage::Error(format!(
                     "compute node '{}' disconnected during inference",
                     id
                 )));
@@ -467,6 +493,7 @@ async fn process_message(
     connections: &Connections,
     pending_inferences: &PendingInferences,
     pending_intents: &PendingIntents,
+    pending_streams: &PendingStreams,
     tx: &mpsc::Sender<MeshMessage>,
     node_id: &mut Option<String>,
     auth_tokens: &Arc<Vec<String>>,
@@ -712,9 +739,44 @@ async fn process_message(
                 node_id    = %res.node_id,
                 "model inference result received from agent"
             );
+            // Streamed request: the result is the stream terminator. A Full
+            // error is tolerable here — the emitter treats channel-closed-
+            // without-terminal as an error and ends the SSE stream cleanly.
+            let stream_entry = pending_streams.lock().unwrap().remove(&res.request_id);
+            if let Some((stx, _)) = stream_entry {
+                let _ = stx.try_send(MeshMessage::ModelInferenceResult(res));
+                return None;
+            }
             let entry = pending_inferences.lock().unwrap().remove(&res.request_id);
             if let Some((otx, _)) = entry {
                 let _ = otx.send(MeshMessage::ModelInferenceResult(res));
+            }
+            None
+        }
+        MeshMessage::ModelInferenceChunk(chunk) => {
+            // Clone the sender out of the lock — never send while holding it.
+            let entry = pending_streams
+                .lock()
+                .unwrap()
+                .get(&chunk.request_id)
+                .map(|(stx, _)| stx.clone());
+            if let Some(stx) = entry {
+                use tokio::sync::mpsc::error::TrySendError;
+                let request_id = chunk.request_id.clone();
+                match stx.try_send(MeshMessage::ModelInferenceChunk(chunk)) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        // SSE client can't keep up — kill the stream rather
+                        // than buffer unboundedly. The emitter sees the
+                        // channel close without a terminal and errors out.
+                        warn!(request_id = %request_id,
+                              "stream buffer full — dropping slow stream");
+                        pending_streams.lock().unwrap().remove(&request_id);
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        pending_streams.lock().unwrap().remove(&request_id);
+                    }
+                }
             }
             None
         }
@@ -1013,6 +1075,7 @@ mod tests {
         Connections,
         PendingInferences,
         PendingIntents,
+        PendingStreams,
         mpsc::Sender<MeshMessage>,
         Arc<Vec<String>>,
         Arc<DashboardState>,
@@ -1021,6 +1084,7 @@ mod tests {
         let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
         let pending_inferences: PendingInferences = Arc::new(Mutex::new(HashMap::new()));
         let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let pending_streams: PendingStreams = Arc::new(Mutex::new(HashMap::new()));
         let (tx, _rx) = mpsc::channel(8);
         let auth_tokens = Arc::new(vec![]);
         let dashboard = DashboardState::new(Arc::new(vec![]), Arc::new(Mutex::new(HashMap::new())));
@@ -1029,6 +1093,7 @@ mod tests {
             connections,
             pending_inferences,
             pending_intents,
+            pending_streams,
             tx,
             auth_tokens,
             dashboard,
@@ -1039,7 +1104,7 @@ mod tests {
     // authenticated connection's id, not the payload — otherwise commands 503.
     #[tokio::test]
     async fn light_state_routes_on_connection_id_not_payload() {
-        let (registry, connections, pi, pin, tx, tokens, dashboard) = test_deps();
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
         let mut node_id = Some("pi1-real".to_string());
 
         let report = LightStateReport {
@@ -1058,6 +1123,7 @@ mod tests {
             &connections,
             &pi,
             &pin,
+            &ps,
             &tx,
             &mut node_id,
             &tokens,
@@ -1078,7 +1144,7 @@ mod tests {
     // a phantom light_devices row / mis-key group routing.
     #[tokio::test]
     async fn light_device_list_keys_on_connection_id_not_payload() {
-        let (registry, connections, pi, pin, tx, tokens, dashboard) = test_deps();
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
         let mut node_id = Some("pi1-real".to_string());
 
         let report = shared::LightDeviceListReport {
@@ -1093,6 +1159,7 @@ mod tests {
             &connections,
             &pi,
             &pin,
+            &ps,
             &tx,
             &mut node_id,
             &tokens,

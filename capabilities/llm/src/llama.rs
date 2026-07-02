@@ -708,6 +708,128 @@ fn build_messages(model_name: &str, turns: &[shared::ChatTurn]) -> Vec<OwnedChat
     messages
 }
 
+/// Dedicated client for streamed generation: connect timeout only, no total
+/// timeout — the shared client's `LLAMA_GENERATE_TIMEOUT_SECS` cap would kill
+/// any stream longer than it (same reason `pull_model` builds its own client).
+/// Liveness is enforced per-chunk via the idle timeout in `generate_stream`.
+fn stream_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build streaming HTTP client")
+    })
+}
+
+/// Max silence between stream chunks before the generation is declared hung.
+/// Generous default because llama-server emits nothing during prefill, which
+/// on a 14b model with a long prompt can take minutes.
+fn stream_idle_timeout_secs() -> u64 {
+    std::env::var("LLAMA_STREAM_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(300)
+}
+
+/// Streamed inference: each content delta is sent into `delta_tx` as it
+/// arrives; returns the same totals as `generate`. If `delta_tx` closes
+/// (mesh connection gone), the response stream is dropped, which closes the
+/// llama-server connection and cancels generation.
+pub async fn generate_stream(
+    model_name: &str,
+    turns: &[shared::ChatTurn],
+    max_tokens: u32,
+    temperature: f32,
+    delta_tx: tokio::sync::mpsc::Sender<String>,
+) -> Result<GenerateResult, String> {
+    let url = format!("{}/v1/chat/completions", llama_host());
+    let wall_start = Instant::now();
+    let messages = build_messages(model_name, turns);
+
+    let resp = stream_http_client()
+        .post(&url)
+        .json(&ChatRequest {
+            model: model_name,
+            messages,
+            max_tokens,
+            stream: true,
+            repeat_penalty: 1.1,
+            temperature,
+            cache_prompt: true,
+        })
+        .send()
+        .await
+        .map_err(|e| format!("stream request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("stream returned HTTP {status}: {body}"));
+    }
+
+    let idle = std::time::Duration::from_secs(stream_idle_timeout_secs());
+    let mut byte_stream = resp.bytes_stream();
+    let mut parser = shared::sse::SseParser::new();
+    let mut output = String::new();
+    let mut deltas_sent: u32 = 0;
+    let mut prompt_tokens: Option<u32> = None;
+    let mut completion_tokens: Option<u32> = None;
+
+    'read: loop {
+        let chunk = match tokio::time::timeout(idle, byte_stream.next()).await {
+            Ok(Some(Ok(bytes))) => bytes,
+            Ok(Some(Err(e))) => return Err(format!("stream read failed: {e}")),
+            Ok(None) => break 'read, // EOF — treat like [DONE]
+            Err(_) => {
+                return Err(format!(
+                    "llama-server stream stalled for {}s",
+                    idle.as_secs()
+                ));
+            }
+        };
+        for payload in parser.feed(&chunk) {
+            if payload == "[DONE]" {
+                break 'read;
+            }
+            let Some(parsed) = shared::sse::parse_openai_chunk(&payload) else {
+                continue;
+            };
+            if let Some(err) = parsed.error {
+                return Err(format!("llama-server stream error: {err}"));
+            }
+            if parsed.prompt_tokens.is_some() {
+                prompt_tokens = parsed.prompt_tokens;
+            }
+            if parsed.completion_tokens.is_some() {
+                completion_tokens = parsed.completion_tokens;
+            }
+            if let Some(delta) = parsed.delta {
+                if delta.is_empty() {
+                    continue;
+                }
+                output.push_str(&delta);
+                deltas_sent += 1;
+                if delta_tx.send(delta).await.is_err() {
+                    // Receiver gone: mesh connection dropped. Dropping the
+                    // byte stream closes the socket and cancels generation.
+                    return Err("stream cancelled: connection dropped".to_string());
+                }
+            }
+        }
+    }
+
+    Ok(GenerateResult {
+        output,
+        // llama.cpp builds vary on whether the final chunk carries usage —
+        // fall back to counting the deltas we actually forwarded.
+        tokens_generated: completion_tokens.unwrap_or(deltas_sent),
+        prompt_tokens: prompt_tokens.unwrap_or(0),
+        duration_ms: wall_start.elapsed().as_millis() as u64,
+        prompt_eval_ms: 0,
+    })
+}
+
 /// Run inference over a full conversation.
 pub async fn generate(
     model_name: &str,

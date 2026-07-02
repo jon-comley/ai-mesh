@@ -18,6 +18,16 @@ pub type PendingInferences = Arc<Mutex<HashMap<String, (oneshot::Sender<MeshMess
 /// Pending intent-level one-shots: request_id → reply_channel.
 pub type PendingIntents = Arc<Mutex<HashMap<String, oneshot::Sender<MeshMessage>>>>;
 
+/// In-flight streaming inferences: request_id → (chunk/terminal channel, node_id).
+/// The TCP demux feeds N `ModelInferenceChunk`s then one terminal
+/// `ModelInferenceResult` (or a `MeshMessage::Error` on node death).
+pub type PendingStreams = Arc<Mutex<HashMap<String, (mpsc::Sender<MeshMessage>, String)>>>;
+
+/// Buffered chunks per streaming request. Sized so a briefly-slow SSE client
+/// survives; a persistently slow one overflows and its stream is terminated
+/// rather than buffering unboundedly on the coordinator.
+pub const STREAM_CHANNEL_CAP: usize = 256;
+
 const HEALTH_WINDOW: usize = 60;
 const ERROR_RING_CAP: usize = 200;
 const SECURITY_RING_CAP: usize = 200;
@@ -310,6 +320,8 @@ pub struct DashboardState {
     pub pending_inferences: PendingInferences,
     /// Shared with the TCP server so tool calls (scene_load) can wait for a reply.
     pub pending_intents: PendingIntents,
+    /// Shared with the TCP server so streamed inference chunks reach the SSE emitter.
+    pub pending_streams: PendingStreams,
     /// Last-known REAPER status — replayed to new WS clients on connect.
     reaper_snapshot: Mutex<Option<ReaperStatusReport>>,
     /// Cumulative cloud-gateway usage stats (in-memory; reset on restart).
@@ -346,6 +358,7 @@ impl DashboardState {
             security_log: Mutex::new(VecDeque::new()),
             pending_inferences: Arc::new(Mutex::new(HashMap::new())),
             pending_intents: Arc::new(Mutex::new(HashMap::new())),
+            pending_streams: Arc::new(Mutex::new(HashMap::new())),
             reaper_snapshot: Mutex::new(None),
             gateway_stats: Mutex::new(GatewayStats::default()),
         })

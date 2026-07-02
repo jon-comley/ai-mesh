@@ -1865,6 +1865,22 @@ openai text model="":
         -d "{${MODEL_FIELD}\"messages\":[{\"role\":\"user\",\"content\":${CONTENT}}]}" \
         | python3 -m json.tool
 
+# Stream from the OpenAI-compatible endpoint and print SSE events as they
+# arrive. Optional second arg pins a model.
+# Usage: just openai-stream "count to 20"
+#        just openai-stream "count to 20" qwen2.5:7b
+openai-stream text model="":
+    #!/usr/bin/env bash
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    TOKEN=""
+    if [ -f "$STATE" ]; then source "$STATE"; TOKEN="${MESH_AUTH_TOKEN:-}"; fi
+    CONTENT=$(printf '%s' '{{text}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    if [ -n "{{model}}" ]; then MODEL_FIELD="\"model\":\"{{model}}\","; else MODEL_FIELD=""; fi
+    curl -N -s -X POST "http://{{coordinator_ip}}:9001/v1/chat/completions" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -d "{${MODEL_FIELD}\"messages\":[{\"role\":\"user\",\"content\":${CONTENT}}],\"stream\":true,\"stream_options\":{\"include_usage\":true}}"
+
 # Send a natural-language intent to the coordinator.
 # Usage: just intent "turn test_bulb on"
 #        just intent "what is the capital of France"
