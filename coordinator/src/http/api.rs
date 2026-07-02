@@ -23,7 +23,7 @@ fn gen_request_id() -> String {
 #[derive(Deserialize)]
 pub struct TokenQuery {
     #[serde(default)]
-    token: String,
+    pub(crate) token: String,
 }
 
 #[derive(Deserialize)]
@@ -1529,7 +1529,10 @@ pub async fn test_gateway(
         .into_response();
     };
     match provider
-        .complete(None, "Reply with the single word: pong")
+        .complete(
+            &[shared::ChatTurn::user("Reply with the single word: pong")],
+            0.4,
+        )
         .await
     {
         Ok(reply) => Json(serde_json::json!({ "ok": true, "reply": reply.text })).into_response(),

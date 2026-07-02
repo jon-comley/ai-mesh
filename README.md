@@ -75,6 +75,19 @@ just rotate-token               # zero-downtime auth token rotation (no inferenc
 
 ---
 
+## OpenAI-Compatible API
+
+The coordinator exposes the mesh as a standard OpenAI endpoint — point any
+OpenAI-SDK client at `http://pi1:9001/v1` with the mesh auth token as its API
+key and requests are served by local nodes (or the cloud gateway):
+
+```
+just openai "why is the sky blue?"          # curl convenience wrapper
+curl http://pi1:9001/v1/models -H "Authorization: Bearer $MESH_AUTH_TOKEN"
+```
+
+Full reference (routing rules, parameters, errors, SDK examples): `docs/openai-api.md`.
+
 ---
 
 ## Dashboard

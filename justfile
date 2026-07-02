@@ -1193,6 +1193,21 @@ sanity-node node:
 update-portproxy:
     #!/usr/bin/env bash
     set -e
+    # Portproxy maps Windows-host 9000/9001 → the WSL IP so LAN nodes can reach
+    # a coordinator running *inside* WSL. With a remote coordinator (pi1) all
+    # local traffic is outbound — nothing to forward.
+    if [ "{{coordinator_ip}}" != "127.0.0.1" ] && [ "{{coordinator_ip}}" != "localhost" ]; then
+        echo ">>> Coordinator is remote ({{coordinator_ip}}) — portproxy not needed, skipping."
+        exit 0
+    fi
+    # WSL interop can die after a suspend/resume (netsh.exe → I/O error). A dead
+    # portproxy update shouldn't abort cluster start — warn with the fix instead.
+    if ! netsh.exe interface portproxy show all >/dev/null 2>&1; then
+        echo ">>> WARNING: Windows interop unavailable (netsh.exe unreachable) — skipping portproxy."
+        echo ">>>          If LAN nodes can't reach a LOCAL coordinator, run 'wsl --shutdown' from"
+        echo ">>>          Windows PowerShell, reopen this terminal, and re-run."
+        exit 0
+    fi
     WSL_IP=$(ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
     CUR_9000=$(netsh.exe interface portproxy show all | awk '/9000/{print $3}' | head -1 | tr -d '\r')
     CUR_9001=$(netsh.exe interface portproxy show all | awk '/9001/{print $3}' | head -1 | tr -d '\r')
@@ -1831,6 +1846,23 @@ chat text:
     curl -s -X POST "http://{{coordinator_ip}}:9001/api/chat?token=${TOKEN}" \
         -H 'Content-Type: application/json' \
         -d "{\"text\":$(printf '%s' '{{text}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"context\":[]}" \
+        | python3 -m json.tool
+
+# Hit the OpenAI-compatible /v1/chat/completions endpoint (Bearer auth) and
+# pretty-print the response. Optional second arg pins a model.
+# Usage: just openai "why is the sky blue?"
+#        just openai "why is the sky blue?" qwen2.5:7b
+openai text model="":
+    #!/usr/bin/env bash
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    TOKEN=""
+    if [ -f "$STATE" ]; then source "$STATE"; TOKEN="${MESH_AUTH_TOKEN:-}"; fi
+    CONTENT=$(printf '%s' '{{text}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    if [ -n "{{model}}" ]; then MODEL_FIELD="\"model\":\"{{model}}\","; else MODEL_FIELD=""; fi
+    curl -s -X POST "http://{{coordinator_ip}}:9001/v1/chat/completions" \
+        -H "Authorization: Bearer ${TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -d "{${MODEL_FIELD}\"messages\":[{\"role\":\"user\",\"content\":${CONTENT}}]}" \
         | python3 -m json.tool
 
 # Send a natural-language intent to the coordinator.

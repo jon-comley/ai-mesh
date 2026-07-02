@@ -165,8 +165,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                     request_id: "infer-req-001".into(),
                     node_id: None,
                     model_name: "llama3".into(),
-                    system_prompt: None,
-                    prompt: "hello world".into(),
+                    messages: vec![shared::ChatTurn::user("hello world")],
                     max_tokens: 64,
                     temperature: None,
                     wire_version: WIRE_VERSION,
@@ -187,6 +186,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                         model_name: r.model_name.clone(),
                         output: "Simulated answer".into(),
                         tokens_generated: 10,
+                        prompt_tokens: 3,
                         duration_ms: 50,
                         prompt_eval_ms: 0,
                         error: None,
@@ -216,7 +216,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
         MeshMessage::RequestModelInference(req) => {
             assert_eq!(req.request_id, "infer-req-001");
             assert_eq!(req.model_name, "llama3");
-            assert_eq!(req.prompt, "hello world");
+            assert_eq!(req.messages, vec![shared::ChatTurn::user("hello world")]);
             assert_eq!(req.max_tokens, 64);
         }
         other => panic!("Expected RequestModelInference, got {:?}", other),

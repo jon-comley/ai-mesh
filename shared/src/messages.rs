@@ -3,10 +3,52 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 2;
+pub const WIRE_VERSION: u32 = 3;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
+}
+
+/// Role of a single chat turn. Wire strings match the OpenAI role names
+/// (`"system"` / `"user"` / `"assistant"`) so inbound OpenAI requests and the
+/// outbound llama-server / cloud-provider calls serialize identically.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatRole {
+    System,
+    User,
+    Assistant,
+}
+
+/// One turn of a chat conversation, passed to the model verbatim so
+/// llama-server can apply the model's chat template per role.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatTurn {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+impl ChatTurn {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::System,
+            content: content.into(),
+        }
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::User,
+            content: content.into(),
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::Assistant,
+            content: content.into(),
+        }
+    }
 }
 
 /// Sent by the coordinator to a Compute node to run inference.
@@ -17,11 +59,8 @@ pub struct InferenceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub model_name: String,
-    /// Optional system prompt. When set the agent passes it in the system role
-    /// and `prompt` goes in the user role. When absent, only a user role is used.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt: Option<String>,
-    pub prompt: String,
+    /// Full conversation, forwarded to the model as-is (system prompt included).
+    pub messages: Vec<ChatTurn>,
     pub max_tokens: u32,
     /// Sampling temperature. `None` lets the agent use its default (0.8).
     /// Set to `0.0` for greedy/deterministic output (faster, better for JSON).
@@ -39,6 +78,9 @@ pub struct InferenceResult {
     pub model_name: String,
     pub output: String,
     pub tokens_generated: u32,
+    /// Prompt tokens consumed, as reported by the serving backend (`usage.prompt_tokens`).
+    #[serde(default)]
+    pub prompt_tokens: u32,
     pub duration_ms: u64,
     #[serde(default)]
     pub prompt_eval_ms: u64,
@@ -623,7 +665,7 @@ mod tests {
     #[test]
     fn wire_version_defaults_when_field_absent() {
         // Simulate an older agent that sends InferenceRequest without wire_version.
-        let json = r#"{"request_id":"r1","node_id":"n1","model_name":"llama","prompt":"hi","max_tokens":64}"#;
+        let json = r#"{"request_id":"r1","node_id":"n1","model_name":"llama","messages":[{"role":"user","content":"hi"}],"max_tokens":64}"#;
         let req: InferenceRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.wire_version, WIRE_VERSION);
     }
@@ -634,8 +676,7 @@ mod tests {
             request_id: "req-1".into(),
             node_id: Some("node-1".into()),
             model_name: "llama3".into(),
-            system_prompt: None,
-            prompt: "hello".into(),
+            messages: vec![ChatTurn::user("hello")],
             max_tokens: 128,
             temperature: None,
             wire_version: WIRE_VERSION,
@@ -648,19 +689,26 @@ mod tests {
     }
 
     #[test]
-    fn inference_request_with_system_prompt_roundtrip() {
+    fn inference_request_multi_turn_roundtrip() {
         let req = InferenceRequest {
             request_id: "req-2".into(),
             node_id: None,
             model_name: "qwen2.5:7b".into(),
-            system_prompt: Some("You are a controller.".into()),
-            prompt: "turn light on".into(),
+            messages: vec![
+                ChatTurn::system("You are a controller."),
+                ChatTurn::user("turn light on"),
+                ChatTurn::assistant("done"),
+                ChatTurn::user("and the other one"),
+            ],
             max_tokens: 128,
             temperature: Some(0.0),
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("system_prompt"));
+        // Role strings must match the OpenAI names on the wire.
+        assert!(json.contains(r#""role":"system""#));
+        assert!(json.contains(r#""role":"user""#));
+        assert!(json.contains(r#""role":"assistant""#));
         assert!(json.contains("temperature"));
         assert!(
             !json.contains("node_id"),
@@ -680,6 +728,7 @@ mod tests {
             model_name: "llama3".into(),
             output: "world".into(),
             tokens_generated: 1,
+            prompt_tokens: 12,
             duration_ms: 42,
             prompt_eval_ms: 0,
             error: None,

@@ -164,7 +164,7 @@ Phase 6 introduces a set of **model-aware wire-protocol messages** used for:
 All Phase 6 messages include a `wire_version: u32` field with:
 
 ```rust
-pub const WIRE_VERSION: u32 = 1;
+pub const WIRE_VERSION: u32 = 3;
 #[serde(default = "default_wire_version")]
 ```
 
@@ -175,6 +175,14 @@ This ensures **cross-platform compatibility** between:
 
 Older agents that do not send `wire_version` will still deserialize safely.
 
+> **Wire v3 (OpenAI-compatible API):** `InferenceRequest` carries a full
+> `messages: Vec<ChatTurn>` conversation instead of the former
+> `system_prompt` + `prompt` string pair, so llama-server applies the model's
+> chat template per role. `ChatTurn { role, content }` serializes its role as
+> the OpenAI strings (`"system"` / `"user"` / `"assistant"`).
+> `InferenceResult` gains `prompt_tokens`. v2 agents fail fast on v3 frames
+> (missing `prompt` field) — deploy coordinator and agents together.
+
 ### `RequestModelInference`
 CLI → Coordinator  
 Requests inference for a named model. The coordinator uses the scheduler to select a ready node.
@@ -183,8 +191,9 @@ Fields:
 - `request_id: String`
 - `node_id: Option<String>` — caller-supplied pin; `null`/absent means "let the scheduler decide" (`#[serde(default)]`)
 - `model_name: String`
-- `prompt: String`
+- `messages: Vec<ChatTurn>` — full conversation, forwarded to the model verbatim
 - `max_tokens: u32`
+- `temperature: Option<f32>` — `None` = agent default (0.8)
 - `wire_version: u32`
 
 ### `ModelInferenceResult`
@@ -197,6 +206,7 @@ Fields:
 - `model_name: String`
 - `output: String`
 - `tokens_generated: u32`
+- `prompt_tokens: u32` — from the backend's `usage.prompt_tokens` (`#[serde(default)]`)
 - `duration_ms: u64`
 - `error: Option<String>`
 - `wire_version: u32`

@@ -1,11 +1,11 @@
 use crate::http::state::{PendingInferences, PendingIntents};
+use crate::inference::dispatch_local_inference;
 use crate::registry::Registry;
-use crate::scheduler::Scheduler;
 use crate::server::Connections;
 use shared::{
-    InferenceRequest, IntentRequest, IntentResponse, LightAction, LightCommandRequest,
-    LightStateReport, LightTarget, MeshMessage, ReaperCommandRequest, ReaperScriptRequest,
-    SceneLoadRequest, ToolCallRecord, WIRE_VERSION,
+    ChatTurn, IntentRequest, IntentResponse, LightAction, LightCommandRequest, LightStateReport,
+    LightTarget, MeshMessage, ReaperCommandRequest, ReaperScriptRequest, SceneLoadRequest,
+    ToolCallRecord, WIRE_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -13,10 +13,6 @@ use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
 
-// Must exceed LLAMA_GENERATE_TIMEOUT_SECS on the agent (default 120 s) so the
-// agent's own HTTP timeout fires first and sends back an error rather than us
-// dropping the result mid-flight.
-const INTENT_INFERENCE_TIMEOUT_SECS: u64 = 150;
 const TOOL_RESPONSE_TIMEOUT_SECS: u64 = 10;
 
 #[allow(clippy::too_many_arguments)]
@@ -146,12 +142,36 @@ pub async fn handle_intent(
     // 4/5. Run inference. Cloud mode calls the online provider and, on any
     //       failure, records the error and falls back to local. Both paths share
     //       the same system + user prompt and the same tool-parsing below.
-    let llm_result = if let Some(gw) = &gateway {
-        match gw
-            .provider
-            .complete(Some(&system_prompt), &user_prompt)
+    let intent_messages = || {
+        vec![
+            ChatTurn::system(system_prompt.clone()),
+            ChatTurn::user(user_prompt.clone()),
+        ]
+    };
+    let run_local = |model: Option<String>| {
+        let registry = registry.clone();
+        let connections = connections.clone();
+        let pending_inferences = pending_inferences.clone();
+        let request_id = format!("intent-{}", request.request_id);
+        let messages = intent_messages();
+        async move {
+            let model = model.ok_or_else(|| "no LLM model is ready on any node".to_string())?;
+            dispatch_local_inference(
+                &request_id,
+                &model,
+                messages,
+                2048,
+                Some(0.4),
+                &registry,
+                &connections,
+                &pending_inferences,
+            )
             .await
-        {
+        }
+    };
+
+    let llm_result = if let Some(gw) = &gateway {
+        match gw.provider.complete(&intent_messages(), 0.4).await {
             Ok(reply) => {
                 gw.state
                     .record_gateway_call(prompt_tokens_before as u64, prompt_tokens_after as u64);
@@ -161,6 +181,7 @@ pub async fn handle_intent(
                     model_name: model_name.clone(),
                     output: reply.text,
                     tokens_generated: reply.completion_tokens,
+                    prompt_tokens: reply.prompt_tokens,
                     duration_ms: 0,
                     prompt_eval_ms: 0,
                     error: None,
@@ -173,17 +194,7 @@ pub async fn handle_intent(
                     "cloud provider failed: {e}; falling back to local"
                 );
                 gw.state.record_gateway_error(e.to_string());
-                match run_local_inference(
-                    &request.request_id,
-                    local_model.as_deref(),
-                    &system_prompt,
-                    &user_prompt,
-                    &registry,
-                    &connections,
-                    &pending_inferences,
-                )
-                .await
-                {
+                match run_local(local_model.clone()).await {
                     Ok(r) => r,
                     Err(msg) => {
                         return fail(format!("cloud failed ({e}); local fallback failed: {msg}"));
@@ -192,17 +203,7 @@ pub async fn handle_intent(
             }
         }
     } else {
-        match run_local_inference(
-            &request.request_id,
-            local_model.as_deref(),
-            &system_prompt,
-            &user_prompt,
-            &registry,
-            &connections,
-            &pending_inferences,
-        )
-        .await
-        {
+        match run_local(local_model.clone()).await {
             Ok(r) => r,
             Err(msg) => return fail(msg),
         }
@@ -310,77 +311,6 @@ pub async fn handle_intent(
         compression_applied,
         prompt_tokens_before,
         prompt_tokens_after,
-    }
-}
-
-/// Dispatch an inference to a connected local node and await the result.
-/// Returns the node's `InferenceResult`, or an error message on any failure
-/// (no model, no connected node, channel closed, timeout).
-#[allow(clippy::too_many_arguments)]
-async fn run_local_inference(
-    request_id: &str,
-    local_model: Option<&str>,
-    system_prompt: &str,
-    user_prompt: &str,
-    registry: &Arc<Mutex<Registry>>,
-    connections: &Connections,
-    pending_inferences: &PendingInferences,
-) -> Result<shared::InferenceResult, String> {
-    let model_name = local_model.ok_or_else(|| "no LLM model is ready on any node".to_string())?;
-
-    // Find a connected LLM node — skip any whose TCP channel has gone away.
-    let connected: std::collections::HashSet<String> =
-        connections.lock().unwrap().keys().cloned().collect();
-    let llm_node_id = {
-        let reg = registry.lock().unwrap();
-        Scheduler::new(&reg)
-            .select_node_for_inference(model_name)
-            .filter(|n| connected.contains(&n.id))
-            .map(|n| n.id)
-    };
-    let llm_node_id = llm_node_id
-        .ok_or_else(|| format!("no connected node has model '{model_name}' in Ready state"))?;
-
-    let agent_tx = connections.lock().unwrap().get(&llm_node_id).cloned();
-    let agent_tx = agent_tx.ok_or_else(|| format!("LLM node '{llm_node_id}' is not connected"))?;
-
-    let infer_req_id = format!("intent-{request_id}");
-    let infer_req = InferenceRequest {
-        request_id: infer_req_id.clone(),
-        node_id: None,
-        model_name: model_name.to_string(),
-        system_prompt: Some(system_prompt.to_string()),
-        prompt: user_prompt.to_string(),
-        max_tokens: 2048,
-        temperature: Some(0.4),
-        wire_version: WIRE_VERSION,
-    };
-
-    let (otx, orx) = oneshot::channel();
-    pending_inferences
-        .lock()
-        .unwrap()
-        .insert(infer_req_id.clone(), (otx, llm_node_id.clone()));
-
-    if agent_tx
-        .send(MeshMessage::RequestModelInference(infer_req))
-        .await
-        .is_err()
-    {
-        pending_inferences.lock().unwrap().remove(&infer_req_id);
-        return Err("LLM node channel closed before inference could be sent".to_string());
-    }
-
-    match timeout(Duration::from_secs(INTENT_INFERENCE_TIMEOUT_SECS), orx).await {
-        Ok(Ok(MeshMessage::ModelInferenceResult(res))) => Ok(res),
-        Ok(Ok(MeshMessage::Error(e))) => Err(format!("LLM error: {e}")),
-        Ok(Ok(_)) => Err("unexpected message from LLM node".to_string()),
-        Err(_) | Ok(Err(_)) => {
-            pending_inferences.lock().unwrap().remove(&infer_req_id);
-            Err(format!(
-                "LLM inference timed out after {INTENT_INFERENCE_TIMEOUT_SECS}s"
-            ))
-        }
     }
 }
 

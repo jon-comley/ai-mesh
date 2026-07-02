@@ -588,15 +588,15 @@ pub async fn unload_model() -> Result<(), String> {
 // ── /v1/completions inference ─────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct ChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
+struct OwnedChatMessage {
+    role: &'static str,
+    content: String,
 }
 
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: Vec<ChatMessage<'a>>,
+    messages: Vec<OwnedChatMessage>,
     max_tokens: u32,
     stream: bool,
     repeat_penalty: f32,
@@ -618,6 +618,8 @@ struct ChatChoice {
 struct CompletionUsage {
     #[serde(default)]
     completion_tokens: u32,
+    #[serde(default)]
+    prompt_tokens: u32,
 }
 
 #[derive(Deserialize, Default)]
@@ -653,45 +655,72 @@ fn is_deepseek_r1(model_name: &str) -> bool {
 
 // ── /v1/chat/completions inference ────────────────────────────────────────────
 
-/// Run inference. Returns (output_text, tokens_generated, duration_ms, prompt_eval_ms).
+/// Outcome of a completed generation.
+pub struct GenerateResult {
+    pub output: String,
+    pub tokens_generated: u32,
+    pub prompt_tokens: u32,
+    pub duration_ms: u64,
+    pub prompt_eval_ms: u64,
+}
+
+/// Turn the wire conversation into the llama-server message array, applying
+/// model-family generation quirks (these are serving-layer controls like
+/// `repeat_penalty`, not content injection — the caller's turns pass verbatim).
+fn build_messages(model_name: &str, turns: &[shared::ChatTurn]) -> Vec<OwnedChatMessage> {
+    let mut messages: Vec<OwnedChatMessage> = Vec::with_capacity(turns.len() + 1);
+    let mut has_system = false;
+    for turn in turns {
+        let role = match turn.role {
+            shared::ChatRole::System => "system",
+            shared::ChatRole::User => "user",
+            shared::ChatRole::Assistant => "assistant",
+        };
+        let mut content = turn.content.clone();
+        // Qwen models recognise /no_think as a special token that disables CoT;
+        // it belongs in the (first) system turn.
+        if turn.role == shared::ChatRole::System && !has_system && is_qwen(model_name) {
+            content = format!("{content}\n\n/no_think");
+        }
+        if turn.role == shared::ChatRole::System {
+            has_system = true;
+        }
+        messages.push(OwnedChatMessage { role, content });
+    }
+    if !has_system && is_qwen(model_name) {
+        messages.insert(
+            0,
+            OwnedChatMessage {
+                role: "system",
+                content: "/no_think".to_string(),
+            },
+        );
+    }
+    // DeepSeek-R1 skips its thinking phase when an empty think block is
+    // provided as an assistant prefill at the end of the message list — but
+    // never clobber a prefill the caller supplied themselves.
+    if is_deepseek_r1(model_name) && !matches!(messages.last(), Some(m) if m.role == "assistant") {
+        messages.push(OwnedChatMessage {
+            role: "assistant",
+            content: "<think>\n</think>".to_string(),
+        });
+    }
+    messages
+}
+
+/// Run inference over a full conversation.
 pub async fn generate(
     model_name: &str,
-    system_prompt: Option<&str>,
-    prompt: &str,
+    turns: &[shared::ChatTurn],
     max_tokens: u32,
     temperature: f32,
-) -> Result<(String, u32, u64, u64), String> {
+) -> Result<GenerateResult, String> {
     let client = http_client();
     let url = format!("{}/v1/chat/completions", llama_host());
 
     let wall_start = Instant::now();
 
-    let base_sys = system_prompt.unwrap_or("You are a helpful assistant.");
-    // Qwen models recognise /no_think as a special token that disables CoT.
-    let effective_sys: String = if is_qwen(model_name) {
-        format!("{base_sys}\n\n/no_think")
-    } else {
-        base_sys.to_string()
-    };
-
-    let mut messages = vec![
-        ChatMessage {
-            role: "system",
-            content: &effective_sys,
-        },
-        ChatMessage {
-            role: "user",
-            content: prompt,
-        },
-    ];
-    // DeepSeek-R1 skips its thinking phase when an empty think block is
-    // provided as an assistant prefill at the end of the message list.
-    if is_deepseek_r1(model_name) {
-        messages.push(ChatMessage {
-            role: "assistant",
-            content: "<think>\n</think>",
-        });
-    }
+    let messages = build_messages(model_name, turns);
 
     let resp = client
         .post(&url)
@@ -725,20 +754,89 @@ pub async fn generate(
         .next()
         .map(|c| c.message.content)
         .unwrap_or_default();
-    let tokens = body.usage.completion_tokens;
     let duration_ms = if body.timings.predicted_ms > 0.0 {
         body.timings.predicted_ms as u64
     } else {
         wall_start.elapsed().as_millis() as u64
     };
-    let prompt_eval_ms = body.timings.prompt_eval_ms as u64;
 
-    Ok((output, tokens, duration_ms, prompt_eval_ms))
+    Ok(GenerateResult {
+        output,
+        tokens_generated: body.usage.completion_tokens,
+        prompt_tokens: body.usage.prompt_tokens,
+        duration_ms,
+        prompt_eval_ms: body.timings.prompt_eval_ms as u64,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::ChatTurn;
+
+    // ── build_messages ────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_messages_passes_turns_verbatim() {
+        let turns = vec![
+            ChatTurn::system("You are terse."),
+            ChatTurn::user("hi"),
+            ChatTurn::assistant("hello"),
+            ChatTurn::user("bye"),
+        ];
+        let msgs = build_messages("llama3:8b", &turns);
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "You are terse.");
+        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[3].content, "bye");
+    }
+
+    #[test]
+    fn build_messages_qwen_appends_no_think_to_system() {
+        let turns = vec![ChatTurn::system("You are terse."), ChatTurn::user("hi")];
+        let msgs = build_messages("qwen2.5:7b", &turns);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "You are terse.\n\n/no_think");
+        assert_eq!(msgs[1].content, "hi");
+    }
+
+    #[test]
+    fn build_messages_qwen_without_system_inserts_no_think_turn() {
+        let turns = vec![ChatTurn::user("hi")];
+        let msgs = build_messages("qwen2.5:7b", &turns);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "/no_think");
+        assert_eq!(msgs[1].role, "user");
+    }
+
+    #[test]
+    fn build_messages_no_default_system_for_other_models() {
+        let turns = vec![ChatTurn::user("hi")];
+        let msgs = build_messages("llama3:8b", &turns);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
+    }
+
+    #[test]
+    fn build_messages_deepseek_appends_think_prefill() {
+        let turns = vec![ChatTurn::user("hi")];
+        let msgs = build_messages("deepseek-r1:7b", &turns);
+        assert_eq!(msgs.last().unwrap().role, "assistant");
+        assert_eq!(msgs.last().unwrap().content, "<think>\n</think>");
+    }
+
+    #[test]
+    fn build_messages_deepseek_keeps_caller_prefill() {
+        let turns = vec![
+            ChatTurn::user("hi"),
+            ChatTurn::assistant("Sure, the answer is"),
+        ];
+        let msgs = build_messages("deepseek-r1:7b", &turns);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs.last().unwrap().content, "Sure, the answer is");
+    }
 
     // ── resolve_gguf ──────────────────────────────────────────────────────────
 
