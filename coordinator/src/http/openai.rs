@@ -208,6 +208,63 @@ fn finish_reason(tokens_generated: u32, max_tokens: u32) -> &'static str {
     }
 }
 
+/// Map a cloud-provider failure to the OpenAI error envelope, logging it and
+/// recording it in the gateway stats.
+fn cloud_error_response(
+    request_id: &str,
+    e: crate::cloud::CloudError,
+    state: &DashboardState,
+) -> Response {
+    warn!(request_id = %request_id, "openai-api: cloud provider failed: {e}");
+    state.record_gateway_error(e.to_string());
+    let (status, code) = match e {
+        crate::cloud::CloudError::RateLimited => {
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
+        }
+        crate::cloud::CloudError::Unauthorized | crate::cloud::CloudError::NoKey => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "gateway_misconfigured")
+        }
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "upstream_error"),
+    };
+    openai_error(
+        status,
+        &format!("cloud provider error: {e}"),
+        "api_error",
+        code,
+    )
+}
+
+/// Build the non-streaming `chat.completion` success body.
+fn completion_response(
+    request_id: String,
+    model: String,
+    content: String,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    max_tokens: u32,
+) -> Response {
+    Json(ChatCompletionResponse {
+        id: request_id,
+        object: "chat.completion",
+        created: unix_now(),
+        model,
+        choices: vec![Choice {
+            index: 0,
+            message: OutMessage {
+                role: "assistant",
+                content,
+            },
+            finish_reason: finish_reason(completion_tokens, max_tokens),
+        }],
+        usage: Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        },
+    })
+    .into_response()
+}
+
 /// Where a request should run. Resolved under a single registry lock so the
 /// ready-model list and gateway config are a consistent snapshot.
 enum Route {
@@ -228,10 +285,14 @@ fn resolve_route(
     requested: Option<&str>,
     registry: &Arc<Mutex<Registry>>,
 ) -> Result<Route, ApiError> {
-    let reg = registry.lock().unwrap();
-    let ready = reg.ready_llm_models();
-    let cfg = crate::cloud::GatewayConfig::load(&reg);
-    drop(reg);
+    let (ready, default_local, cfg) = {
+        let reg = registry.lock().unwrap();
+        (
+            reg.ready_llm_models(),
+            reg.any_ready_llm_model(),
+            crate::cloud::GatewayConfig::load(&reg),
+        )
+    };
     let gateway_on = cfg.enabled && cfg.is_configured();
 
     match requested.filter(|m| !m.is_empty()) {
@@ -255,7 +316,6 @@ fn resolve_route(
         }
         None => {
             // No model requested: largest ready local model, else the gateway.
-            let default_local = registry.lock().unwrap().any_ready_llm_model();
             if let Some(m) = default_local {
                 Ok(Route::Local(m))
             } else if gateway_on {
@@ -691,25 +751,7 @@ pub async fn chat_completions(
                 .await
             {
                 Ok(resp) => resp,
-                Err(e) => {
-                    state.record_gateway_error(e.to_string());
-                    let (status, code) = match e {
-                        crate::cloud::CloudError::RateLimited => {
-                            (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
-                        }
-                        crate::cloud::CloudError::Unauthorized
-                        | crate::cloud::CloudError::NoKey => {
-                            (StatusCode::INTERNAL_SERVER_ERROR, "gateway_misconfigured")
-                        }
-                        _ => (StatusCode::SERVICE_UNAVAILABLE, "upstream_error"),
-                    };
-                    return openai_error(
-                        status,
-                        &format!("cloud provider error: {e}"),
-                        "api_error",
-                        code,
-                    );
-                }
+                Err(e) => return cloud_error_response(&request_id, e, &state),
             };
             let (item_tx, item_rx) = mpsc::channel::<StreamItem>(64);
             spawn_cloud_stream_adapter(resp, max_tokens, item_tx, state.clone());
@@ -739,26 +781,14 @@ pub async fn chat_completions(
                             "upstream_error",
                         );
                     }
-                    Json(ChatCompletionResponse {
-                        id: request_id,
-                        object: "chat.completion",
-                        created: unix_now(),
-                        model: res.model_name,
-                        choices: vec![Choice {
-                            index: 0,
-                            message: OutMessage {
-                                role: "assistant",
-                                content: res.output,
-                            },
-                            finish_reason: finish_reason(res.tokens_generated, max_tokens),
-                        }],
-                        usage: Usage {
-                            prompt_tokens: res.prompt_tokens,
-                            completion_tokens: res.tokens_generated,
-                            total_tokens: res.prompt_tokens + res.tokens_generated,
-                        },
-                    })
-                    .into_response()
+                    completion_response(
+                        request_id,
+                        res.model_name,
+                        res.output,
+                        res.prompt_tokens,
+                        res.tokens_generated,
+                        max_tokens,
+                    )
                 }
                 Err(msg) => openai_error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -779,47 +809,16 @@ pub async fn chat_completions(
                     // No compression on this path — record the call for the
                     // Online AI tab's counters without a tokens-saved delta.
                     state.record_gateway_call(0, 0);
-                    Json(ChatCompletionResponse {
-                        id: request_id,
-                        object: "chat.completion",
-                        created: unix_now(),
+                    completion_response(
+                        request_id,
                         model,
-                        choices: vec![Choice {
-                            index: 0,
-                            message: OutMessage {
-                                role: "assistant",
-                                content: reply.text,
-                            },
-                            finish_reason: finish_reason(reply.completion_tokens, max_tokens),
-                        }],
-                        usage: Usage {
-                            prompt_tokens: reply.prompt_tokens,
-                            completion_tokens: reply.completion_tokens,
-                            total_tokens: reply.prompt_tokens + reply.completion_tokens,
-                        },
-                    })
-                    .into_response()
-                }
-                Err(e) => {
-                    warn!(request_id = %request_id, "openai-api: cloud provider failed: {e}");
-                    state.record_gateway_error(e.to_string());
-                    let (status, code) = match e {
-                        crate::cloud::CloudError::RateLimited => {
-                            (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
-                        }
-                        crate::cloud::CloudError::Unauthorized
-                        | crate::cloud::CloudError::NoKey => {
-                            (StatusCode::INTERNAL_SERVER_ERROR, "gateway_misconfigured")
-                        }
-                        _ => (StatusCode::SERVICE_UNAVAILABLE, "upstream_error"),
-                    };
-                    openai_error(
-                        status,
-                        &format!("cloud provider error: {e}"),
-                        "api_error",
-                        code,
+                        reply.text,
+                        reply.prompt_tokens,
+                        reply.completion_tokens,
+                        max_tokens,
                     )
                 }
+                Err(e) => cloud_error_response(&request_id, e, &state),
             }
         }
     }
