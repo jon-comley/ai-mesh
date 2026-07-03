@@ -14,6 +14,7 @@ async fn fetch_info(
     let mut stream = crate::connection::connect(coordinator).await?;
     match crate::connection::send_recv(&mut stream, &MeshMessage::RequestNodeInfo(id)).await? {
         MeshMessage::NodeInfo(info) => Ok(info),
+        MeshMessage::Error(e) => Err(e.into()),
         other => Err(format!("Unexpected response: {:?}", other).into()),
     }
 }

@@ -117,15 +117,51 @@ pub async fn unload_model(
 
 /// Remove a dead node from the registry. Nodes never expire on their own, so
 /// a decommissioned or renamed node sits in the dashboard forever without
-/// this. Refuses (409) while the node's TCP connection is live — stop the
-/// agent first; a connected node would just re-register on its next
+/// this. Accepts a node id or a hostname (ids aren't shown in `just nodes`,
+/// hostnames are). Refuses (409) while the node's TCP connection is live —
+/// stop the agent first; a connected node would just re-register on its next
 /// heartbeat anyway.
 pub async fn remove_node(
-    Path(node_id): Path<String>,
+    Path(key): Path<String>,
     _: Authed,
     State(state): State<Arc<DashboardState>>,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
 ) -> impl IntoResponse {
+    // Resolve: exact id first, else a unique (case-insensitive) hostname match.
+    let node_id = {
+        let reg = registry.lock().unwrap();
+        if reg.get_node_full(&key).is_some() {
+            Some(key.clone())
+        } else {
+            let matches: Vec<String> = reg
+                .list_nodes()
+                .into_iter()
+                .filter(|n| n.hostname.eq_ignore_ascii_case(&key))
+                .map(|n| n.id)
+                .collect();
+            match matches.len() {
+                1 => matches.into_iter().next(),
+                0 => None,
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "hostname '{key}' matches multiple nodes — use the id: {}",
+                            matches.join(", ")
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+    let Some(node_id) = node_id else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no node with id or hostname '{key}'"),
+        )
+            .into_response();
+    };
     if state.connections.lock().unwrap().contains_key(&node_id) {
         return (
             StatusCode::CONFLICT,
@@ -532,6 +568,64 @@ mod tests {
                 .get_node_full("live-node")
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn remove_node_resolves_hostname() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        registry
+            .lock()
+            .unwrap()
+            .update_heartbeat(shared::NodeIdentity {
+                id: "uuid-1234".into(),
+                hostname: "chaos".into(),
+                ip: "127.0.0.1".into(),
+                role: shared::NodeRole::Compute,
+            });
+
+        let status = send(
+            remove_router(state, registry.clone()),
+            "DELETE",
+            "/api/nodes/CHAOS", // case-insensitive hostname
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_node_full("uuid-1234")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_node_ambiguous_hostname_returns_400() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        for id in ["uuid-a", "uuid-b"] {
+            registry
+                .lock()
+                .unwrap()
+                .update_heartbeat(shared::NodeIdentity {
+                    id: id.into(),
+                    hostname: "twin".into(),
+                    ip: "127.0.0.1".into(),
+                    role: shared::NodeRole::Compute,
+                });
+        }
+
+        let status = send(
+            remove_router(state, registry.clone()),
+            "DELETE",
+            "/api/nodes/twin",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(registry.lock().unwrap().get_node_full("uuid-a").is_some());
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ use shared::frame::{
 };
 use shared::{
     AdminMessage, HeartbeatPayload, InferenceRequest, MeshMessage, ModelLifecycleState,
-    ModelLoadRequest, NodeRecordFull, NodeRole,
+    ModelLoadRequest, NodeRole,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -861,18 +861,12 @@ async fn process_message(
         }
         MeshMessage::RequestNodeInfo(id) => {
             let full = registry.lock().unwrap().get_node_full(&id);
-            Some(MeshMessage::NodeInfo(full.unwrap_or_else(|| {
-                NodeRecordFull {
-                    id,
-                    hostname: "unknown".into(),
-                    ip: "unknown".into(),
-                    role: NodeRole::Compute,
-                    last_heartbeat_ms: 0,
-                    hardware: None,
-                    capabilities: None,
-                    models: vec![],
-                }
-            })))
+            Some(match full {
+                Some(info) => MeshMessage::NodeInfo(info),
+                // A clear not-found beats a fabricated placeholder record —
+                // "Hostname: unknown, 0ms heartbeat" reads like a live node.
+                None => MeshMessage::Error(format!("no node with id '{id}'")),
+            })
         }
         MeshMessage::RequestModelInference(req) => {
             handle_cli_inference(req, registry, connections, pending_inferences).await
