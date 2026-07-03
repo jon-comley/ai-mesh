@@ -658,7 +658,16 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 
 ---
 
-## Phase 11.8 — Multi-Device Home (Blinds, HVAC) + Room-Centric Control (Design)
+## Phase 11.8 — Multi-Device Home + Room-Centric Control (Plan ratified 2026-07-03 — executing)
+
+> **Execution plan: `plans/multi-domain-home.md`** — sensors first (cheapest
+> real second domain, feeds HVAC later), anchored on the local-AI-voice
+> differentiator; phases: A enabling refactor (typed device inventory, exposes
+> classification, shared ZigbeeClient, DeviceListReport rename, feature enum) →
+> B capability-sensors → C sensor tools/context + multi-command chat → D Home
+> tab + single Devices tab (pairing is bridge-wide, so one tab from day one) →
+> E blinds (+ sun-geometry automation) → F HVAC. The design notes below stand;
+> the plan supersedes the sequencing details where they differ.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
