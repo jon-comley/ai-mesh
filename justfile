@@ -1826,8 +1826,9 @@ chat text:
         | python3 -m json.tool
 
 # Remove a dead node from the registry (nodes never expire on their own).
-# Refuses while the node's agent is still connected. Get ids from: just nodes
-# Usage: just remove-node <node-uuid>
+# Accepts the node's hostname (as shown in `just nodes`) or its uuid.
+# Refuses while the node's agent is still connected.
+# Usage: just remove-node <hostname-or-uuid>
 remove-node id:
     #!/usr/bin/env bash
     source scripts/mesh-env.sh

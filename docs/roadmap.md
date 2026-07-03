@@ -846,10 +846,10 @@ audit was bug-focused). Prioritized; none are defects.
   `Registry::remove_node`, `DELETE /api/nodes/{id}` (409 while connected),
   `just remove-node <id>`; verified live 2026-07-03 — the stale `chaos-test`
   row is gone; auto-purge of long-silent nodes still deferred)*. Follow-up
-  UX gaps found while hunting the id: `mesh info <unknown-id>` fabricates a
-  placeholder record instead of a clear not-found, and neither `just nodes`
-  nor the dashboard displays node ids (removal needs one) — resolve
-  hostnames in the endpoint or show ids in the table. The stale `chaos`
+  UX gaps fixed same day: `mesh info <unknown-id>` now returns a clear
+  not-found instead of a fabricated placeholder record, and
+  `DELETE /api/nodes/{key}` / `just remove-node` accept a hostname
+  (unique, case-insensitive; 400 on ambiguity) as well as an id. The stale `chaos`
   registry row (from June chaos-testing) has sat in `just nodes` / the
   dashboard for weeks; the only remedy is `reset-registry` (nukes
   everything). Add `DELETE /api/nodes/{id}` + `mesh remove-node`, and
