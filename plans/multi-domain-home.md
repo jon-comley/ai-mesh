@@ -19,6 +19,24 @@ What's verifiably true today (from the coupling audit):
 4. **Wire rename** (WIRE_VERSION bump, coordinated deploy): `LightDeviceListReport` → `DeviceListReport { node_id, devices: Vec<DeviceEntry { id, device_type }>, groups }`.
 5. **Feature enum.** Replace raw feature strings (`"lighting"`, `"reaper"`, `"llm"`, incoming `"sensors"`) with a shared enum — 11.8 deferred this until enough variants existed; sensors is the trigger.
 
+**Migration & deploy note (settled up front):** no data migration and no hard
+reset. Rooms, scenes, device names, and positions live in separate tables the
+refactor never touches. The `light_devices` inventory being dropped is
+*derived* data — z2m republishes the full device list on every connect
+(retained `bridge/devices` topic), so the new `devices` table populates
+itself the first time the lighting node connects, exactly as the old blob did
+at startup. The wire bump follows the established convention: fail-fast
+serde, one coordinated deploy of coordinator + all agents, no dual-format
+window (same playbook as wire v3 and v4).
+
+**ZigbeeClient lifecycle (settled up front):** capabilities are compile-time
+features, so the shared client's lifetime is simply the agent process
+lifetime — built once at startup when any zigbee feature is enabled, no
+dynamic subscribe/teardown protocol needed. Fan-out uses the existing bounded
+`tokio::broadcast`, whose semantics already isolate a slow subscriber (it
+lags and drops oldest events; it can never block sibling capabilities or the
+MQTT poll loop).
+
 ## Phase B — capability-sensors (first real second domain)
 
 1. New `capabilities/sensors` crate (thin sibling of lighting): consumes shared ZigbeeClient events, parses temp/humidity/battery/occupancy/contact (`parse_sensor_report` beside the light parser; same `/state` topics already subscribed), forwards `MeshMessage::SensorState(SensorReport { node_id, device_id, temperature, humidity, battery, occupancy, contact, online })`.
