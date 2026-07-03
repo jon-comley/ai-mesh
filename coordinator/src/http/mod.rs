@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod openai;
 pub mod state;
 mod ws;
@@ -62,75 +63,93 @@ pub fn router(
         .merge(static_asset_routes())
         .route(
             "/api/nodes/{id}/heartbeat-interval",
-            post(api::set_heartbeat_interval),
+            post(api::nodes::set_heartbeat_interval),
         )
-        .route("/api/models/load", post(api::load_model))
-        .route("/api/models/unload", post(api::unload_model))
-        .route("/api/lights/names", get(api::get_device_names))
-        .route("/api/lights/{device}/command", post(api::light_command))
-        .route("/api/lights/{device}/name", patch(api::rename_device))
-        .route("/api/lights/{device}", delete(api::delete_device))
+        .route("/api/models/load", post(api::nodes::load_model))
+        .route("/api/models/unload", post(api::nodes::unload_model))
+        .route("/api/lights/names", get(api::lights::get_device_names))
+        .route(
+            "/api/lights/{device}/command",
+            post(api::lights::light_command),
+        )
+        .route(
+            "/api/lights/{device}/name",
+            patch(api::lights::rename_device),
+        )
+        .route("/api/lights/{device}", delete(api::lights::delete_device))
         .route(
             "/api/lights/{device}/position",
-            get(api::get_light_position).post(api::update_light_position),
+            get(api::lights::get_light_position).post(api::lights::update_light_position),
         )
         .route(
             "/api/lights/group/{group}/command",
-            post(api::group_light_command),
+            post(api::lights::group_light_command),
         )
-        .route("/api/rooms", post(api::create_room))
-        .route("/api/rooms/reorder", post(api::reorder_rooms))
-        .route("/api/rooms/{id}", delete(api::delete_room))
-        .route("/api/rooms/{id}/name", patch(api::rename_room))
-        .route("/api/rooms/{id}/devices", patch(api::modify_room_devices))
+        .route("/api/rooms", post(api::rooms::create_room))
+        .route("/api/rooms/reorder", post(api::rooms::reorder_rooms))
+        .route("/api/rooms/{id}", delete(api::rooms::delete_room))
+        .route("/api/rooms/{id}/name", patch(api::rooms::rename_room))
+        .route(
+            "/api/rooms/{id}/devices",
+            patch(api::rooms::modify_room_devices),
+        )
         .route(
             "/api/rooms/{id}/devices/reorder",
-            post(api::reorder_room_devices),
+            post(api::rooms::reorder_room_devices),
         )
-        .route("/api/rooms/{id}/positions", get(api::get_room_positions))
+        .route(
+            "/api/rooms/{id}/positions",
+            get(api::rooms::get_room_positions),
+        )
         .route(
             "/api/rooms/{id}/openings",
-            get(api::list_openings).post(api::create_opening),
+            get(api::rooms::list_openings).post(api::rooms::create_opening),
         )
         .route(
             "/api/rooms/{id}/openings/{oid}",
-            patch(api::update_opening).delete(api::delete_opening),
+            patch(api::rooms::update_opening).delete(api::rooms::delete_opening),
         )
-        .route("/api/effects", get(api::list_effects))
+        .route("/api/effects", get(api::effects::list_effects))
         .route(
             "/api/rooms/{id}/effect",
-            post(api::set_room_effect).delete(api::clear_room_effect),
+            post(api::effects::set_room_effect).delete(api::effects::clear_room_effect),
         )
         .route(
             "/api/rooms/{id}/effect/override",
-            patch(api::patch_effect_override),
+            patch(api::effects::patch_effect_override),
         )
         .route(
             "/api/rooms/{id}/orientation",
-            patch(api::set_room_orientation),
+            patch(api::rooms::set_room_orientation),
         )
-        .route("/api/rooms/{id}/origin", patch(api::set_room_origin))
+        .route("/api/rooms/{id}/origin", patch(api::rooms::set_room_origin))
         .route(
             "/api/rooms/{id}/dimensions",
-            patch(api::set_room_dimensions),
+            patch(api::rooms::set_room_dimensions),
         )
-        .route("/api/rooms/{id}/command", post(api::room_command))
-        .route("/api/solar/config", get(api::solar_config))
-        .route("/api/scenes", post(api::save_scene))
-        .route("/api/scenes/reorder", post(api::reorder_scenes))
-        .route("/api/scenes/{id}/recall", post(api::recall_scene))
-        .route("/api/scenes/{id}", delete(api::delete_scene))
-        .route("/api/chat", post(api::chat))
+        .route("/api/rooms/{id}/command", post(api::rooms::room_command))
+        // PUBLIC — no Authed: the dashboard's solar calculator fetches this
+        // before any token is entered; it exposes only lat/lon. Every other
+        // /api/* handler must take `_: Authed` (see http/auth.rs).
+        .route("/api/solar/config", get(api::rooms::solar_config))
+        .route("/api/scenes", post(api::scenes::save_scene))
+        .route("/api/scenes/reorder", post(api::scenes::reorder_scenes))
+        .route("/api/scenes/{id}/recall", post(api::scenes::recall_scene))
+        .route("/api/scenes/{id}", delete(api::scenes::delete_scene))
+        .route("/api/chat", post(api::chat::chat))
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/models", get(openai::list_models))
-        .route("/api/gateway", get(api::get_gateway).post(api::set_gateway))
-        .route("/api/gateway/test", post(api::test_gateway))
-        .route("/api/preferences", get(api::get_preferences))
+        .route(
+            "/api/gateway",
+            get(api::gateway::get_gateway).post(api::gateway::set_gateway),
+        )
+        .route("/api/gateway/test", post(api::gateway::test_gateway))
+        .route("/api/preferences", get(api::prefs::get_preferences))
         .route(
             "/api/preferences/{key}",
-            put(api::set_preference).delete(api::delete_preference),
+            put(api::prefs::set_preference).delete(api::prefs::delete_preference),
         )
-        .route("/api/reaper/state", get(api::get_reaper_state))
+        .route("/api/reaper/state", get(api::nodes::get_reaper_state))
         .layer(axum::Extension(registry))
         .layer(axum::Extension(effects))
         .with_state(dashboard)

@@ -36,6 +36,10 @@ Authorization: Bearer <MESH_AUTH_TOKEN>
 the HTTP API). The header wins when both are present. Failures return the
 OpenAI error envelope with `code: "invalid_api_key"`.
 
+The dashboard's `/api/*` routes accept the same two token forms (Bearer or
+`?token=`) via the shared `Authed` extractor — one auth story across the
+whole HTTP surface.
+
 ## Model routing
 
 - `model` matches a **Ready local model** → dispatched to a connected node via
