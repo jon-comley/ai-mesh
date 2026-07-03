@@ -775,6 +775,29 @@ impl Registry {
         }
     }
 
+    /// Remove a single node (and its model allocations) from the registry.
+    /// Returns false when the id is unknown. Used to purge dead nodes that
+    /// would otherwise sit in the registry forever — nodes never expire on
+    /// their own.
+    pub fn remove_node(&mut self, id: &str) -> bool {
+        if self.nodes.remove(id).is_none() {
+            return false;
+        }
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM model_allocations WHERE node_id = ?1",
+            params![id],
+        ) {
+            warn!(error = %e, "DB model_allocations delete failed");
+        }
+        if let Err(e) = self
+            .conn
+            .execute("DELETE FROM nodes WHERE id = ?1", params![id])
+        {
+            warn!(error = %e, "DB node delete failed");
+        }
+        true
+    }
+
     /// Returns all Compute nodes whose reported capabilities include `feature`.
     pub fn nodes_with_feature(&self, feature: &str) -> Vec<NodeRecordFull> {
         self.nodes
@@ -1862,6 +1885,20 @@ mod tests {
             reg.ready_llm_models(),
             vec!["qwen2.5:1.5b".to_string(), "qwen2.5:7b".to_string()]
         );
+    }
+
+    #[test]
+    fn remove_node_deletes_node_and_models() {
+        let mut reg = Registry::new();
+        reg.update_heartbeat(make_identity("node-1"));
+        reg.update_model_status("node-1", "qwen2.5:7b", 4096, ModelLifecycleState::Ready);
+
+        assert!(reg.remove_node("node-1"));
+        assert!(reg.get_node_full("node-1").is_none());
+        assert!(reg.ready_llm_models().is_empty());
+        // Removing again (or an unknown id) reports not-found.
+        assert!(!reg.remove_node("node-1"));
+        assert!(!reg.remove_node("ghost"));
     }
 
     #[test]

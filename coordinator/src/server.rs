@@ -7,7 +7,8 @@ use shared::frame::{
     FrameReadError, FrameVerifyError, SignedFrame, derive_hmac_key, read_bounded_frame,
 };
 use shared::{
-    AdminMessage, HeartbeatPayload, MeshMessage, ModelLifecycleState, NodeRecordFull, NodeRole,
+    AdminMessage, HeartbeatPayload, InferenceRequest, MeshMessage, ModelLifecycleState,
+    ModelLoadRequest, NodeRecordFull, NodeRole,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -486,6 +487,333 @@ fn next_read_timeout(
     }
 }
 
+/// Heartbeat: validate the per-message auth token, refresh the registry and
+/// connection map, and push topology/health to the dashboard.
+#[allow(clippy::too_many_arguments)]
+fn handle_heartbeat(
+    payload: HeartbeatPayload,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    tx: &mpsc::Sender<MeshMessage>,
+    node_id: &mut Option<String>,
+    auth_tokens: &Arc<Vec<String>>,
+    dashboard: Option<&DashboardState>,
+    auth_tag: &'static str,
+) -> Option<MeshMessage> {
+    let HeartbeatPayload {
+        identity,
+        auth_token,
+        cpu_usage_pct,
+        ram_used_gb,
+        ram_total_gb,
+        gpu_usage_pct,
+        gpu_vram_used_gb,
+        gpu_vram_total_gb,
+        disk_free_gb,
+    } = payload;
+    // When tokens are configured, require the heartbeat token to match exactly.
+    if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
+        warn!(node_id = %identity.id, "heartbeat rejected: missing or wrong auth token");
+        if let Some(dash) = dashboard {
+            dash.push_security(SecurityEvent {
+                ts_ms: now_ms(),
+                kind: SecurityEventKind::NodeAuthFailed,
+                source: identity.id.clone(),
+                detail: "heartbeat: wrong auth token".into(),
+            });
+        }
+        return None;
+    }
+    info!(node_id = %identity.id, hostname = %identity.hostname, "heartbeat");
+    let this_id = identity.id.clone();
+    let this_hostname = identity.hostname.clone();
+    let is_first_heartbeat = node_id.is_none();
+    *node_id = Some(this_id.clone());
+    let nodes = {
+        let mut reg = registry.lock().unwrap();
+        reg.update_heartbeat(identity.clone());
+        if is_first_heartbeat {
+            // Agent (re)connected — llama-server may have been killed since
+            // the coordinator last saw it. Clear stale model state so the
+            // scheduler doesn't route to a server that isn't running.
+            reg.clear_node_models(&this_id);
+        }
+        reg.list_nodes()
+    };
+    connections.lock().unwrap().insert(identity.id, tx.clone());
+    if let Some(dash) = dashboard {
+        if is_first_heartbeat {
+            dash.push_security(SecurityEvent {
+                ts_ms: now_ms(),
+                kind: SecurityEventKind::NodeJoin,
+                source: this_id.clone(),
+                detail: format!("{this_hostname} · {auth_tag}"),
+            });
+        }
+        dash.push_topology(&nodes);
+        dash.push_health(
+            &this_id,
+            cpu_usage_pct,
+            ram_used_gb,
+            ram_total_gb,
+            gpu_usage_pct,
+            gpu_vram_used_gb,
+            gpu_vram_total_gb,
+            disk_free_gb,
+        );
+    }
+    Some(MeshMessage::Acknowledge)
+}
+
+/// CLI-peer inference (`mesh infer`): wait for the model to become Ready
+/// (pull phase), forward to the serving agent, and await the result with a
+/// separate generation timeout. The HTTP paths use `crate::inference` instead.
+async fn handle_cli_inference(
+    req: InferenceRequest,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    pending_inferences: &PendingInferences,
+) -> Option<MeshMessage> {
+    // Phase 1 — pull wait: if the model is still being pulled on a Compute node,
+    // poll the registry until it becomes Ready or the pull deadline expires.
+    // This decouples the pull duration from the generation timeout.
+    const PULL_TIMEOUT_SECS: u64 = 300;
+    const GENERATE_TIMEOUT_SECS: u64 = 300;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(PULL_TIMEOUT_SECS);
+    let mut pull_timed_out = false;
+
+    let selected = loop {
+        let (ready_node, is_loading) = {
+            let reg = registry.lock().unwrap();
+            let ready = Scheduler::new(&reg).select_node_for_inference(&req.model_name);
+            let loading = ready.is_none() && reg.model_is_loading(&req.model_name);
+            (ready, loading)
+        };
+
+        if let Some(node) = ready_node {
+            break Some(node);
+        }
+        if !is_loading {
+            // Model not present or in Failed state — no point waiting.
+            break None;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            pull_timed_out = true;
+            break None;
+        }
+        info!(
+            model_name = %req.model_name,
+            request_id = %req.request_id,
+            "model still loading, waiting for Ready state"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+
+    match selected {
+        Some(node) => {
+            let agent_tx = connections.lock().unwrap().get(&node.id).cloned();
+            match agent_tx {
+                Some(agent_tx) => {
+                    let (otx, orx) = oneshot::channel();
+                    let request_id = req.request_id.clone();
+                    pending_inferences
+                        .lock()
+                        .unwrap()
+                        .insert(request_id.clone(), (otx, node.id.clone()));
+                    info!(
+                        node_id    = %node.id,
+                        model_name = %req.model_name,
+                        request_id = %req.request_id,
+                        "forwarding inference request to agent"
+                    );
+                    if agent_tx
+                        .send(MeshMessage::RequestModelInference(req))
+                        .await
+                        .is_err()
+                    {
+                        // Writer task exited — clean up immediately rather than
+                        // waiting the full generation timeout for a response that
+                        // will never arrive.
+                        pending_inferences.lock().unwrap().remove(&request_id);
+                        connections.lock().unwrap().remove(&node.id);
+                        warn!(
+                            node_id    = %node.id,
+                            request_id = %request_id,
+                            "inference send failed: agent channel closed"
+                        );
+                        return Some(MeshMessage::Error(format!(
+                            "compute node '{}' dropped from connections map",
+                            node.id
+                        )));
+                    }
+                    // Phase 2 — generation timeout: separate, shorter window.
+                    // The oneshot is also resolved early if the agent disconnects.
+                    match timeout(Duration::from_secs(GENERATE_TIMEOUT_SECS), orx).await {
+                        Ok(Ok(result)) => Some(result),
+                        Ok(Err(_)) => {
+                            pending_inferences.lock().unwrap().remove(&request_id);
+                            Some(MeshMessage::Error(
+                                "inference channel closed unexpectedly".into(),
+                            ))
+                        }
+                        Err(_) => {
+                            pending_inferences.lock().unwrap().remove(&request_id);
+                            Some(MeshMessage::Error(format!(
+                                "inference generation timed out after {}s",
+                                GENERATE_TIMEOUT_SECS
+                            )))
+                        }
+                    }
+                }
+                None => {
+                    warn!(
+                        node_id    = %node.id,
+                        model_name = %req.model_name,
+                        request_id = %req.request_id,
+                        "scheduler selected node but agent is not connected"
+                    );
+                    Some(MeshMessage::Error(format!(
+                        "compute node '{}' dropped from connections map",
+                        node.id
+                    )))
+                }
+            }
+        }
+        None => {
+            if pull_timed_out {
+                warn!(
+                    model_name = %req.model_name,
+                    request_id = %req.request_id,
+                    "model pull did not complete within {}s",
+                    PULL_TIMEOUT_SECS
+                );
+                Some(MeshMessage::Error(format!(
+                    "model '{}' pull did not complete within {}s",
+                    req.model_name, PULL_TIMEOUT_SECS
+                )))
+            } else {
+                warn!(
+                    model_name = %req.model_name,
+                    request_id = %req.request_id,
+                    "no node ready to serve inference request"
+                );
+                Some(MeshMessage::Error(format!(
+                    "no node has model '{}' in Ready state",
+                    req.model_name
+                )))
+            }
+        }
+    }
+}
+
+/// ModelLoad from a CLI peer: auto-place onto the best-fit node when no
+/// target was given, then forward to that node's agent.
+async fn handle_model_load(
+    mut req: ModelLoadRequest,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+) -> Option<MeshMessage> {
+    // Auto-place: if no node_id supplied, pick the best-fit node by headroom.
+    if req.node_id.is_none() {
+        let selected = {
+            let reg = registry.lock().unwrap();
+            Scheduler::new(&reg)
+                .select_node_for_model(req.model_size_mb)
+                .map(|n| n.id)
+        };
+        match selected {
+            Some(id) => {
+                info!(node_id = %id, model_name = %req.model_name, "auto-placed ModelLoad");
+                req.node_id = Some(id);
+            }
+            None => {
+                warn!(model_name = %req.model_name, "no node has capacity for auto-placed ModelLoad");
+                return Some(MeshMessage::Acknowledge);
+            }
+        }
+    }
+    let target_id = req.node_id.as_deref().unwrap_or("");
+    let agent_tx = connections.lock().unwrap().get(target_id).cloned();
+    match agent_tx {
+        Some(agent_tx) => {
+            info!(
+                node_id    = %target_id,
+                model_name = %req.model_name,
+                "forwarding ModelLoad to agent"
+            );
+            let _ = agent_tx.send(MeshMessage::ModelLoad(req)).await;
+        }
+        None => {
+            warn!(node_id = %target_id, "ModelLoad target node not connected");
+        }
+    }
+    Some(MeshMessage::Acknowledge)
+}
+
+/// LightState from a lighting node: persist, surface on the dashboard, and
+/// auto-pause a room effect when one of its devices goes offline. The
+/// authenticated connection id overrides the payload id (stale ids would
+/// route commands to a dead connection).
+fn handle_light_state(
+    mut report: shared::LightStateReport,
+    registry: &Arc<Mutex<Registry>>,
+    node_id: Option<&str>,
+    dashboard: Option<&DashboardState>,
+) -> Option<MeshMessage> {
+    // A Zigbee group publishes state on its base topic exactly like a
+    // device. If one slipped past the capability's group filter (a group's
+    // retained state can arrive before its group list on (re)connect),
+    // don't persist or surface it — and scrub any row an earlier slip left.
+    if dashboard.is_some_and(|d| d.is_known_group(&report.device_id)) {
+        registry.lock().unwrap().delete_device(&report.device_id);
+        return None;
+    }
+    // The authenticated connection IS the owning node — trust its id over
+    // the report payload. A stale/'unknown' node_id (e.g. from a seeded DB)
+    // would otherwise route device commands to a non-existent connection
+    // (HTTP 503, lights dead until a state change re-reports them).
+    if let Some(id) = node_id {
+        report.node_id = id.to_string();
+    }
+    info!(
+        node_id = %report.node_id,
+        device_id = %report.device_id,
+        on = %report.on,
+        "light state report received"
+    );
+    let device_id = report.device_id.clone();
+    let went_offline = !report.online;
+    registry.lock().unwrap().save_light_state(&report);
+    if let Some(dash) = dashboard {
+        dash.push_lighting_update(report.clone());
+
+        if went_offline {
+            // Get room + check for active effect in a single lock acquisition.
+            let (maybe_room, has_effect) = {
+                let reg = registry.lock().unwrap();
+                let room_id = reg.get_room_for_device(&device_id);
+                let has = room_id
+                    .as_deref()
+                    .and_then(|rid| reg.get_active_effect(rid))
+                    .is_some();
+                (room_id, has)
+            };
+            if has_effect && let Some(room_id) = maybe_room {
+                info!(
+                    room_id = %room_id,
+                    device_id = %device_id,
+                    "device offline — auto-pausing effect"
+                );
+                let _ = registry.lock().unwrap().disable_active_effect(&room_id);
+                dash.push_effect_update(room_id.clone(), None, serde_json::json!({}), vec![]);
+                dash.solar_sweep_notify.notify_one();
+            }
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_message(
     msg: MeshMessage,
@@ -501,70 +829,16 @@ async fn process_message(
     auth_tag: &'static str,
 ) -> Option<MeshMessage> {
     match msg {
-        MeshMessage::Heartbeat(HeartbeatPayload {
-            identity,
-            auth_token,
-            cpu_usage_pct,
-            ram_used_gb,
-            ram_total_gb,
-            gpu_usage_pct,
-            gpu_vram_used_gb,
-            gpu_vram_total_gb,
-            disk_free_gb,
-        }) => {
-            // When tokens are configured, require the heartbeat token to match exactly.
-            if !auth_tokens.is_empty() && !auth_tokens.iter().any(|a| a == &auth_token) {
-                warn!(node_id = %identity.id, "heartbeat rejected: missing or wrong auth token");
-                if let Some(dash) = dashboard {
-                    dash.push_security(SecurityEvent {
-                        ts_ms: now_ms(),
-                        kind: SecurityEventKind::NodeAuthFailed,
-                        source: identity.id.clone(),
-                        detail: "heartbeat: wrong auth token".into(),
-                    });
-                }
-                return None;
-            }
-            info!(node_id = %identity.id, hostname = %identity.hostname, "heartbeat");
-            let this_id = identity.id.clone();
-            let this_hostname = identity.hostname.clone();
-            let is_first_heartbeat = node_id.is_none();
-            *node_id = Some(this_id.clone());
-            let nodes = {
-                let mut reg = registry.lock().unwrap();
-                reg.update_heartbeat(identity.clone());
-                if is_first_heartbeat {
-                    // Agent (re)connected — llama-server may have been killed since
-                    // the coordinator last saw it. Clear stale model state so the
-                    // scheduler doesn't route to a server that isn't running.
-                    reg.clear_node_models(&this_id);
-                }
-                reg.list_nodes()
-            };
-            connections.lock().unwrap().insert(identity.id, tx.clone());
-            if let Some(dash) = dashboard {
-                if is_first_heartbeat {
-                    dash.push_security(SecurityEvent {
-                        ts_ms: now_ms(),
-                        kind: SecurityEventKind::NodeJoin,
-                        source: this_id.clone(),
-                        detail: format!("{this_hostname} · {auth_tag}"),
-                    });
-                }
-                dash.push_topology(&nodes);
-                dash.push_health(
-                    &this_id,
-                    cpu_usage_pct,
-                    ram_used_gb,
-                    ram_total_gb,
-                    gpu_usage_pct,
-                    gpu_vram_used_gb,
-                    gpu_vram_total_gb,
-                    disk_free_gb,
-                );
-            }
-            Some(MeshMessage::Acknowledge)
-        }
+        MeshMessage::Heartbeat(payload) => handle_heartbeat(
+            payload,
+            registry,
+            connections,
+            tx,
+            node_id,
+            auth_tokens,
+            dashboard,
+            auth_tag,
+        ),
         MeshMessage::HardwareReport(hw) => {
             if let Some(id) = node_id.as_deref() {
                 let mut reg = registry.lock().unwrap();
@@ -601,137 +875,7 @@ async fn process_message(
             })))
         }
         MeshMessage::RequestModelInference(req) => {
-            // Phase 1 — pull wait: if the model is still being pulled on a Compute node,
-            // poll the registry until it becomes Ready or the pull deadline expires.
-            // This decouples the pull duration from the generation timeout.
-            const PULL_TIMEOUT_SECS: u64 = 300;
-            const GENERATE_TIMEOUT_SECS: u64 = 300;
-
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(PULL_TIMEOUT_SECS);
-            let mut pull_timed_out = false;
-
-            let selected = loop {
-                let (ready_node, is_loading) = {
-                    let reg = registry.lock().unwrap();
-                    let ready = Scheduler::new(&reg).select_node_for_inference(&req.model_name);
-                    let loading = ready.is_none() && reg.model_is_loading(&req.model_name);
-                    (ready, loading)
-                };
-
-                if let Some(node) = ready_node {
-                    break Some(node);
-                }
-                if !is_loading {
-                    // Model not present or in Failed state — no point waiting.
-                    break None;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    pull_timed_out = true;
-                    break None;
-                }
-                info!(
-                    model_name = %req.model_name,
-                    request_id = %req.request_id,
-                    "model still loading, waiting for Ready state"
-                );
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            };
-
-            match selected {
-                Some(node) => {
-                    let agent_tx = connections.lock().unwrap().get(&node.id).cloned();
-                    match agent_tx {
-                        Some(agent_tx) => {
-                            let (otx, orx) = oneshot::channel();
-                            let request_id = req.request_id.clone();
-                            pending_inferences
-                                .lock()
-                                .unwrap()
-                                .insert(request_id.clone(), (otx, node.id.clone()));
-                            info!(
-                                node_id    = %node.id,
-                                model_name = %req.model_name,
-                                request_id = %req.request_id,
-                                "forwarding inference request to agent"
-                            );
-                            if agent_tx
-                                .send(MeshMessage::RequestModelInference(req))
-                                .await
-                                .is_err()
-                            {
-                                // Writer task exited — clean up immediately rather than
-                                // waiting the full generation timeout for a response that
-                                // will never arrive.
-                                pending_inferences.lock().unwrap().remove(&request_id);
-                                connections.lock().unwrap().remove(&node.id);
-                                warn!(
-                                    node_id    = %node.id,
-                                    request_id = %request_id,
-                                    "inference send failed: agent channel closed"
-                                );
-                                return Some(MeshMessage::Error(format!(
-                                    "compute node '{}' dropped from connections map",
-                                    node.id
-                                )));
-                            }
-                            // Phase 2 — generation timeout: separate, shorter window.
-                            // The oneshot is also resolved early if the agent disconnects.
-                            match timeout(Duration::from_secs(GENERATE_TIMEOUT_SECS), orx).await {
-                                Ok(Ok(result)) => Some(result),
-                                Ok(Err(_)) => {
-                                    pending_inferences.lock().unwrap().remove(&request_id);
-                                    Some(MeshMessage::Error(
-                                        "inference channel closed unexpectedly".into(),
-                                    ))
-                                }
-                                Err(_) => {
-                                    pending_inferences.lock().unwrap().remove(&request_id);
-                                    Some(MeshMessage::Error(format!(
-                                        "inference generation timed out after {}s",
-                                        GENERATE_TIMEOUT_SECS
-                                    )))
-                                }
-                            }
-                        }
-                        None => {
-                            warn!(
-                                node_id    = %node.id,
-                                model_name = %req.model_name,
-                                request_id = %req.request_id,
-                                "scheduler selected node but agent is not connected"
-                            );
-                            Some(MeshMessage::Error(format!(
-                                "compute node '{}' dropped from connections map",
-                                node.id
-                            )))
-                        }
-                    }
-                }
-                None => {
-                    if pull_timed_out {
-                        warn!(
-                            model_name = %req.model_name,
-                            request_id = %req.request_id,
-                            "model pull did not complete within {}s",
-                            PULL_TIMEOUT_SECS
-                        );
-                        Some(MeshMessage::Error(format!(
-                            "model '{}' pull did not complete within {}s",
-                            req.model_name, PULL_TIMEOUT_SECS
-                        )))
-                    } else {
-                        warn!(
-                            model_name = %req.model_name,
-                            request_id = %req.request_id,
-                            "no node ready to serve inference request"
-                        );
-                        Some(MeshMessage::Error(format!(
-                            "no node has model '{}' in Ready state",
-                            req.model_name
-                        )))
-                    }
-                }
-            }
+            handle_cli_inference(req, registry, connections, pending_inferences).await
         }
         MeshMessage::ModelInferenceResult(res) => {
             info!(
@@ -790,43 +934,7 @@ async fn process_message(
             // Idempotent — repeated cancels for the same id are no-ops.
             consumer_gone.then_some(MeshMessage::CancelInference { request_id })
         }
-        MeshMessage::ModelLoad(mut req) => {
-            // Auto-place: if no node_id supplied, pick the best-fit node by headroom.
-            if req.node_id.is_none() {
-                let selected = {
-                    let reg = registry.lock().unwrap();
-                    Scheduler::new(&reg)
-                        .select_node_for_model(req.model_size_mb)
-                        .map(|n| n.id)
-                };
-                match selected {
-                    Some(id) => {
-                        info!(node_id = %id, model_name = %req.model_name, "auto-placed ModelLoad");
-                        req.node_id = Some(id);
-                    }
-                    None => {
-                        warn!(model_name = %req.model_name, "no node has capacity for auto-placed ModelLoad");
-                        return Some(MeshMessage::Acknowledge);
-                    }
-                }
-            }
-            let target_id = req.node_id.as_deref().unwrap_or("");
-            let agent_tx = connections.lock().unwrap().get(target_id).cloned();
-            match agent_tx {
-                Some(agent_tx) => {
-                    info!(
-                        node_id    = %target_id,
-                        model_name = %req.model_name,
-                        "forwarding ModelLoad to agent"
-                    );
-                    let _ = agent_tx.send(MeshMessage::ModelLoad(req)).await;
-                }
-                None => {
-                    warn!(node_id = %target_id, "ModelLoad target node not connected");
-                }
-            }
-            Some(MeshMessage::Acknowledge)
-        }
+        MeshMessage::ModelLoad(req) => handle_model_load(req, registry, connections).await,
         MeshMessage::ModelUnload(req) => {
             let agent_tx = connections.lock().unwrap().get(&req.node_id).cloned();
             match agent_tx {
@@ -897,63 +1005,8 @@ async fn process_message(
             }
             None
         }
-        MeshMessage::LightState(mut report) => {
-            // A Zigbee group publishes state on its base topic exactly like a
-            // device. If one slipped past the capability's group filter (a group's
-            // retained state can arrive before its group list on (re)connect),
-            // don't persist or surface it — and scrub any row an earlier slip left.
-            if dashboard.is_some_and(|d| d.is_known_group(&report.device_id)) {
-                registry.lock().unwrap().delete_device(&report.device_id);
-                return None;
-            }
-            // The authenticated connection IS the owning node — trust its id over
-            // the report payload. A stale/'unknown' node_id (e.g. from a seeded DB)
-            // would otherwise route device commands to a non-existent connection
-            // (HTTP 503, lights dead until a state change re-reports them).
-            if let Some(id) = node_id.as_deref() {
-                report.node_id = id.to_string();
-            }
-            info!(
-                node_id = %report.node_id,
-                device_id = %report.device_id,
-                on = %report.on,
-                "light state report received"
-            );
-            let device_id = report.device_id.clone();
-            let went_offline = !report.online;
-            registry.lock().unwrap().save_light_state(&report);
-            if let Some(dash) = dashboard {
-                dash.push_lighting_update(report.clone());
-
-                if went_offline {
-                    // Get room + check for active effect in a single lock acquisition.
-                    let (maybe_room, has_effect) = {
-                        let reg = registry.lock().unwrap();
-                        let room_id = reg.get_room_for_device(&device_id);
-                        let has = room_id
-                            .as_deref()
-                            .and_then(|rid| reg.get_active_effect(rid))
-                            .is_some();
-                        (room_id, has)
-                    };
-                    if has_effect && let Some(room_id) = maybe_room {
-                        info!(
-                            room_id = %room_id,
-                            device_id = %device_id,
-                            "device offline — auto-pausing effect"
-                        );
-                        let _ = registry.lock().unwrap().disable_active_effect(&room_id);
-                        dash.push_effect_update(
-                            room_id.clone(),
-                            None,
-                            serde_json::json!({}),
-                            vec![],
-                        );
-                        dash.solar_sweep_notify.notify_one();
-                    }
-                }
-            }
-            None
+        MeshMessage::LightState(report) => {
+            handle_light_state(report, registry, node_id.as_deref(), dashboard)
         }
         MeshMessage::LightDeviceList(mut report) => {
             // Trust the authenticated connection's id (see LightState above) so a

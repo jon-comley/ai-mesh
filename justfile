@@ -266,11 +266,7 @@ run-coordinator: update-portproxy
     #!/usr/bin/env bash
     pkill -f "target/(debug|release)/coordinator" || true
     sleep 0.3
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    if [ -f "$STATE" ]; then
-        source "$STATE"
-        export MESH_AUTH_TOKEN="${MESH_AUTH_TOKEN:-}"
-    fi
+    source scripts/mesh-env.sh
     MDNS_ADVERTISE_IP={{coordinator_ip}} cargo run -p coordinator
 
 run-controller:
@@ -286,18 +282,13 @@ run-controller:
 reset: update-portproxy
     #!/usr/bin/env bash
     set -e
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    if [ -f "$STATE" ]; then
-        source "$STATE"
-        export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
-    fi
+    source scripts/mesh-env.sh
     cargo run -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" reset-registry
     echo "Registry cleared. Nodes will re-register on their next heartbeat."
 
 nodes:
     #!/usr/bin/env bash
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN; fi
+    source scripts/mesh-env.sh
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes
 
 # Set heartbeat interval for a node. Accepts hostname, IP, or UUID.
@@ -305,8 +296,7 @@ nodes:
 # Usage: just set-heartbeat 10.0.0.11 30
 set-heartbeat node secs:
     #!/usr/bin/env bash
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN MESH_HTTP_PORT; fi
+    source scripts/mesh-env.sh
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
         set-heartbeat {{node}} {{secs}}
 
@@ -969,8 +959,7 @@ load-model node model:
     #!/usr/bin/env bash
     set -e
     source nodes/{{node}}.env
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    [ -f "$STATE" ] && source "$STATE" && export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
+    source scripts/mesh-env.sh
     MODEL="{{model}}"
     case "$MODEL" in
         qwen3:4b)         SIZE_MB=2382  ;;
@@ -1067,8 +1056,7 @@ auto-load-model node:
     #!/usr/bin/env bash
     set -e
     source nodes/{{node}}.env
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    [ -f "$STATE" ] && source "$STATE" && export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
+    source scripts/mesh-env.sh
     case "$NODE_OS" in
       linux)
         HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} '
@@ -1225,9 +1213,7 @@ dashboard-mobile: update-portproxy
     #!/usr/bin/env bash
     set -e
     WIN_IP=$(powershell.exe -NoProfile -Command "(Get-NetIPConfiguration | Where-Object IPv4DefaultGateway -ne \$null | Select-Object -First 1).IPv4Address.IPAddress" | tr -d '\r\n ')
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    TOKEN=""
-    if [ -f "$STATE" ]; then source "$STATE"; TOKEN="${MESH_AUTH_TOKEN:-}"; fi
+    source scripts/mesh-env.sh
     URL="http://${WIN_IP}:9001/"
     [ -n "$TOKEN" ] && URL="${URL}?token=${TOKEN}"
     echo ""
@@ -1286,8 +1272,7 @@ start-agents:
 load-models-retry:
     #!/usr/bin/env bash
     set -e
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    [ -f "$STATE" ] && source "$STATE" && export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
+    source scripts/mesh-env.sh
     COORD="{{coordinator_ip}}:{{coordinator_port}}"
 
     # Build the compute-node list (name:ip pairs).
@@ -1385,8 +1370,7 @@ start-cluster: update-portproxy
         # check — the CLI needs them for the mesh TLS handshake. Without re-sourcing here
         # the check uses a stale fingerprint (none, or one read before this scp) and fails
         # even when the coordinator is healthy, e.g. after its cert was regenerated.
-        STATE="$HOME/.config/ai-mesh/coordinator.state"
-        if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN; fi
+        source scripts/mesh-env.sh
 
         cargo build -q -p cli
         echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
@@ -1477,11 +1461,7 @@ restart-coordinator: update-portproxy
 
     # Source the existing token BEFORE starting the coordinator so it inherits
     # the same token and doesn't generate a new one on every restart.
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    if [ -f "$STATE" ]; then
-        source "$STATE"
-        export MESH_AUTH_TOKEN="${MESH_AUTH_TOKEN:-}"
-    fi
+    source scripts/mesh-env.sh
 
     # Check if coordinator runs remotely (on pi1) or locally (on this machine)
     if [[ "{{coordinator_ip}}" == "127.0.0.1" || "{{coordinator_ip}}" == "localhost" ]]; then
@@ -1513,8 +1493,7 @@ restart-coordinator: update-portproxy
         # check — the CLI needs them for the mesh TLS handshake. Without re-sourcing here
         # the check uses a stale fingerprint (none, or one read before this scp) and fails
         # even when the coordinator is healthy, e.g. after its cert was regenerated.
-        STATE="$HOME/.config/ai-mesh/coordinator.state"
-        if [ -f "$STATE" ]; then source "$STATE"; export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN; fi
+        source scripts/mesh-env.sh
 
         cargo build -q -p cli
         echo ">>> Verifying connectivity to {{coordinator_ip}}:{{coordinator_port}}..."
@@ -1840,13 +1819,27 @@ pair-bulb:
 # Usage: just chat "what is the capital of France?"
 chat text:
     #!/usr/bin/env bash
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    TOKEN=""
-    if [ -f "$STATE" ]; then source "$STATE"; TOKEN="${MESH_AUTH_TOKEN:-}"; fi
+    source scripts/mesh-env.sh
     curl -s -X POST "http://{{coordinator_ip}}:9001/api/chat?token=${TOKEN}" \
         -H 'Content-Type: application/json' \
         -d "{\"text\":$(printf '%s' '{{text}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"context\":[]}" \
         | python3 -m json.tool
+
+# Remove a dead node from the registry (nodes never expire on their own).
+# Refuses while the node's agent is still connected. Get ids from: just nodes
+# Usage: just remove-node <node-uuid>
+remove-node id:
+    #!/usr/bin/env bash
+    source scripts/mesh-env.sh
+    CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+        "http://{{coordinator_ip}}:9001/api/nodes/{{id}}" \
+        -H "Authorization: Bearer ${TOKEN}")
+    case "$CODE" in
+        204) echo ">>> Node {{id}} removed." ;;
+        404) echo ">>> No node with id {{id}} (try: just nodes)"; exit 1 ;;
+        409) echo ">>> Node {{id}} is still connected — stop its agent first."; exit 1 ;;
+        *)   echo ">>> Unexpected response HTTP $CODE"; exit 1 ;;
+    esac
 
 # Hit the OpenAI-compatible /v1/chat/completions endpoint (Bearer auth) and
 # pretty-print the response. Optional second arg pins a model.
@@ -1854,9 +1847,7 @@ chat text:
 #        just openai "why is the sky blue?" qwen2.5:7b
 openai text model="":
     #!/usr/bin/env bash
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    TOKEN=""
-    if [ -f "$STATE" ]; then source "$STATE"; TOKEN="${MESH_AUTH_TOKEN:-}"; fi
+    source scripts/mesh-env.sh
     CONTENT=$(printf '%s' '{{text}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
     if [ -n "{{model}}" ]; then MODEL_FIELD="\"model\":\"{{model}}\","; else MODEL_FIELD=""; fi
     curl -s -X POST "http://{{coordinator_ip}}:9001/v1/chat/completions" \
@@ -1871,9 +1862,7 @@ openai text model="":
 #        just openai-stream "count to 20" qwen2.5:7b
 openai-stream text model="":
     #!/usr/bin/env bash
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    TOKEN=""
-    if [ -f "$STATE" ]; then source "$STATE"; TOKEN="${MESH_AUTH_TOKEN:-}"; fi
+    source scripts/mesh-env.sh
     CONTENT=$(printf '%s' '{{text}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
     if [ -n "{{model}}" ]; then MODEL_FIELD="\"model\":\"{{model}}\","; else MODEL_FIELD=""; fi
     curl -N -s -X POST "http://{{coordinator_ip}}:9001/v1/chat/completions" \
@@ -1886,11 +1875,7 @@ openai-stream text model="":
 #        just intent "what is the capital of France"
 intent text:
     #!/usr/bin/env bash
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    if [ -f "$STATE" ]; then
-        source "$STATE"
-        export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
-    fi
+    source scripts/mesh-env.sh
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" \
         intent "{{text}}"
 
@@ -1905,11 +1890,7 @@ validate-routing: update-portproxy chaos
 
     # Load credentials from coordinator state so this works immediately after
     # restart-coordinator without needing to source ~/.bashrc first.
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    if [ -f "$STATE" ]; then
-        source "$STATE"
-        export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
-    fi
+    source scripts/mesh-env.sh
 
     COORD="{{coordinator_ip}}:{{coordinator_port}}"
     PASS=0
@@ -1987,11 +1968,7 @@ chaos: update-portproxy
     #!/usr/bin/env bash
     set -e
 
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    if [ -f "$STATE" ]; then
-        source "$STATE"
-        export MESH_TLS_FINGERPRINT MESH_AUTH_TOKEN
-    fi
+    source scripts/mesh-env.sh
 
     export MESH_COORDINATOR="{{coordinator_ip}}:{{coordinator_port}}"
     # Dashboard runs in WSL2 — no portproxy for 9001, so connect via localhost.
