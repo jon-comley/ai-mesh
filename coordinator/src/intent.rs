@@ -15,6 +15,74 @@ use tracing::{info, warn};
 
 const TOOL_RESPONSE_TIMEOUT_SECS: u64 = 10;
 
+/// Tool schemas offered to the model: the union of schemas for every feature
+/// at least one connected node advertises, deduped by tool name.
+fn collect_tool_schemas(registry: &Arc<Mutex<Registry>>) -> Vec<serde_json::Value> {
+    let reg = registry.lock().unwrap();
+    let mut seen = std::collections::HashSet::new();
+    let mut schemas = Vec::new();
+    for feature in ["lighting", "reaper"] {
+        if !reg.nodes_with_feature(feature).is_empty() {
+            for schema in tool_schemas_for_feature(feature) {
+                let name = schema["name"].as_str().unwrap_or("").to_string();
+                if seen.insert(name) {
+                    schemas.push(schema);
+                }
+            }
+        }
+    }
+    schemas
+}
+
+/// Render the trailing conversation turns into the prompt's history blob,
+/// compressing it when forwarding to the cloud (local inference is not
+/// token-billed, so it keeps full fidelity). The device context and the
+/// user's current question stay verbatim so tool-calling fidelity is never
+/// degraded. Returns (history, compressed?, tokens_before, tokens_after).
+fn build_history(
+    request: &IntentRequest,
+    gateway: Option<&crate::cloud::GatewayInvocation>,
+) -> (String, bool, u32, u32) {
+    const MAX_CONTEXT_TURNS: usize = 20;
+    let context = if request.context.len() > MAX_CONTEXT_TURNS {
+        &request.context[request.context.len() - MAX_CONTEXT_TURNS..]
+    } else {
+        &request.context[..]
+    };
+    let mut history_blob = String::new();
+    for turn in context {
+        match turn.role {
+            shared::IntentRole::User => {
+                history_blob.push_str(&format!("User: {}\n", turn.content));
+            }
+            shared::IntentRole::Assistant => {
+                history_blob.push_str(&format!("Assistant: {}\n", turn.content));
+            }
+        }
+    }
+
+    if let Some(gw) = gateway.filter(|gw| gw.compress) {
+        let outcome = crate::compress::compress(&history_blob, gw.engine);
+        if outcome.compressed {
+            info!(
+                request_id = %request.request_id,
+                before = outcome.orig_tokens,
+                after = outcome.new_tokens,
+                ratio = outcome.ratio,
+                "compressed history for cloud forward"
+            );
+        }
+        (
+            outcome.text,
+            outcome.compressed,
+            outcome.orig_tokens as u32,
+            outcome.new_tokens as u32,
+        )
+    } else {
+        (history_blob, false, 0, 0)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_intent(
     request: IntentRequest,
@@ -44,22 +112,7 @@ pub async fn handle_intent(
     };
 
     // 1. Collect tool schemas from nodes that advertise a given feature
-    let schemas = {
-        let reg = registry.lock().unwrap();
-        let mut seen = std::collections::HashSet::new();
-        let mut schemas = Vec::new();
-        for feature in ["lighting", "reaper"] {
-            if !reg.nodes_with_feature(feature).is_empty() {
-                for schema in tool_schemas_for_feature(feature) {
-                    let name = schema["name"].as_str().unwrap_or("").to_string();
-                    if seen.insert(name) {
-                        schemas.push(schema);
-                    }
-                }
-            }
-        }
-        schemas
-    };
+    let schemas = collect_tool_schemas(&registry);
 
     // 2. Choose model. In cloud mode the label is the cloud model; a local model
     //    is still resolved when available so we can fall back if the cloud call
@@ -92,50 +145,8 @@ pub async fn handle_intent(
         &device_room_map,
         &scene_names,
     );
-    // Conversation history is the bulky, compressible part. The device context
-    // and the user's current question are kept verbatim so tool-calling fidelity
-    // (exact device names, the actual request) is never degraded.
-    const MAX_CONTEXT_TURNS: usize = 20;
-    let context = if request.context.len() > MAX_CONTEXT_TURNS {
-        &request.context[request.context.len() - MAX_CONTEXT_TURNS..]
-    } else {
-        &request.context[..]
-    };
-    let mut history_blob = String::new();
-    for turn in context {
-        match turn.role {
-            shared::IntentRole::User => {
-                history_blob.push_str(&format!("User: {}\n", turn.content));
-            }
-            shared::IntentRole::Assistant => {
-                history_blob.push_str(&format!("Assistant: {}\n", turn.content));
-            }
-        }
-    }
-
-    // Compress the history only when forwarding to the cloud — local inference is
-    // not token-billed, so it keeps full fidelity.
     let (history_for_prompt, compression_applied, prompt_tokens_before, prompt_tokens_after) =
-        if let Some(gw) = gateway.as_ref().filter(|gw| gw.compress) {
-            let outcome = crate::compress::compress(&history_blob, gw.engine);
-            if outcome.compressed {
-                info!(
-                    request_id = %request.request_id,
-                    before = outcome.orig_tokens,
-                    after = outcome.new_tokens,
-                    ratio = outcome.ratio,
-                    "compressed history for cloud forward"
-                );
-            }
-            (
-                outcome.text,
-                outcome.compressed,
-                outcome.orig_tokens as u32,
-                outcome.new_tokens as u32,
-            )
-        } else {
-            (history_blob, false, 0, 0)
-        };
+        build_history(&request, gateway.as_ref());
 
     let user_prompt = format!("{device_ctx}{history_for_prompt}{}", request.text);
 
@@ -390,203 +401,238 @@ fn offline_skip_summary(
     ))
 }
 
+/// First currently-connected node advertising `feature`, with its sender.
+fn connected_feature_node(
+    feature: &str,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+) -> Option<(String, tokio::sync::mpsc::Sender<MeshMessage>)> {
+    let candidates: Vec<String> = registry
+        .lock()
+        .unwrap()
+        .nodes_with_feature(feature)
+        .into_iter()
+        .map(|n| n.id)
+        .collect();
+    let conns = connections.lock().unwrap();
+    candidates
+        .into_iter()
+        .find_map(|id| conns.get(&id).cloned().map(|tx| (id, tx)))
+}
+
+/// `light_command`: validate/resolve the target (device, group, or room name),
+/// refuse offline devices, and fan the command out to the lighting node.
+async fn dispatch_light_command(
+    request_id: &str,
+    mut args: serde_json::Value,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    device_states: &[LightStateReport],
+) -> String {
+    let Some((_, lighting_tx)) = connected_feature_node("lighting", registry, connections) else {
+        return "no lighting node connected".into();
+    };
+    // Validate target; if it names a room instead of a device, resolve to
+    // the first device in that room so the command still goes through.
+    if let Some(target) = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let (devices, groups) = registry.lock().unwrap().all_light_device_names();
+        let known: Vec<&str> = devices
+            .iter()
+            .chain(groups.iter())
+            .map(String::as_str)
+            .collect();
+        if !known.is_empty() && !known.contains(&target) {
+            // Not a device/group — try matching against a room name.
+            let resolved = registry
+                .lock()
+                .unwrap()
+                .list_rooms()
+                .into_iter()
+                .find(|r| r.name.eq_ignore_ascii_case(target))
+                .and_then(|r| r.device_ids.into_iter().next());
+            match resolved {
+                Some(device_id) => {
+                    args["target"] = serde_json::Value::String(device_id);
+                }
+                None => {
+                    return format!(
+                        "unknown target '{}' — known targets: {}",
+                        target,
+                        known.join(", ")
+                    );
+                }
+            }
+        }
+    }
+    // Reject commands to individual devices that are known to be offline.
+    // Groups are not checked here — the lighting node handles partial groups.
+    let final_target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if device_is_offline(&final_target, device_states) {
+        return offline_skip_result(&final_target);
+    }
+    let Some(cmds) = build_light_command(request_id, &args) else {
+        return "unrecognised colour — no command sent".into();
+    };
+    for cmd in cmds {
+        if lighting_tx
+            .send(MeshMessage::LightCommand(cmd))
+            .await
+            .is_err()
+        {
+            warn!(request_id, "failed to send LightCommand to lighting node");
+            return "failed to send LightCommand to lighting node".into();
+        }
+    }
+    "ok".into()
+}
+
+/// `scene_load`: forward to the lighting node and await its SceneLoaded reply.
+async fn dispatch_scene_load(
+    request_id: &str,
+    args: &serde_json::Value,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    pending_intents: &PendingIntents,
+) -> String {
+    let Some((_, lighting_tx)) = connected_feature_node("lighting", registry, connections) else {
+        return "no lighting node connected".into();
+    };
+    let scene_name = args
+        .get("scene")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let transition_ms = args
+        .get("transition_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1000) as u32;
+
+    let (otx, orx) = oneshot::channel();
+    pending_intents
+        .lock()
+        .unwrap()
+        .insert(request_id.to_string(), otx);
+
+    let req = SceneLoadRequest {
+        request_id: request_id.to_string(),
+        scene_name,
+        transition_ms,
+    };
+    if lighting_tx.send(MeshMessage::SceneLoad(req)).await.is_err() {
+        pending_intents.lock().unwrap().remove(request_id);
+        return "failed to send SceneLoad to lighting node".into();
+    }
+
+    match timeout(Duration::from_secs(TOOL_RESPONSE_TIMEOUT_SECS), orx).await {
+        Ok(Ok(MeshMessage::SceneLoaded(report))) => {
+            if report.success {
+                format!("scene '{}' loaded", report.scene_name)
+            } else {
+                report.error.unwrap_or_else(|| "scene load failed".into())
+            }
+        }
+        _ => {
+            pending_intents.lock().unwrap().remove(request_id);
+            format!("scene load timed out after {TOOL_RESPONSE_TIMEOUT_SECS}s")
+        }
+    }
+}
+
+/// `reaper_transport` / `reaper_action`: forward to the REAPER node and await
+/// the command result with a short timeout.
+async fn dispatch_reaper_command(
+    request_id: &str,
+    tool_name: &str,
+    args: &serde_json::Value,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    pending_intents: &PendingIntents,
+) -> String {
+    // If multiple REAPER nodes exist in future, extend this to a policy.
+    let Some((reaper_node_id, _)) = connected_feature_node("reaper", registry, connections) else {
+        return "no REAPER node connected".into();
+    };
+
+    let action = if tool_name == "reaper_transport" {
+        args["action"].as_str().unwrap_or("").to_string()
+    } else {
+        args["action_id"].as_str().unwrap_or("").to_string()
+    };
+
+    let cmd = ReaperCommandRequest {
+        request_id: request_id.to_string(),
+        action,
+        params: args.clone(),
+    };
+
+    let (otx, orx) = oneshot::channel();
+    pending_intents
+        .lock()
+        .unwrap()
+        .insert(request_id.to_string(), otx);
+
+    let sent = connections
+        .lock()
+        .unwrap()
+        .get(&reaper_node_id)
+        .map(|tx| tx.try_send(MeshMessage::ReaperCommand(cmd)).is_ok())
+        .unwrap_or(false);
+
+    if !sent {
+        pending_intents.lock().unwrap().remove(request_id);
+        return "failed to send ReaperCommand to node".into();
+    }
+
+    // 5 s timeout — prevents the LLM hanging if REAPER is unresponsive.
+    match timeout(Duration::from_secs(5), orx).await {
+        Ok(Ok(MeshMessage::ReaperCommandResult(r))) => {
+            if r.ok {
+                "ok".into()
+            } else {
+                r.message
+            }
+        }
+        _ => {
+            pending_intents.lock().unwrap().remove(request_id);
+            "REAPER command timed out".into()
+        }
+    }
+}
+
 async fn dispatch_tool(
     request_id: &str,
     tool_name: &str,
-    mut args: serde_json::Value,
+    args: serde_json::Value,
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
     pending_intents: &PendingIntents,
     device_states: &[LightStateReport],
 ) -> String {
-    // Find a lighting node that is currently connected
-    let lighting_node_id = {
-        let reg = registry.lock().unwrap();
-        let lighting: Vec<String> = reg
-            .nodes_with_feature("lighting")
-            .into_iter()
-            .map(|n| n.id)
-            .collect();
-        drop(reg);
-        let conns = connections.lock().unwrap();
-        lighting.into_iter().find(|id| conns.contains_key(id))
-    };
-
-    let Some(lighting_node_id) = lighting_node_id else {
-        return "no lighting node connected".into();
-    };
-
-    let lighting_tx = connections.lock().unwrap().get(&lighting_node_id).cloned();
-    let Some(lighting_tx) = lighting_tx else {
-        return "lighting node channel not found".into();
-    };
-
     match tool_name {
         "light_command" => {
-            // Validate target; if it names a room instead of a device, resolve to
-            // the first device in that room so the command still goes through.
-            if let Some(target) = args
-                .get("target")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                let (devices, groups) = registry.lock().unwrap().all_light_device_names();
-                let known: Vec<&str> = devices
-                    .iter()
-                    .chain(groups.iter())
-                    .map(String::as_str)
-                    .collect();
-                if !known.is_empty() && !known.contains(&target) {
-                    // Not a device/group — try matching against a room name.
-                    let resolved = registry
-                        .lock()
-                        .unwrap()
-                        .list_rooms()
-                        .into_iter()
-                        .find(|r| r.name.eq_ignore_ascii_case(target))
-                        .and_then(|r| r.device_ids.into_iter().next());
-                    match resolved {
-                        Some(device_id) => {
-                            args["target"] = serde_json::Value::String(device_id);
-                        }
-                        None => {
-                            return format!(
-                                "unknown target '{}' — known targets: {}",
-                                target,
-                                known.join(", ")
-                            );
-                        }
-                    }
-                }
-            }
-            // Reject commands to individual devices that are known to be offline.
-            // Groups are not checked here — the lighting node handles partial groups.
-            let final_target = args
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if device_is_offline(&final_target, device_states) {
-                return offline_skip_result(&final_target);
-            }
-            let Some(cmds) = build_light_command(request_id, &args) else {
-                return "unrecognised colour — no command sent".into();
-            };
-            for cmd in cmds {
-                if lighting_tx
-                    .send(MeshMessage::LightCommand(cmd))
-                    .await
-                    .is_err()
-                {
-                    warn!(request_id, "failed to send LightCommand to lighting node");
-                    return "failed to send LightCommand to lighting node".into();
-                }
-            }
-            "ok".into()
+            dispatch_light_command(request_id, args, registry, connections, device_states).await
         }
         "scene_load" => {
-            let scene_name = args
-                .get("scene")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let transition_ms = args
-                .get("transition_ms")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1000) as u32;
-
-            let (otx, orx) = oneshot::channel();
-            pending_intents
-                .lock()
-                .unwrap()
-                .insert(request_id.to_string(), otx);
-
-            let req = SceneLoadRequest {
-                request_id: request_id.to_string(),
-                scene_name,
-                transition_ms,
-            };
-            if lighting_tx.send(MeshMessage::SceneLoad(req)).await.is_err() {
-                pending_intents.lock().unwrap().remove(request_id);
-                return "failed to send SceneLoad to lighting node".into();
-            }
-
-            match timeout(Duration::from_secs(TOOL_RESPONSE_TIMEOUT_SECS), orx).await {
-                Ok(Ok(MeshMessage::SceneLoaded(report))) => {
-                    if report.success {
-                        format!("scene '{}' loaded", report.scene_name)
-                    } else {
-                        report.error.unwrap_or_else(|| "scene load failed".into())
-                    }
-                }
-                _ => {
-                    pending_intents.lock().unwrap().remove(request_id);
-                    format!("scene load timed out after {TOOL_RESPONSE_TIMEOUT_SECS}s")
-                }
-            }
+            dispatch_scene_load(request_id, &args, registry, connections, pending_intents).await
         }
         "reaper_transport" | "reaper_action" => {
-            // Node selection: first connected reaper node.
-            // If multiple REAPER nodes exist in future, extend this to a policy.
-            let reaper_node_id = {
-                let reg = registry.lock().unwrap();
-                let nodes: Vec<String> = reg
-                    .nodes_with_feature("reaper")
-                    .into_iter()
-                    .map(|n| n.id)
-                    .collect();
-                drop(reg);
-                let conns = connections.lock().unwrap();
-                nodes.into_iter().find(|id| conns.contains_key(id))
-            };
-            let Some(reaper_node_id) = reaper_node_id else {
-                return "no REAPER node connected".into();
-            };
-
-            let action = if tool_name == "reaper_transport" {
-                args["action"].as_str().unwrap_or("").to_string()
-            } else {
-                args["action_id"].as_str().unwrap_or("").to_string()
-            };
-
-            let cmd = ReaperCommandRequest {
-                request_id: request_id.to_string(),
-                action,
-                params: args.clone(),
-            };
-
-            let (otx, orx) = oneshot::channel();
-            pending_intents
-                .lock()
-                .unwrap()
-                .insert(request_id.to_string(), otx);
-
-            let sent = connections
-                .lock()
-                .unwrap()
-                .get(&reaper_node_id)
-                .map(|tx| tx.try_send(MeshMessage::ReaperCommand(cmd)).is_ok())
-                .unwrap_or(false);
-
-            if !sent {
-                pending_intents.lock().unwrap().remove(request_id);
-                return "failed to send ReaperCommand to node".into();
-            }
-
-            // 5 s timeout — prevents the LLM hanging if REAPER is unresponsive.
-            match timeout(Duration::from_secs(5), orx).await {
-                Ok(Ok(MeshMessage::ReaperCommandResult(r))) => {
-                    if r.ok {
-                        "ok".into()
-                    } else {
-                        r.message
-                    }
-                }
-                _ => {
-                    pending_intents.lock().unwrap().remove(request_id);
-                    "REAPER command timed out".into()
-                }
-            }
+            dispatch_reaper_command(
+                request_id,
+                tool_name,
+                &args,
+                registry,
+                connections,
+                pending_intents,
+            )
+            .await
         }
         "reaper_script" => {
             // `code` is required by the schema; empty -> daemon runs an empty file

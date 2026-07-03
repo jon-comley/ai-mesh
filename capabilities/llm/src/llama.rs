@@ -599,9 +599,18 @@ struct ChatRequest<'a> {
     messages: Vec<OwnedChatMessage>,
     max_tokens: u32,
     stream: bool,
+    /// Ask llama-server for a final usage chunk on streamed responses so
+    /// `usage.prompt_tokens` is real instead of the delta-count fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptionsOut>,
     repeat_penalty: f32,
     temperature: f32,
     cache_prompt: bool,
+}
+
+#[derive(Serialize)]
+struct StreamOptionsOut {
+    include_usage: bool,
 }
 
 #[derive(Deserialize)]
@@ -832,6 +841,9 @@ async fn post_chat(
             messages: build_messages(model_name, turns),
             max_tokens,
             stream,
+            stream_options: stream.then_some(StreamOptionsOut {
+                include_usage: true,
+            }),
             repeat_penalty: 1.1,
             temperature,
             cache_prompt: true,

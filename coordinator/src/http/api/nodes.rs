@@ -1,16 +1,17 @@
 //! Node/agent control: heartbeat cadence, model load/unload, REAPER status.
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
 use serde::Deserialize;
 use shared::{MeshMessage, ModelLoadRequest, ModelUnloadRequest, WIRE_VERSION};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::http::state::DashboardState;
+use crate::registry::Registry;
 
 use super::gen_request_id;
 use crate::http::auth::Authed;
@@ -112,6 +113,36 @@ pub async fn unload_model(
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
+}
+
+/// Remove a dead node from the registry. Nodes never expire on their own, so
+/// a decommissioned or renamed node sits in the dashboard forever without
+/// this. Refuses (409) while the node's TCP connection is live — stop the
+/// agent first; a connected node would just re-register on its next
+/// heartbeat anyway.
+pub async fn remove_node(
+    Path(node_id): Path<String>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+) -> impl IntoResponse {
+    if state.connections.lock().unwrap().contains_key(&node_id) {
+        return (
+            StatusCode::CONFLICT,
+            "node is currently connected — stop its agent before removing",
+        )
+            .into_response();
+    }
+    let (removed, nodes) = {
+        let mut reg = registry.lock().unwrap();
+        (reg.remove_node(&node_id), reg.list_nodes())
+    };
+    if !removed {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    tracing::info!(node_id = %node_id, "node removed from registry");
+    state.push_topology(&nodes);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn get_reaper_state(
@@ -408,6 +439,109 @@ mod tests {
             state,
             "wrong",
             r#"{"node_id":"node1","model_name":"qwen2.5:7b"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── remove_node ───────────────────────────────────────────────────────────
+
+    fn remove_router(
+        state: Arc<DashboardState>,
+        registry: Arc<Mutex<crate::registry::Registry>>,
+    ) -> Router {
+        Router::new()
+            .route("/api/nodes/{id}", axum::routing::delete(remove_node))
+            .layer(axum::Extension(registry))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn remove_node_deletes_disconnected_node() {
+        let state = make_state(vec![], empty_connections());
+        let registry = make_registry();
+        registry
+            .lock()
+            .unwrap()
+            .update_heartbeat(shared::NodeIdentity {
+                id: "dead-node".into(),
+                hostname: "old-host".into(),
+                ip: "10.0.0.18".into(),
+                role: shared::NodeRole::Compute,
+            });
+
+        let status = send(
+            remove_router(state, registry.clone()),
+            "DELETE",
+            "/api/nodes/dead-node",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_node_full("dead-node")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_node_unknown_returns_404() {
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            remove_router(state, make_registry()),
+            "DELETE",
+            "/api/nodes/ghost",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn remove_node_connected_returns_409() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(1);
+        connections.lock().unwrap().insert("live-node".into(), tx);
+        let state = make_state(vec![], connections);
+        let registry = make_registry();
+        registry
+            .lock()
+            .unwrap()
+            .update_heartbeat(shared::NodeIdentity {
+                id: "live-node".into(),
+                hostname: "host".into(),
+                ip: "10.0.0.1".into(),
+                role: shared::NodeRole::Compute,
+            });
+
+        let status = send(
+            remove_router(state, registry.clone()),
+            "DELETE",
+            "/api/nodes/live-node",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_node_full("live-node")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_node_requires_auth() {
+        let state = make_state(vec!["secret".into()], empty_connections());
+        let status = send(
+            remove_router(state, make_registry()),
+            "DELETE",
+            "/api/nodes/x",
+            "",
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);

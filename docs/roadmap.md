@@ -842,24 +842,39 @@ audit was bug-focused). Prioritized; none are defects.
 - [x] **Split `api.rs` (3,917 lines — largest file)** *(done 2026-07-03: `api/{nodes,lights,rooms,scenes,effects,chat,gateway,prefs}.rs` — lights (device domain) and rooms (spatial container) separated for future aircon/blinds/sensors modules; see `plans/api-split-auth-extractor.md`)* into
   `http/{lights,rooms,scenes,models,gateway,chat,prefs}.rs` along its
   existing section comments. Mechanical.
-- [ ] **Node lifecycle: no way to remove a dead node.** The stale `chaos`
+- [x] **Node lifecycle: no way to remove a dead node** *(done 2026-07-03:
+  `Registry::remove_node`, `DELETE /api/nodes/{id}` (409 while connected),
+  `just remove-node <id>`; purge the live `chaos` row after next deploy;
+  auto-purge of long-silent nodes still deferred)*. The stale `chaos`
   registry row (from June chaos-testing) has sat in `just nodes` / the
   dashboard for weeks; the only remedy is `reset-registry` (nukes
   everything). Add `DELETE /api/nodes/{id}` + `mesh remove-node`, and
   consider auto-purging nodes silent > 7 days. Matters for client
   deployments — a permanently-dead node in the dashboard erodes trust.
-- [ ] **Streaming usage accuracy** — llama-server was not asked for usage on
+- [x] **Streaming usage accuracy** *(done 2026-07-03: agent sends
+  `stream_options.include_usage` on streamed llama-server requests; verify
+  live `usage.prompt_tokens` after next deploy)* — llama-server was not asked for usage on
   the streaming path, so `usage.prompt_tokens` falls back to 0 in stream
   responses. llama.cpp's OpenAI compat supports
   `stream_options.include_usage`; send it from `llama::post_chat` when
   `stream` and verify against the deployed llama-server build. Small fix,
   real accounting win (per-key attribution will need it).
-- [ ] **Giant-function splits** (navigability, not correctness):
+- [x] **Giant-function splits** *(done 2026-07-03: `process_message`
+  541→266 via `handle_heartbeat`/`handle_cli_inference`/`handle_model_load`/
+  `handle_light_state`; `handle_intent` 371→240 via `collect_tool_schemas`/
+  `build_history`; `dispatch_tool` 299→128 via per-domain
+  `dispatch_light_command`/`dispatch_scene_load`/`dispatch_reaper_command` +
+  shared `connected_feature_node`. Behavior fix folded in: REAPER tools no
+  longer fail with "no lighting node connected" when only a REAPER node is
+  up — the lighting lookup was gating every tool)* (navigability, not correctness):
   `server::process_message` 541 lines (extract per-message handlers),
   `intent::handle_intent` 371, `intent::dispatch_tool` 299.
-- [ ] **justfile: the coordinator.state token-sourcing block is pasted in
-  27 recipes** — factor into one `scripts/mesh-env.sh` sourced by each.
-- [ ] **CLI pulls three crossterm versions** (0.27 direct, 0.28 via ratatui,
+- [x] **justfile token-sourcing dedup** *(done 2026-07-03:
+  `scripts/mesh-env.sh` sourced by 18 recipes; the ~10 remaining bespoke
+  sites are hard-fail checks or conditional push loops with different
+  semantics)*.
+- [x] **CLI crossterm versions** *(done 2026-07-03: direct dep bumped to
+  0.28 matching ratatui; comfy-table's 0.29 is its own transitive pin)* (0.27 direct, 0.28 via ratatui,
   0.29 via comfy-table) — bump the direct dep to 0.28 to match ratatui;
   compile-time/binary-size trim.
 - [ ] **Scene recall should go through lights-domain primitives** — `scenes.rs
