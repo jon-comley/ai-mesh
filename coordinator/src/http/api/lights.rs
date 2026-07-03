@@ -1,0 +1,486 @@
+//! Lighting — the first *device domain* module. Device-level command,
+//! naming, and position handlers plus the lighting command primitives
+//! (`LightCommandBody`, `build_light_action`) that rooms and scenes fan
+//! out through. Future device domains (aircon, blinds, sensors) get
+//! sibling modules shaped like this one.
+
+use axum::{
+    Extension, Json,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use serde::Deserialize;
+use shared::{LightAction, LightCommandRequest, LightTarget, MeshMessage};
+use std::sync::{Arc, Mutex};
+
+use crate::http::state::{DashboardState, RoomInfo};
+use crate::registry::Registry;
+
+use super::gen_request_id;
+use crate::http::auth::Authed;
+
+#[derive(Deserialize)]
+pub struct LightCommandBody {
+    action: String,
+    #[serde(default)]
+    value: Option<f64>,
+    #[serde(default)]
+    x: Option<f32>,
+    #[serde(default)]
+    y: Option<f32>,
+    #[serde(default)]
+    transition_secs: Option<f32>,
+}
+
+pub(crate) fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
+    match body.action.as_str() {
+        "on" => Some(LightAction::On),
+        "off" => Some(LightAction::Off),
+        "toggle" => Some(LightAction::Toggle),
+        "brightness" => body.value.map(|v| {
+            let value = v.clamp(0.0, 255.0) as u8;
+            match body.transition_secs {
+                Some(t) if t > 0.0 => LightAction::BrightnessTransition {
+                    value,
+                    transition_secs: t,
+                },
+                _ => LightAction::Brightness(value),
+            }
+        }),
+        "color_temp" => body.value.map(|v| {
+            let value = v.clamp(1.0, 65535.0) as u16;
+            match body.transition_secs {
+                Some(t) if t > 0.0 => LightAction::ColorTempTransition {
+                    value,
+                    transition_secs: t,
+                },
+                _ => LightAction::ColorTemp(value),
+            }
+        }),
+        "color_xy" => match (body.x, body.y) {
+            (Some(x), Some(y)) => match body.transition_secs {
+                Some(t) if t > 0.0 => Some(LightAction::ColorXYTransition {
+                    x,
+                    y,
+                    transition_secs: t,
+                }),
+                _ => Some(LightAction::ColorXY { x, y }),
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub async fn light_command(
+    Path(device): Path<String>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<LightCommandBody>,
+) -> impl IntoResponse {
+    let Some(node_id) = state.get_node_for_device(&device) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(command) = build_light_action(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unknown action or missing required fields",
+        )
+            .into_response();
+    };
+
+    let cmd = LightCommandRequest {
+        request_id: gen_request_id(),
+        target: LightTarget::Device(device.clone()),
+        command: command.clone(),
+    };
+    let sent = state.send_to_node(&node_id, MeshMessage::LightCommand(cmd));
+    if sent {
+        // Optimistically update the snapshot only after a successful send, so
+        // subsequent broadcasts (triggered by any other device's status report)
+        // carry the intended value rather than snapping UI sliders back — but a
+        // failed send leaves no phantom value for a later broadcast to push out.
+        state.apply_command_to_snapshot(&device, &command);
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
+pub async fn group_light_command(
+    Path(group): Path<String>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<LightCommandBody>,
+) -> impl IntoResponse {
+    let Some(node_id) = state.get_node_for_group(&group) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(command) = build_light_action(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unknown action or missing required fields",
+        )
+            .into_response();
+    };
+    let cmd = LightCommandRequest {
+        request_id: gen_request_id(),
+        target: LightTarget::Group(group),
+        command,
+    };
+    if state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
+/// DELETE /api/lights/{id} — delete a device completely from the system.
+pub async fn delete_device(
+    Path(device_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+) -> impl IntoResponse {
+    registry.lock().unwrap().delete_device(&device_id);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ── Device names ─────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct RenameDeviceBody {
+    name: String,
+}
+
+pub async fn rename_device(
+    Path(device_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<RenameDeviceBody>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
+    }
+    // One lock scope for the write and both reads, so the pushed snapshot is a
+    // single consistent view — a concurrent handler can't interleave between the
+    // rename and the names/rooms it's bundled with.
+    let (names, rooms) = {
+        let mut reg = registry.lock().unwrap();
+        reg.set_device_name(&device_id, &name);
+        let names = reg.get_all_device_names();
+        let rooms: Vec<RoomInfo> = reg.list_rooms().into_iter().map(RoomInfo::from).collect();
+        (names, rooms)
+    };
+    state.push_rooms_update_with_names(rooms, names);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn get_device_names(
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+) -> impl IntoResponse {
+    let names = registry.lock().unwrap().get_all_device_names();
+    Json(names).into_response()
+}
+
+// ── Spatial ──────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SetPositionBody {
+    x: f32,
+    y: f32,
+    z: f32,
+    room_id: Option<String>,
+    fixture_type: Option<String>,
+}
+
+pub async fn get_light_position(
+    Path(device_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+) -> impl IntoResponse {
+    let pos = registry.lock().unwrap().get_light_position(&device_id);
+    match pos {
+        Some(p) => Json(serde_json::json!({
+            "x": p.x,
+            "y": p.y,
+            "z": p.z,
+            "room_id": p.room_id,
+            "fixture_type": p.fixture_type,
+        }))
+        .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+pub async fn update_light_position(
+    Path(device_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    Json(body): Json<SetPositionBody>,
+) -> impl IntoResponse {
+    registry.lock().unwrap().update_light_position(
+        &device_id,
+        body.x,
+        body.y,
+        body.z,
+        body.room_id,
+        body.fixture_type,
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::api::test_util::*;
+    use axum::Router;
+    use axum::routing::{get, post};
+    use std::sync::Mutex;
+    use tokio::sync::mpsc;
+
+    // ── light_command ─────────────────────────────────────────────────────────
+
+    async fn post_light_cmd(
+        state: Arc<DashboardState>,
+        device: &str,
+        token: &str,
+        body: &str,
+    ) -> StatusCode {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let router: Router = Router::new()
+            .route("/api/lights/{device}/command", post(light_command))
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let uri = format!("/api/lights/{device}/command?token={token}");
+        send(router, "POST", &uri, body).await
+    }
+
+    #[tokio::test]
+    async fn light_command_ok_queues_message() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "kitchen_bulb", "pi1");
+
+        let status = post_light_cmd(state, "kitchen_bulb", "", r#"{"action":"toggle"}"#).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        match rx.try_recv().unwrap() {
+            MeshMessage::LightCommand(req) => {
+                assert!(matches!(req.command, LightAction::Toggle));
+                assert!(matches!(req.target, LightTarget::Device(d) if d == "kitchen_bulb"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn light_command_returns_401_for_wrong_token() {
+        let state = make_state(vec!["secret".into()], empty_connections());
+        seed_light(&state, "bulb1", "pi1");
+        let status = post_light_cmd(state, "bulb1", "wrong", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn light_command_returns_404_for_unknown_device() {
+        let state = make_state(vec![], empty_connections());
+        let status = post_light_cmd(state, "ghost_bulb", "", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn light_command_returns_400_for_unknown_action() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+        let status = post_light_cmd(state, "bulb1", "", r#"{"action":"dance"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn light_command_brightness_requires_value() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+        let status = post_light_cmd(state, "bulb1", "", r#"{"action":"brightness"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn light_command_color_xy_requires_both_coords() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+        let status = post_light_cmd(state, "bulb1", "", r#"{"action":"color_xy","x":0.3}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ── group_light_command ───────────────────────────────────────────────────
+
+    fn seed_group(state: &Arc<DashboardState>, group: &str, node_id: &str) {
+        state.push_group_update(node_id, vec![group.into()]);
+    }
+
+    async fn post_group_cmd(
+        state: Arc<DashboardState>,
+        group: &str,
+        token: &str,
+        body: &str,
+    ) -> StatusCode {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let router: Router = Router::new()
+            .route(
+                "/api/lights/group/{group}/command",
+                post(group_light_command),
+            )
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let uri = format!("/api/lights/group/{group}/command?token={token}");
+        send(router, "POST", &uri, body).await
+    }
+
+    #[tokio::test]
+    async fn group_light_command_ok_queues_message() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_group(&state, "all", "pi1");
+
+        let status = post_group_cmd(state, "all", "", r#"{"action":"off"}"#).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        match rx.try_recv().unwrap() {
+            MeshMessage::LightCommand(req) => {
+                assert!(matches!(req.command, LightAction::Off));
+                assert!(matches!(req.target, LightTarget::Group(ref g) if g == "all"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn group_light_command_returns_404_for_unknown_group() {
+        let state = make_state(vec![], empty_connections());
+        let status = post_group_cmd(state, "ghost_group", "", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn group_light_command_returns_401_for_wrong_token() {
+        let state = make_state(vec!["secret".into()], empty_connections());
+        seed_group(&state, "all", "pi1");
+        let status = post_group_cmd(state, "all", "wrong", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn group_light_command_returns_400_for_unknown_action() {
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_group(&state, "all", "pi1");
+        let status = post_group_cmd(state, "all", "", r#"{"action":"dance"}"#).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn build_light_action_maps_all_variants() {
+        let mk = |action: &str, value: Option<f64>, x: Option<f32>, y: Option<f32>| {
+            build_light_action(&LightCommandBody {
+                action: action.into(),
+                value,
+                x,
+                y,
+                transition_secs: None,
+            })
+        };
+        assert!(matches!(mk("on", None, None, None), Some(LightAction::On)));
+        assert!(matches!(
+            mk("off", None, None, None),
+            Some(LightAction::Off)
+        ));
+        assert!(matches!(
+            mk("toggle", None, None, None),
+            Some(LightAction::Toggle)
+        ));
+        assert!(matches!(
+            mk("brightness", Some(128.0), None, None),
+            Some(LightAction::Brightness(128))
+        ));
+        assert!(matches!(
+            mk("color_temp", Some(370.0), None, None),
+            Some(LightAction::ColorTemp(370))
+        ));
+        assert!(matches!(
+            mk("color_xy", None, Some(0.3), Some(0.3)),
+            Some(LightAction::ColorXY { x, y }) if (x - 0.3).abs() < 1e-4 && (y - 0.3).abs() < 1e-4
+        ));
+        assert!(mk("unknown", None, None, None).is_none());
+        assert!(mk("color_xy", None, Some(0.3), None).is_none());
+    }
+
+    // ── light position endpoints ──────────────────────────────────────────────
+
+    fn position_router(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) -> Router {
+        Router::new()
+            .route(
+                "/api/lights/{device}/position",
+                get(get_light_position).post(update_light_position),
+            )
+            .layer(axum::Extension(registry))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn get_light_position_returns_404_when_unset() {
+        let router = position_router(make_state(vec![], empty_connections()), make_registry());
+        let status = send(router, "GET", "/api/lights/bulb1/position?token=", "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_then_get_light_position_round_trips() {
+        let registry = make_registry();
+        let router = position_router(make_state(vec![], empty_connections()), registry.clone());
+
+        let set_status = send(
+            router,
+            "POST",
+            "/api/lights/bulb1/position?token=",
+            r#"{"x":1.5,"y":2.5,"z":0.0}"#,
+        )
+        .await;
+        assert_eq!(set_status, StatusCode::NO_CONTENT);
+
+        let pos = registry.lock().unwrap().get_light_position("bulb1");
+        assert!(pos.is_some());
+        let p = pos.unwrap();
+        assert!((p.x - 1.5).abs() < 1e-4);
+        assert!((p.y - 2.5).abs() < 1e-4);
+        assert!((p.z - 0.0).abs() < 1e-4);
+    }
+
+    #[tokio::test]
+    async fn get_light_position_returns_401_for_wrong_token() {
+        let router = position_router(
+            make_state(vec!["secret".into()], empty_connections()),
+            make_registry(),
+        );
+        let status = send(router, "GET", "/api/lights/bulb1/position?token=wrong", "").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+}

@@ -236,7 +236,7 @@ where
     // 15s). It starts generous and only tightens once we've seen a real gap
     // between two heartbeats — the first heartbeat arrives immediately on connect,
     // so it isn't a representative interval and must not drive the timeout.
-    const MAX_HEARTBEAT_SECS: u64 = 3600; // mirrors the bound in http::api::set_heartbeat_interval
+    const MAX_HEARTBEAT_SECS: u64 = 3600; // mirrors the bound in http::api::nodes::set_heartbeat_interval
     // Grace granted while a model is loading. Sized to the agent's own worst-case
     // load: `health_timeout_secs` caps at 900s for the largest models (180s for the
     // ≤7b models here), so the agent always reports Ready/Failed within this window.

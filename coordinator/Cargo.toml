@@ -32,6 +32,7 @@ compression-prompt = "0.1.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
+serde_urlencoded = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

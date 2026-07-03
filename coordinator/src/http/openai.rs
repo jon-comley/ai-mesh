@@ -9,13 +9,13 @@
 //! mid-stream node death or stall emits an SSE error event and terminates
 //! rather than holding the connection open.
 
-use super::api::TokenQuery;
+use super::auth::{TokenQuery, bearer_token};
 use super::state::{DashboardState, PendingStreams};
 use crate::registry::Registry;
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
@@ -175,13 +175,7 @@ fn openai_error(status: StatusCode, message: &str, err_type: &str, code: &str) -
 /// Token from `Authorization: Bearer …` (what OpenAI SDKs send), falling back
 /// to the `?token=` query param used by the rest of the HTTP API.
 fn request_token(headers: &HeaderMap, q: &TokenQuery) -> String {
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| q.token.clone())
+    bearer_token(headers).unwrap_or_else(|| q.token.clone())
 }
 
 fn unauthorized() -> Response {

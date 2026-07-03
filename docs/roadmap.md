@@ -828,6 +828,62 @@ local and cloud routes (`docs/openai-api.md` → Streaming).
 
 ---
 
+## Code Review — Refactoring Backlog (2026-07-03)
+
+Whole-codebase quality pass (refactoring + could-do-better; the 2026-06-02
+audit was bug-focused). Prioritized; none are defects.
+
+- [x] **Auth extractor for the HTTP API** *(done 2026-07-03: `http/auth.rs` `Authed` extractor, Bearer + `?token=` on all `/api/*`)* — `api.rs` has 41 handlers each
+  repeating the `Query<TokenQuery>` + `state.auth_ok(&q.token)` +
+  `UNAUTHORIZED` boilerplate (~120 lines). An axum `FromRequestParts`
+  extractor (`Authed`) makes auth a parameter type: impossible to forget on a
+  new route, and the openai.rs Bearer variant can layer on it. Biggest single
+  cleanup in the codebase; do together with the api.rs module split below.
+- [x] **Split `api.rs` (3,917 lines — largest file)** *(done 2026-07-03: `api/{nodes,lights,rooms,scenes,effects,chat,gateway,prefs}.rs` — lights (device domain) and rooms (spatial container) separated for future aircon/blinds/sensors modules; see `plans/api-split-auth-extractor.md`)* into
+  `http/{lights,rooms,scenes,models,gateway,chat,prefs}.rs` along its
+  existing section comments. Mechanical.
+- [ ] **Node lifecycle: no way to remove a dead node.** The stale `chaos`
+  registry row (from June chaos-testing) has sat in `just nodes` / the
+  dashboard for weeks; the only remedy is `reset-registry` (nukes
+  everything). Add `DELETE /api/nodes/{id}` + `mesh remove-node`, and
+  consider auto-purging nodes silent > 7 days. Matters for client
+  deployments — a permanently-dead node in the dashboard erodes trust.
+- [ ] **Streaming usage accuracy** — llama-server was not asked for usage on
+  the streaming path, so `usage.prompt_tokens` falls back to 0 in stream
+  responses. llama.cpp's OpenAI compat supports
+  `stream_options.include_usage`; send it from `llama::post_chat` when
+  `stream` and verify against the deployed llama-server build. Small fix,
+  real accounting win (per-key attribution will need it).
+- [ ] **Giant-function splits** (navigability, not correctness):
+  `server::process_message` 541 lines (extract per-message handlers),
+  `intent::handle_intent` 371, `intent::dispatch_tool` 299.
+- [ ] **justfile: the coordinator.state token-sourcing block is pasted in
+  27 recipes** — factor into one `scripts/mesh-env.sh` sourced by each.
+- [ ] **CLI pulls three crossterm versions** (0.27 direct, 0.28 via ratatui,
+  0.29 via comfy-table) — bump the direct dep to 0.28 to match ratatui;
+  compile-time/binary-size trim.
+- [ ] **Scene recall should go through lights-domain primitives** — `scenes.rs
+  recall_scene` builds `LightAction` values inline (no clamps) while
+  `lights::build_light_action` owns clamped construction; the copies now sit
+  across the domain seam with no compiler linkage (self-review 2026-07-03,
+  pre-existing). Fold into the first new-device-domain change, when scene
+  snapshots grow beyond lighting anyway.
+- Noted, accepted (self-review 2026-07-03): moving auth into the `Authed`
+  extractor changed error precedence — bad-token + malformed-body now 401s
+  before the 400/422 body rejection, and an unparseable query string
+  (e.g. duplicate `token` keys) reads as empty-token rather than 400. Both
+  standard extractor semantics; documented here for contract archaeology.
+  Token-source precedence also intentionally lives in two places
+  (`auth::token_from_parts`, `openai::request_token`) — both delegate to the
+  shared `bearer_token`, drift risk accepted until a third token source exists.
+- Accepted debt, revisit post-first-client: `Result<_, String>` error
+  handling throughout (a shared error enum is churn without payoff yet);
+  `DashboardState` as a 16-mutex grab-bag (grouping into sub-structs is
+  heavy churn); `layout.js` at 3,401 lines (dashboard is demo-frozen per
+  the productization plan).
+
+---
+
 ## OpenAI API — Per-Key Auth, Usage Attribution & Rate Limiting (Next)
 
 The third productization step (`an internal productization plan` item 3): one
