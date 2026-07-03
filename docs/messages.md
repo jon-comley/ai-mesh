@@ -164,7 +164,7 @@ Phase 6 introduces a set of **model-aware wire-protocol messages** used for:
 All Phase 6 messages include a `wire_version: u32` field with:
 
 ```rust
-pub const WIRE_VERSION: u32 = 4;
+pub const WIRE_VERSION: u32 = 5;
 #[serde(default = "default_wire_version")]
 ```
 
@@ -190,6 +190,15 @@ Older agents that do not send `wire_version` will still deserialize safely.
 > ignores the unknown `stream` field and replies non-streamed (the API
 > degrades to a single-delta stream), but a v4 agent cannot parse a v3
 > coordinator's requests (missing `stream`).
+
+> **Wire v5 (multi-domain, Phase A):** `LightDeviceListReport` →
+> `DeviceListReport { node_id, devices: Vec<DeviceEntry { id, device_type }>,
+> groups }` — the inventory is typed per device (`light` / `sensor` / `cover`
+> / `climate` / `unknown`, classified from z2m's `definition.exposes`).
+> `NodeCapabilities.features` is now `Vec<Feature>` (wire strings unchanged:
+> `"llm"`, `"lighting"`, `"reaper"`, `"sensors"`). Coordinated deploy as
+> usual; no data migration (see plans/multi-domain-home.md).
+
 
 ### `ModelInferenceChunk`
 Compute node → Coordinator

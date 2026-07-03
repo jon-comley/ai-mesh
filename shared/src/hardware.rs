@@ -75,10 +75,21 @@ pub struct NodeCapabilities {
     pub gpu_inference: bool,
     pub ane_inference: bool,
     pub max_model_size_gb: f32,
-    /// Active Cargo feature capabilities on this node, e.g. ["llm", "lighting"].
-    /// Populated from compile-time feature flags; used by the coordinator to route
+    /// Active Cargo feature capabilities on this node. Populated from
+    /// compile-time feature flags; used by the coordinator to route
     /// capability-specific messages (e.g. LightCommand) to the right node.
-    pub features: Vec<String>,
+    pub features: Vec<Feature>,
+}
+
+/// A node capability, 1:1 with the agent's compile-time Cargo features.
+/// Wire strings are the historical lowercase feature names.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Feature {
+    Llm,
+    Lighting,
+    Reaper,
+    Sensors,
 }
 
 impl Default for NodeCapabilities {
@@ -162,12 +173,12 @@ mod tests {
             gpu_inference: true,
             ane_inference: false,
             max_model_size_gb: 8.0,
-            features: vec!["llm".into(), "lighting".into()],
+            features: vec![Feature::Llm, Feature::Lighting],
         };
         let json = serde_json::to_string(&caps).unwrap();
         let back: NodeCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(back, caps);
-        assert_eq!(back.features, vec!["llm", "lighting"]);
+        assert_eq!(back.features, vec![Feature::Llm, Feature::Lighting]);
     }
 
     #[test]

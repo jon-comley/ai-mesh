@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 4;
+pub const WIRE_VERSION: u32 = 5;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -242,12 +242,56 @@ pub struct SceneLoadedReport {
     pub error: Option<String>,
 }
 
-/// Sent by a lighting node to inform the coordinator of known Z2M devices and groups.
+/// Device class, classified from z2m's `definition.exposes` at discovery.
+/// Decides which capability crate handles the device and which widget the
+/// dashboard renders — never the room it lives in.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceType {
+    Light,
+    Sensor,
+    Cover,
+    Climate,
+    Unknown,
+}
+
+impl DeviceType {
+    /// The wire/storage string — identical to the serde representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeviceType::Light => "light",
+            DeviceType::Sensor => "sensor",
+            DeviceType::Cover => "cover",
+            DeviceType::Climate => "climate",
+            DeviceType::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(s: &str) -> DeviceType {
+        match s {
+            "light" => DeviceType::Light,
+            "sensor" => DeviceType::Sensor,
+            "cover" => DeviceType::Cover,
+            "climate" => DeviceType::Climate,
+            _ => DeviceType::Unknown,
+        }
+    }
+}
+
+/// One discovered device: friendly name + its classified type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LightDeviceListReport {
+pub struct DeviceEntry {
+    pub id: String,
+    pub device_type: DeviceType,
+}
+
+/// Full device inventory for a node's Zigbee bridge, sent on every MQTT
+/// (re)connect. Typed per device; `groups` stays lighting-specific (Z2M
+/// groups are a lighting concept).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeviceListReport {
     pub node_id: String,
-    /// Friendly names of individual Zigbee devices (e.g. "test_bulb").
-    pub devices: Vec<String>,
+    pub devices: Vec<DeviceEntry>,
     /// Friendly names of Z2M groups (e.g. "all").
     pub groups: Vec<String>,
 }
@@ -396,7 +440,7 @@ pub enum MeshMessage {
     // Lighting capability messages
     LightCommand(LightCommandRequest),
     LightState(LightStateReport),
-    LightDeviceList(LightDeviceListReport),
+    DeviceList(DeviceListReport),
     SceneLoad(SceneLoadRequest),
     SceneLoaded(SceneLoadedReport),
     // Intent routing
@@ -608,7 +652,7 @@ mod tests {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 3.69,
-            features: vec!["llm".into()],
+            features: vec![crate::Feature::Llm],
         };
 
         let rec = NodeRecordFull {
@@ -961,13 +1005,25 @@ mod tests {
     }
 
     #[test]
-    fn light_device_list_roundtrip() {
-        let msg = MeshMessage::LightDeviceList(LightDeviceListReport {
+    fn device_list_roundtrip() {
+        let msg = MeshMessage::DeviceList(DeviceListReport {
             node_id: "pi1".into(),
-            devices: vec!["test_bulb".into(), "desk_lamp".into()],
+            devices: vec![
+                DeviceEntry {
+                    id: "test_bulb".into(),
+                    device_type: DeviceType::Light,
+                },
+                DeviceEntry {
+                    id: "hall_motion".into(),
+                    device_type: DeviceType::Sensor,
+                },
+            ],
             groups: vec!["all".into()],
         });
         let json = serde_json::to_string(&msg).unwrap();
+        // Types serialize as lowercase strings on the wire.
+        assert!(json.contains(r#""device_type":"light""#));
+        assert!(json.contains(r#""device_type":"sensor""#));
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
     }
 

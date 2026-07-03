@@ -172,7 +172,10 @@ pub struct Registry {
     nodes: HashMap<String, NodeRecord>,
     conn: Connection,
     /// Known Zigbee devices and groups per lighting node, keyed by node_id.
-    light_devices: HashMap<String, (Vec<String>, Vec<String>)>,
+    /// Typed device inventory: device_id → (owning node, device class).
+    devices: HashMap<String, (String, shared::DeviceType)>,
+    /// Z2M groups per node (a lighting-only concept).
+    light_groups: HashMap<String, Vec<String>>,
     /// Physical coordinates (x, y, z), optional room association, and fixture type for lighting devices.
     light_positions: HashMap<String, LightPosition>,
 }
@@ -197,11 +200,18 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             last_updated INTEGER NOT NULL,
             PRIMARY KEY (node_id, model_name)
         );
-        CREATE TABLE IF NOT EXISTS light_devices (
+        CREATE TABLE IF NOT EXISTS devices (
+            device_id   TEXT PRIMARY KEY,
+            node_id     TEXT NOT NULL,
+            device_type TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS light_groups (
             node_id  TEXT PRIMARY KEY,
-            devices  TEXT NOT NULL,
             groups   TEXT NOT NULL
         );
+        -- Pre-multi-domain inventory blob; derived data, repopulated into
+        -- `devices` from z2m's retained bridge/devices on first connect.
+        DROP TABLE IF EXISTS light_devices;
         CREATE TABLE IF NOT EXISTS rooms (
             id       TEXT PRIMARY KEY,
             name     TEXT NOT NULL,
@@ -447,7 +457,8 @@ impl Registry {
         Self {
             nodes: HashMap::new(),
             conn,
-            light_devices: HashMap::new(),
+            devices: HashMap::new(),
+            light_groups: HashMap::new(),
             light_positions: HashMap::new(),
         }
     }
@@ -461,7 +472,8 @@ impl Registry {
         let mut reg = Self {
             nodes: HashMap::new(),
             conn,
-            light_devices: HashMap::new(),
+            devices: HashMap::new(),
+            light_groups: HashMap::new(),
             light_positions: HashMap::new(),
         };
         reg.load_from_db()?;
@@ -558,19 +570,30 @@ impl Registry {
             }
         }
 
-        // ── light_devices ──────────────────────────────────────────────────
-        let ld_rows: Vec<(String, String, String)> = {
+        // ── devices (typed inventory) ───────────────────────────────────────
+        let dev_rows: Vec<(String, String, String)> = {
             let mut stmt = self
                 .conn
-                .prepare("SELECT node_id, devices, groups FROM light_devices")?;
+                .prepare("SELECT device_id, node_id, device_type FROM devices")?;
             stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?
         };
+        for (device_id, node_id, type_str) in dev_rows {
+            self.devices
+                .insert(device_id, (node_id, shared::DeviceType::parse(&type_str)));
+        }
 
-        for (node_id, devices_json, groups_json) in ld_rows {
-            let devices: Vec<String> = serde_json::from_str(&devices_json).unwrap_or_default();
+        // ── light_groups ────────────────────────────────────────────────────
+        let grp_rows: Vec<(String, String)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT node_id, groups FROM light_groups")?;
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for (node_id, groups_json) in grp_rows {
             let groups: Vec<String> = serde_json::from_str(&groups_json).unwrap_or_default();
-            self.light_devices.insert(node_id, (devices, groups));
+            self.light_groups.insert(node_id, groups);
         }
 
         // ── light_positions ────────────────────────────────────────────────
@@ -799,13 +822,13 @@ impl Registry {
     }
 
     /// Returns all Compute nodes whose reported capabilities include `feature`.
-    pub fn nodes_with_feature(&self, feature: &str) -> Vec<NodeRecordFull> {
+    pub fn nodes_with_feature(&self, feature: shared::Feature) -> Vec<NodeRecordFull> {
         self.nodes
             .values()
             .filter(|n| {
                 n.capabilities
                     .as_ref()
-                    .map(|c| c.features.iter().any(|f| f == feature))
+                    .map(|c| c.features.contains(&feature))
                     .unwrap_or(false)
             })
             .filter_map(|rec| self.get_node_full(&rec.identity.id))
@@ -814,11 +837,11 @@ impl Registry {
 
     /// True if the node `id` currently advertises `feature`. Used on disconnect to
     /// decide whether losing this node means we've lost the lighting/bridge source.
-    pub fn node_has_feature(&self, id: &str, feature: &str) -> bool {
+    pub fn node_has_feature(&self, id: &str, feature: shared::Feature) -> bool {
         self.nodes
             .get(id)
             .and_then(|n| n.capabilities.as_ref())
-            .map(|c| c.features.iter().any(|f| f == feature))
+            .map(|c| c.features.contains(&feature))
             .unwrap_or(false)
     }
 
@@ -833,7 +856,7 @@ impl Registry {
                 n.identity.role == NodeRole::Compute
                     && n.capabilities
                         .as_ref()
-                        .map(|c| c.features.iter().any(|f| f == "llm"))
+                        .map(|c| c.features.contains(&shared::Feature::Llm))
                         .unwrap_or(false)
             })
             .flat_map(|n| n.models.iter())
@@ -851,7 +874,7 @@ impl Registry {
                 n.identity.role == NodeRole::Compute
                     && n.capabilities
                         .as_ref()
-                        .map(|c| c.features.iter().any(|f| f == "llm"))
+                        .map(|c| c.features.contains(&shared::Feature::Llm))
                         .unwrap_or(false)
             })
             .flat_map(|n| n.models.iter())
@@ -862,40 +885,78 @@ impl Registry {
             .collect()
     }
 
-    /// Store the list of known Zigbee devices and groups reported by a lighting node.
-    pub fn update_light_devices(
+    /// Store a node's full typed device inventory + Z2M groups, replacing the
+    /// node's previous rows (z2m sends the complete list on every connect).
+    pub fn update_devices(
         &mut self,
         node_id: &str,
-        devices: Vec<String>,
+        devices: Vec<shared::DeviceEntry>,
         groups: Vec<String>,
     ) {
-        let devices_json = serde_json::to_string(&devices).unwrap_or_default();
-        let groups_json = serde_json::to_string(&groups).unwrap_or_default();
-        if let Err(e) = self.conn.execute(
-            "INSERT OR REPLACE INTO light_devices (node_id, devices, groups) VALUES (?1, ?2, ?3)",
-            params![node_id, devices_json, groups_json],
-        ) {
-            warn!(error = %e, "DB light_devices upsert failed");
+        let tx = self.conn.transaction();
+        match tx {
+            Ok(tx) => {
+                let mut ok = tx
+                    .execute("DELETE FROM devices WHERE node_id = ?1", params![node_id])
+                    .is_ok();
+                for d in &devices {
+                    ok &= tx
+                        .execute(
+                            "INSERT OR REPLACE INTO devices (device_id, node_id, device_type)
+                             VALUES (?1, ?2, ?3)",
+                            params![d.id, node_id, d.device_type.as_str()],
+                        )
+                        .is_ok();
+                }
+                let groups_json = serde_json::to_string(&groups).unwrap_or_default();
+                ok &= tx
+                    .execute(
+                        "INSERT OR REPLACE INTO light_groups (node_id, groups) VALUES (?1, ?2)",
+                        params![node_id, groups_json],
+                    )
+                    .is_ok();
+                if !ok || tx.commit().is_err() {
+                    warn!(node_id = %node_id, "DB devices upsert failed");
+                }
+            }
+            Err(e) => warn!(error = %e, "DB devices transaction failed"),
         }
-        self.light_devices
-            .insert(node_id.to_owned(), (devices, groups));
+        self.devices.retain(|_, (nid, _)| nid != node_id);
+        for d in devices {
+            self.devices
+                .insert(d.id, (node_id.to_owned(), d.device_type));
+        }
+        self.light_groups.insert(node_id.to_owned(), groups);
     }
 
-    /// Returns all known Zigbee device and group friendly names across all lighting nodes.
-    pub fn all_light_device_names(&self) -> (Vec<String>, Vec<String>) {
-        let mut devices: std::collections::HashSet<String> = Default::default();
+    /// Friendly names of all devices of one class, deduped and sorted.
+    pub fn devices_of_type(&self, t: shared::DeviceType) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .devices
+            .iter()
+            .filter(|(_, (_, dt))| *dt == t)
+            .map(|(id, _)| id.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Lighting control targets: (light device names, Z2M group names) across
+    /// all nodes — the shape the intent pipeline validates against.
+    pub fn lighting_targets(&self) -> (Vec<String>, Vec<String>) {
         let mut groups: std::collections::HashSet<String> = Default::default();
-        for (devs, grps) in self.light_devices.values() {
-            devices.extend(devs.iter().cloned());
+        for grps in self.light_groups.values() {
             groups.extend(grps.iter().cloned());
         }
-        (devices.into_iter().collect(), groups.into_iter().collect())
+        (
+            self.devices_of_type(shared::DeviceType::Light),
+            groups.into_iter().collect(),
+        )
     }
 
-    pub fn get_all_light_devices(
-        &self,
-    ) -> impl Iterator<Item = (&String, &(Vec<String>, Vec<String>))> {
-        self.light_devices.iter()
+    /// The typed inventory: (device_id, node_id, type) rows.
+    pub fn all_devices(&self) -> impl Iterator<Item = (&String, &(String, shared::DeviceType))> {
+        self.devices.iter()
     }
 
     pub fn get_node_full(&self, id: &str) -> Option<NodeRecordFull> {
@@ -1156,6 +1217,14 @@ impl Registry {
         ) {
             warn!(error = %e, "delete_device: remove light_positions failed");
         }
+        // Remove from the typed inventory
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM devices WHERE device_id = ?1",
+            params![device_id],
+        ) {
+            warn!(error = %e, "delete_device: remove devices failed");
+        }
+        self.devices.remove(device_id);
         // Update in-memory cache
         self.light_positions.remove(device_id);
     }
@@ -1464,7 +1533,7 @@ mod tests {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 8.0,
-            features: vec!["llm".into()],
+            features: vec![shared::Feature::Llm],
         }
     }
 
@@ -1582,7 +1651,7 @@ mod tests {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 3.69,
-            features: vec!["llm".into()],
+            features: vec![shared::Feature::Llm],
         }
     }
 
@@ -1753,7 +1822,7 @@ mod tests {
             reg.update_capabilities(
                 "beelink1",
                 NodeCapabilities {
-                    features: vec!["llm".into()],
+                    features: vec![shared::Feature::Llm],
                     max_model_size_gb: 8.0,
                     ..NodeCapabilities::default()
                 },
@@ -1788,7 +1857,7 @@ mod tests {
         reg.update_capabilities(
             "llm-only",
             NodeCapabilities {
-                features: vec!["llm".into()],
+                features: vec![shared::Feature::Llm],
                 ..NodeCapabilities::default()
             },
         );
@@ -1796,19 +1865,19 @@ mod tests {
         reg.update_capabilities(
             "llm-and-lighting",
             NodeCapabilities {
-                features: vec!["llm".into(), "lighting".into()],
+                features: vec![shared::Feature::Llm, shared::Feature::Lighting],
                 ..NodeCapabilities::default()
             },
         );
 
-        let lighting_nodes = reg.nodes_with_feature("lighting");
+        let lighting_nodes = reg.nodes_with_feature(shared::Feature::Lighting);
         assert_eq!(lighting_nodes.len(), 1);
         assert_eq!(lighting_nodes[0].id, "llm-and-lighting");
 
         // node_has_feature mirrors the same membership for a single node.
-        assert!(reg.node_has_feature("llm-and-lighting", "lighting"));
-        assert!(!reg.node_has_feature("llm-only", "lighting"));
-        assert!(!reg.node_has_feature("nonexistent", "lighting"));
+        assert!(reg.node_has_feature("llm-and-lighting", shared::Feature::Lighting));
+        assert!(!reg.node_has_feature("llm-only", shared::Feature::Lighting));
+        assert!(!reg.node_has_feature("nonexistent", shared::Feature::Lighting));
     }
 
     #[test]
@@ -1818,7 +1887,7 @@ mod tests {
         reg.update_capabilities(
             "node-1",
             NodeCapabilities {
-                features: vec!["llm".into()],
+                features: vec![shared::Feature::Llm],
                 ..NodeCapabilities::default()
             },
         );
@@ -1834,7 +1903,7 @@ mod tests {
         reg.update_capabilities(
             "node-1",
             NodeCapabilities {
-                features: vec!["llm".into()],
+                features: vec![shared::Feature::Llm],
                 ..NodeCapabilities::default()
             },
         );
@@ -1854,7 +1923,7 @@ mod tests {
             reg.update_capabilities(
                 id,
                 NodeCapabilities {
-                    features: vec!["llm".into()],
+                    features: vec![shared::Feature::Llm],
                     ..NodeCapabilities::default()
                 },
             );
@@ -1875,7 +1944,7 @@ mod tests {
             reg.update_capabilities(
                 id,
                 NodeCapabilities {
-                    features: vec!["llm".into()],
+                    features: vec![shared::Feature::Llm],
                     ..NodeCapabilities::default()
                 },
             );
@@ -1908,7 +1977,7 @@ mod tests {
         reg.update_capabilities(
             "node-1",
             NodeCapabilities {
-                features: vec!["llm".into()],
+                features: vec![shared::Feature::Llm],
                 ..NodeCapabilities::default()
             },
         );
@@ -1921,56 +1990,91 @@ mod tests {
         assert!(reg.ready_llm_models().is_empty());
     }
 
+    fn light(id: &str) -> shared::DeviceEntry {
+        shared::DeviceEntry {
+            id: id.into(),
+            device_type: shared::DeviceType::Light,
+        }
+    }
+
+    fn sensor(id: &str) -> shared::DeviceEntry {
+        shared::DeviceEntry {
+            id: id.into(),
+            device_type: shared::DeviceType::Sensor,
+        }
+    }
+
     #[test]
-    fn update_light_devices_stores_and_retrieves() {
+    fn update_devices_stores_and_retrieves() {
         let mut reg = Registry::new();
-        reg.update_light_devices("pi1", vec!["test_bulb".into()], vec!["all".into()]);
-        let (devices, groups) = reg.all_light_device_names();
+        reg.update_devices("pi1", vec![light("test_bulb")], vec!["all".into()]);
+        let (devices, groups) = reg.lighting_targets();
         assert!(devices.contains(&"test_bulb".to_string()));
         assert!(groups.contains(&"all".to_string()));
     }
 
     #[test]
-    fn light_devices_persist_across_open() {
-        let path = "/tmp/test-light-devices-registry.db";
+    fn lighting_targets_excludes_other_device_types() {
+        let mut reg = Registry::new();
+        reg.update_devices(
+            "pi1",
+            vec![light("test_bulb"), sensor("hall_motion")],
+            vec![],
+        );
+        let (devices, _) = reg.lighting_targets();
+        assert_eq!(devices, vec!["test_bulb".to_string()]);
+        assert_eq!(
+            reg.devices_of_type(shared::DeviceType::Sensor),
+            vec!["hall_motion".to_string()]
+        );
+    }
+
+    #[test]
+    fn devices_persist_across_open() {
+        let path = "/tmp/test-devices-registry.db";
         let _ = std::fs::remove_file(path);
 
         {
             let mut reg = Registry::open(path).unwrap();
-            reg.update_light_devices(
+            reg.update_devices(
                 "pi1",
-                vec!["test_bulb".into(), "desk_lamp".into()],
+                vec![light("test_bulb"), sensor("temp_1")],
                 vec!["all".into()],
             );
         }
 
         let reg = Registry::open(path).unwrap();
-        let (devices, groups) = reg.all_light_device_names();
+        let (devices, groups) = reg.lighting_targets();
         assert!(devices.contains(&"test_bulb".to_string()));
-        assert!(devices.contains(&"desk_lamp".to_string()));
+        assert!(!devices.contains(&"temp_1".to_string()));
+        assert_eq!(
+            reg.devices_of_type(shared::DeviceType::Sensor),
+            vec!["temp_1".to_string()]
+        );
         assert!(groups.contains(&"all".to_string()));
 
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn update_light_devices_overwrites_previous() {
+    fn update_devices_overwrites_previous() {
         let mut reg = Registry::new();
-        reg.update_light_devices("pi1", vec!["old_bulb".into()], vec![]);
-        reg.update_light_devices("pi1", vec!["new_bulb".into()], vec!["all".into()]);
-        let (devices, groups) = reg.all_light_device_names();
+        reg.update_devices("pi1", vec![light("old_bulb")], vec![]);
+        reg.update_devices("pi1", vec![light("new_bulb")], vec!["all".into()]);
+        let (devices, groups) = reg.lighting_targets();
         assert!(!devices.contains(&"old_bulb".to_string()));
         assert!(devices.contains(&"new_bulb".to_string()));
         assert!(groups.contains(&"all".to_string()));
     }
 
     #[test]
-    fn all_light_device_names_deduplicates_across_nodes() {
-        // Simulates a stale SQLite row from an old node_id alongside the current one.
+    fn lighting_targets_deduplicates_across_nodes() {
+        // device_id is the primary key, so a device reported by a stale node
+        // row and the current one collapses to a single entry.
         let mut reg = Registry::new();
-        reg.update_light_devices("old-uuid", vec!["test_bulb".into()], vec!["all".into()]);
-        reg.update_light_devices("new-uuid", vec!["test_bulb".into()], vec!["all".into()]);
-        let (devices, groups) = reg.all_light_device_names();
+        reg.update_devices("old-uuid", vec![light("test_bulb")], vec!["all".into()]);
+        reg.update_devices("new-uuid", vec![light("test_bulb")], vec!["all".into()]);
+        let (devices, groups) = reg.lighting_targets();
         assert_eq!(devices.len(), 1);
         assert_eq!(groups.len(), 1);
     }

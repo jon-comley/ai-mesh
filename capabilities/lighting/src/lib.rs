@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use capability_core::{Capability, ToolSchema};
-use capability_zigbee::{ZigbeeClient, ZigbeeError, ZigbeeEvent};
+use capability_zigbee::{ZigbeeClient, ZigbeeEvent, service};
 use shared::{
-    LightAction, LightDeviceListReport, LightStateReport, LightTarget, MeshMessage,
+    DeviceEntry, DeviceListReport, LightAction, LightStateReport, LightTarget, MeshMessage,
     SceneLoadedReport,
 };
 use tokio::sync::{OnceCell, mpsc::Sender};
@@ -43,57 +43,56 @@ impl Capability for LightingCapability {
         // Update the active coordinator sender for the background task.
         *self.coordinator_tx.lock().unwrap() = Some(tx);
 
-        let Ok(host) = std::env::var("MQTT_HOST") else {
+        let node_id = self.node_id.clone();
+
+        // The Zigbee client is a per-node shared service (one MQTT connection,
+        // fanned out to every zigbee-backed capability). Stub mode (MQTT_HOST
+        // unset) returns None: a stub bridge is not a healthy bridge — tell
+        // the coordinator it's offline so the dashboard reflects reality
+        // (otherwise light commands silently vanish into the stub and nothing
+        // on the dashboard explains why).
+        let Some(client) = service::shared_client(&node_id)
+            .await
+            .map_err(|e| format!("zigbee connect: {e}"))?
+        else {
             info!("lighting: MQTT_HOST not set — running as stub");
-            // A stub bridge is not a healthy bridge: tell the coordinator it's
-            // offline so the dashboard reflects reality instead of the default
-            // "online" (otherwise light commands silently vanish into the stub
-            // and nothing on the dashboard explains why).
             self.send_to_coordinator(MeshMessage::ZigbeeStatus { online: false })
                 .await;
             return Ok(());
         };
-        let port: u16 = std::env::var("MQTT_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1883);
-        let node_id = self.node_id.clone();
 
-        // If already initialized, push the current device list to the new connection.
-        if let Some(client) = self.zigbee.get() {
-            let devices = client.devices();
+        // If already started, push the current device list to the new connection.
+        if self.zigbee.get().is_some() {
+            let devices = client.device_entries();
             if !devices.is_empty() {
-                let report = LightDeviceListReport {
+                let report = DeviceListReport {
                     node_id: node_id.clone(),
                     devices,
                     groups: vec![], // Groups will be updated by the next MQTT event
                 };
                 let _ = self
-                    .send_to_coordinator(MeshMessage::LightDeviceList(report))
+                    .send_to_coordinator(MeshMessage::DeviceList(report))
                     .await;
             }
         }
 
-        // Initialize Zigbee client if not already done.
+        // Spawn the event-forwarding task once.
         if self.zigbee.get().is_none() {
-            let (client, mut events) = ZigbeeClient::connect(&host, port, node_id.clone())
-                .await
-                .map_err(|e: ZigbeeError| format!("zigbee connect: {e}"))?;
-            let client = Arc::new(client);
+            let mut events = client.subscribe();
 
-            let initial_devices = client.devices();
+            let initial_devices = client.device_entries();
             if !initial_devices.is_empty() {
-                let report = LightDeviceListReport {
+                let report = DeviceListReport {
                     node_id: node_id.clone(),
                     devices: initial_devices,
                     groups: vec![],
                 };
                 let _ = self
-                    .send_to_coordinator(MeshMessage::LightDeviceList(report))
+                    .send_to_coordinator(MeshMessage::DeviceList(report))
                     .await;
             }
 
-            let known_devices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+            let known_devices: Arc<Mutex<Vec<DeviceEntry>>> = Arc::new(Mutex::new(vec![]));
             let known_groups: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
             let kd = Arc::clone(&known_devices);
             let kg = Arc::clone(&known_groups);
@@ -153,29 +152,27 @@ impl Capability for LightingCapability {
                                     Self::send_via_ctx(&ctx, MeshMessage::LightState(report)).await;
                             }
                         }
-                        Ok(ZigbeeEvent::DeviceListUpdated(names)) => {
+                        Ok(ZigbeeEvent::DeviceListUpdated(entries)) => {
                             info!(
-                                count = names.len(),
+                                count = entries.len(),
                                 "lighting: sending updated device list to coordinator"
                             );
-                            *kd.lock().unwrap() = names.clone();
-                            let report = LightDeviceListReport {
+                            *kd.lock().unwrap() = entries.clone();
+                            let report = DeviceListReport {
                                 node_id: node_id.clone(),
-                                devices: names,
+                                devices: entries,
                                 groups: kg.lock().unwrap().clone(),
                             };
-                            let _ = Self::send_via_ctx(&ctx, MeshMessage::LightDeviceList(report))
-                                .await;
+                            let _ = Self::send_via_ctx(&ctx, MeshMessage::DeviceList(report)).await;
                         }
                         Ok(ZigbeeEvent::GroupListUpdated(names)) => {
                             *kg.lock().unwrap() = names.clone();
-                            let report = LightDeviceListReport {
+                            let report = DeviceListReport {
                                 node_id: node_id.clone(),
                                 devices: kd.lock().unwrap().clone(),
                                 groups: names,
                             };
-                            let _ = Self::send_via_ctx(&ctx, MeshMessage::LightDeviceList(report))
-                                .await;
+                            let _ = Self::send_via_ctx(&ctx, MeshMessage::DeviceList(report)).await;
                         }
                         Ok(ZigbeeEvent::BridgeState { online }) => {
                             let _ = Self::send_via_ctx(&ctx, MeshMessage::ZigbeeStatus { online })
@@ -205,7 +202,7 @@ impl Capability for LightingCapability {
                 .map_err(|_| "race during zigbee init")?;
         }
 
-        info!("lighting: MQTT connected to {host}:{port}");
+        info!("lighting: consuming shared zigbee client");
         Ok(())
     }
 

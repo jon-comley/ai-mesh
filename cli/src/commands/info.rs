@@ -113,7 +113,7 @@ mod tests {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 3.9,
-            features: vec!["llm".into()],
+            features: vec![shared::Feature::Llm],
         }
     }
 

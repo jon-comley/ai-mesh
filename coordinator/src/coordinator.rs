@@ -28,8 +28,17 @@ fn warm_start_lighting(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<Dashboar
     // Suppress internal broadcasts (emit=false) during the loop to prevent massive JSON
     // thundering, then fire a single final update.
     let mut any_new = false;
-    for (node_id, (devices, _)) in reg.get_all_light_devices() {
-        dashboard.push_device_discovery(node_id, devices.clone(), false);
+    let mut lights_by_node: std::collections::HashMap<&String, Vec<String>> = Default::default();
+    for (device_id, (node_id, dt)) in reg.all_devices() {
+        if *dt == shared::DeviceType::Light {
+            lights_by_node
+                .entry(node_id)
+                .or_default()
+                .push(device_id.clone());
+        }
+    }
+    for (node_id, devices) in lights_by_node {
+        dashboard.push_device_discovery(node_id, devices, false);
         any_new = true;
     }
 

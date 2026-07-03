@@ -21,7 +21,7 @@ fn collect_tool_schemas(registry: &Arc<Mutex<Registry>>) -> Vec<serde_json::Valu
     let reg = registry.lock().unwrap();
     let mut seen = std::collections::HashSet::new();
     let mut schemas = Vec::new();
-    for feature in ["lighting", "reaper"] {
+    for feature in [shared::Feature::Lighting, shared::Feature::Reaper] {
         if !reg.nodes_with_feature(feature).is_empty() {
             for schema in tool_schemas_for_feature(feature) {
                 let name = schema["name"].as_str().unwrap_or("").to_string();
@@ -128,7 +128,7 @@ pub async fn handle_intent(
     };
 
     // 3. Build system prompt + conversation
-    let (known_devices, known_groups) = registry.lock().unwrap().all_light_device_names();
+    let (known_devices, known_groups) = registry.lock().unwrap().lighting_targets();
     let device_room_map = registry.lock().unwrap().device_room_name_map();
     let scene_names: Vec<String> = registry
         .lock()
@@ -403,7 +403,7 @@ fn offline_skip_summary(
 
 /// First currently-connected node advertising `feature`, with its sender.
 fn connected_feature_node(
-    feature: &str,
+    feature: shared::Feature,
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
 ) -> Option<(String, tokio::sync::mpsc::Sender<MeshMessage>)> {
@@ -429,7 +429,9 @@ async fn dispatch_light_command(
     connections: &Connections,
     device_states: &[LightStateReport],
 ) -> String {
-    let Some((_, lighting_tx)) = connected_feature_node("lighting", registry, connections) else {
+    let Some((_, lighting_tx)) =
+        connected_feature_node(shared::Feature::Lighting, registry, connections)
+    else {
         return "no lighting node connected".into();
     };
     // Validate target; if it names a room instead of a device, resolve to
@@ -439,7 +441,7 @@ async fn dispatch_light_command(
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
     {
-        let (devices, groups) = registry.lock().unwrap().all_light_device_names();
+        let (devices, groups) = registry.lock().unwrap().lighting_targets();
         let known: Vec<&str> = devices
             .iter()
             .chain(groups.iter())
@@ -502,7 +504,9 @@ async fn dispatch_scene_load(
     connections: &Connections,
     pending_intents: &PendingIntents,
 ) -> String {
-    let Some((_, lighting_tx)) = connected_feature_node("lighting", registry, connections) else {
+    let Some((_, lighting_tx)) =
+        connected_feature_node(shared::Feature::Lighting, registry, connections)
+    else {
         return "no lighting node connected".into();
     };
     let scene_name = args
@@ -557,7 +561,9 @@ async fn dispatch_reaper_command(
     pending_intents: &PendingIntents,
 ) -> String {
     // If multiple REAPER nodes exist in future, extend this to a policy.
-    let Some((reaper_node_id, _)) = connected_feature_node("reaper", registry, connections) else {
+    let Some((reaper_node_id, _)) =
+        connected_feature_node(shared::Feature::Reaper, registry, connections)
+    else {
         return "no REAPER node connected".into();
     };
 
@@ -751,7 +757,7 @@ async fn launch_reaper_and_advise(
     let reaper_node_id = {
         let reg = registry.lock().unwrap();
         let nodes: Vec<String> = reg
-            .nodes_with_feature("reaper")
+            .nodes_with_feature(shared::Feature::Reaper)
             .into_iter()
             .map(|n| n.id)
             .collect();
@@ -824,7 +830,7 @@ async fn run_reaper_lua(
     let reaper_node_id = {
         let reg = registry.lock().unwrap();
         let nodes: Vec<String> = reg
-            .nodes_with_feature("reaper")
+            .nodes_with_feature(shared::Feature::Reaper)
             .into_iter()
             .map(|n| n.id)
             .collect();
@@ -1386,9 +1392,9 @@ pub fn try_parse_tool_calls(output: &str) -> Option<Vec<serde_json::Value>> {
     if calls.is_empty() { None } else { Some(calls) }
 }
 
-fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
+fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> {
     match feature {
-        "lighting" => vec![
+        shared::Feature::Lighting => vec![
             serde_json::json!({
                 "name": "light_command",
                 "description": "Turn lights on/off, set brightness, colour temperature, or colour",
@@ -1441,7 +1447,7 @@ fn tool_schemas_for_feature(feature: &str) -> Vec<serde_json::Value> {
                 }
             }),
         ],
-        "reaper" => vec![
+        shared::Feature::Reaper => vec![
             serde_json::json!({
                 "name": "reaper_transport",
                 "description": "Control REAPER DAW transport or project. Use to start/stop playback, recording, or manage projects.",
@@ -1720,7 +1726,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_with_schemas_includes_tool_section() {
-        let schemas = tool_schemas_for_feature("lighting");
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
         let p = build_system_prompt(&schemas);
         assert!(p.contains("light_command"));
         assert!(p.contains("scene_load"));
@@ -1729,7 +1735,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_no_devices_omits_device_section() {
-        let schemas = tool_schemas_for_feature("lighting");
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
         let p = build_system_prompt(&schemas);
         assert!(!p.contains("Known devices"));
         assert!(!p.contains("Known groups"));
@@ -1740,7 +1746,7 @@ mod tests {
         // /no_think is applied per model family in llama.rs, not baked into the
         // static system prompt. If it appears here the KV-cache benefit is lost
         // for non-Qwen models and the token is sent incorrectly to phi4/gemma/etc.
-        let schemas = tool_schemas_for_feature("lighting");
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
         let p = build_system_prompt(&schemas);
         assert!(
             !p.contains("/no_think"),
@@ -1862,15 +1868,16 @@ mod tests {
 
     #[test]
     fn tool_schemas_for_lighting_returns_two() {
-        let schemas = tool_schemas_for_feature("lighting");
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
         assert_eq!(schemas.len(), 2);
         assert_eq!(schemas[0]["name"], "light_command");
         assert_eq!(schemas[1]["name"], "scene_load");
     }
 
     #[test]
-    fn tool_schemas_for_unknown_feature_returns_empty() {
-        assert!(tool_schemas_for_feature("nonexistent").is_empty());
+    fn tool_schemas_for_toolless_feature_returns_empty() {
+        // The enum makes unknown features unrepresentable; Llm has no tools.
+        assert!(tool_schemas_for_feature(shared::Feature::Llm).is_empty());
     }
 
     #[test]
@@ -2005,7 +2012,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_forbids_special_tags() {
-        let schemas = tool_schemas_for_feature("lighting");
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
         let p = build_system_prompt(&schemas);
         assert!(p.contains("Only output JSON"));
         assert!(p.contains("do NOT output JSON"));
@@ -2013,7 +2020,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_schema_is_compact_json() {
-        let schemas = tool_schemas_for_feature("lighting");
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
         let p = build_system_prompt(&schemas);
         for schema in schemas {
             let s = serde_json::to_string(&schema).unwrap();
@@ -2027,7 +2034,7 @@ mod tests {
 
     #[test]
     fn lighting_schema_has_cx_cy_not_color_string() {
-        let schemas = tool_schemas_for_feature("lighting");
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
         let light_cmd = schemas
             .iter()
             .find(|s| s["name"] == "light_command")

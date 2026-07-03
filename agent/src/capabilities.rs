@@ -23,13 +23,13 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
     // Max model size = 50% of RAM (simple heuristic).
     let max_model_size_gb = hw.ram_gb * 0.5;
 
-    let features: Vec<String> = vec![
+    let features: Vec<shared::Feature> = vec![
         #[cfg(feature = "llm")]
-        "llm".into(),
+        shared::Feature::Llm,
         #[cfg(feature = "lighting")]
-        "lighting".into(),
+        shared::Feature::Lighting,
         #[cfg(feature = "reaper")]
-        "reaper".into(),
+        shared::Feature::Reaper,
     ];
 
     Ok(NodeCapabilities {
@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn features_includes_llm_when_built_with_llm_feature() {
         let caps = detect_capabilities().unwrap();
-        assert!(caps.features.contains(&"llm".to_string()));
+        assert!(caps.features.contains(&shared::Feature::Llm));
     }
 
     #[cfg(not(feature = "llm"))]

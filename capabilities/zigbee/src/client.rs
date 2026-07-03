@@ -14,8 +14,8 @@ use crate::error::ZigbeeError;
 #[derive(Debug, Clone)]
 pub enum ZigbeeEvent {
     StateChanged(LightStateReport),
-    /// Fires once after `bridge/devices` is parsed — full list of device friendly names.
-    DeviceListUpdated(Vec<String>),
+    /// Fires once after `bridge/devices` is parsed — full typed device list.
+    DeviceListUpdated(Vec<shared::DeviceEntry>),
     /// Fires once after `bridge/groups` is parsed — full list of group friendly names.
     GroupListUpdated(Vec<String>),
     /// Fires when `zigbee2mqtt/<device>/availability` changes.
@@ -115,20 +115,25 @@ impl ZigbeeClient {
                         let topic = p.topic.as_str();
                         if topic == "zigbee2mqtt/bridge/devices" {
                             let devices = registry_loop.update_from_payload(p.payload.as_ref());
-                            let names: Vec<String> =
-                                devices.iter().map(|d| d.friendly_name.clone()).collect();
                             for dev in &devices {
                                 info!(
                                     friendly_name = %dev.friendly_name,
                                     ieee = %dev.ieee_address,
+                                    device_type = ?dev.device_type,
                                     "zigbee: device discovered"
                                 );
                             }
-                            // Poll current state for every device. Without this, the dashboard
-                            // only shows state after the first device-triggered Z2M publish,
-                            // which may never come if nothing changes.
+                            // Poll current state for every LIGHT. Without this, the
+                            // dashboard only shows state after the first device-triggered
+                            // Z2M publish, which may never come if nothing changes.
+                            // Sensors push their own reports and don't answer light-field
+                            // gets, so polling them would only produce z2m error noise.
                             let poll_client = subscribe_client.clone();
-                            let poll_names = names.clone();
+                            let poll_names: Vec<String> = devices
+                                .iter()
+                                .filter(|d| d.device_type == shared::DeviceType::Light)
+                                .map(|d| d.friendly_name.clone())
+                                .collect();
                             tokio::spawn(async move {
                                 for name in &poll_names {
                                     let topic = format!("zigbee2mqtt/{name}/get");
@@ -141,7 +146,14 @@ impl ZigbeeClient {
                                     }
                                 }
                             });
-                            let _ = tx_loop.send(ZigbeeEvent::DeviceListUpdated(names));
+                            let entries: Vec<shared::DeviceEntry> = devices
+                                .iter()
+                                .map(|d| shared::DeviceEntry {
+                                    id: d.friendly_name.clone(),
+                                    device_type: d.device_type,
+                                })
+                                .collect();
+                            let _ = tx_loop.send(ZigbeeEvent::DeviceListUpdated(entries));
                         } else if topic == "zigbee2mqtt/bridge/groups" {
                             let groups = parse_group_names(p.payload.as_ref());
                             known_groups = groups.iter().cloned().collect();
@@ -267,6 +279,18 @@ impl ZigbeeClient {
             .all()
             .into_iter()
             .map(|d| d.friendly_name)
+            .collect()
+    }
+
+    /// Full typed inventory for a `DeviceListReport`.
+    pub fn device_entries(&self) -> Vec<shared::DeviceEntry> {
+        self.registry
+            .all()
+            .into_iter()
+            .map(|d| shared::DeviceEntry {
+                id: d.friendly_name,
+                device_type: d.device_type,
+            })
             .collect()
     }
 }
