@@ -123,7 +123,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
             gpu_inference: false,
             ane_inference: false,
             max_model_size_gb: 8.0,
-            features: vec!["llm".into()],
+            features: vec![shared::Feature::Llm],
         }),
     )
     .await;

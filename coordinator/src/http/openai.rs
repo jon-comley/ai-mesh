@@ -900,7 +900,7 @@ mod tests {
         reg.update_capabilities(
             node_id,
             NodeCapabilities {
-                features: vec!["llm".into()],
+                features: vec![shared::Feature::Llm],
                 ..NodeCapabilities::default()
             },
         );

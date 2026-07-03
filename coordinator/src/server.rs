@@ -364,7 +364,7 @@ where
         {
             let mut reg = registry.lock().unwrap();
             // Was this the lighting node? Check before clearing anything.
-            let was_lighting = reg.node_has_feature(&id, "lighting");
+            let was_lighting = reg.node_has_feature(&id, shared::Feature::Lighting);
             reg.clear_node_models(&id);
             if let Some(dash) = &dashboard {
                 let snapshot = build_model_snapshot(&reg);
@@ -1002,21 +1002,29 @@ async fn process_message(
         MeshMessage::LightState(report) => {
             handle_light_state(report, registry, node_id.as_deref(), dashboard)
         }
-        MeshMessage::LightDeviceList(mut report) => {
+        MeshMessage::DeviceList(mut report) => {
             // Trust the authenticated connection's id (see LightState above) so a
-            // stale payload id can't create a phantom light_devices row.
+            // stale payload id can't create a phantom device row.
             if let Some(id) = node_id.as_deref() {
                 report.node_id = id.to_string();
             }
             info!(
                 node_id = %report.node_id,
-                devices = ?report.devices,
+                devices = report.devices.len(),
                 groups = ?report.groups,
-                "light device list received"
+                "device list received"
             );
             if let Some(dash) = dashboard {
                 dash.push_group_update(&report.node_id, report.groups.clone());
-                dash.push_device_discovery(&report.node_id, report.devices.clone(), true);
+                // Placeholder cards are a lighting-UI concept — seed them for
+                // lights only; other device classes get their own snapshots.
+                let light_names: Vec<String> = report
+                    .devices
+                    .iter()
+                    .filter(|d| d.device_type == shared::DeviceType::Light)
+                    .map(|d| d.id.clone())
+                    .collect();
+                dash.push_device_discovery(&report.node_id, light_names, true);
             }
             {
                 let mut reg = registry.lock().unwrap();
@@ -1026,7 +1034,7 @@ async fn process_message(
                 for g in &report.groups {
                     reg.delete_device(g);
                 }
-                reg.update_light_devices(&report.node_id, report.devices, report.groups);
+                reg.update_devices(&report.node_id, report.devices, report.groups);
             }
             None
         }
@@ -1278,14 +1286,17 @@ mod tests {
         let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
         let mut node_id = Some("pi1-real".to_string());
 
-        let report = shared::LightDeviceListReport {
+        let report = shared::DeviceListReport {
             node_id: "unknown".into(), // stale payload — must be ignored
-            devices: vec!["bulb1".into()],
+            devices: vec![shared::DeviceEntry {
+                id: "bulb1".into(),
+                device_type: shared::DeviceType::Light,
+            }],
             groups: vec!["all".into()],
         };
 
         let reply = process_message(
-            MeshMessage::LightDeviceList(report),
+            MeshMessage::DeviceList(report),
             &registry,
             &connections,
             &pi,

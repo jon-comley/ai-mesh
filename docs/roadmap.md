@@ -668,6 +668,15 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > tab + single Devices tab (pairing is bridge-wide, so one tab from day one) →
 > E blinds (+ sun-geometry automation) → F HVAC. The design notes below stand;
 > the plan supersedes the sequencing details where they differ.
+>
+> **Phase A complete (2026-07-03, wire v5):** typed `devices` registry table
+> (+ `light_groups`) replacing the `light_devices` blob; z2m `exposes`
+> classification in discovery (light/sensor/cover/climate/unknown, actuators
+> win over sensor props, state polls now lights-only); `ZigbeeClient` hoisted
+> to `capability_zigbee::service::shared_client` (one MQTT connection,
+> broadcast fan-out — lighting consumes it, sensors will subscribe beside it);
+> `DeviceListReport` with typed entries; `shared::Feature` enum replacing raw
+> feature strings across registry/intent/agent. 769 tests.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
@@ -904,7 +913,9 @@ audit was bug-focused). Prioritized; none are defects.
   Token-source precedence also intentionally lives in two places
   (`auth::token_from_parts`, `openai::request_token`) — both delegate to the
   shared `bearer_token`, drift risk accepted until a third token source exists.
-- Accepted debt, revisit post-first-client: `Result<_, String>` error
+- Accepted debt, revisit post-first-client: hand-rolled SQLite migrations in
+  `init_schema` (ALTER/DROP inline) — adopt a migration runner (refinery/sqlx)
+  if schema evolution outgrows it; `Result<_, String>` error
   handling throughout (a shared error enum is churn without payoff yet);
   `DashboardState` as a 16-mutex grab-bag (grouping into sub-structs is
   heavy churn); `layout.js` at 3,401 lines (dashboard is demo-frozen per

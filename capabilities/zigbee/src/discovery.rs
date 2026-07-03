@@ -1,3 +1,4 @@
+use shared::DeviceType;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use tracing::warn;
@@ -6,6 +7,56 @@ use tracing::warn;
 pub struct DeviceInfo {
     pub ieee_address: String,
     pub friendly_name: String,
+    pub device_type: DeviceType,
+}
+
+/// Classify a device from its z2m `definition.exposes` list.
+///
+/// z2m publishes, per device, the features it exposes (a `light` composite,
+/// `cover` composite, `climate` composite, or bare sensor properties like
+/// `temperature` / `humidity` / `occupancy` / `contact`). Order matters:
+/// anything actuating (light/cover/climate) wins over sensor properties,
+/// because actuators commonly also report sensor-ish fields.
+fn classify(exposes: Option<&serde_json::Value>) -> DeviceType {
+    let Some(list) = exposes.and_then(|e| e.as_array()) else {
+        return DeviceType::Unknown;
+    };
+    let types: Vec<&str> = list
+        .iter()
+        .filter_map(|e| e.get("type").and_then(|t| t.as_str()))
+        .collect();
+    if types.contains(&"light") {
+        return DeviceType::Light;
+    }
+    if types.contains(&"cover") {
+        return DeviceType::Cover;
+    }
+    if types.contains(&"climate") {
+        return DeviceType::Climate;
+    }
+    // Sensors expose bare properties (no composite type): match on names.
+    const SENSOR_PROPS: &[&str] = &[
+        "temperature",
+        "humidity",
+        "occupancy",
+        "contact",
+        "illuminance",
+        "pressure",
+        "water_leak",
+        "smoke",
+        "vibration",
+    ];
+    let has_sensor_prop = list.iter().any(|e| {
+        e.get("property")
+            .or_else(|| e.get("name"))
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| SENSOR_PROPS.contains(&p))
+    });
+    if has_sensor_prop {
+        DeviceType::Sensor
+    } else {
+        DeviceType::Unknown
+    }
 }
 
 /// Live registry of Zigbee devices, keyed by friendly_name.
@@ -49,10 +100,12 @@ impl DeviceRegistry {
                 .and_then(|v| v.as_str())
                 .unwrap_or(&ieee)
                 .to_owned();
+            let device_type = classify(entry.pointer("/definition/exposes"));
 
             let info = DeviceInfo {
                 ieee_address: ieee,
                 friendly_name: name.clone(),
+                device_type,
             };
             discovered.push(info.clone());
             new_map.insert(name, info);
@@ -99,6 +152,86 @@ mod tests {
         let found = reg.update_from_payload(payload.as_bytes());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].friendly_name, "test_bulb");
+    }
+
+    #[test]
+    fn classifies_light_from_exposes() {
+        let payload = r#"[{
+            "ieee_address": "0x1", "friendly_name": "bulb",
+            "definition": {"exposes": [
+                {"type": "light", "features": []},
+                {"property": "linkquality", "type": "numeric"}
+            ]}
+        }]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Light);
+    }
+
+    #[test]
+    fn classifies_sensor_from_bare_properties() {
+        let payload = r#"[{
+            "ieee_address": "0x2", "friendly_name": "temp_sensor",
+            "definition": {"exposes": [
+                {"property": "temperature", "type": "numeric"},
+                {"property": "humidity", "type": "numeric"},
+                {"property": "battery", "type": "numeric"}
+            ]}
+        }]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Sensor);
+    }
+
+    #[test]
+    fn classifies_occupancy_sensor() {
+        let payload = r#"[{
+            "ieee_address": "0x3", "friendly_name": "hall_motion",
+            "definition": {"exposes": [
+                {"property": "occupancy", "type": "binary"},
+                {"property": "battery", "type": "numeric"}
+            ]}
+        }]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Sensor);
+    }
+
+    #[test]
+    fn classifies_cover_and_climate() {
+        let payload = r#"[
+            {"ieee_address": "0x4", "friendly_name": "blind",
+             "definition": {"exposes": [{"type": "cover", "features": []}]}},
+            {"ieee_address": "0x5", "friendly_name": "trv",
+             "definition": {"exposes": [{"type": "climate", "features": []}]}}
+        ]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Cover);
+        assert_eq!(found[1].device_type, DeviceType::Climate);
+    }
+
+    #[test]
+    fn actuator_wins_over_sensor_properties() {
+        // Lights often also expose sensor-ish numerics; the composite wins.
+        let payload = r#"[{
+            "ieee_address": "0x6", "friendly_name": "fancy_bulb",
+            "definition": {"exposes": [
+                {"property": "temperature", "type": "numeric"},
+                {"type": "light", "features": []}
+            ]}
+        }]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Light);
+    }
+
+    #[test]
+    fn missing_exposes_is_unknown() {
+        let payload = r#"[{"ieee_address": "0x7", "friendly_name": "mystery"}]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Unknown);
     }
 
     #[test]
