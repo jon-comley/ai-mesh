@@ -844,16 +844,20 @@ audit was bug-focused). Prioritized; none are defects.
   existing section comments. Mechanical.
 - [x] **Node lifecycle: no way to remove a dead node** *(done 2026-07-03:
   `Registry::remove_node`, `DELETE /api/nodes/{id}` (409 while connected),
-  `just remove-node <id>`; purge the live `chaos` row after next deploy;
-  auto-purge of long-silent nodes still deferred)*. The stale `chaos`
+  `just remove-node <id>`; verified live 2026-07-03 — the stale `chaos-test`
+  row is gone; auto-purge of long-silent nodes still deferred)*. Follow-up
+  UX gaps found while hunting the id: `mesh info <unknown-id>` fabricates a
+  placeholder record instead of a clear not-found, and neither `just nodes`
+  nor the dashboard displays node ids (removal needs one) — resolve
+  hostnames in the endpoint or show ids in the table. The stale `chaos`
   registry row (from June chaos-testing) has sat in `just nodes` / the
   dashboard for weeks; the only remedy is `reset-registry` (nukes
   everything). Add `DELETE /api/nodes/{id}` + `mesh remove-node`, and
   consider auto-purging nodes silent > 7 days. Matters for client
   deployments — a permanently-dead node in the dashboard erodes trust.
 - [x] **Streaming usage accuracy** *(done 2026-07-03: agent sends
-  `stream_options.include_usage` on streamed llama-server requests; verify
-  live `usage.prompt_tokens` after next deploy)* — llama-server was not asked for usage on
+  `stream_options.include_usage` on streamed llama-server requests;
+  verified live 2026-07-03 — streamed `usage.prompt_tokens` is real)* — llama-server was not asked for usage on
   the streaming path, so `usage.prompt_tokens` falls back to 0 in stream
   responses. llama.cpp's OpenAI compat supports
   `stream_options.include_usage`; send it from `llama::post_chat` when
