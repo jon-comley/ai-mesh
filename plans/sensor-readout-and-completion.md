@@ -152,19 +152,38 @@ touching `SensorReport` again:
    - On pass: mark Phase B **complete** in `docs/roadmap.md` (11.8 section)
      and update the focus memory.
 
-4. **Phase C — the differentiator** (software-only, can start before
-   hardware arrives; see `plans/multi-domain-home.md` Phase C):
-   - `"sensors"` arm in the intent router's tool schemas: `get_climate
-     { room? }` answered **from the coordinator's sensor snapshot** — no
-     node round-trip (sensors are read-only push).
-   - `build_sensor_context` injecting per-room lines ("Office: 21.4°C,
-     47% RH, motion 3m ago") beside the existing device context in the
-     intent system prompt.
-   - Multi-command chat (old chat-roadmap item 7): "turn off the kitchen
-     lights and tell me the bedroom temperature" — multiple tool calls per
-     turn.
-   - Gate: `just intent "what temperature is the office?"` answers from
-     real sensor data.
+4. **Phase C — the differentiator** — code shipped 2026-07-04
+   (`coordinator/src/intent.rs`, no wire bump, 824 tests), **not yet
+   live-verified against a real LLM**:
+   - ~~`"sensors"` arm in the intent router's tool schemas~~ **Done**:
+     `get_climate { room? }` answered from the coordinator's sensor
+     snapshot — no node round-trip.
+   - ~~`build_sensor_context`~~ **Done**, per-device (not per-room) lines —
+     a room commonly has more than one sensor, so per-device lets the model
+     see which reading came from which unit; room tag is inline, same shape
+     as `build_device_context`.
+   - ~~Multi-command chat~~ **Done via the existing array mechanism**:
+     `try_parse_tool_calls` already supported JSON arrays (compound light
+     commands used this); the system prompt now tells the model a mixed
+     action+climate turn ("turn off the lights and tell me the bedroom
+     temperature") must express the climate part as a `get_climate` call
+     inside that array, since one reply can't mix free text with JSON.
+   - **Bonus fix while in the area**: `lighting.js`'s sensor readout had
+     `contact` backwards — z2m's `contact: true` means *closed*, the card
+     showed "Open". No contact sensors were in the hardware batch, so this
+     was never exercised live; caught while writing the same formatting
+     logic in Rust and checked against z2m's docs.
+   - **Gate (needs the live hardware + a working local LLM, not yet run):**
+     `just intent "what temperature is the office?"` answers from real
+     sensor data; a mixed action+climate turn produces both effects.
+   - **Deferred (not this slice):** no recency/staleness timestamp on
+     readings. `offline: true` covers the dead-sensor case, but a live
+     sensor whose last real update was a while ago (illuminance only
+     updates on motion events, so a quiet room's lux reading can be stale
+     while `online` stays true) has no "as of when" signal. Real gap, but
+     not small — same shape as the illuminance addition (another wire bump,
+     threaded through parser/merge/registry/UI). Worth doing once the live
+     gate shows it's actually confusing, not speculatively before.
 
 5. **Phase D — not sensors work, but supersedes Part 1's interim UI**:
    Lighting tab → Home; room cards render mixed-domain members (lights get

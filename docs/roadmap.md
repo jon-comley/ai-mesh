@@ -718,10 +718,35 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > drop it), and the readout card (`💡lx`). See `docs/pi1-lighting-setup.md`
 > §9 for the model-specific note.
 >
+> **Phase C started (2026-07-04)** — sensor tools + context (item 1) done
+> in `coordinator/src/intent.rs`, no wire change (coordinator-only, reads
+> the existing `SensorReport` snapshot): `get_climate { room? }` tool
+> answered entirely from `DashboardState::get_sensor_snapshot()` — no node
+> round-trip, matching the plan's spec — plus `build_sensor_context`
+> injecting per-device sensor readings (room-tagged, same shape as
+> `build_device_context`) into every intent prompt. System prompt extended
+> so climate questions combined with a real action ("turn off the lights
+> and tell me the bedroom temperature") go through the JSON tool-call array
+> the parser already supported — the existing array mechanism was the
+> answer to item 2 (multi-command chat) once a climate *tool* existed to
+> put in it; the "answer directly, no JSON" rule alone couldn't express a
+> mixed action+question turn in one reply. Item 3 (room-aware phrasing)
+> comes for free from `get_climate`'s `room` arg using the same
+> case-insensitive room-name match as light-command targeting.
+> Caught and fixed a real pre-existing bug while writing the sensor-reading
+> formatter shared with the readout card: z2m's `contact: true` means
+> *closed* (reed switch made), not open — `lighting.js`'s card had it
+> backwards since the readout shipped; no contact sensors were in the
+> hardware batch yet, so it was never exercised live. 824 tests (+11).
+> **Not yet live-verified against a real LLM** — needs a working local
+> model + the hardware live gate to actually watch "what's the office
+> temperature?" resolve correctly.
+>
 > **Next:** `plans/sensor-readout-and-completion.md` Part 2 — deploy
 > (`deploy-coordinator` before `deploy-node`, wire v8) → hardware live gate
-> (pair all 7, verify readings/battery/availability/restart-survival) →
-> Phase C (get_climate tool + sensor context + multi-command chat).
+> (pair all 7, verify readings/battery/availability/restart-survival, then
+> exercise Phase C's `get_climate` for real: `just intent "what's the
+> office temperature?"` and a mixed action+climate turn).
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past

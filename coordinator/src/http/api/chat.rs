@@ -65,6 +65,7 @@ pub async fn chat(
         state.pending_inferences.clone(),
         state.pending_intents.clone(),
         state.get_light_snapshot(),
+        state.get_sensor_snapshot(),
         reaper_online,
         gateway,
     )

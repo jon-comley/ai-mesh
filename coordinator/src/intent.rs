@@ -5,7 +5,7 @@ use crate::server::Connections;
 use shared::{
     ChatTurn, IntentRequest, IntentResponse, LightAction, LightCommandRequest, LightStateReport,
     LightTarget, MeshMessage, ReaperCommandRequest, ReaperScriptRequest, SceneLoadRequest,
-    ToolCallRecord, WIRE_VERSION,
+    SensorReport, ToolCallRecord, WIRE_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,11 @@ fn collect_tool_schemas(registry: &Arc<Mutex<Registry>>) -> Vec<serde_json::Valu
     let reg = registry.lock().unwrap();
     let mut seen = std::collections::HashSet::new();
     let mut schemas = Vec::new();
-    for feature in [shared::Feature::Lighting, shared::Feature::Reaper] {
+    for feature in [
+        shared::Feature::Lighting,
+        shared::Feature::Reaper,
+        shared::Feature::Sensors,
+    ] {
         if !reg.nodes_with_feature(feature).is_empty() {
             for schema in tool_schemas_for_feature(feature) {
                 let name = schema["name"].as_str().unwrap_or("").to_string();
@@ -91,6 +95,7 @@ pub async fn handle_intent(
     pending_inferences: PendingInferences,
     pending_intents: PendingIntents,
     device_states: Vec<LightStateReport>,
+    sensor_states: Vec<SensorReport>,
     reaper_online: bool,
     gateway: Option<crate::cloud::GatewayInvocation>,
 ) -> IntentResponse {
@@ -129,6 +134,10 @@ pub async fn handle_intent(
 
     // 3. Build system prompt + conversation
     let (known_devices, known_groups) = registry.lock().unwrap().lighting_targets();
+    let known_sensors = registry
+        .lock()
+        .unwrap()
+        .devices_of_type(shared::DeviceType::Sensor);
     let device_room_map = registry.lock().unwrap().device_room_name_map();
     let scene_names: Vec<String> = registry
         .lock()
@@ -145,10 +154,14 @@ pub async fn handle_intent(
         &device_room_map,
         &scene_names,
     );
+    let sensor_ctx = build_sensor_context(&known_sensors, &sensor_states, &device_room_map);
     let (history_for_prompt, compression_applied, prompt_tokens_before, prompt_tokens_after) =
         build_history(&request, gateway.as_ref());
 
-    let user_prompt = format!("{device_ctx}{history_for_prompt}{}", request.text);
+    let user_prompt = format!(
+        "{device_ctx}{sensor_ctx}{history_for_prompt}{}",
+        request.text
+    );
 
     // 4/5. Run inference. Cloud mode calls the online provider and, on any
     //       failure, records the error and falls back to local. Both paths share
@@ -278,6 +291,7 @@ pub async fn handle_intent(
                     &connections,
                     &pending_intents,
                     &device_states,
+                    &sensor_states,
                 )
                 .await
             };
@@ -418,6 +432,105 @@ fn connected_feature_node(
     candidates
         .into_iter()
         .find_map(|id| conns.get(&id).cloned().map(|tx| (id, tx)))
+}
+
+/// Render one sensor's readings as a short comma-joined phrase (no device
+/// name — callers prefix that). Only fields the device actually reports are
+/// included. `occupancy`/`contact` are read as-is off the wire: z2m's
+/// `occupancy` is true while motion is (recently) detected — the device's own
+/// `motion_timeout`/`occupied_to_unoccupied_delay` already provides the
+/// "recently" debounce, so there is no separate "time since last motion" to
+/// compute here. `contact: true` means the reed switch is made — i.e. closed.
+fn format_sensor_readout(s: &SensorReport) -> String {
+    let mut parts = Vec::new();
+    if let Some(t) = s.temperature {
+        parts.push(format!("{t:.1}°C"));
+    }
+    if let Some(h) = s.humidity {
+        parts.push(format!("{}% RH", h.round() as i64));
+    }
+    if let Some(o) = s.occupancy {
+        parts.push(if o { "motion detected" } else { "no motion" }.to_string());
+    }
+    if let Some(c) = s.contact {
+        parts.push(if c { "closed" } else { "open" }.to_string());
+    }
+    if let Some(lux) = s.illuminance {
+        parts.push(format!("{} lx", lux.round() as i64));
+    }
+    if let Some(b) = s.battery {
+        parts.push(format!("battery {b}%"));
+    }
+    if !s.online {
+        parts.push("offline — last known reading".to_string());
+    }
+    if parts.is_empty() {
+        "no reading yet".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// `get_climate`: answered entirely from the coordinator's own sensor
+/// snapshot — sensors are read-only push devices, so unlike every other
+/// tool here there is no node round-trip and no timeout to wait on.
+fn dispatch_get_climate(
+    args: &serde_json::Value,
+    registry: &Arc<Mutex<Registry>>,
+    sensor_states: &[SensorReport],
+) -> String {
+    let room_arg = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let reg = registry.lock().unwrap();
+    let sensor_ids: std::collections::HashSet<String> = reg
+        .devices_of_type(shared::DeviceType::Sensor)
+        .into_iter()
+        .collect();
+    if sensor_ids.is_empty() {
+        return "no sensors are paired".into();
+    }
+
+    let target_room = match room_arg {
+        Some(room) => {
+            let rooms = reg.list_rooms();
+            match rooms.iter().find(|r| r.name.eq_ignore_ascii_case(room)) {
+                Some(r) => Some(r.clone()),
+                None => {
+                    let known: Vec<&str> = rooms.iter().map(|r| r.name.as_str()).collect();
+                    return format!("no room named '{room}' — known rooms: {}", known.join(", "));
+                }
+            }
+        }
+        None => None,
+    };
+    drop(reg);
+
+    let matches: Vec<&SensorReport> = sensor_states
+        .iter()
+        .filter(|s| sensor_ids.contains(&s.device_id))
+        .filter(|s| {
+            target_room
+                .as_ref()
+                .is_none_or(|r| r.device_ids.contains(&s.device_id))
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return match room_arg {
+            Some(room) => format!("no sensors are assigned to '{room}'"),
+            None => "no sensor readings available yet".into(),
+        };
+    }
+
+    matches
+        .iter()
+        .map(|s| format!("{}: {}", s.device_id, format_sensor_readout(s)))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// `light_command`: validate/resolve the target (device, group, or room name),
@@ -613,6 +726,7 @@ async fn dispatch_reaper_command(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_tool(
     request_id: &str,
     tool_name: &str,
@@ -621,11 +735,13 @@ async fn dispatch_tool(
     connections: &Connections,
     pending_intents: &PendingIntents,
     device_states: &[LightStateReport],
+    sensor_states: &[SensorReport],
 ) -> String {
     match tool_name {
         "light_command" => {
             dispatch_light_command(request_id, args, registry, connections, device_states).await
         }
+        "get_climate" => dispatch_get_climate(&args, registry, sensor_states),
         "scene_load" => {
             dispatch_scene_load(request_id, &args, registry, connections, pending_intents).await
         }
@@ -1616,6 +1732,20 @@ fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> 
                 }
             }),
         ],
+        shared::Feature::Sensors => vec![serde_json::json!({
+            "name": "get_climate",
+            "description": "Get the latest sensor readings (temperature, humidity, motion, contact, light level, battery) for a room or the whole home. Answered instantly from live sensor data — no need to wait. Use this for questions like 'what's the temperature in the office?', 'is anyone in the living room?', 'is the office warm?'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "room": {
+                        "type": "string",
+                        "description": "Room name, e.g. 'Living Room'. Omit to get every room with a sensor."
+                    }
+                },
+                "required": []
+            }
+        })],
         _ => vec![],
     }
 }
@@ -1644,10 +1774,11 @@ Rules:
 - When the user names a room (e.g. "kitchen lights", "the bedroom"), find devices tagged [RoomName]. If no group for that room exists, pick the first online device in that room.
 - If the user says "one of", "just one", or "a single", always pick the FIRST online device listed for that room.
 - If the user says "all" or "everything", use a group if one exists; otherwise emit one array element per online device in that room.
-- For compound requests (e.g. "dim warm light"), emit one array element per command — brightness and colour/temperature are separate tool calls.
+- For compound requests (e.g. "dim warm light", or requests spanning different tools like lighting + REAPER), emit one array element per command — one tool call per distinct action.
 - Never issue a command to a device shown as [OFFLINE — not responding].
 - For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists. Count devices sharing a [RoomName] tag to answer "how many". do NOT output JSON for these questions.
-- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something."#
+- Sensor/climate questions (temperature, humidity, motion, contact, light level — e.g. "what's the office temperature?", "is anyone in the living room?", "is the office warm?") are the one exception: answer directly from the sensor readings below OR call get_climate — either is fine for a sensor-only question. But if the request COMBINES a climate question with a real action ("turn off the lights and tell me the bedroom temperature"), the climate part MUST be a get_climate call inside the JSON array — a single reply cannot mix free text with JSON tool calls.
+- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something, or asking a sensor/climate question per the rule above."#
     )
 }
 
@@ -1713,6 +1844,36 @@ pub fn build_device_context(
     }
 }
 
+/// Sensor equivalent of [`build_device_context`] — flat per-device lines
+/// (room tag inline, same as lights) rather than one line per room: a room
+/// commonly holds more than one sensor (a temp/humidity unit and a separate
+/// motion sensor), and per-device lines let the model see exactly which
+/// device each reading came from without a merge step here duplicating the
+/// one `DashboardState::push_sensor_update` already does for persistence.
+pub fn build_sensor_context(
+    known_sensors: &[String],
+    sensor_states: &[SensorReport],
+    device_room_map: &HashMap<String, String>,
+) -> String {
+    if known_sensors.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec!["Known sensors:".to_string()];
+    for name in known_sensors {
+        let room_tag = device_room_map
+            .get(name)
+            .map(|r| format!(" [{r}]"))
+            .unwrap_or_default();
+        let readout = sensor_states
+            .iter()
+            .find(|s| &s.device_id == name)
+            .map(format_sensor_readout)
+            .unwrap_or_else(|| "no reading yet".to_string());
+        lines.push(format!("  - {name}{room_tag}: {readout}"));
+    }
+    format!("{}\n\n", lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1774,6 +1935,206 @@ mod tests {
     fn build_device_context_empty_returns_empty() {
         let ctx = build_device_context(&[], &[], &[], &HashMap::new(), &[]);
         assert!(ctx.is_empty());
+    }
+
+    fn sensor_report(device_id: &str) -> SensorReport {
+        SensorReport {
+            node_id: "pi1".into(),
+            device_id: device_id.into(),
+            temperature: Some(21.4),
+            humidity: Some(47.0),
+            battery: Some(98),
+            occupancy: None,
+            contact: None,
+            illuminance: None,
+            online: true,
+        }
+    }
+
+    #[test]
+    fn build_sensor_context_empty_returns_empty() {
+        assert!(build_sensor_context(&[], &[], &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn build_sensor_context_injects_readings_and_room_tag() {
+        let known = vec!["office_climate".to_string()];
+        let states = vec![sensor_report("office_climate")];
+        let mut rooms = HashMap::new();
+        rooms.insert("office_climate".to_string(), "Office".to_string());
+        let ctx = build_sensor_context(&known, &states, &rooms);
+        assert!(ctx.contains("Known sensors"));
+        assert!(ctx.contains("office_climate [Office]"));
+        assert!(ctx.contains("21.4°C"));
+        assert!(ctx.contains("47% RH"));
+        assert!(ctx.contains("battery 98%"));
+    }
+
+    #[test]
+    fn build_sensor_context_no_reading_yet() {
+        let known = vec!["new_sensor".to_string()];
+        let ctx = build_sensor_context(&known, &[], &HashMap::new());
+        assert!(ctx.contains("new_sensor"));
+        assert!(ctx.contains("no reading yet"));
+    }
+
+    #[test]
+    fn format_sensor_readout_offline_flags_stale_reading() {
+        let mut s = sensor_report("x");
+        s.online = false;
+        let readout = format_sensor_readout(&s);
+        assert!(readout.contains("offline"));
+        assert!(
+            readout.contains("21.4°C"),
+            "stale reading still shown: {readout}"
+        );
+    }
+
+    #[test]
+    fn format_sensor_readout_contact_true_means_closed() {
+        // z2m convention: contact=true means the reed switch is made (closed).
+        let mut s = sensor_report("x");
+        s.temperature = None;
+        s.humidity = None;
+        s.battery = None;
+        s.contact = Some(true);
+        assert_eq!(format_sensor_readout(&s), "closed");
+        s.contact = Some(false);
+        assert_eq!(format_sensor_readout(&s), "open");
+    }
+
+    #[test]
+    fn get_climate_schema_present_for_sensors_feature() {
+        let schemas = tool_schemas_for_feature(shared::Feature::Sensors);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["name"], "get_climate");
+    }
+
+    #[test]
+    fn dispatch_get_climate_filters_by_room() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.update_devices(
+                "pi1",
+                vec![
+                    shared::DeviceEntry {
+                        id: "office_climate".into(),
+                        device_type: shared::DeviceType::Sensor,
+                    },
+                    shared::DeviceEntry {
+                        id: "hall_motion".into(),
+                        device_type: shared::DeviceType::Sensor,
+                    },
+                ],
+                vec![],
+            );
+            let office = reg.create_room("Office");
+            reg.add_device_to_room(&office.id, "office_climate");
+            let hall = reg.create_room("Hallway");
+            reg.add_device_to_room(&hall.id, "hall_motion");
+        }
+        let states = vec![
+            sensor_report("office_climate"),
+            sensor_report("hall_motion"),
+        ];
+
+        let all = dispatch_get_climate(&serde_json::json!({}), &registry, &states);
+        assert!(all.contains("office_climate"));
+        assert!(all.contains("hall_motion"));
+
+        let office_only =
+            dispatch_get_climate(&serde_json::json!({"room": "Office"}), &registry, &states);
+        assert!(office_only.contains("office_climate"));
+        assert!(!office_only.contains("hall_motion"));
+    }
+
+    #[test]
+    fn dispatch_get_climate_unknown_room_lists_known_rooms() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.update_devices(
+                "pi1",
+                vec![shared::DeviceEntry {
+                    id: "office_climate".into(),
+                    device_type: shared::DeviceType::Sensor,
+                }],
+                vec![],
+            );
+            reg.create_room("Office");
+        }
+        let result = dispatch_get_climate(
+            &serde_json::json!({"room": "Nonexistent"}),
+            &registry,
+            &[sensor_report("office_climate")],
+        );
+        assert!(result.contains("no room named"));
+        assert!(result.contains("Office"));
+    }
+
+    #[test]
+    fn dispatch_get_climate_no_sensors_paired() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let result = dispatch_get_climate(&serde_json::json!({}), &registry, &[]);
+        assert_eq!(result, "no sensors are paired");
+    }
+
+    #[test]
+    fn dispatch_get_climate_room_with_no_sensors() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.update_devices(
+                "pi1",
+                vec![shared::DeviceEntry {
+                    id: "office_climate".into(),
+                    device_type: shared::DeviceType::Sensor,
+                }],
+                vec![],
+            );
+            reg.create_room("Office");
+            reg.create_room("Bedroom");
+            let office = reg.list_rooms();
+            let office_id = office
+                .iter()
+                .find(|r| r.name == "Office")
+                .unwrap()
+                .id
+                .clone();
+            reg.add_device_to_room(&office_id, "office_climate");
+        }
+        let result = dispatch_get_climate(
+            &serde_json::json!({"room": "Bedroom"}),
+            &registry,
+            &[sensor_report("office_climate")],
+        );
+        assert!(result.contains("no sensors are assigned to 'Bedroom'"));
+    }
+
+    #[test]
+    fn collect_tool_schemas_includes_sensors_feature_when_connected() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        // A node advertising the sensors feature makes get_climate available,
+        // mirroring how lighting/reaper schemas are gated.
+        registry
+            .lock()
+            .unwrap()
+            .update_heartbeat(shared::NodeIdentity {
+                id: "pi1".into(),
+                hostname: "pi1".into(),
+                ip: "10.0.0.10".into(),
+                role: shared::NodeRole::Compute,
+            });
+        registry.lock().unwrap().update_capabilities(
+            "pi1",
+            shared::NodeCapabilities {
+                features: vec![shared::Feature::Sensors],
+                ..Default::default()
+            },
+        );
+        let schemas = collect_tool_schemas(&registry);
+        assert!(schemas.iter().any(|s| s["name"] == "get_climate"));
     }
 
     #[test]
