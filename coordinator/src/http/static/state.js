@@ -90,7 +90,7 @@ export const SCENE_ICON = '\u{1F3AD}';     // 🎭 — per-light "in scene" mark
 // "On" powers a room OR a single bulb up to a consistent Hue default warm white
 // (≈2700K), so on/off is predictable. Users wanting a soft on/off use brightness
 // instead. Order matters: brightness/temp before the on flag. Shared by the room
-// and device handlers (lighting.js imports it).
+// and device handlers (rooms.js imports it).
 export const HUE_DEFAULT_ON = [
   { action: 'brightness', value: 200 },
   { action: 'color_temp', value: 370 },

@@ -185,11 +185,11 @@ touching `SensorReport` again:
      threaded through parser/merge/registry/UI). Worth doing once the live
      gate shows it's actually confusing, not speculatively before.
 
-5. **Phase D — not sensors work, but supersedes Part 1's interim UI**:
-   Lighting tab → Home; room cards render mixed-domain members (lights get
-   controls, sensors get the readout strip); single Devices tab absorbs
-   pairing + inventory. When D lands, delete Part 1's sensor section from
-   the Lighting panel in the same commit (house rule: no legacy mirrors).
+5. ~~Phase D~~ **Done (2026-07-04)** — see `plans/multi-domain-home.md`'s
+   Phase D entry for the full account. Part 1's interim `#sensor-section`
+   flat list (and the whole `lighting.js` file it lived in) was deleted in
+   the same commit, superseded by per-room sensor strips on the new Home
+   tab and the Sensors group in the new Devices tab.
 
 ## House rules for the implementing session
 

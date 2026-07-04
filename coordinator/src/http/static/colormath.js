@@ -1,7 +1,7 @@
 // ── CIE colour-space conversions shared by the dashboard panels ──────────────
 // Hue-bulb colour is CIE xy; the UI works in RGB/HSL. These were duplicated
-// verbatim in rooms.js and lighting.js — single home now. (ctToHex lives in
-// layout.js since it owns the mireds gradient.)
+// verbatim across panels — single home now. (ctToHex lives in layout.js
+// since it owns the mireds gradient.)
 
 // CIE xy + brightness (0-254) → sRGB { r, g, b } (0-255), gamma-corrected.
 export function xyToRgb(x, y, bri = 254) {

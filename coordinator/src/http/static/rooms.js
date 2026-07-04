@@ -6,6 +6,7 @@ import * as layout from '/static/layout.js';
 import { xyToRgb, hslToXy } from '/static/colormath.js';
 import { buildSlider, buildColourWheel } from '/static/controls.js';
 import { buildLightControls, buildTempBar, dismissOpenLightControl } from '/static/lightcontrols.js';
+import { buildSensorCard } from '/static/devicewidgets.js';
 import {
   createRoom, deleteRoom, renameRoom, reorderRooms,
   addDeviceToRoom, removeDeviceFromRoom, reorderRoomDevices,
@@ -113,7 +114,7 @@ document.addEventListener('dragend', () => {
   let scrollEl = null;   // cached per drag session
 
   const resolveScrollEl = () => {
-    const panel = document.getElementById('panel-lighting');
+    const panel = document.getElementById('panel-home');
     if (panel && getComputedStyle(panel).overflowY !== 'visible') return panel;
     return document.scrollingElement || document.documentElement;
   };
@@ -248,11 +249,21 @@ async function fetchDeviceNames() {
   } catch (_) {}
 }
 
+// devicesMap holds BOTH lights and sensors, tagged by `device_type` — each
+// WS event (LightingUpdate/SensorUpdate) is always a full domain snapshot, so
+// each notify* function only ever clears+repopulates ITS OWN type's entries,
+// never touching the other domain's.
+function clearByType(type) {
+  for (const [id, dev] of devicesMap) {
+    if (dev.device_type === type) devicesMap.delete(id);
+  }
+}
+
 export function notifyDevices(devices) {
-  devicesMap.clear();
+  clearByType('light');
   for (const dev of devices) {
     const reconciled = reconcilePending(dev);
-    devicesMap.set(dev.device_id, reconciled);
+    devicesMap.set(dev.device_id, { ...reconciled, device_type: 'light' });
     layout.notifyDeviceUpdate(dev.device_id, reconciled);
   }
   inferZigbeeStatus();
@@ -261,6 +272,19 @@ export function notifyDevices(devices) {
   if (document.querySelector('.slider-active, .colour-wheel.dragging, .temp-bar.dragging')) return;
   patchDeviceCards();
   refreshRoomTriggers();
+}
+
+// Sensors never participate in the 3D layout (fixture placement is a
+// lights-only concept — see layout.js), so unlike notifyDevices there is no
+// layout.notifyDeviceUpdate call here. Sensor updates are infrequent enough
+// (push-on-change, no slider dragging involved) that a full render() is fine
+// — no need for a sensor-specific patch path mirroring patchDeviceCards.
+export function notifySensors(sensors) {
+  clearByType('sensor');
+  for (const dev of sensors) {
+    devicesMap.set(dev.device_id, { ...dev, device_type: 'sensor' });
+  }
+  render();
 }
 
 // The colour/temperature indicator paint functions live in indicators.js.
@@ -327,14 +351,19 @@ export function handleZigbeeStatus(online) {
 }
 
 function inferZigbeeStatus() {
-  // If we have rooms but zero devices have ever arrived, zigbee2mqtt never
+  // Lights only: z2m marks a mains-powered light unreachable within ~10 min,
+  // but battery sensors get a ~25h passive timeout (see docs/pi1-lighting-setup.md
+  // §9) — a bridge that just went down would still show sensors "online" for
+  // hours, making this heuristic less reliable if sensors were included.
+  const lights = [...devicesMap.values()].filter(d => d.device_type === 'light');
+  // If we have rooms but zero lights have ever arrived, zigbee2mqtt never
   // connected — treat as offline.
-  if (model.rooms.length > 0 && devicesMap.size === 0) {
+  if (model.rooms.length > 0 && lights.length === 0) {
     zigbeeOnline = false;
     return;
   }
-  // If every known device is offline, the bridge is almost certainly down.
-  if (devicesMap.size > 0 && [...devicesMap.values()].every(d => !d.online)) {
+  // If every known light is offline, the bridge is almost certainly down.
+  if (lights.length > 0 && lights.every(d => !d.online)) {
     zigbeeOnline = false;
     return;
   }
@@ -351,7 +380,7 @@ export function notifySolar(azimuth, elevation) {
 // ── Main render ──────────────────────────────────────────────────────────────
 
 function render() {
-  const container = document.getElementById('lighting-list');
+  const container = document.getElementById('home-list');
   if (!container || dragSrc || roomDragId) return;
   if (container.querySelector('.layout-view')) return; // layout open — don't wipe
   if (container.querySelector('.room-slider-input.slider-active')) return; // room slider thumb being dragged — don't wipe it out
@@ -364,7 +393,13 @@ function render() {
   inferZigbeeStatus();
 
   const assigned = new Set(model.rooms.flatMap(r => r.device_ids));
-  const unassigned = [...devicesMap.keys()].filter(id => !assigned.has(id));
+  // Lights only — this strip is the light-specific drag-and-drop assignment
+  // UI (chips carry on/off state, pulse-identify, etc). Sensors are assigned
+  // to rooms via the Devices tab's dropdown instead (devices.js), so an
+  // unassigned sensor must never render here as a light-shaped chip.
+  const unassigned = [...devicesMap.entries()]
+    .filter(([id, d]) => d.device_type === 'light' && !assigned.has(id))
+    .map(([id]) => id);
 
   // An open temp/colour section has a document-level pointerdown listener bound
   // to a card we're about to remove. Disarm it before wiping, or it leaks (and
@@ -661,10 +696,11 @@ function renderRoomCard(room) {
     const ghostName = document.createElement('span');
     ghostName.className = 'room-drag-ghost-name';
     ghostName.textContent = room.name || 'Room';
+    const bulbCount = room.device_ids.filter(id => devicesMap.get(id)?.device_type !== 'sensor').length;
     const ghostCount = document.createElement('span');
     ghostCount.className = 'room-drag-ghost-count';
-    ghostCount.textContent = room.device_ids.length
-      ? `${room.device_ids.length} bulb${room.device_ids.length !== 1 ? 's' : ''}`
+    ghostCount.textContent = bulbCount
+      ? `${bulbCount} bulb${bulbCount !== 1 ? 's' : ''}`
       : 'empty';
     ghost.appendChild(ghostName);
     ghost.appendChild(ghostCount);
@@ -699,12 +735,16 @@ function renderRoomCard(room) {
     if (wasReordering) saveRoomOrder();
   });
 
-  // Shared state for header
-  const roomDevicesAll = room.device_ids.map(id => devicesMap.get(id)).filter(Boolean);
+  // Shared state for header — lights only: on/off, colour, brightness, and the
+  // "empty" gate for the On/Off/brightness controls are all light-specific
+  // concepts, so a room holding only a sensor must still count as empty here.
+  const roomDevicesAll = room.device_ids
+    .map(id => devicesMap.get(id))
+    .filter(d => d && d.device_type !== 'sensor');
   const anyOn = roomDevicesAll.some(d => d.on);
   const hasColour = roomDevicesAll.some(d => d.color_xy != null);
   const activeEffect = roomEffectsMap.get(room.id) || null;
-  const empty = room.device_ids.length === 0;
+  const empty = roomDevicesAll.length === 0;
 
   // Header: two rows — name row on top, controls row below
   const header = document.createElement('div');
@@ -953,7 +993,10 @@ function renderRoomCard(room) {
       }
       if (activeSceneByRoom.get(room.id) === scene.id) {
         chip.classList.add('active');
-        const memberCount = room.device_ids?.length ?? 0;
+        // Scenes are a lights-only concept — a sensor sharing the room isn't
+        // "in" or "paused from" the scene, so it must not count as a member.
+        const memberCount = (room.device_ids ?? [])
+          .filter(id => devicesMap.get(id)?.device_type !== 'sensor').length;
         const pausedCount = pausedSceneDevices.get(room.id)?.size ?? 0;
         if (pausedCount > 0 && pausedCount < memberCount) chip.classList.add('partly-paused');
         if (memberCount > 0 && pausedCount >= memberCount) chip.classList.add('all-paused');
@@ -979,15 +1022,22 @@ function renderRoomCard(room) {
   });
 
   // Device cards
+  // room.device_ids is untyped (any device, light or sensor); the light-only
+  // ids drive this list, a placeholder covers a light not yet reported.
+  // Sensor members render in their own read-only strip below instead — they
+  // have no brightness/on-off shape for buildDeviceCard to work with, and no
+  // controls to expose (see buildSensorCard's own comment for why the widget
+  // is shared as-is between here and the Devices tab).
+  const lightIds = room.device_ids.filter(id => devicesMap.get(id)?.device_type !== 'sensor');
   const devicesEl = document.createElement('div');
   devicesEl.className = 'room-devices';
-  if (room.device_ids.length === 0) {
+  if (lightIds.length === 0) {
     const hint = document.createElement('span');
     hint.className = 'room-drop-hint';
     hint.textContent = 'Drop bulbs here';
     devicesEl.appendChild(hint);
   } else {
-    for (const deviceId of room.device_ids) {
+    for (const deviceId of lightIds) {
       const dev = devicesMap.get(deviceId);
       if (dev) {
         // Device cards are intentionally NOT draggable — accidental drags were
@@ -1003,6 +1053,19 @@ function renderRoomCard(room) {
   }
   body.appendChild(devicesEl);
   wireDropZone(body, room.id);
+
+  // Sensor members — read-only, room-assignment happens on the Devices tab.
+  const roomSensors = room.device_ids
+    .map(id => devicesMap.get(id))
+    .filter(d => d?.device_type === 'sensor');
+  if (roomSensors.length > 0) {
+    const sensorsEl = document.createElement('div');
+    sensorsEl.className = 'room-sensors';
+    for (const dev of roomSensors) {
+      sensorsEl.appendChild(buildSensorCard(dev));
+    }
+    body.appendChild(sensorsEl);
+  }
 
   // Scenes section (full list with save button)
   body.appendChild(buildScenesSection(room.id));
@@ -1450,11 +1513,13 @@ function startRename(nameEl, room) {
 async function sendRoomCommand(roomId, body, room, isGlobal = false) {
   if (!isGlobal) model.globalLight = null;
   clearRoomActiveScene(roomId);
-  // Optimistic update
+  // Optimistic update — lights only; a room command is a light command, and
+  // stamping fake on/brightness fields onto a sensor's cached reading would
+  // corrupt it for no reason.
   if (room) {
     for (const deviceId of room.device_ids) {
       const dev = devicesMap.get(deviceId);
-      if (dev) {
+      if (dev && dev.device_type !== 'sensor') {
         let updated = dev;
         if (body.action === 'on') updated = { ...updated, on: true };
         else if (body.action === 'off') updated = { ...updated, on: false };
