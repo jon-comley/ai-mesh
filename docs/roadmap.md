@@ -703,6 +703,11 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > unpairs (was registry-only — the device re-announced and came back);
 > Lighting tab gains a Pair-device button + live feed (interim home until
 > Phase D's Devices tab). 805 tests.
+>
+> **Next: `plans/sensor-readout-and-completion.md`** — the one visible gap
+> (no UI renders sensor readings; frontend `SensorUpdate` handler missing)
+> plus the ordered completion checklist: interim readout → deploy → hardware
+> live gate → Phase C.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
