@@ -257,14 +257,21 @@ joining; check the device manual. Rename after pairing exactly as in §5.
 Everything downstream is automatic:
 
 - The agent classifies each device from its Z2M `exposes` metadata — anything
-  reporting temperature/humidity/occupancy/contact without light controls lands
-  as `DeviceType::Sensor`.
+  reporting temperature/humidity/occupancy/contact/illuminance without light
+  controls lands as `DeviceType::Sensor`.
 - Sensor publishes are parsed (temperature, humidity, battery, occupancy,
-  contact) and forwarded to the coordinator as `SensorState`; readings are
-  merged field-wise, persisted across coordinator restarts, and served at
-  `GET /api/sensors` plus pushed to the dashboard as `SensorUpdate` WS events.
+  contact, illuminance) and forwarded to the coordinator as `SensorState`;
+  readings are merged field-wise, persisted across coordinator restarts, and
+  served at `GET /api/sensors` plus pushed to the dashboard as `SensorUpdate`
+  WS events. Readout cards render on the Lighting panel.
 - Sensors are never state-polled (`/get` returns z2m errors for them) — they
   push on their own schedule.
+- **Model note — SONOFF SNZB-02P / SNZB-03P R2 (verified 2026-07-04):**
+  SNZB-02P is temperature + humidity + battery (no voltage). SNZB-03P R2
+  is occupancy + a *numeric lux* `illuminance` + battery (no voltage either).
+  The **base** SNZB-03P (non-R2) instead exposes a `dim`/`bright` enum on a
+  property named `illumination` — different key, different shape — which
+  this parser does not read; only the R2's numeric lux is captured.
 
 **Availability caveat:** battery sensors are *passive* devices — z2m only
 marks them offline after `availability.passive.timeout` (default **25 h**,

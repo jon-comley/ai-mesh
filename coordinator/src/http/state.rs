@@ -526,6 +526,7 @@ impl DashboardState {
                     battery: report.battery.or(existing.battery),
                     occupancy: report.occupancy.or(existing.occupancy),
                     contact: report.contact.or(existing.contact),
+                    illuminance: report.illuminance.or(existing.illuminance),
                     online: report.online,
                 },
                 None => report,
@@ -1786,6 +1787,7 @@ mod tests {
             battery: None,
             occupancy: None,
             contact: None,
+            illuminance: None,
             online: true,
         }
     }
@@ -1826,6 +1828,30 @@ mod tests {
         let snap = state.get_sensor_snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].battery, Some(98));
+    }
+
+    #[test]
+    fn push_sensor_update_merges_illuminance() {
+        // SNZB-03P R2 shape: occupancy/illuminance/battery, no temperature.
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut first = make_sensor_report("hall_motion", None);
+        first.occupancy = Some(true);
+        first.illuminance = Some(120.0);
+        state.push_sensor_update(first);
+        // A later occupancy-only publish (illuminance only updates on detection
+        // per the device's own behaviour) must not drop the last lux reading.
+        let mut later = make_sensor_report("hall_motion", None);
+        later.occupancy = Some(false);
+        let merged = state.push_sensor_update(later);
+        assert_eq!(merged.occupancy, Some(false), "new reading wins");
+        assert_eq!(
+            merged.illuminance,
+            Some(120.0),
+            "missing field keeps stored value"
+        );
     }
 
     #[test]
