@@ -273,7 +273,8 @@ function sensorReadout(s) {
   if (s.humidity != null) parts.push(`${Math.round(s.humidity)}% RH`);
   if (s.battery != null) parts.push(`🔋${s.battery}%`);
   if (s.occupancy != null) parts.push(s.occupancy ? 'Motion' : 'Clear');
-  if (s.contact != null) parts.push(s.contact ? 'Open' : 'Closed');
+  // z2m convention: contact=true means the reed switch is made — i.e. closed.
+  if (s.contact != null) parts.push(s.contact ? 'Closed' : 'Open');
   if (s.illuminance != null) parts.push(`💡${Math.round(s.illuminance)} lx`);
   return parts.join(' · ');
 }

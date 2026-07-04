@@ -976,6 +976,9 @@ async fn process_message(
             let device_states = dashboard
                 .map(|d| d.get_light_snapshot())
                 .unwrap_or_default();
+            let sensor_states = dashboard
+                .map(|d| d.get_sensor_snapshot())
+                .unwrap_or_default();
             let reaper_online = dashboard
                 .and_then(|d| d.get_reaper_snapshot())
                 .is_some_and(|s| s.reaper_online);
@@ -986,6 +989,7 @@ async fn process_message(
                 pending_inferences.clone(),
                 pending_intents.clone(),
                 device_states,
+                sensor_states,
                 reaper_online,
                 None, // mesh-originated intents stay local; the cloud gateway is dashboard-driven
             )
