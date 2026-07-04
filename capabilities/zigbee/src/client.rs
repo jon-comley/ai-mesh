@@ -14,6 +14,8 @@ use crate::error::ZigbeeError;
 #[derive(Debug, Clone)]
 pub enum ZigbeeEvent {
     StateChanged(LightStateReport),
+    /// A sensor-class device published new readings.
+    SensorChanged(shared::SensorReport),
     /// Fires once after `bridge/devices` is parsed — full typed device list.
     DeviceListUpdated(Vec<shared::DeviceEntry>),
     /// Fires once after `bridge/groups` is parsed — full list of group friendly names.
@@ -172,9 +174,30 @@ impl ZigbeeClient {
                             let _ = tx_loop.send(ZigbeeEvent::BridgeState { online });
                         } else if topic.ends_with("/state") || topic.matches('/').count() == 1 {
                             // Both the legacy "<device>/state" subtopic and the standard Z2M
-                            // base topic "<device>" carry device state. Only warn on failures
-                            // for the explicit /state form; base topics receive many non-state
-                            // event types (actions, linkquality, etc.) so we skip silently.
+                            // base topic "<device>" carry device state. Route by the device's
+                            // classified type: sensors get their own parser and event; the
+                            // light path below stays unchanged. Only warn on failures for the
+                            // explicit /state form; base topics receive many non-state event
+                            // types (actions, linkquality, etc.) so we skip silently.
+                            let topic_device = topic
+                                .strip_prefix("zigbee2mqtt/")
+                                .map(|t| t.trim_end_matches("/state"))
+                                .unwrap_or_default();
+                            let is_sensor = registry_loop
+                                .get_by_name(topic_device)
+                                .is_some_and(|d| d.device_type == shared::DeviceType::Sensor);
+                            if is_sensor {
+                                if let Some(mut report) =
+                                    parse_sensor_report(topic_device, p.payload.as_ref(), &node_id)
+                                {
+                                    report.online = availability
+                                        .get(&report.device_id)
+                                        .copied()
+                                        .unwrap_or(true);
+                                    let _ = tx_loop.send(ZigbeeEvent::SensorChanged(report));
+                                }
+                                continue;
+                            }
                             match parse_state_report(topic, p.payload.as_ref(), &node_id) {
                                 Some(mut report) if !known_groups.contains(&report.device_id) => {
                                     // Stamp the real availability: a `/get` poll reply for an
@@ -319,6 +342,59 @@ fn parse_bridge_online(payload: &[u8]) -> Option<bool> {
                     .map(|s| s == "online")
             }),
     }
+}
+
+/// Parse a sensor-class device's publish: temperature/humidity/battery/
+/// occupancy/contact. Returns None when no sensor field is present (button
+/// actions, linkquality-only publishes). `device_name` is the topic remainder
+/// the caller already extracted (friendly names may contain slashes, so the
+/// full remainder — not the first segment — is the name). Raw `voltage` and
+/// `linkquality` are deliberately not captured (diagnostics live in the z2m
+/// frontend); add voltage here if a paired device turns out to expose it
+/// without a computed battery percentage.
+fn parse_sensor_report(
+    device_name: &str,
+    payload: &[u8],
+    node_id: &str,
+) -> Option<shared::SensorReport> {
+    let json: serde_json::Value = serde_json::from_slice(payload).ok()?;
+
+    let temperature = json
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    let humidity = json
+        .get("humidity")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    // Some converters emit fractional percentages (voltage-derived), so parse
+    // as float rather than integer.
+    let battery = json
+        .get("battery")
+        .and_then(|v| v.as_f64())
+        .map(|v| v.clamp(0.0, 100.0).round() as u8);
+    let occupancy = json.get("occupancy").and_then(|v| v.as_bool());
+    let contact = json.get("contact").and_then(|v| v.as_bool());
+
+    if temperature.is_none()
+        && humidity.is_none()
+        && battery.is_none()
+        && occupancy.is_none()
+        && contact.is_none()
+    {
+        return None;
+    }
+
+    Some(shared::SensorReport {
+        node_id: node_id.to_owned(),
+        device_id: device_name.to_owned(),
+        temperature,
+        humidity,
+        battery,
+        occupancy,
+        contact,
+        online: true,
+    })
 }
 
 fn parse_state_report(topic: &str, payload: &[u8], node_id: &str) -> Option<LightStateReport> {
@@ -546,5 +622,53 @@ mod tests {
             "parser accepts group topics — caller must filter"
         );
         assert_eq!(r.unwrap().device_id, "all");
+    }
+
+    #[test]
+    fn parse_sensor_temp_humidity_battery() {
+        let r = parse_sensor_report(
+            "office_climate",
+            br#"{"temperature":21.4,"humidity":47.2,"battery":98,"linkquality":120}"#,
+            "pi1",
+        )
+        .unwrap();
+        assert_eq!(r.node_id, "pi1");
+        assert_eq!(r.device_id, "office_climate");
+        assert_eq!(r.temperature, Some(21.4));
+        assert_eq!(r.humidity, Some(47.2));
+        assert_eq!(r.battery, Some(98));
+        assert_eq!(r.occupancy, None);
+        assert_eq!(r.contact, None);
+        assert!(r.online);
+    }
+
+    #[test]
+    fn parse_sensor_fractional_battery() {
+        // Voltage-derived converters emit fractional percentages (e.g. Xiaomi).
+        let r = parse_sensor_report("motion_hall", br#"{"battery":97.5}"#, "pi1").unwrap();
+        assert_eq!(r.battery, Some(98));
+    }
+
+    #[test]
+    fn parse_sensor_occupancy_and_contact() {
+        let r = parse_sensor_report("motion_hall", br#"{"occupancy":true}"#, "pi1").unwrap();
+        assert_eq!(r.occupancy, Some(true));
+        let r = parse_sensor_report("front_door", br#"{"contact":false}"#, "pi1").unwrap();
+        assert_eq!(r.contact, Some(false));
+    }
+
+    #[test]
+    fn parse_sensor_action_only_returns_none() {
+        // Button actions and linkquality-only publishes carry no sensor fields.
+        assert!(
+            parse_sensor_report("remote", br#"{"action":"single","linkquality":87}"#, "pi1")
+                .is_none()
+        );
+        assert!(parse_sensor_report("remote", br#"{"linkquality":87}"#, "pi1").is_none());
+    }
+
+    #[test]
+    fn parse_sensor_malformed_json_returns_none() {
+        assert!(parse_sensor_report("office_climate", b"not json", "pi1").is_none());
     }
 }

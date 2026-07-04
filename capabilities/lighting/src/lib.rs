@@ -108,7 +108,21 @@ impl Capability for LightingCapability {
                         Ok(ZigbeeEvent::StateChanged(report)) => {
                             let _ = Self::send_via_ctx(&ctx, MeshMessage::LightState(report)).await;
                         }
+                        // Sensor readings belong to the sensors capability.
+                        Ok(ZigbeeEvent::SensorChanged(_)) => {}
                         Ok(ZigbeeEvent::DeviceAvailability { device_id, online }) => {
+                            // Availability fires for every device on the bridge; only
+                            // lights get the warm-white restore and LightState offline
+                            // report. Sensor availability is the sensors capability's
+                            // to report (and lights-only commands would just produce
+                            // z2m converter errors on a sensor).
+                            let is_light = client_bg
+                                .device_registry()
+                                .get_by_name(&device_id)
+                                .is_some_and(|d| d.device_type == shared::DeviceType::Light);
+                            if !is_light {
+                                continue;
+                            }
                             if online {
                                 // Bulb just powered on — restore to warm white (2700 K).
                                 // Any active room effect will override this within its next tick.

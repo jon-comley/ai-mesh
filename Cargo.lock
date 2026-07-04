@@ -11,6 +11,7 @@ dependencies = [
  "capability-lighting",
  "capability-llm",
  "capability-reaper",
+ "capability-sensors",
  "dirs",
  "futures-util",
  "mdns-sd",
@@ -354,6 +355,18 @@ dependencies = [
  "capability-core",
  "reqwest",
  "serde_json",
+ "shared",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "capability-sensors"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "capability-core",
+ "capability-zigbee",
  "shared",
  "tokio",
  "tracing",

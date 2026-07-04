@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 5;
+pub const WIRE_VERSION: u32 = 6;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -285,6 +285,27 @@ pub struct DeviceEntry {
     pub device_type: DeviceType,
 }
 
+/// One sensor's latest readings, pushed by a sensors node whenever the
+/// device publishes. All measurement fields optional — devices carry
+/// different subsets (a temp/humidity sensor has no occupancy; a motion
+/// sensor has no temperature).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SensorReport {
+    pub node_id: String,
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub humidity: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occupancy: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<bool>,
+    pub online: bool,
+}
+
 /// Full device inventory for a node's Zigbee bridge, sent on every MQTT
 /// (re)connect. Typed per device; `groups` stays lighting-specific (Z2M
 /// groups are a lighting concept).
@@ -441,6 +462,7 @@ pub enum MeshMessage {
     LightCommand(LightCommandRequest),
     LightState(LightStateReport),
     DeviceList(DeviceListReport),
+    SensorState(SensorReport),
     SceneLoad(SceneLoadRequest),
     SceneLoaded(SceneLoadedReport),
     // Intent routing
@@ -1001,6 +1023,26 @@ mod tests {
             error: Some("unknown scene".into()),
         });
         let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn sensor_state_roundtrip() {
+        let msg = MeshMessage::SensorState(SensorReport {
+            node_id: "pi1".into(),
+            device_id: "office_temp".into(),
+            temperature: Some(21.4),
+            humidity: Some(47.0),
+            battery: Some(98),
+            occupancy: None,
+            contact: None,
+            online: true,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("occupancy"),
+            "None fields omitted on the wire"
+        );
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
     }
 
