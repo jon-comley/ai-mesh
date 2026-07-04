@@ -1964,6 +1964,30 @@ body {
 .pair-feed-line { padding: 2px 0; }
 .pair-feed-ts { color: var(--text-muted); margin-right: 6px; }
 
+/* ── Sensor cards (interim readout — Phase D's Home tab supersedes this) ────── */
+#sensor-section h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.sensor-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.sensor-card.is-offline {
+  opacity: 0.55;
+}
+.sensor-readout {
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 .room-scene-save-btn {
   background: none;
   border: 1px dashed var(--border);

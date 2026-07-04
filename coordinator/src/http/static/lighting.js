@@ -14,6 +14,7 @@ let groupsSet = new Set();
 let dragSrc = null;
 let roomsActive = false;
 let renderedIds = new Set();
+let sensorsMap = new Map();
 
 export function setRoomsActive() { roomsActive = true; }
 
@@ -216,6 +217,64 @@ async function sendCommand(deviceId, body) {
 
 function formatDeviceName(id) {
   return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// ── Sensors (interim read-only readout — Phase D's Home tab supersedes this) ─
+// Own container + own map so a sensor update never interferes with the light
+// cards' drag-to-reorder (render() above bails while dragging/rooms-active;
+// sensors have no such interaction to protect, so they always just re-render).
+
+export function handleSensorUpdate(evt) {
+  sensorsMap.clear();
+  for (const s of evt.sensors) sensorsMap.set(s.device_id, s);
+  renderSensors();
+}
+
+function renderSensors() {
+  const section = document.getElementById('sensor-section');
+  const container = document.getElementById('sensor-list');
+  if (!section || !container) return;
+
+  if (sensorsMap.size === 0) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  container.innerHTML = '';
+
+  const sorted = [...sensorsMap.values()].sort((a, b) => a.device_id.localeCompare(b.device_id));
+  for (const s of sorted) {
+    const card = document.createElement('div');
+    card.className = `light-card sensor-card${s.online ? '' : ' is-offline'}`;
+    card.setAttribute('data-device-id', s.device_id);
+
+    const displayName = formatDeviceName(s.device_id);
+    const readout = sensorReadout(s);
+    const statusBadge = s.online
+      ? ''
+      : '<span class="badge badge-muted">Offline</span>';
+
+    card.innerHTML = `
+      <div class="light-name-group">
+        <span class="light-name">${esc(displayName)}</span>
+        <span class="light-node-badge">${esc(s.node_id)}</span>
+      </div>
+      <div class="light-card-header-right">
+        ${readout ? `<span class="sensor-readout">${esc(readout)}</span>` : ''}
+        ${statusBadge}
+      </div>`;
+    container.appendChild(card);
+  }
+}
+
+function sensorReadout(s) {
+  const parts = [];
+  if (s.temperature != null) parts.push(`${s.temperature.toFixed(1)}°C`);
+  if (s.humidity != null) parts.push(`${Math.round(s.humidity)}% RH`);
+  if (s.battery != null) parts.push(`🔋${s.battery}%`);
+  if (s.occupancy != null) parts.push(s.occupancy ? 'Motion' : 'Clear');
+  if (s.contact != null) parts.push(s.contact ? 'Open' : 'Closed');
+  return parts.join(' · ');
 }
 
 // ── Pairing (bridge-wide permit-join + live join feed) ──────────────────────

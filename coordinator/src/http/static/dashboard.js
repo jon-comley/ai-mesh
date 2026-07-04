@@ -80,6 +80,7 @@ const handlers = {
   EffectUpdate: evt => effects.handleEffectUpdate(evt),
   ZigbeeStatus: evt => { rooms.handleZigbeeStatus(evt.online); health.handleZigbeeStatus(evt.online); },
   ZigbeeJoinEvent: evt => lighting.handleJoinEvent(evt),
+  SensorUpdate: evt => lighting.handleSensorUpdate(evt),
   ErrorUpdate: evt => errors.handleErrorUpdate(evt),
   SecurityUpdate: evt => security.handleSecurityUpdate(evt),
   ReaperUpdate: evt => reaper.handleReaperUpdate(evt),
