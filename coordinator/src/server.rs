@@ -1002,6 +1002,26 @@ async fn process_message(
         MeshMessage::LightState(report) => {
             handle_light_state(report, registry, node_id.as_deref(), dashboard)
         }
+        MeshMessage::SensorState(mut report) => {
+            // Trust the authenticated connection's id (see LightState above).
+            if let Some(id) = node_id.as_deref() {
+                report.node_id = id.to_string();
+            }
+            info!(
+                node_id = %report.node_id,
+                device_id = %report.device_id,
+                online = %report.online,
+                "sensor state report received"
+            );
+            // The dashboard snapshot owns the field-wise merge; persist the
+            // merged record so partial publishes never wipe stored readings.
+            let merged = match dashboard {
+                Some(dash) => dash.push_sensor_update(report),
+                None => report,
+            };
+            registry.lock().unwrap().save_sensor_state(&merged);
+            None
+        }
         MeshMessage::DeviceList(mut report) => {
             // Trust the authenticated connection's id (see LightState above) so a
             // stale payload id can't create a phantom device row.
@@ -1277,6 +1297,49 @@ mod tests {
             Some("pi1-real".to_string()),
             "command routing must use the connection node_id, not the report payload",
         );
+    }
+
+    // A sensor report flows into both the dashboard snapshot and the registry,
+    // keyed by the authenticated connection's id (same invariant as LightState).
+    #[tokio::test]
+    async fn sensor_state_persists_and_surfaces_on_connection_id() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        let mut node_id = Some("pi1-real".to_string());
+
+        let report = shared::SensorReport {
+            node_id: "unknown".into(), // stale payload — must be ignored
+            device_id: "office_climate".into(),
+            temperature: Some(21.4),
+            humidity: Some(47.0),
+            battery: Some(98),
+            occupancy: None,
+            contact: None,
+            online: true,
+        };
+
+        let reply = process_message(
+            MeshMessage::SensorState(report),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        assert!(reply.is_none(), "sensor state report produces no reply");
+        let snap = dashboard.get_sensor_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].node_id, "pi1-real", "connection id must win");
+        assert_eq!(snap[0].temperature, Some(21.4));
+        let persisted = registry.lock().unwrap().load_sensor_states();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].node_id, "pi1-real");
     }
 
     // Same invariant for the device-list report: a stale node_id must not create

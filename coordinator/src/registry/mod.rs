@@ -1,5 +1,5 @@
 use rusqlite::{Connection, params};
-use shared::messages::LightStateReport;
+use shared::messages::{LightStateReport, SensorReport};
 use shared::{
     HardwareSpec, ModelAllocationFull, ModelLifecycleState, NodeCapabilities, NodeIdentity,
     NodeRecordFull, NodeRecordLite, NodeRole,
@@ -233,6 +233,11 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             states_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS light_states (
+            device_id  TEXT PRIMARY KEY,
+            node_id    TEXT NOT NULL,
+            state_json TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sensor_states (
             device_id  TEXT PRIMARY KEY,
             node_id    TEXT NOT NULL,
             state_json TEXT NOT NULL
@@ -1210,6 +1215,13 @@ impl Registry {
         ) {
             warn!(error = %e, "delete_device: remove light_states failed");
         }
+        // Remove sensor state
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM sensor_states WHERE device_id = ?1",
+            params![device_id],
+        ) {
+            warn!(error = %e, "delete_device: remove sensor_states failed");
+        }
         // Remove light position
         if let Err(e) = self.conn.execute(
             "DELETE FROM light_positions WHERE device_id = ?1",
@@ -1376,6 +1388,46 @@ impl Registry {
             .map(|rows| {
                 rows.filter_map(|r| r.ok())
                     .filter_map(|json| serde_json::from_str::<LightStateReport>(&json).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // ── Sensor state persistence ──────────────────────────────────────────────
+
+    /// Upsert the last-known readings for a sensor so they survive coordinator
+    /// restarts. Callers persist the *merged* report (see
+    /// `DashboardState::push_sensor_update`) so an availability-only report
+    /// never wipes the stored readings.
+    pub fn save_sensor_state(&mut self, report: &SensorReport) {
+        let state_json = match serde_json::to_string(report) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(error = %e, "save_sensor_state: serialize failed");
+                return;
+            }
+        };
+        if let Err(e) = self.conn.execute(
+            "INSERT OR REPLACE INTO sensor_states (device_id, node_id, state_json) VALUES (?1, ?2, ?3)",
+            params![report.device_id, report.node_id, state_json],
+        ) {
+            warn!(error = %e, "save_sensor_state: db write failed");
+        }
+    }
+
+    /// Return all persisted sensor states — used to warm-start the dashboard on boot.
+    pub fn load_sensor_states(&self) -> Vec<SensorReport> {
+        let mut stmt = match self.conn.prepare("SELECT state_json FROM sensor_states") {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "load_sensor_states: prepare failed");
+                return vec![];
+            }
+        };
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .map(|rows| {
+                rows.filter_map(|r| r.ok())
+                    .filter_map(|json| serde_json::from_str::<SensorReport>(&json).ok())
                     .collect()
             })
             .unwrap_or_default()
@@ -2454,6 +2506,67 @@ mod tests {
         assert_eq!(states[0].device_id, "living_room_bulb");
         assert!(states[0].on);
         let _ = std::fs::remove_file(path);
+    }
+
+    // ── Sensor state persistence ──────────────────────────────────────────────
+
+    fn make_sensor_state(device_id: &str, node_id: &str, temperature: f32) -> SensorReport {
+        SensorReport {
+            device_id: device_id.into(),
+            node_id: node_id.into(),
+            temperature: Some(temperature),
+            humidity: Some(47.0),
+            battery: Some(98),
+            occupancy: None,
+            contact: None,
+            online: true,
+        }
+    }
+
+    #[test]
+    fn save_and_load_sensor_state_round_trips() {
+        let mut reg = Registry::new();
+        reg.save_sensor_state(&make_sensor_state("office_climate", "pi1", 21.4));
+        let loaded = reg.load_sensor_states();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].device_id, "office_climate");
+        assert_eq!(loaded[0].node_id, "pi1");
+        assert_eq!(loaded[0].temperature, Some(21.4));
+        assert_eq!(loaded[0].battery, Some(98));
+        assert!(loaded[0].occupancy.is_none());
+    }
+
+    #[test]
+    fn save_sensor_state_upserts_same_device() {
+        let mut reg = Registry::new();
+        reg.save_sensor_state(&make_sensor_state("office_climate", "pi1", 21.4));
+        reg.save_sensor_state(&make_sensor_state("office_climate", "pi1", 22.0));
+        let loaded = reg.load_sensor_states();
+        assert_eq!(loaded.len(), 1, "upsert should not accumulate");
+        assert_eq!(loaded[0].temperature, Some(22.0), "latest state should win");
+    }
+
+    #[test]
+    fn sensor_states_persist_across_open() {
+        let path = "/tmp/test-sensor-states-registry.db";
+        let _ = std::fs::remove_file(path);
+        {
+            let mut reg = Registry::open(path).unwrap();
+            reg.save_sensor_state(&make_sensor_state("office_climate", "pi1", 21.4));
+        }
+        let reg = Registry::open(path).unwrap();
+        let states = reg.load_sensor_states();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].device_id, "office_climate");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn delete_device_removes_sensor_state() {
+        let mut reg = Registry::new();
+        reg.save_sensor_state(&make_sensor_state("office_climate", "pi1", 21.4));
+        reg.delete_device("office_climate");
+        assert!(reg.load_sensor_states().is_empty());
     }
 
     // ── Light positions ───────────────────────────────────────────────────────

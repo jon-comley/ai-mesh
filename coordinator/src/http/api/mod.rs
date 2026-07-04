@@ -19,6 +19,7 @@ pub mod nodes;
 pub mod prefs;
 pub mod rooms;
 pub mod scenes;
+pub mod sensors;
 
 fn gen_request_id() -> String {
     uuid::Uuid::new_v4().to_string()

@@ -97,6 +97,20 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Push current sensor snapshot so sensor readouts populate immediately on connect.
+    let sensors = state.get_sensor_snapshot();
+    if !sensors.is_empty() {
+        let evt = DashboardEvent::SensorUpdate { sensors };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot SensorUpdate: {e}"),
+        }
+    }
+
     // Push current rooms snapshot so the Rooms panel populates immediately on connect.
     let rooms = state.get_room_snapshot();
     if !rooms.is_empty() {
