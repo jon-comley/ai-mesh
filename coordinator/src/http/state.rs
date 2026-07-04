@@ -2,7 +2,9 @@ use crate::registry::RoomRecord;
 use serde::Serialize;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
-use shared::messages::{LightAction, LightStateReport, NodeRecordLite, ReaperStatusReport};
+use shared::messages::{
+    LightAction, LightStateReport, NodeRecordLite, ReaperStatusReport, SensorReport,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -79,6 +81,9 @@ pub enum DashboardEvent {
         devices: Vec<LightStateReport>,
         #[serde(default)]
         groups: Vec<String>,
+    },
+    SensorUpdate {
+        sensors: Vec<SensorReport>,
     },
     RoomsUpdate {
         rooms: Vec<RoomInfo>,
@@ -293,6 +298,8 @@ pub struct DashboardState {
     health_store: Mutex<HashMap<String, VecDeque<HealthSample>>>,
     model_snapshot: Mutex<Vec<NodeModelInfo>>,
     light_snapshot: Mutex<HashMap<String, LightStateReport>>,
+    /// Latest merged readings per sensor device (see `push_sensor_update`).
+    sensor_snapshot: Mutex<HashMap<String, SensorReport>>,
     /// Group friendly name → node_id that owns it.
     group_snapshot: Mutex<HashMap<String, String>>,
     room_snapshot: Mutex<Vec<RoomInfo>>,
@@ -345,6 +352,7 @@ impl DashboardState {
             health_store: Mutex::new(HashMap::new()),
             model_snapshot: Mutex::new(Vec::new()),
             light_snapshot: Mutex::new(HashMap::new()),
+            sensor_snapshot: Mutex::new(HashMap::new()),
             group_snapshot: Mutex::new(HashMap::new()),
             room_snapshot: Mutex::new(Vec::new()),
             scene_snapshot: Mutex::new(Vec::new()),
@@ -477,6 +485,48 @@ impl DashboardState {
                 .tx
                 .send(DashboardEvent::LightingUpdate { devices, groups });
         }
+    }
+
+    /// Merge one sensor's readings into the snapshot and broadcast a SensorUpdate
+    /// with all sensors. Returns the merged record so the caller can persist it.
+    ///
+    /// Merge is field-wise: `Some` overwrites, `None` keeps the stored value.
+    /// Sensors publish partial payloads (battery arrives rarely; an
+    /// availability flip carries no readings at all), so a raw insert would
+    /// wipe last-known readings on every partial publish.
+    pub fn push_sensor_update(&self, report: SensorReport) -> SensorReport {
+        let (merged, sensors) = {
+            let mut snap = self.sensor_snapshot.lock().unwrap();
+            let merged = match snap.get(&report.device_id) {
+                Some(existing) => SensorReport {
+                    node_id: report.node_id,
+                    device_id: report.device_id,
+                    temperature: report.temperature.or(existing.temperature),
+                    humidity: report.humidity.or(existing.humidity),
+                    battery: report.battery.or(existing.battery),
+                    occupancy: report.occupancy.or(existing.occupancy),
+                    contact: report.contact.or(existing.contact),
+                    online: report.online,
+                },
+                None => report,
+            };
+            snap.insert(merged.device_id.clone(), merged.clone());
+            (merged, snap.values().cloned().collect::<Vec<_>>())
+        };
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::SensorUpdate { sensors });
+        }
+        merged
+    }
+
+    /// Point-in-time copy of the sensor snapshot for warm-starting new WS clients.
+    pub fn get_sensor_snapshot(&self) -> Vec<SensorReport> {
+        self.sensor_snapshot
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Add placeholder entries for discovered devices that haven't yet reported state.
@@ -1650,6 +1700,102 @@ mod tests {
         );
         assert!(json.contains("\"groups\""), "missing groups field: {json}");
         assert!(json.contains("\"all\""), "missing group name: {json}");
+    }
+
+    // ── push_sensor_update / get_sensor_snapshot ─────────────────────────────
+
+    fn make_sensor_report(device_id: &str, temperature: Option<f32>) -> SensorReport {
+        SensorReport {
+            node_id: "pi1".into(),
+            device_id: device_id.into(),
+            temperature,
+            humidity: None,
+            battery: None,
+            occupancy: None,
+            contact: None,
+            online: true,
+        }
+    }
+
+    #[test]
+    fn push_sensor_update_stores_and_broadcasts() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut rx = state.tx.subscribe();
+        state.push_sensor_update(make_sensor_report("office_climate", Some(21.4)));
+        let snap = state.get_sensor_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].device_id, "office_climate");
+        match rx.try_recv().unwrap() {
+            DashboardEvent::SensorUpdate { sensors } => {
+                assert_eq!(sensors.len(), 1);
+                assert_eq!(sensors[0].temperature, Some(21.4));
+            }
+            _ => panic!("expected SensorUpdate"),
+        }
+    }
+
+    #[test]
+    fn push_sensor_update_merges_partial_fields() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut with_battery = make_sensor_report("office_climate", Some(21.4));
+        with_battery.battery = Some(98);
+        state.push_sensor_update(with_battery);
+        // Later publish without battery — merged record must keep it.
+        let merged = state.push_sensor_update(make_sensor_report("office_climate", Some(22.0)));
+        assert_eq!(merged.temperature, Some(22.0), "new reading wins");
+        assert_eq!(merged.battery, Some(98), "missing field keeps stored value");
+        let snap = state.get_sensor_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].battery, Some(98));
+    }
+
+    #[test]
+    fn push_sensor_update_availability_only_keeps_readings() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_sensor_update(make_sensor_report("office_climate", Some(21.4)));
+        // Offline flip with no readings (what the sensors capability sends).
+        let mut offline = make_sensor_report("office_climate", None);
+        offline.online = false;
+        let merged = state.push_sensor_update(offline);
+        assert!(!merged.online);
+        assert_eq!(
+            merged.temperature,
+            Some(21.4),
+            "readings survive availability flips"
+        );
+    }
+
+    #[test]
+    fn sensor_update_event_wire_format() {
+        let evt = DashboardEvent::SensorUpdate {
+            sensors: vec![make_sensor_report("office_climate", Some(21.4))],
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(
+            json.contains("\"type\":\"SensorUpdate\""),
+            "missing type tag: {json}"
+        );
+        assert!(
+            json.contains("\"device_id\":\"office_climate\""),
+            "missing device_id: {json}"
+        );
+        assert!(
+            json.contains("\"temperature\":21.4"),
+            "missing temperature: {json}"
+        );
+        assert!(
+            !json.contains("occupancy"),
+            "None fields must be omitted: {json}"
+        );
     }
 
     // ── push_group_update / get_group_snapshot ───────────────────────────────

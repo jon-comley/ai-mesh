@@ -51,6 +51,13 @@ fn warm_start_lighting(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<Dashboar
     }
 }
 
+fn warm_start_sensors(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
+    let reports = registry.lock().unwrap().load_sensor_states();
+    for report in reports {
+        dashboard.push_sensor_update(report);
+    }
+}
+
 fn warm_start_rooms(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardState>) {
     let reg = registry.lock().unwrap();
     let room_infos: Vec<RoomInfo> = reg.list_rooms().into_iter().map(RoomInfo::from).collect();
@@ -178,6 +185,7 @@ impl Coordinator {
             server.pending_streams = dashboard.pending_streams.clone();
             server.dashboard = Some(dashboard.clone());
             warm_start_lighting(&self.registry, &dashboard);
+            warm_start_sensors(&self.registry, &dashboard);
             warm_start_rooms(&self.registry, &dashboard);
             warm_start_scenes(&self.registry, &dashboard);
             let handle = tokio::spawn(async move {
@@ -213,6 +221,7 @@ impl Coordinator {
         server.pending_streams = dashboard.pending_streams.clone();
         server.dashboard = Some(dashboard.clone());
         warm_start_lighting(&self.registry, &dashboard);
+        warm_start_sensors(&self.registry, &dashboard);
         warm_start_rooms(&self.registry, &dashboard);
         warm_start_scenes(&self.registry, &dashboard);
 
