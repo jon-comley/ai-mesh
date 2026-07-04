@@ -912,7 +912,26 @@ update-llama node:
             fi
             echo \"Downloading \$ZIP_URL...\"
             LLAMA_TMP=\$(mktemp -d)
-            curl -fsSL \"\$ZIP_URL\" -o \"\$LLAMA_TMP/llama.tar.gz\"
+            if ! curl -fsSL \"\$ZIP_URL\" -o \"\$LLAMA_TMP/llama.tar.gz\"; then
+                # The latest tag's assets sometimes lag its publish by 20+ min
+                # (CI upload race) — fall back to the previous release rather
+                # than hard-failing. Queried dynamically, not hardcoded: a
+                # pinned fallback version would be stale within days.
+                echo \"Warning: ${LATEST} assets aren't uploaded yet — trying the previous release...\"
+                PREV=\$(curl -fsSL \"https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=2\" \
+                    | grep '\"tag_name\"' | sed -n '2p' | cut -d'\"' -f4)
+                if [ -z \"\$PREV\" ]; then
+                    echo \"ERROR: download failed and no previous release could be resolved.\"
+                    exit 1
+                fi
+                if [ \"\$ARCH\" = \"x86_64\" ]; then
+                    ZIP_URL=\"https://github.com/ggml-org/llama.cpp/releases/download/\${PREV}/llama-\${PREV}-bin-ubuntu-x64.tar.gz\"
+                else
+                    ZIP_URL=\"https://github.com/ggml-org/llama.cpp/releases/download/\${PREV}/llama-\${PREV}-bin-ubuntu-arm64.tar.gz\"
+                fi
+                echo \"Falling back to llama.cpp release: \$PREV\"
+                curl -fsSL \"\$ZIP_URL\" -o \"\$LLAMA_TMP/llama.tar.gz\"
+            fi
             sudo install -d /opt/llama.cpp
             sudo tar -xzf \"\$LLAMA_TMP/llama.tar.gz\" -C /opt/llama.cpp --strip-components=1
             rm -rf \"\$LLAMA_TMP\"

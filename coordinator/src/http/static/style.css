@@ -132,10 +132,19 @@ body {
   border-top: 1px solid var(--border);
   display: flex;
   flex-shrink: 0;
+  /* Enough tabs to not fit a phone width (ten, as of Devices/Online AI) —
+     scroll instead of letting flex:1 squeeze every tab down to illegibility.
+     min-width below is the hard floor; flex-basis:0 + grow:1 still spreads
+     tabs evenly to fill a wide viewport when there's room to spare. */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
 }
+.tab-bar::-webkit-scrollbar { display: none; }
 
 .tab {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 64px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3622,6 +3631,7 @@ body {
   background: color-mix(in srgb, var(--green) 22%, transparent);
   border-color: var(--green); color: var(--green);
 }
+.gw-toggle:disabled { opacity: .5; cursor: not-allowed; }
 .gw-banner {
   padding: 10px 12px; border-radius: 8px;
   background: color-mix(in srgb, var(--amber) 18%, transparent);
@@ -3636,12 +3646,14 @@ body {
   background: var(--surface); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; font-size: 14px;
 }
+.gw select:disabled, .gw input:disabled { opacity: .5; cursor: not-allowed; }
 .gw input { flex: 1 1 160px; }
 .gw button:not(.gw-toggle) {
   background: var(--surface-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 9px 14px;
   font-size: 14px; cursor: pointer;
 }
+.gw button:not(.gw-toggle):disabled { opacity: .5; cursor: not-allowed; }
 .gw-btns { display: flex; gap: 8px; flex-wrap: wrap; }
 .gw-btns button[data-active="1"] { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .gw-btns button[disabled] { opacity: .5; cursor: not-allowed; }

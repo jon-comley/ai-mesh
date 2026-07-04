@@ -152,11 +152,17 @@ function render(snap) {
   const banner = document.getElementById('gw-keybanner');
   if (banner) banner.hidden = snap.key_set;
 
+  // Model selection / compression only take effect once Online AI is on —
+  // grey them out rather than leave them clickable but inert. API key,
+  // endpoint, and the test-call button stay live either way: you need to be
+  // able to set them up and verify a key works *before* flipping the switch.
+  const offline = !snap.enabled;
+
   const norm = (u) => (u || '').replace(/\/+$/, '');
   const presetBox = document.getElementById('gw-presets');
   if (presetBox) {
     presetBox.innerHTML = (snap.presets ?? []).map(p =>
-      `<button type="button" data-preset="${escapeHtml(p.id)}" data-base-url="${escapeHtml(p.base_url)}" data-model="${escapeHtml(p.models?.[0] ?? '')}" data-active="${norm(p.base_url) === norm(snap.base_url) ? '1' : '0'}">${escapeHtml(p.label)}</button>`).join('');
+      `<button type="button" data-preset="${escapeHtml(p.id)}" data-base-url="${escapeHtml(p.base_url)}" data-model="${escapeHtml(p.models?.[0] ?? '')}" data-active="${norm(p.base_url) === norm(snap.base_url) ? '1' : '0'}" ${offline ? 'disabled' : ''}>${escapeHtml(p.label)}</button>`).join('');
   }
 
   const sel = document.getElementById('gw-model');
@@ -167,10 +173,18 @@ function render(snap) {
     if (snap.selected_model && !models.includes(snap.selected_model)) models.unshift(snap.selected_model);
     sel.innerHTML = models.map(m =>
       `<option value="${escapeHtml(m)}"${m === snap.selected_model ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+    sel.disabled = offline;
   }
+  const modelCustom = document.getElementById('gw-model-custom');
+  const modelCustomSave = document.getElementById('gw-model-custom-save');
+  if (modelCustom) modelCustom.disabled = offline;
+  if (modelCustomSave) modelCustomSave.disabled = offline;
 
+  if (compressBtn) compressBtn.disabled = offline;
   document.querySelectorAll('#gw-engine-btns button[data-engine]').forEach(btn => {
     btn.dataset.active = btn.dataset.engine === snap.engine ? '1' : '0';
+    const engine = ENGINES.find(e => e.id === btn.dataset.engine);
+    btn.disabled = offline || !engine?.ready;
   });
 
   const keyStatus = document.getElementById('gw-key-status');

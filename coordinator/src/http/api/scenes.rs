@@ -34,6 +34,7 @@ fn scenes_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<SceneInfo> {
                 created_at: s.created_at,
                 position: s.position,
                 preview_color,
+                states: s.states,
             }
         })
         .collect()
@@ -343,6 +344,42 @@ mod tests {
             DashboardEvent::ScenesUpdate { scenes } => {
                 assert_eq!(scenes.len(), 1);
                 assert_eq!(scenes[0].name, "Morning");
+            }
+            _ => panic!("expected ScenesUpdate"),
+        }
+    }
+
+    // The client detects a scene-vs-live-state divergence (chat command,
+    // physical switch, ...) by comparing against this — it must actually
+    // carry the saved per-device values, not just an empty placeholder.
+    #[tokio::test]
+    async fn scenes_update_carries_saved_device_states() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+        let mut rx = state.tx.subscribe();
+
+        send(
+            scenes_router(state, Arc::clone(&registry)),
+            "POST",
+            "/api/scenes?token=",
+            &format!(r#"{{"name":"Night","room_id":"{room_id}"}}"#),
+        )
+        .await;
+
+        use crate::http::state::DashboardEvent;
+        match rx.try_recv().unwrap() {
+            DashboardEvent::ScenesUpdate { scenes } => {
+                assert_eq!(scenes[0].states.len(), 1);
+                assert_eq!(scenes[0].states[0].device_id, "bulb1");
             }
             _ => panic!("expected ScenesUpdate"),
         }

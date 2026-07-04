@@ -118,6 +118,21 @@ fn load_guard() -> &'static Mutex<Option<(String, u64)>> {
     LOAD_GUARD.get_or_init(|| Mutex::new(None))
 }
 
+/// The `Unloaded` status report for whatever was previously loaded, if
+/// anything — sent before starting a new model so the coordinator's registry
+/// (and the scheduler's "is this model Ready on this node" checks) don't keep
+/// believing the old one is still there after it's been implicitly killed by
+/// a switch. `None` when nothing was loaded (first load on this node).
+fn unload_status_for(node_id: &str, previous: &Option<(String, u64)>) -> Option<ModelStatusReport> {
+    previous.as_ref().map(|(name, size)| ModelStatusReport {
+        node_id: node_id.to_string(),
+        model_name: name.clone(),
+        size_mb: *size,
+        state: ModelLifecycleState::Unloaded,
+        wire_version: WIRE_VERSION,
+    })
+}
+
 pub struct LlmCapability {
     node_id: String,
 }
@@ -219,7 +234,18 @@ impl Capability for LlmCapability {
                     // A switch to a different model invalidates the current one;
                     // clear it up front so a mid-load crash doesn't leave a stale
                     // "loaded" marker that would suppress a later reload.
+                    let previous = loaded.clone();
                     *loaded = None;
+                    // pull_model()'s kill_existing() is about to SIGKILL whatever
+                    // was running, but that's silent to the coordinator — its
+                    // registry only ever upserts the model named in a status
+                    // report, so without this the OLD model's entry stays
+                    // "Ready" forever after an implicit switch (only an explicit
+                    // ModelUnload message previously sent one). Tell the
+                    // coordinator the old one is gone before starting the new.
+                    if let Some(report) = unload_status_for(&nid, &previous) {
+                        let _ = tx2.send(MeshMessage::ModelStatus(report)).await;
+                    }
                     let state = match llama::pull_model(&mname, size).await {
                         Ok(()) => {
                             info!(model = %mname, "llama pull complete");
@@ -323,6 +349,21 @@ mod tests {
 
     fn make_cap() -> LlmCapability {
         LlmCapability::new("node-1")
+    }
+
+    #[test]
+    fn unload_status_for_reports_the_previous_model() {
+        let previous = Some(("old_model".to_string(), 1234));
+        let report = unload_status_for("node-1", &previous).unwrap();
+        assert_eq!(report.node_id, "node-1");
+        assert_eq!(report.model_name, "old_model");
+        assert_eq!(report.size_mb, 1234);
+        assert!(matches!(report.state, ModelLifecycleState::Unloaded));
+    }
+
+    #[test]
+    fn unload_status_for_none_when_nothing_was_loaded() {
+        assert!(unload_status_for("node-1", &None).is_none());
     }
 
     #[test]

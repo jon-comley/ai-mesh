@@ -37,6 +37,7 @@ import {
 import {
   initScenes, buildScenesSection, clearRoomActiveScene, cancelSceneEdit,
   toggleSceneDevice, recallScene, wireSceneChipTouchDrag, wireSceneBarDrag,
+  reconcileSceneDivergence,
 } from '/static/scenes.js';
 
 // Shared state model + collections live in state.js (imported above). The vars
@@ -261,11 +262,18 @@ function clearByType(type) {
 
 export function notifyDevices(devices) {
   clearByType('light');
+  const reconciledDevices = [];
   for (const dev of devices) {
     const reconciled = reconcilePending(dev);
     devicesMap.set(dev.device_id, { ...reconciled, device_type: 'light' });
     layout.notifyDeviceUpdate(dev.device_id, reconciled);
+    reconciledDevices.push(reconciled);
   }
+  // Runs regardless of the drag guard below — detecting a scene divergence
+  // (e.g. a chat command changed a light) isn't itself a rendering concern,
+  // and reconcileSceneDivergence's own re-render is internally guarded
+  // against clobbering an in-progress drag anyway.
+  reconcileSceneDivergence(reconciledDevices);
   inferZigbeeStatus();
   // Skip full re-render while a slider/wheel/temp-bar is being dragged to prevent
   // mid-drag jumps (and so the live colour/temp dot isn't reset to its icon).

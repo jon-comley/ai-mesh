@@ -1,4 +1,4 @@
-use crate::registry::RoomRecord;
+use crate::registry::{DeviceSnapshot, RoomRecord};
 use serde::Serialize;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
@@ -245,6 +245,12 @@ pub struct SceneInfo {
     pub position: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_color: Option<[f32; 2]>,
+    /// Per-device saved values, so the client can detect when a device's
+    /// live state has diverged from its room's active scene (a chat
+    /// command, a physical switch, another client) without the coordinator
+    /// needing to track "active scene per room" itself — the frontend
+    /// already gets every live state change over the wire and can compare.
+    pub states: Vec<DeviceSnapshot>,
 }
 
 /// Per-model entry in a `ModelUpdate` event — one per non-Unloaded allocation.
@@ -2131,6 +2137,7 @@ mod tests {
             created_at: 1_000_000,
             position: 0,
             preview_color: None,
+            states: vec![],
         }
     }
 
@@ -2198,6 +2205,7 @@ mod tests {
                 created_at: 1_700_000_000,
                 position: 0,
                 preview_color: None,
+                states: vec![],
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();
@@ -2226,6 +2234,7 @@ mod tests {
                 created_at: 0,
                 position: 0,
                 preview_color: None,
+                states: vec![],
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();

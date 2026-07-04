@@ -135,6 +135,30 @@ function connect() {
   ws.onerror = () => setConnState('disconnected');
 }
 
+function reconnectNow() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (ws) {
+    ws.onclose = null; // don't let the stale socket's lifecycle interfere
+    ws.onerror = null;
+    try { ws.close(); } catch (_) {}
+  }
+  ws = null;
+  connect();
+}
+
+// A backgrounded/suspended PWA's WebSocket can die silently — iOS in
+// particular pauses JS timers while backgrounded, so the normal
+// onclose→reconnect path may never fire, leaving stale data (e.g. a
+// "Zigbee: Unknown" health card, or room controls that look disabled) on
+// screen indefinitely until the page happens to get manually reloaded.
+// Force a fresh connection whenever the app returns to the foreground.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') reconnectNow();
+});
+window.addEventListener('pageshow', evt => {
+  if (evt.persisted) reconnectNow();
+});
+
 // ── Init ────────────────────────────────────────────────────────────────────
 topology.init(document.getElementById('node-list'));
 errors.init(document.getElementById('error-feed'));
