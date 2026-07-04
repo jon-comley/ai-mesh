@@ -33,40 +33,59 @@ pub struct LightCommandBody {
     transition_secs: Option<f32>,
 }
 
+// Transition-aware action constructors — the lighting-domain primitives.
+// Every caller that turns typed values into a `LightAction` (the HTTP command
+// body below, scene recall) goes through these, so the `t > 0.0` transition
+// dispatch has exactly one owner.
+
+pub(crate) fn brightness_action(value: u8, transition_secs: Option<f32>) -> LightAction {
+    match transition_secs {
+        Some(t) if t > 0.0 => LightAction::BrightnessTransition {
+            value,
+            transition_secs: t,
+        },
+        _ => LightAction::Brightness(value),
+    }
+}
+
+pub(crate) fn color_temp_action(value: u16, transition_secs: Option<f32>) -> LightAction {
+    match transition_secs {
+        Some(t) if t > 0.0 => LightAction::ColorTempTransition {
+            value,
+            transition_secs: t,
+        },
+        _ => LightAction::ColorTemp(value),
+    }
+}
+
+pub(crate) fn color_xy_action(x: f32, y: f32, transition_secs: Option<f32>) -> LightAction {
+    match transition_secs {
+        Some(t) if t > 0.0 => LightAction::ColorXYTransition {
+            x,
+            y,
+            transition_secs: t,
+        },
+        _ => LightAction::ColorXY { x, y },
+    }
+}
+
 pub(crate) fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
     match body.action.as_str() {
         "on" => Some(LightAction::On),
         "off" => Some(LightAction::Off),
         "toggle" => Some(LightAction::Toggle),
-        "brightness" => body.value.map(|v| {
-            let value = v.clamp(0.0, 255.0) as u8;
-            match body.transition_secs {
-                Some(t) if t > 0.0 => LightAction::BrightnessTransition {
-                    value,
-                    transition_secs: t,
-                },
-                _ => LightAction::Brightness(value),
-            }
-        }),
-        "color_temp" => body.value.map(|v| {
-            let value = v.clamp(1.0, 65535.0) as u16;
-            match body.transition_secs {
-                Some(t) if t > 0.0 => LightAction::ColorTempTransition {
-                    value,
-                    transition_secs: t,
-                },
-                _ => LightAction::ColorTemp(value),
-            }
-        }),
+        "brightness" => body
+            .value
+            .map(|v| brightness_action(v.clamp(0.0, 255.0) as u8, body.transition_secs)),
+        "color_temp" => body
+            .value
+            .map(|v| color_temp_action(v.clamp(1.0, 65535.0) as u16, body.transition_secs)),
         "color_xy" => match (body.x, body.y) {
-            (Some(x), Some(y)) => match body.transition_secs {
-                Some(t) if t > 0.0 => Some(LightAction::ColorXYTransition {
-                    x,
-                    y,
-                    transition_secs: t,
-                }),
-                _ => Some(LightAction::ColorXY { x, y }),
-            },
+            (Some(x), Some(y)) => Some(color_xy_action(
+                x.clamp(0.0, 1.0),
+                y.clamp(0.0, 1.0),
+                body.transition_secs,
+            )),
             _ => None,
         },
         _ => None,
@@ -241,6 +260,68 @@ mod tests {
     use axum::routing::{get, post};
     use std::sync::Mutex;
     use tokio::sync::mpsc;
+
+    // ── action constructors ───────────────────────────────────────────────────
+
+    #[test]
+    fn action_constructors_dispatch_on_transition() {
+        // No transition, zero, and negative all mean "immediate".
+        for t in [None, Some(0.0), Some(-1.0)] {
+            assert!(matches!(
+                brightness_action(200, t),
+                LightAction::Brightness(200)
+            ));
+            assert!(matches!(
+                color_temp_action(370, t),
+                LightAction::ColorTemp(370)
+            ));
+            assert!(matches!(
+                color_xy_action(0.3, 0.4, t),
+                LightAction::ColorXY { .. }
+            ));
+        }
+        assert!(matches!(
+            brightness_action(200, Some(1.5)),
+            LightAction::BrightnessTransition {
+                value: 200,
+                transition_secs: t
+            } if t == 1.5
+        ));
+        assert!(matches!(
+            color_temp_action(370, Some(1.5)),
+            LightAction::ColorTempTransition { value: 370, .. }
+        ));
+        assert!(matches!(
+            color_xy_action(0.3, 0.4, Some(1.5)),
+            LightAction::ColorXYTransition { .. }
+        ));
+    }
+
+    #[test]
+    fn build_light_action_clamps_out_of_range_values() {
+        let brightness = LightCommandBody {
+            action: "brightness".into(),
+            value: Some(9000.0),
+            x: None,
+            y: None,
+            transition_secs: None,
+        };
+        assert!(matches!(
+            build_light_action(&brightness),
+            Some(LightAction::Brightness(255))
+        ));
+        let xy = LightCommandBody {
+            action: "color_xy".into(),
+            value: None,
+            x: Some(-0.5),
+            y: Some(1.5),
+            transition_secs: None,
+        };
+        assert!(matches!(
+            build_light_action(&xy),
+            Some(LightAction::ColorXY { x: 0.0, y: 1.0 })
+        ));
+    }
 
     // ── light_command ─────────────────────────────────────────────────────────
 

@@ -1,7 +1,9 @@
 # pi1 Lighting Infrastructure Setup
 
-One-time manual setup on pi1 (10.0.0.10) to support the `lighting` capability.
-The agent binary handles MQTT automatically once Mosquitto and Z2M are running.
+One-time manual setup on pi1 (10.0.0.10) to support the `lighting` and
+`sensors` capabilities (both ride the same Mosquitto + Z2M bridge; see §9 for
+the sensors specifics). The agent binary handles MQTT automatically once
+Mosquitto and Z2M are running.
 
 ---
 
@@ -229,6 +231,37 @@ just intent "bright white light for working"
 
 The LLM maps natural language to a `light_command` tool call. Device/group names
 must match what Z2M knows (use `zigbee2mqtt/bridge/devices` to list them).
+
+---
+
+## 9. Sensors
+
+No extra infrastructure — sensors join the same Z2M bridge. The agent needs the
+`sensors` feature (`NODE_FEATURES=llm,lighting,sensors` in `nodes/pi1.env`,
+baked in by `just deploy-node pi1`).
+
+**Pairing** is identical to bulbs (`just pair-bulb` opens the bridge-wide
+permit-join window — Zigbee pairing is not device-type specific). Battery
+devices usually need a button held to start joining; check the device manual.
+Rename after pairing exactly as in §5.
+
+Everything downstream is automatic:
+
+- The agent classifies each device from its Z2M `exposes` metadata — anything
+  reporting temperature/humidity/occupancy/contact without light controls lands
+  as `DeviceType::Sensor`.
+- Sensor publishes are parsed (temperature, humidity, battery, occupancy,
+  contact) and forwarded to the coordinator as `SensorState`; readings are
+  merged field-wise, persisted across coordinator restarts, and served at
+  `GET /api/sensors` plus pushed to the dashboard as `SensorUpdate` WS events.
+- Sensors are never state-polled (`/get` returns z2m errors for them) — they
+  push on their own schedule.
+
+**Availability caveat:** battery sensors are *passive* devices — z2m only
+marks them offline after `availability.passive.timeout` (default **25 h**,
+vs 10 min for mains-powered lights). A sensor with a dead battery can read
+"online" with stale values for up to a day; the `battery` field is the
+earlier warning signal.
 
 ---
 

@@ -677,6 +677,20 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > broadcast fan-out — lighting consumes it, sensors will subscribe beside it);
 > `DeviceListReport` with typed entries; `shared::Feature` enum replacing raw
 > feature strings across registry/intent/agent. 769 tests.
+>
+> **Phase B software-complete (2026-07-04, wire v6):** `capability-sensors`
+> crate (thin lighting sibling: forwards `SensorChanged` + sensor availability
+> flips from the shared zigbee client as `MeshMessage::SensorState`; sensor
+> parsing beside the light parser in `capability-zigbee`); coordinator side —
+> `sensor_states` registry table, field-wise merge in
+> `DashboardState::push_sensor_update` (partial publishes / availability-only
+> reports never wipe readings), `DashboardEvent::SensorUpdate` with WS replay
+> + boot warm-start, read-only `GET /api/sensors`; scene recall folded through
+> new typed lights-domain action constructors (the deferred cleanup, see
+> Quality backlog); `NODE_FEATURES=llm,lighting,sensors` on pi1 + §9 in
+> `docs/pi1-lighting-setup.md`. 792 tests. **Remaining: the live gate** —
+> pair one temp/humidity + one motion sensor, verify readings + battery +
+> availability land in registry/dashboard snapshot.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
@@ -899,12 +913,14 @@ audit was bug-focused). Prioritized; none are defects.
   0.28 matching ratatui; comfy-table's 0.29 is its own transitive pin)* (0.27 direct, 0.28 via ratatui,
   0.29 via comfy-table) — bump the direct dep to 0.28 to match ratatui;
   compile-time/binary-size trim.
-- [ ] **Scene recall should go through lights-domain primitives** — `scenes.rs
-  recall_scene` builds `LightAction` values inline (no clamps) while
-  `lights::build_light_action` owns clamped construction; the copies now sit
-  across the domain seam with no compiler linkage (self-review 2026-07-03,
-  pre-existing). Fold into the first new-device-domain change, when scene
-  snapshots grow beyond lighting anyway.
+- [x] **Scene recall should go through lights-domain primitives** *(done
+  2026-07-04, folded into Phase B as planned: `lights.rs` gained typed
+  `brightness_action`/`color_temp_action`/`color_xy_action` constructors
+  owning the transition dispatch; both `build_light_action` and
+  `recall_scene` now build through them)* — `scenes.rs recall_scene` built
+  `LightAction` values inline (no clamps) while `lights::build_light_action`
+  owned clamped construction; the copies sat across the domain seam with no
+  compiler linkage (self-review 2026-07-03, pre-existing).
 - Noted, accepted (self-review 2026-07-03): moving auth into the `Authed`
   extractor changed error precedence — bad-token + malformed-body now 401s
   before the 400/422 body rejection, and an unparseable query string
