@@ -96,18 +96,20 @@ The coordinator on **pi1** serves a web dashboard on **port 9001** (override wit
 
 **Local access (home LAN):**
 ```
-http://10.0.0.10:9001/?token=<auth-token>
+http://10.0.0.10:9001/
 ```
 
 **Remote access (Tailscale, anywhere):**
 ```
-http://100.100.100.100:9001/?token=<auth-token>
-http://pi1:9001/?token=<auth-token>              (once built-in DNS propagates)
+http://100.100.100.100:9001/
+http://pi1:9001/              (once built-in DNS propagates)
 ```
 
-> **If `pi1:9001` won't load:** the `pi1` and `100.x` addresses only resolve/route when that device is connected to the tailnet. Check that **Tailscale is on** (and the device shows online in `tailscale status` on pi1). On the home LAN you can always fall back to the direct `http://10.0.0.10:9001/` — no token needed there.
+The page itself loads with no auth; the first WebSocket connection prompts a native browser dialog for `MESH_AUTH_TOKEN` (retrieve it with `echo $MESH_AUTH_TOKEN` on OmniLink1, or from `MESH_AUTH_TOKEN=` in pi1's `/var/lib/ai-mesh/coordinator.state`) and caches it in the browser's local storage — a `?token=` query param is not read by the client. Tap the connection dot (top of the page) to re-enter it if it's ever rejected.
 
-A Progressive Web App — open in Chrome/Safari and use "Add to Home Screen" to install it on mobile. Bookmark the remote URL for one-tap access from anywhere (cellular, public WiFi, etc.). Six panels: Nodes, Health, Models, Lighting, Security, Errors. Real-time data via WebSocket (Phase 11.B); the full lighting UI is live (rooms, effects, scenes, device control).
+> **If `pi1:9001` won't load:** the `pi1` and `100.x` addresses only resolve/route when that device is connected to the tailnet. Check that **Tailscale is on** (and the device shows online in `tailscale status` on pi1). On the home LAN you can always fall back to the direct `http://10.0.0.10:9001/`.
+
+A Progressive Web App — open in **Safari** on iOS/iPadOS (Chrome's iOS "Add to Home Screen" doesn't install a standalone PWA) and use Share → "Add to Home Screen" to install it as an app icon. Bookmark the remote URL for one-tap access from anywhere (cellular, public WiFi, etc.). Tabs: Nodes, Health, Models, Home, Devices, Security, Errors, Chat, REAPER, Online AI. Real-time data via WebSocket; the full Home (rooms, effects, scenes, device control) and Devices (pairing, inventory) tabs are live.
 
 ---
 

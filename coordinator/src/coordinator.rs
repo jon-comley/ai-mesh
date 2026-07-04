@@ -79,6 +79,7 @@ fn warm_start_scenes(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardS
                 created_at: s.created_at,
                 position: s.position,
                 preview_color,
+                states: s.states,
             }
         })
         .collect();

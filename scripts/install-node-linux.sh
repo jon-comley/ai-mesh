@@ -75,13 +75,35 @@ if ! LLAMA_VERSION="$(curl -fsSL --connect-timeout 5 \
 fi
 echo ">>> llama.cpp release: ${LLAMA_VERSION}"
 ARCH="$(uname -m)"
-if [ "$ARCH" = "x86_64" ]; then
-    LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-ubuntu-x64.tar.gz"
-else
-    LLAMA_URL="https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-ubuntu-arm64.tar.gz"
-fi
+llama_url_for() {
+    if [ "$ARCH" = "x86_64" ]; then
+        echo "https://github.com/ggml-org/llama.cpp/releases/download/$1/llama-$1-bin-ubuntu-x64.tar.gz"
+    else
+        echo "https://github.com/ggml-org/llama.cpp/releases/download/$1/llama-$1-bin-ubuntu-arm64.tar.gz"
+    fi
+}
+LLAMA_URL="$(llama_url_for "$LLAMA_VERSION")"
 LLAMA_TMP="$(mktemp -d)"
-curl -fsSL "$LLAMA_URL" -o "$LLAMA_TMP/llama.tar.gz"
+if ! curl -fsSL "$LLAMA_URL" -o "$LLAMA_TMP/llama.tar.gz"; then
+    # "latest" is a tag, published as soon as it's created — its release-asset
+    # upload is a separate, sometimes-lagging CI step. Seen live 2026-07-04:
+    # b9871 sat at zero uploaded assets for 20+ minutes. Fall back to the
+    # previous release by querying the releases list (not a hardcoded version
+    # — llama.cpp cuts a new tag roughly daily, so a pinned fallback would be
+    # stale within days) rather than hard-failing the whole node install.
+    echo ">>> Warning: ${LLAMA_VERSION} assets aren't uploaded yet — trying the previous release..."
+    PREV_VERSION="$(curl -fsSL --connect-timeout 5 \
+            "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=2" \
+            | grep '"tag_name"' | sed -n '2p' | cut -d'"' -f4)"
+    if [ -z "$PREV_VERSION" ]; then
+        echo ">>> ERROR: llama.cpp download failed and no previous release could be resolved."
+        exit 1
+    fi
+    LLAMA_VERSION="$PREV_VERSION"
+    LLAMA_URL="$(llama_url_for "$LLAMA_VERSION")"
+    echo ">>> Falling back to llama.cpp release: ${LLAMA_VERSION}"
+    curl -fsSL "$LLAMA_URL" -o "$LLAMA_TMP/llama.tar.gz"
+fi
 # Extract everything — llama-server depends on several .so files in the same archive.
 install -d /opt/llama.cpp
 tar -xzf "$LLAMA_TMP/llama.tar.gz" -C /opt/llama.cpp --strip-components=1

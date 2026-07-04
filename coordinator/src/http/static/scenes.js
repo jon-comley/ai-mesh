@@ -19,10 +19,92 @@ import { saveScene, deleteSceneApi, reorderScenes } from '/static/actions.js';
 import { clearEffect } from '/static/effects.js';
 import { clearDotForRoom } from '/static/indicators.js';
 import {
-  model, devicesMap,
+  model, devicesMap, pendingCommands,
   activeSceneByRoom, preSceneStateByRoom, pausedSceneDevices, roomEffectsMap,
   HUE_DEFAULT_ON, sceneEdit, effectEditor,
 } from '/static/state.js';
+
+// A scene settles every member to one fixed, known value — unlike an effect,
+// which keeps moving, so forcing controls to track it would look like they're
+// jumping around (deliberately not done for effects; see patchDeviceCards's
+// `device-under-effect` freeze). Recalling (or reverting) a scene should win
+// over whatever a control was showing a moment ago: drop any pendingCommands
+// entry (or reconcilePending will keep re-asserting the old dragged value for
+// up to PENDING_TTL_MS over the real one) and blur the input if the drag left
+// it focused (patchDeviceCards skips any element that still has focus).
+function clearPendingControlState(deviceId) {
+  pendingCommands.delete(deviceId);
+  const card = document.querySelector(`.room-device-card[data-device-id="${CSS.escape(deviceId)}"]`);
+  if (!card) return;
+  for (const ctrl of ['brightness', 'color_temp']) {
+    const el = card.querySelector(`[data-ctrl="${ctrl}"]`);
+    if (el && document.activeElement === el) el.blur();
+  }
+}
+
+// ── Scene divergence reconciliation ──────────────────────────────────────────
+// A scene's "active" flag is pure client session state — the coordinator has
+// no concept of it — so a light changed by ANY other source (a chat/intent
+// command, a physical switch, another browser) needs the client to notice by
+// itself rather than being told. Every incoming light-state update already
+// carries the live value; SceneInfo now carries each scene's saved per-device
+// values too, so this just compares the two — no new wire message, no
+// coordinator-side scene tracking. Deliberately mirrors (never re-triggers)
+// the manual pause/resume via the per-device 🎭 icon: same pausedSceneDevices
+// bookkeeping, just detected instead of clicked. Never sends a command —
+// whatever externally changed the device already did that.
+const XY_EPSILON = 0.01;
+
+function stateMatchesScene(dev, snap) {
+  if (dev.on !== snap.on) return false;
+  if (!dev.on) return true; // both off — brightness/colour are moot
+  if (snap.brightness != null && dev.brightness !== snap.brightness) return false;
+  if (snap.color_temp != null && dev.color_temp !== snap.color_temp) return false;
+  if (snap.color_xy != null) {
+    if (dev.color_xy == null) return false;
+    if (Math.abs(dev.color_xy[0] - snap.color_xy[0]) > XY_EPSILON) return false;
+    if (Math.abs(dev.color_xy[1] - snap.color_xy[1]) > XY_EPSILON) return false;
+  }
+  return true;
+}
+
+// Called from rooms.js's notifyDevices with the freshly-reconciled light
+// list on every LightingUpdate. Cheap no-op in the common case (bails
+// immediately for any device whose room has no active scene).
+export function reconcileSceneDivergence(devices) {
+  let changed = false;
+  for (const dev of devices) {
+    if (dev.online === false) continue; // stale/last-known state, not a real signal
+    const roomId = model.rooms.find(r => r.device_ids.includes(dev.device_id))?.id;
+    if (!roomId) continue;
+    const sceneId = activeSceneByRoom.get(roomId);
+    if (!sceneId) continue;
+    const scene = model.scenes.find(s => s.id === sceneId);
+    const snap = scene?.states?.find(s => s.device_id === dev.device_id);
+    if (!snap) continue; // device isn't part of this scene's saved snapshot
+
+    const set = pausedSceneDevices.get(roomId);
+    const wasPaused = set?.has(dev.device_id) ?? false;
+    const matches = stateMatchesScene(dev, snap);
+
+    if (matches && wasPaused) {
+      set.delete(dev.device_id);
+      updateSceneChipStates(roomId);
+      changed = true;
+    } else if (!matches && !wasPaused) {
+      let s = pausedSceneDevices.get(roomId);
+      if (!s) { s = new Set(); pausedSceneDevices.set(roomId, s); }
+      s.add(dev.device_id);
+      updateSceneChipStates(roomId);
+      changed = true;
+    }
+  }
+  // Room cards' per-device 🎭 icon is only set at build time (buildDeviceCard),
+  // not patched incrementally like patchDeviceCards — a full render picks up
+  // the new paused/resumed icon state. render() itself guards against
+  // clobbering an in-progress drag, so this is safe to call unconditionally.
+  if (changed) _render();
+}
 
 let sceneDragId = null;        // sceneId being dragged within the bar
 let _sceneReorderTimer = null; // debounce for the reorder POST after a drag
@@ -319,6 +401,7 @@ export async function recallScene(id) {
       for (const deviceId of (room?.device_ids ?? [])) {
         const snap = preState.get(deviceId);
         if (!snap) continue;
+        clearPendingControlState(deviceId);
         if (!snap.on) { _sendDeviceCommand(deviceId, { action: 'off' }); continue; }
         if (snap.brightness != null)
           _sendDeviceCommand(deviceId, { action: 'brightness', value: snap.brightness, transition_secs: 0.8 });
@@ -358,6 +441,8 @@ export async function recallScene(id) {
       if (roomId) {
         activeSceneByRoom.set(roomId, id);
         updateSceneChipStates(roomId);
+        const room = model.rooms.find(r => r.id === roomId);
+        for (const deviceId of (room?.device_ids ?? [])) clearPendingControlState(deviceId);
       }
       if (res.status === 503) showToast('Some devices offline — others recalled', false);
     } else {
