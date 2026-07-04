@@ -24,8 +24,9 @@ const DASHBOARD_JS: &str = include_str!("static/dashboard.js");
 const TOPOLOGY_JS: &str = include_str!("static/topology.js");
 const HEALTH_JS: &str = include_str!("static/health.js");
 const MODELS_JS: &str = include_str!("static/models.js");
-const LIGHTING_JS: &str = include_str!("static/lighting.js");
 const ROOMS_JS: &str = include_str!("static/rooms.js");
+const DEVICES_JS: &str = include_str!("static/devices.js");
+const DEVICEWIDGETS_JS: &str = include_str!("static/devicewidgets.js");
 const DRAG_JS: &str = include_str!("static/drag.js");
 const COLORMATH_JS: &str = include_str!("static/colormath.js");
 const CONTROLS_JS: &str = include_str!("static/controls.js");
@@ -169,8 +170,9 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/topology.js", TOPOLOGY_JS, JS),
         ("/static/health.js", HEALTH_JS, JS),
         ("/static/models.js", MODELS_JS, JS),
-        ("/static/lighting.js", LIGHTING_JS, JS),
         ("/static/rooms.js", ROOMS_JS, JS),
+        ("/static/devices.js", DEVICES_JS, JS),
+        ("/static/devicewidgets.js", DEVICEWIDGETS_JS, JS),
         ("/static/drag.js", DRAG_JS, JS),
         ("/static/colormath.js", COLORMATH_JS, JS),
         ("/static/controls.js", CONTROLS_JS, JS),
@@ -314,8 +316,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lighting_js_returns_correct_content_type() {
-        let (status, ct) = get("/static/lighting.js").await;
+    async fn devices_js_returns_correct_content_type() {
+        let (status, ct) = get("/static/devices.js").await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             ct.contains("javascript"),

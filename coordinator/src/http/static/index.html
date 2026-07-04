@@ -66,17 +66,18 @@
       <div id="model-list"><p class="placeholder">No data yet.</p></div>
     </section>
 
-    <section class="panel" id="panel-lighting">
+    <section class="panel" id="panel-home">
+      <h2>Home</h2>
+      <div id="home-list"><p class="placeholder">No data yet.</p></div>
+    </section>
+
+    <section class="panel" id="panel-devices">
       <div class="pair-header">
-        <h2>Lighting</h2>
+        <h2>Devices</h2>
         <button id="pair-device-btn" class="pair-btn" title="Open the Zigbee pairing window (bridge-wide — accepts lights, sensors, anything)">Pair device</button>
       </div>
       <div id="pair-feed" class="pair-feed" hidden></div>
-      <div id="sensor-section" hidden>
-        <h3>Sensors</h3>
-        <div id="sensor-list"></div>
-      </div>
-      <div id="lighting-list"><p class="placeholder">No data yet.</p></div>
+      <div id="device-list"><p class="placeholder">No data yet.</p></div>
     </section>
 
     <section class="panel" id="panel-security">
@@ -121,12 +122,19 @@
       <span>Models</span>
     </button>
 
-    <button class="tab" data-panel="lighting" role="tab" aria-selected="false" aria-controls="panel-lighting">
+    <button class="tab" data-panel="home" role="tab" aria-selected="false" aria-controls="panel-home">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <line x1="9" y1="18" x2="15" y2="18"/><line x1="10" y1="22" x2="14" y2="22"/>
-        <path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5A4.61 4.61 0 0 1 8.91 14"/>
+        <path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>
       </svg>
-      <span>Lighting</span>
+      <span>Home</span>
+    </button>
+
+    <button class="tab" data-panel="devices" role="tab" aria-selected="false" aria-controls="panel-devices">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/>
+        <rect x="3" y="15" width="7" height="7" rx="1"/><rect x="14" y="15" width="7" height="7" rx="1"/>
+      </svg>
+      <span>Devices</span>
     </button>
 
     <button class="tab" data-panel="security" role="tab" aria-selected="false" aria-controls="panel-security">

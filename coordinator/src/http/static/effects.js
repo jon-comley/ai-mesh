@@ -170,7 +170,7 @@ function wireEffectChipTouchDrag(chip, effectId) {
     scrollSpeed = y < EDGE ? -MAX_SPEED * (1 - y / EDGE)
                 : y > h - EDGE ?  MAX_SPEED * (1 - (h - y) / EDGE) : 0;
     if (!scrollSpeed) { stopScroll(); return; }
-    if (!scrollTarget) scrollTarget = document.getElementById('panel-lighting') || document.scrollingElement || document.documentElement;
+    if (!scrollTarget) scrollTarget = document.getElementById('panel-home') || document.scrollingElement || document.documentElement;
     if (!scrollRaf) {
       const tick = () => {
         if (!scrollSpeed) { scrollRaf = null; return; }

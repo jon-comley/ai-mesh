@@ -1638,6 +1638,16 @@ body {
   margin-top: 8px;
 }
 
+.room-sensors {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.room-sensors .sensor-card {
+  padding: 8px 12px;
+}
+
 .room-device-card {
   border-radius: 8px;
   background: var(--surface-2);
@@ -1724,14 +1734,14 @@ body {
     max-width: 1100px;
     margin-inline: auto;
   }
-  /* The lighting 3D layout view manages its own full-width flex layout. */
-  #panel-lighting.layout-open > #lighting-list {
+  /* The Home tab's 3D layout view manages its own full-width flex layout. */
+  #panel-home.layout-open > #home-list {
     max-width: none;
     margin-inline: 0;
   }
 
   /* Two-column card grid so cards don't stretch across the full viewport.
-     NOT #lighting-list: the lighting tab is always the rooms view (full-width
+     NOT #home-list: the Home tab is always the rooms view (full-width
      sections + a .room-list column), so the auto-fill grid would tile those
      sections into columns and pile every room into the last cell when wide. */
   #nodes-list,
@@ -1964,20 +1974,13 @@ body {
 .pair-feed-line { padding: 2px 0; }
 .pair-feed-ts { color: var(--text-muted); margin-right: 6px; }
 
-/* ── Sensor cards (interim readout — Phase D's Home tab supersedes this) ────── */
-#sensor-section h3 {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-muted);
-  margin: 0 0 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
+/* ── Sensor cards (Home room-card strip + Devices tab, same widget) ─────────── */
 .sensor-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
 }
 .sensor-card.is-offline {
   opacity: 0.55;
@@ -1987,6 +1990,48 @@ body {
   color: var(--text-muted);
   white-space: nowrap;
 }
+
+/* ── Devices tab ──────────────────────────────────────────────────────────── */
+#device-list h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin: 16px 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#device-list h3:first-child { margin-top: 0; }
+.device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.device-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.device-room-select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.device-row-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+.device-row-btn:hover { border-color: var(--accent); color: var(--accent); }
+.device-row-btn-delete:hover { border-color: var(--red); color: var(--red); }
 
 .room-scene-save-btn {
   background: none;
@@ -2075,21 +2120,21 @@ body {
 /* ── Layout canvas view ─────────────────────────────────────────────────────── */
 
 /* When layout is open, panel becomes a flex column so canvas fills the height */
-#panel-lighting.layout-open {
+#panel-home.layout-open {
   overflow: hidden;
   padding: 0;
   display: flex;
   flex-direction: column;
 }
-#panel-lighting.layout-open > h2 { display: none; }
-#panel-lighting.layout-open #lighting-list {
+#panel-home.layout-open > h2 { display: none; }
+#panel-home.layout-open #home-list {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-#panel-lighting.layout-open .layout-view {
+#panel-home.layout-open .layout-view {
   flex: 1;
   min-height: 0;
 }

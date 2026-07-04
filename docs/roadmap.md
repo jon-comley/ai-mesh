@@ -747,6 +747,46 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > (pair all 7, verify readings/battery/availability/restart-survival, then
 > exercise Phase C's `get_climate` for real: `just intent "what's the
 > office temperature?"` and a mixed action+climate turn).
+>
+> **Phase D shipped (2026-07-04)** — frontend-only, no wire bump (every REST
+> endpoint touched — `PATCH /api/rooms/{id}/devices`, `PATCH`/`DELETE
+> /api/lights/{id}[/name]` — was already device-type-agnostic, confirmed by
+> a research pass before writing any code). Lighting tab renamed to **Home**;
+> room cards render mixed-domain members — lights keep their existing
+> interactive controls, sensors get a new read-only strip (`buildSensorCard`
+> in the new `devicewidgets.js`, shared verbatim with the Devices tab, since
+> sensors have no controls to duplicate either way). New single **Devices**
+> tab (pairing is bridge-wide, so "add device" can't live on a per-type tab
+> per the plan): inventory grouped by type with rename/delete/room-assignment
+> (dropdown, not drag-and-drop) for both domains, plus the pair-device button
+> + live join feed **moved** here wholesale from the Home panel (was added
+> to the wrong panel in the pairing-feature slice — this was always its
+> real home per the plan). A successful pair now also prompts inline in the
+> join feed to assign the new device to a room (`buildRoomSelect`, shared
+> with the Devices tab's own row pickers) — missed in the first pass,
+> caught when asked whether Phase D was actually complete against the
+> plan's exact wording, added same-day. `lighting.js` deleted outright: `roomsActive`
+> had been forced true unconditionally since rooms.js took over the panel,
+> so its entire flat-list renderer (`render`/`patchCards`/drag machinery)
+> was already 100% dead code, confirmed by a dependency check before
+> deleting.
+> `devicesMap` (state.js) now holds both lights and sensors tagged by
+> `device_type`; `notifyDevices`/new `notifySensors` each only clear+refill
+> their own tag so neither domain's WS snapshot clobbers the other's. Fixed
+> four latent bugs this surfaced by making `room.device_ids` (untyped —
+> already true before Phase D, just never exercised with a sensor member
+> until now) hold a mix of both types: the drag-reorder ghost's "N bulbs"
+> count, the scenes "all-paused" member count, the On/Off/brightness
+> `empty`-room gate, and `sendRoomCommand`'s optimistic-update loop — all
+> would have silently counted or mutated a sensor as if it were a light.
+> Also excluded sensors from `inferZigbeeStatus`'s heuristic: a sensor's
+> ~25h passive offline timeout vs. a light's ~10min would have made "all
+> devices offline" a much less reliable bridge-down signal. 824 tests
+> (unchanged — frontend-only; one Rust test renamed for the asset-route
+> rename). Verified via curl (served JS/HTML content, tab/panel id pairing,
+> old `/static/lighting.js` now 404s) — **no browser on WSL2**, so the
+> actual room-card/Devices-tab rendering needs a visual check on the phone
+> (pi1:9001) after deploy, alongside the sensor live gate above.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past

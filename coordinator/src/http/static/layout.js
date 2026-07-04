@@ -143,10 +143,10 @@ export async function openLayout(room) {
   sunCalibMode = false;
   compassDeg = room.orientation_degrees ?? 0;
 
-  const container = document.getElementById('lighting-list');
+  const container = document.getElementById('home-list');
   for (const child of container.children) child.style.display = 'none';
 
-  document.getElementById('panel-lighting')?.classList.add('layout-open');
+  document.getElementById('panel-home')?.classList.add('layout-open');
 
   const view = buildLayoutView(room);
   container.appendChild(view);
@@ -196,9 +196,9 @@ export function closeLayout() {
   dismissPopover();
   teardownThree();
 
-  document.getElementById('panel-lighting')?.classList.remove('layout-open');
+  document.getElementById('panel-home')?.classList.remove('layout-open');
 
-  const container = document.getElementById('lighting-list');
+  const container = document.getElementById('home-list');
   const view = container.querySelector('.layout-view');
   if (view) view.remove();
 

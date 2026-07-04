@@ -2,8 +2,8 @@ import { loadPrefs } from '/static/prefs.js';
 import * as topology from '/static/topology.js';
 import * as health from '/static/health.js';
 import * as models from '/static/models.js';
-import * as lighting from '/static/lighting.js';
 import * as rooms from '/static/rooms.js';
+import * as devices from '/static/devices.js';
 import * as effects from '/static/effects.js';
 import * as scenes from '/static/scenes.js';
 import * as errors from '/static/errors.js';
@@ -71,16 +71,22 @@ const handlers = {
   },
   ModelUpdate: evt => models.handleModelUpdate(evt),
   LightingUpdate: evt => {
-    lighting.handleLightingUpdate(evt);
     rooms.notifyDevices(evt.devices);
+    devices.refresh();
   },
-  RoomsUpdate: evt => rooms.handleRoomsUpdate(evt),
+  RoomsUpdate: evt => {
+    rooms.handleRoomsUpdate(evt);
+    devices.refresh();
+  },
   ScenesUpdate: evt => scenes.handleScenesUpdate(evt),
   SolarUpdate: evt => rooms.notifySolar(evt.azimuth, evt.elevation),
   EffectUpdate: evt => effects.handleEffectUpdate(evt),
   ZigbeeStatus: evt => { rooms.handleZigbeeStatus(evt.online); health.handleZigbeeStatus(evt.online); },
-  ZigbeeJoinEvent: evt => lighting.handleJoinEvent(evt),
-  SensorUpdate: evt => lighting.handleSensorUpdate(evt),
+  ZigbeeJoinEvent: evt => devices.handleJoinEvent(evt),
+  SensorUpdate: evt => {
+    rooms.notifySensors(evt.sensors);
+    devices.refresh();
+  },
   ErrorUpdate: evt => errors.handleErrorUpdate(evt),
   SecurityUpdate: evt => security.handleSecurityUpdate(evt),
   ReaperUpdate: evt => reaper.handleReaperUpdate(evt),
@@ -136,7 +142,6 @@ security.init(document.getElementById('security-table'));
 chat.init(document.getElementById('panel-chat'));
 reaper.init(document.getElementById('panel-reaper'));
 gateway.init(document.getElementById('panel-gateway'));
-lighting.setRoomsActive();
 
 // Ask for token on very first visit when auth is likely needed.
 if (!localStorage.getItem('meshToken')) {
