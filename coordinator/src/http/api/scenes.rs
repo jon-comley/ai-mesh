@@ -14,6 +14,7 @@ use crate::http::state::{DashboardState, SceneInfo};
 use crate::registry::{DeviceSnapshot, Registry};
 
 use super::gen_request_id;
+use super::lights::{brightness_action, color_temp_action, color_xy_action};
 use crate::http::auth::Authed;
 
 // ── Scenes ────────────────────────────────────────────────────────────────────
@@ -166,69 +167,32 @@ pub async fn recall_scene(
                 continue;
             }
         };
-        if let Some((x, y)) = snap.color_xy {
-            let command = match transition_secs {
-                Some(t) if t > 0.0 => LightAction::ColorXYTransition {
-                    x,
-                    y,
-                    transition_secs: t,
-                },
-                _ => LightAction::ColorXY { x, y },
+        // Actions come from the lights-domain constructors so the transition
+        // dispatch is shared with the HTTP command path, not re-derived here.
+        {
+            let mut send = |command: LightAction| {
+                let cmd = LightCommandRequest {
+                    request_id: gen_request_id(),
+                    target: LightTarget::Device(snap.device_id.clone()),
+                    command,
+                };
+                if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+                    any_unavailable = true;
+                }
             };
-            let cmd = LightCommandRequest {
-                request_id: gen_request_id(),
-                target: LightTarget::Device(snap.device_id.clone()),
-                command,
-            };
-            if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
-                any_unavailable = true;
+            if let Some((x, y)) = snap.color_xy {
+                send(color_xy_action(x, y, transition_secs));
+            } else if let Some(ct) = snap.color_temp {
+                send(color_temp_action(ct, transition_secs));
             }
-        } else if let Some(ct) = snap.color_temp {
-            let command = match transition_secs {
-                Some(t) if t > 0.0 => LightAction::ColorTempTransition {
-                    value: ct,
-                    transition_secs: t,
-                },
-                _ => LightAction::ColorTemp(ct),
-            };
-            let cmd = LightCommandRequest {
-                request_id: gen_request_id(),
-                target: LightTarget::Device(snap.device_id.clone()),
-                command,
-            };
-            if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
-                any_unavailable = true;
+            if let Some(brightness) = snap.brightness {
+                send(brightness_action(brightness, transition_secs));
             }
-        }
-        if let Some(brightness) = snap.brightness {
-            let command = match transition_secs {
-                Some(t) if t > 0.0 => LightAction::BrightnessTransition {
-                    value: brightness,
-                    transition_secs: t,
-                },
-                _ => LightAction::Brightness(brightness),
-            };
-            let cmd = LightCommandRequest {
-                request_id: gen_request_id(),
-                target: LightTarget::Device(snap.device_id.clone()),
-                command,
-            };
-            if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
-                any_unavailable = true;
-            }
-        }
-        let on_off = if snap.on {
-            LightAction::On
-        } else {
-            LightAction::Off
-        };
-        let cmd = LightCommandRequest {
-            request_id: gen_request_id(),
-            target: LightTarget::Device(snap.device_id.clone()),
-            command: on_off,
-        };
-        if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
-            any_unavailable = true;
+            send(if snap.on {
+                LightAction::On
+            } else {
+                LightAction::Off
+            });
         }
 
         // Update the dashboard snapshot so the UI sees the state from the scene.
