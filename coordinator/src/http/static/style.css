@@ -1923,6 +1923,47 @@ body {
   margin-bottom: 6px;
 }
 
+/* ── Zigbee pairing (Lighting panel header) ─────────────────────────────────── */
+.pair-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pair-btn {
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 10px;
+  transition: border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.pair-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.pair-btn:disabled {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+  cursor: default;
+}
+.pair-feed {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  margin-bottom: 12px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 8px 10px;
+}
+.pair-feed-line { padding: 2px 0; }
+.pair-feed-ts { color: var(--text-muted); margin-right: 6px; }
+
 .room-scene-save-btn {
   background: none;
   border: 1px dashed var(--border);

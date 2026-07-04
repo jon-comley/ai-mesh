@@ -160,7 +160,30 @@ pub async fn delete_device(
     Path(device_id): Path<String>,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
     _: Authed,
+    State(state): State<Arc<DashboardState>>,
 ) -> impl IntoResponse {
+    // Ask the bridge to unpair the device first — registry deletion alone is
+    // cosmetic: a still-paired device re-announces and reappears on the next
+    // bridge/devices publish. Best-effort: with the node offline we still
+    // clean local records (the device returns when the node does, and the
+    // user can delete again).
+    let node = state
+        .get_node_for_device(&device_id)
+        .or_else(|| state.get_zigbee_node());
+    match node {
+        Some(node_id) => {
+            let req = shared::DeviceRemoveRequest {
+                request_id: gen_request_id(),
+                device_id: device_id.clone(),
+            };
+            if !state.send_to_node(&node_id, MeshMessage::DeviceRemove(req)) {
+                tracing::warn!(%device_id, "delete_device: zigbee node unreachable — removed locally only");
+            }
+        }
+        None => {
+            tracing::warn!(%device_id, "delete_device: no zigbee node known — removed locally only");
+        }
+    }
     registry.lock().unwrap().delete_device(&device_id);
     StatusCode::NO_CONTENT.into_response()
 }
@@ -406,6 +429,40 @@ mod tests {
         seed_light(&state, "bulb1", "pi1");
         let status = post_light_cmd(state, "bulb1", "", r#"{"action":"color_xy","x":0.3}"#).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ── delete_device ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn delete_device_requests_network_removal() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "old_bulb", "pi1");
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let router: Router = Router::new()
+            .route("/api/lights/{device}", axum::routing::delete(delete_device))
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let status = send(router, "DELETE", "/api/lights/old_bulb", "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        match rx.try_recv().unwrap() {
+            MeshMessage::DeviceRemove(req) => assert_eq!(req.device_id, "old_bulb"),
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_device_without_node_still_cleans_registry() {
+        let state = make_state(vec![], empty_connections());
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let router: Router = Router::new()
+            .route("/api/lights/{device}", axum::routing::delete(delete_device))
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let status = send(router, "DELETE", "/api/lights/ghost", "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
     }
 
     // ── group_light_command ───────────────────────────────────────────────────

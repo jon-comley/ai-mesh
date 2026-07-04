@@ -33,9 +33,15 @@ impl Capability for LightingCapability {
     }
 
     fn handles(&self, msg: &MeshMessage) -> bool {
+        // PermitJoin/DeviceRemove are bridge-wide admin commands, not strictly
+        // lighting — they live here because lighting owns the bridge
+        // relationship (ZigbeeStatus reporting) on every zigbee node.
         matches!(
             msg,
-            MeshMessage::LightCommand(_) | MeshMessage::SceneLoad(_)
+            MeshMessage::LightCommand(_)
+                | MeshMessage::SceneLoad(_)
+                | MeshMessage::PermitJoin(_)
+                | MeshMessage::DeviceRemove(_)
         )
     }
 
@@ -110,6 +116,19 @@ impl Capability for LightingCapability {
                         }
                         // Sensor readings belong to the sensors capability.
                         Ok(ZigbeeEvent::SensorChanged(_)) => {}
+                        Ok(ZigbeeEvent::JoinEvent {
+                            event,
+                            device_id,
+                            model,
+                        }) => {
+                            let report = shared::ZigbeeJoinEvent {
+                                node_id: node_id.clone(),
+                                event,
+                                device_id,
+                                model,
+                            };
+                            let _ = Self::send_via_ctx(&ctx, MeshMessage::ZigbeeJoin(report)).await;
+                        }
                         Ok(ZigbeeEvent::DeviceAvailability { device_id, online }) => {
                             // Availability fires for every device on the bridge; only
                             // lights get the warm-white restore and LightState offline
@@ -234,6 +253,30 @@ impl Capability for LightingCapability {
                     warn!(request_id = %req.request_id, "LightCommand received but MQTT not connected");
                 }
             },
+            MeshMessage::PermitJoin(req) => match self.zigbee.get() {
+                Some(client) => {
+                    if let Err(e) = client.permit_join(req.seconds).await {
+                        warn!(request_id = %req.request_id, "permit join failed: {e}");
+                    } else {
+                        info!(request_id = %req.request_id, seconds = req.seconds, "pairing window opened");
+                    }
+                }
+                None => {
+                    warn!(request_id = %req.request_id, "PermitJoin received but MQTT not connected");
+                }
+            },
+            MeshMessage::DeviceRemove(req) => match self.zigbee.get() {
+                Some(client) => {
+                    if let Err(e) = client.remove_device(&req.device_id).await {
+                        warn!(request_id = %req.request_id, device_id = %req.device_id, "device remove failed: {e}");
+                    } else {
+                        info!(request_id = %req.request_id, device_id = %req.device_id, "device removal requested");
+                    }
+                }
+                None => {
+                    warn!(request_id = %req.request_id, "DeviceRemove received but MQTT not connected");
+                }
+            },
             MeshMessage::SceneLoad(req) => {
                 info!(request_id = %req.request_id, scene = %req.scene_name, "SceneLoad received (scenes not yet implemented)");
                 let report = SceneLoadedReport {
@@ -345,6 +388,20 @@ mod tests {
     #[test]
     fn handles_scene_load() {
         assert!(LightingCapability::new("test-node").handles(&scene_load()));
+    }
+
+    #[test]
+    fn handles_bridge_admin_commands() {
+        use shared::{DeviceRemoveRequest, PermitJoinRequest};
+        let cap = LightingCapability::new("test-node");
+        assert!(cap.handles(&MeshMessage::PermitJoin(PermitJoinRequest {
+            request_id: "r".into(),
+            seconds: 254,
+        })));
+        assert!(cap.handles(&MeshMessage::DeviceRemove(DeviceRemoveRequest {
+            request_id: "r".into(),
+            device_id: "d".into(),
+        })));
     }
 
     #[test]

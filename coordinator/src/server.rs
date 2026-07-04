@@ -1035,6 +1035,9 @@ async fn process_message(
                 "device list received"
             );
             if let Some(dash) = dashboard {
+                // The sender owns a Zigbee bridge — bridge-wide admin commands
+                // (permit-join, device removal) route to it.
+                dash.set_zigbee_node(&report.node_id);
                 dash.push_group_update(&report.node_id, report.groups.clone());
                 // Placeholder cards are a lighting-UI concept — seed them for
                 // lights only; other device classes get their own snapshots.
@@ -1065,7 +1068,21 @@ async fn process_message(
                 warn!("zigbee: bridge offline");
             }
             if let Some(dash) = dashboard {
+                if let Some(id) = node_id.as_deref() {
+                    dash.set_zigbee_node(id);
+                }
                 dash.push_zigbee_status(online);
+            }
+            None
+        }
+        MeshMessage::ZigbeeJoin(report) => {
+            info!(
+                event = %report.event,
+                device_id = %report.device_id,
+                "zigbee: pairing event"
+            );
+            if let Some(dash) = dashboard {
+                dash.push_join_event(report.event, report.device_id, report.model);
             }
             None
         }

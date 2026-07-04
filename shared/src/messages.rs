@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 6;
+pub const WIRE_VERSION: u32 = 7;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -306,6 +306,41 @@ pub struct SensorReport {
     pub online: bool,
 }
 
+/// Coordinator asks the Zigbee bridge to open its pairing window (bridge-wide
+/// — Zigbee pairing is not device-type specific). Fire-and-forget: feedback
+/// arrives as `ZigbeeJoin` events while the window is open.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PermitJoinRequest {
+    pub request_id: String,
+    /// Window length; z2m caps at 254 s.
+    pub seconds: u8,
+}
+
+/// Coordinator asks the bridge to remove a device from the Zigbee network.
+/// Without this a "deleted" device re-announces and reappears in the next
+/// `bridge/devices` publish. Fire-and-forget: z2m republishes the device
+/// list after removal, which flows back as the usual `DeviceList`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeviceRemoveRequest {
+    pub request_id: String,
+    pub device_id: String,
+}
+
+/// One z2m `bridge/event` during pairing, forwarded by the zigbee-owning
+/// node: drives the dashboard's live "joined: <model>" feed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ZigbeeJoinEvent {
+    pub node_id: String,
+    /// "device_joined" | "device_interview_started" |
+    /// "device_interview_successful" | "device_interview_failed" |
+    /// "device_announce" | "device_leave"
+    pub event: String,
+    pub device_id: String,
+    /// Model name from the interview definition (only on interview success).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 /// Full device inventory for a node's Zigbee bridge, sent on every MQTT
 /// (re)connect. Typed per device; `groups` stays lighting-specific (Z2M
 /// groups are a lighting concept).
@@ -463,6 +498,9 @@ pub enum MeshMessage {
     LightState(LightStateReport),
     DeviceList(DeviceListReport),
     SensorState(SensorReport),
+    PermitJoin(PermitJoinRequest),
+    DeviceRemove(DeviceRemoveRequest),
+    ZigbeeJoin(ZigbeeJoinEvent),
     SceneLoad(SceneLoadRequest),
     SceneLoaded(SceneLoadedReport),
     // Intent routing
@@ -1043,6 +1081,48 @@ mod tests {
             !json.contains("occupancy"),
             "None fields omitted on the wire"
         );
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn permit_join_roundtrip() {
+        let msg = MeshMessage::PermitJoin(PermitJoinRequest {
+            request_id: "r1".into(),
+            seconds: 254,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn device_remove_roundtrip() {
+        let msg = MeshMessage::DeviceRemove(DeviceRemoveRequest {
+            request_id: "r1".into(),
+            device_id: "old_bulb".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn zigbee_join_roundtrip() {
+        let msg = MeshMessage::ZigbeeJoin(ZigbeeJoinEvent {
+            node_id: "pi1".into(),
+            event: "device_interview_successful".into(),
+            device_id: "0xabcdef".into(),
+            model: Some("WSDCGQ11LM".into()),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+        // model=None is omitted on the wire
+        let msg = MeshMessage::ZigbeeJoin(ZigbeeJoinEvent {
+            node_id: "pi1".into(),
+            event: "device_joined".into(),
+            device_id: "0xabcdef".into(),
+            model: None,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("model"));
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
     }
 

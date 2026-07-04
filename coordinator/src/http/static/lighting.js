@@ -6,6 +6,7 @@ import { repaintModeDots } from '/static/indicators.js';
 import { esc, showToast } from '/static/util.js';
 import { HUE_DEFAULT_ON } from '/static/state.js';
 import { setPrefDebounced } from '/static/prefs.js';
+import { api } from '/static/api.js';
 
 const ORDER_KEY = 'meshLightOrder';
 let devicesMap = new Map();
@@ -216,6 +217,85 @@ async function sendCommand(deviceId, body) {
 function formatDeviceName(id) {
   return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
+
+// ── Pairing (bridge-wide permit-join + live join feed) ──────────────────────
+
+let pairCountdown = null;
+
+function wirePairButton() {
+  const btn = document.getElementById('pair-device-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (pairCountdown) return; // window already open
+    try {
+      const res = await api('/zigbee/permit-join', { method: 'POST' });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        showToast(`Pairing failed (${res.status})${text ? ': ' + text : ''}`, true);
+        return;
+      }
+      const { seconds } = await res.json();
+      startPairCountdown(btn, seconds);
+      pairFeedLine('Pairing window open — power-cycle the device or hold its pair button.');
+    } catch (e) {
+      showToast(`Pairing error: ${e.message}`, true);
+    }
+  });
+}
+
+function startPairCountdown(btn, seconds) {
+  let remaining = seconds;
+  btn.disabled = true;
+  const tick = () => {
+    if (remaining <= 0) {
+      clearInterval(pairCountdown);
+      pairCountdown = null;
+      btn.disabled = false;
+      btn.textContent = 'Pair device';
+      pairFeedLine('Pairing window closed.');
+      return;
+    }
+    btn.textContent = `Pairing… ${remaining}s`;
+    remaining -= 1;
+  };
+  tick();
+  pairCountdown = setInterval(tick, 1000);
+}
+
+function pairFeedLine(text, tsMs) {
+  const feed = document.getElementById('pair-feed');
+  if (!feed) return;
+  feed.hidden = false;
+  const line = document.createElement('div');
+  line.className = 'pair-feed-line';
+  const ts = new Date(tsMs ?? Date.now()).toLocaleTimeString();
+  line.innerHTML = `<span class="pair-feed-ts">${esc(ts)}</span> ${esc(text)}`;
+  feed.prepend(line);
+  while (feed.children.length > 20) feed.removeChild(feed.lastChild);
+}
+
+// Recent events are replayed on every WS (re)connect (phone screen locking
+// mid-pairing drops the socket) — skip anything already rendered.
+let lastJoinTs = 0;
+
+// WS ZigbeeJoinEvent → human line in the feed. The device list itself
+// refreshes automatically (z2m republishes bridge/devices after interview).
+export function handleJoinEvent(evt) {
+  if (evt.ts_ms <= lastJoinTs) return;
+  lastJoinTs = evt.ts_ms;
+  const name = formatDeviceName(evt.device_id);
+  const lines = {
+    device_joined: `${name} joined — interviewing…`,
+    device_interview_started: `Interviewing ${name}…`,
+    device_interview_successful: `Paired: ${evt.model ?? name} ✓`,
+    device_interview_failed: `Interview failed for ${name} — move it closer and retry.`,
+    device_announce: `${name} announced itself.`,
+    device_leave: `${name} left the network.`,
+  };
+  pairFeedLine(lines[evt.event] ?? `${name}: ${evt.event}`, evt.ts_ms);
+}
+
+wirePairButton();
 
 // ── Drag-to-reorder (same pattern as models.js / topology.js) ───────────────
 

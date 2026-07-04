@@ -79,6 +79,7 @@ const handlers = {
   SolarUpdate: evt => rooms.notifySolar(evt.azimuth, evt.elevation),
   EffectUpdate: evt => effects.handleEffectUpdate(evt),
   ZigbeeStatus: evt => { rooms.handleZigbeeStatus(evt.online); health.handleZigbeeStatus(evt.online); },
+  ZigbeeJoinEvent: evt => lighting.handleJoinEvent(evt),
   ErrorUpdate: evt => errors.handleErrorUpdate(evt),
   SecurityUpdate: evt => security.handleSecurityUpdate(evt),
   ReaperUpdate: evt => reaper.handleReaperUpdate(evt),

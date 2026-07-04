@@ -33,6 +33,7 @@ pub const STREAM_CHANNEL_CAP: usize = 256;
 const HEALTH_WINDOW: usize = 60;
 const ERROR_RING_CAP: usize = 200;
 const SECURITY_RING_CAP: usize = 200;
+const JOIN_FEED_CAP: usize = 20;
 
 /// One captured WARN/ERROR log record — surfaced in the Errors tab.
 #[derive(Clone, Debug, Serialize)]
@@ -108,6 +109,16 @@ pub enum DashboardEvent {
         /// coordinator has not yet received any `ZigbeeStatus` from a lighting
         /// node (no node connected, or it hasn't reported). Serialises to `null`.
         online: Option<bool>,
+    },
+    /// One z2m bridge event during pairing. The last few are replayed on WS
+    /// connect: the realistic pairing flow is phone-driven (tap Pair, walk to
+    /// the device, screen locks, WS drops) so events must survive a reconnect.
+    ZigbeeJoinEvent {
+        ts_ms: u64,
+        event: String,
+        device_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     ErrorUpdate {
         errors: Vec<ErrorEntry>,
@@ -312,6 +323,13 @@ pub struct DashboardState {
     /// from), then `Some(online)`. `ZigbeeStatus` is otherwise only broadcast on
     /// change, so this is replayed to new WS clients on connect.
     zigbee_status: Mutex<Option<bool>>,
+    /// The node that owns the Zigbee bridge (last node to send a DeviceList /
+    /// ZigbeeStatus) — target for bridge-wide admin commands (permit-join,
+    /// device removal). Single-bridge assumption, same as the status field.
+    zigbee_node: Mutex<Option<String>>,
+    /// Recent pairing-feed events, replayed to new WS clients (see
+    /// `DashboardEvent::ZigbeeJoinEvent`).
+    join_feed: Mutex<VecDeque<DashboardEvent>>,
     /// Live TCP sender channels — used by the HTTP API to push commands to agents.
     pub connections: NodeConnections,
     /// Wakes the EffectRunner for an immediate tick — used by activation /
@@ -358,6 +376,8 @@ impl DashboardState {
             scene_snapshot: Mutex::new(Vec::new()),
             effect_snapshot: Mutex::new(HashMap::new()),
             zigbee_status: Mutex::new(None),
+            zigbee_node: Mutex::new(None),
+            join_feed: Mutex::new(VecDeque::new()),
             connections,
             solar_sweep_notify: Arc::new(Notify::new()),
             lat,
@@ -773,6 +793,59 @@ impl DashboardState {
     /// `None` means no lighting node has reported yet (unknown).
     pub fn get_zigbee_status(&self) -> Option<bool> {
         *self.zigbee_status.lock().unwrap()
+    }
+
+    /// Remember which node owns the Zigbee bridge (targets bridge-wide admin
+    /// commands). Set whenever a node identifies itself by sending a
+    /// DeviceList or ZigbeeStatus.
+    pub fn set_zigbee_node(&self, node_id: &str) {
+        *self.zigbee_node.lock().unwrap() = Some(node_id.to_string());
+    }
+
+    pub fn get_zigbee_node(&self) -> Option<String> {
+        self.zigbee_node.lock().unwrap().clone()
+    }
+
+    /// Record + broadcast one pairing-feed event. The last `JOIN_FEED_CAP`
+    /// are kept for replay-on-connect: pairing is phone-driven and the phone
+    /// screen locking mid-window drops the WS.
+    pub fn push_join_event(&self, event: String, device_id: String, model: Option<String>) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let evt = {
+            let mut feed = self.join_feed.lock().unwrap();
+            // Strictly monotonic timestamps: the client dedupes replayed
+            // events by ts, so two events in the same millisecond (joined →
+            // interview started) must not share one.
+            let last_ts = feed
+                .back()
+                .and_then(|e| match e {
+                    DashboardEvent::ZigbeeJoinEvent { ts_ms, .. } => Some(*ts_ms),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let evt = DashboardEvent::ZigbeeJoinEvent {
+                ts_ms: now_ms.max(last_ts + 1),
+                event,
+                device_id,
+                model,
+            };
+            feed.push_back(evt.clone());
+            while feed.len() > JOIN_FEED_CAP {
+                feed.pop_front();
+            }
+            evt
+        };
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(evt);
+        }
+    }
+
+    /// Recent pairing-feed events for warm-starting new WS clients, oldest first.
+    pub fn get_join_feed(&self) -> Vec<DashboardEvent> {
+        self.join_feed.lock().unwrap().iter().cloned().collect()
     }
 
     /// Broadcast the current solar position to all connected clients.
@@ -1795,6 +1868,50 @@ mod tests {
         assert!(
             !json.contains("occupancy"),
             "None fields must be omitted: {json}"
+        );
+    }
+
+    // ── push_join_event / get_join_feed ──────────────────────────────────────
+
+    #[test]
+    fn join_feed_caps_and_replays_in_order() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        for i in 0..25 {
+            state.push_join_event("device_joined".into(), format!("dev{i}"), None);
+        }
+        let feed = state.get_join_feed();
+        assert_eq!(feed.len(), 20, "feed capped at JOIN_FEED_CAP");
+        match &feed[0] {
+            DashboardEvent::ZigbeeJoinEvent { device_id, .. } => {
+                assert_eq!(device_id, "dev5", "oldest events evicted first");
+            }
+            _ => panic!("expected ZigbeeJoinEvent"),
+        }
+    }
+
+    #[test]
+    fn join_feed_timestamps_strictly_increase() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        // Pushed in a tight loop — wall clock won't tick between them.
+        state.push_join_event("device_joined".into(), "d".into(), None);
+        state.push_join_event("device_interview_started".into(), "d".into(), None);
+        let feed = state.get_join_feed();
+        let ts: Vec<u64> = feed
+            .iter()
+            .map(|e| match e {
+                DashboardEvent::ZigbeeJoinEvent { ts_ms, .. } => *ts_ms,
+                _ => panic!("expected ZigbeeJoinEvent"),
+            })
+            .collect();
+        assert!(
+            ts[1] > ts[0],
+            "client dedupes by ts — must be strict: {ts:?}"
         );
     }
 
