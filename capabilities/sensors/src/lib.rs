@@ -93,6 +93,7 @@ impl Capability for SensorsCapability {
                                     battery: None,
                                     occupancy: None,
                                     contact: None,
+                                    illuminance: None,
                                     online,
                                 };
                                 let _ = Self::send_via_ctx(&ctx, MeshMessage::SensorState(report))

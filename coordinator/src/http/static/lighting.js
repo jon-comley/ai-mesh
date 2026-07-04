@@ -274,6 +274,7 @@ function sensorReadout(s) {
   if (s.battery != null) parts.push(`🔋${s.battery}%`);
   if (s.occupancy != null) parts.push(s.occupancy ? 'Motion' : 'Clear');
   if (s.contact != null) parts.push(s.contact ? 'Open' : 'Closed');
+  if (s.illuminance != null) parts.push(`💡${Math.round(s.illuminance)} lx`);
   return parts.join(' · ');
 }
 

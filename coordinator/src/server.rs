@@ -1331,6 +1331,7 @@ mod tests {
             battery: Some(98),
             occupancy: None,
             contact: None,
+            illuminance: None,
             online: true,
         };
 

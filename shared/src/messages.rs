@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 7;
+pub const WIRE_VERSION: u32 = 8;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -303,6 +303,11 @@ pub struct SensorReport {
     pub occupancy: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<bool>,
+    /// Ambient light in lux (motion sensors with a light sensor, e.g. the
+    /// SNZB-03P R2 — its base-model sibling reports a dim/bright enum
+    /// instead and is not covered here).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub illuminance: Option<f32>,
     pub online: bool,
 }
 
@@ -1074,6 +1079,7 @@ mod tests {
             battery: Some(98),
             occupancy: None,
             contact: None,
+            illuminance: None,
             online: true,
         });
         let json = serde_json::to_string(&msg).unwrap();
@@ -1081,6 +1087,29 @@ mod tests {
             !json.contains("occupancy"),
             "None fields omitted on the wire"
         );
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn sensor_state_illuminance_roundtrip() {
+        // SNZB-03P R2 shape: occupancy + illuminance + battery, no temp/humidity/contact.
+        let msg = MeshMessage::SensorState(SensorReport {
+            node_id: "pi1".into(),
+            device_id: "hall_motion".into(),
+            temperature: None,
+            humidity: None,
+            battery: Some(100),
+            occupancy: Some(true),
+            contact: None,
+            illuminance: Some(123.0),
+            online: true,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains("\"illuminance\":123.0"),
+            "missing illuminance: {json}"
+        );
+        assert!(!json.contains("temperature"), "None fields omitted: {json}");
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
     }
 

@@ -421,13 +421,16 @@ fn parse_join_event(payload: &[u8]) -> Option<(String, String, Option<String>)> 
 }
 
 /// Parse a sensor-class device's publish: temperature/humidity/battery/
-/// occupancy/contact. Returns None when no sensor field is present (button
-/// actions, linkquality-only publishes). `device_name` is the topic remainder
-/// the caller already extracted (friendly names may contain slashes, so the
-/// full remainder — not the first segment — is the name). Raw `voltage` and
-/// `linkquality` are deliberately not captured (diagnostics live in the z2m
-/// frontend); add voltage here if a paired device turns out to expose it
-/// without a computed battery percentage.
+/// occupancy/contact/illuminance. Returns None when no sensor field is
+/// present (button actions, linkquality-only publishes). `device_name` is
+/// the topic remainder the caller already extracted (friendly names may
+/// contain slashes, so the full remainder — not the first segment — is the
+/// name). Raw `voltage` and `linkquality` are deliberately not captured
+/// (diagnostics live in the z2m frontend); add voltage here if a paired
+/// device turns out to expose it without a computed battery percentage.
+/// `illuminance` here is the numeric lux exposed by e.g. the SNZB-03P R2 —
+/// its base-model sibling instead exposes a `dim`/`bright` enum on a
+/// property named `illumination`, which this does not parse.
 fn parse_sensor_report(
     device_name: &str,
     payload: &[u8],
@@ -451,12 +454,17 @@ fn parse_sensor_report(
         .map(|v| v.clamp(0.0, 100.0).round() as u8);
     let occupancy = json.get("occupancy").and_then(|v| v.as_bool());
     let contact = json.get("contact").and_then(|v| v.as_bool());
+    let illuminance = json
+        .get("illuminance")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
 
     if temperature.is_none()
         && humidity.is_none()
         && battery.is_none()
         && occupancy.is_none()
         && contact.is_none()
+        && illuminance.is_none()
     {
         return None;
     }
@@ -469,6 +477,7 @@ fn parse_sensor_report(
         battery,
         occupancy,
         contact,
+        illuminance,
         online: true,
     })
 }
@@ -731,6 +740,23 @@ mod tests {
         assert_eq!(r.occupancy, Some(true));
         let r = parse_sensor_report("front_door", br#"{"contact":false}"#, "pi1").unwrap();
         assert_eq!(r.contact, Some(false));
+    }
+
+    #[test]
+    fn parse_sensor_snzb03p_r2_shape() {
+        // SNZB-03P R2: occupancy + numeric lux illuminance + battery, no voltage.
+        let payload = br#"{"occupancy":true,"illuminance":123,"battery":100,"linkquality":150}"#;
+        let r = parse_sensor_report("hall_motion", payload, "pi1").unwrap();
+        assert_eq!(r.occupancy, Some(true));
+        assert_eq!(r.illuminance, Some(123.0));
+        assert_eq!(r.battery, Some(100));
+        assert_eq!(r.temperature, None);
+    }
+
+    #[test]
+    fn parse_sensor_illuminance_only() {
+        let r = parse_sensor_report("hall_motion", br#"{"illuminance":42.5}"#, "pi1").unwrap();
+        assert_eq!(r.illuminance, Some(42.5));
     }
 
     #[test]

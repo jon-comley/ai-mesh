@@ -2,14 +2,16 @@
 
 Written 2026-07-04. Companion to `plans/multi-domain-home.md`. Phase B is
 software-complete and pairing/removal works from the app (commits `b0cf895`,
-`3906936`, `a3ff8ac`, `20e526b` — wire v7). **The one visible gap:** nothing
-in the UI renders sensor readings. The backend pipeline is finished — pair a
-temp sensor today and it joins, classifies, reports, persists, and serves at
-`GET /api/sensors` + `SensorUpdate` WS events — but `dashboard.js` has no
-`SensorUpdate` handler, so readings appear nowhere on screen.
+`3906936`, `a3ff8ac`, `20e526b` — wire v7).
 
-This plan: (1) the minimal interim readout to close that gap, (2) everything
-outstanding to call the sensors arc done.
+**Part 1 shipped (2026-07-04, commit `9749451`, wire v8):** the Lighting
+panel now renders read-only sensor cards — the one visible gap (no
+`SensorUpdate` WS handler existed) is closed. Hardware also arrived: SONOFF
+SNZB-02P ×4 (temp/humidity) + SNZB-03P R2 ×3 (motion). Checking their exact
+z2m `exposes` before pairing turned up a real gap beyond the UI: the R2
+motion sensor reports a *numeric lux* `illuminance` that `SensorReport` had
+no field for — added as part of Part 1 (see the addendum below). Everything
+that remains (Part 2) needs the live hardware and is unblocked.
 
 ---
 
@@ -71,6 +73,30 @@ showing the last readings, dimmed, per the merge semantics in
    modifier (no hover affordances) and a `.sensor-readout` line style.
    Follow the `.pair-*` block added at the same spot for conventions.
 
+### Addendum — illuminance (folded into Part 1, wire v8)
+
+Real hardware exposed a gap the original wire shape didn't cover. The
+**SNZB-03P R2** (the model actually purchased) reports ambient light as a
+numeric `illuminance` (lux) — added to `SensorReport` as
+`illuminance: Option<f32>` and to the readout as `💡{lx} lx`. **Do not
+confuse with the base SNZB-03P** (no "R2"): it instead exposes a `dim`/
+`bright` enum on a differently-named property (`illumination`), which is
+not parsed — if that model ever gets paired, its light-level reading is
+silently dropped (same "unhandled sensor field" behaviour as any other
+unmapped property; not a crash, just missing data).
+
+Three things forget-easily-caused bugs live here — check all three when
+touching `SensorReport` again:
+1. The zigbee parser (`parse_sensor_report` in `capabilities/zigbee/src/client.rs`).
+2. The coordinator's field-wise merge (`push_sensor_update` in
+   `coordinator/src/http/state.rs`) — the easy one to miss, since a
+   compile error won't catch a merge arm that quietly drops a field the
+   struct literal already has.
+3. Every other `SensorReport { ... }` literal in the codebase (tests,
+   `capabilities/sensors/src/lib.rs`'s availability-flip constructor) —
+   the compiler catches these as missing-field errors, so they're the
+   safe ones.
+
 ### Verification (no browser on WSL2 — house constraint)
 
 - `cargo build -p coordinator` (static assets are `include_str!` — JS/HTML
@@ -89,27 +115,40 @@ showing the last readings, dimmed, per the merge semantics in
 
 ## Part 2 — Outstanding for sensors-arc completion (in order)
 
-1. **This readout** (Part 1). After it: every Phase B deliverable has a
-   visible surface.
+1. ~~This readout~~ **Done** (Part 1, commit `9749451`, wire v8). Every
+   Phase B deliverable now has a visible surface.
 
 2. **Deploy** (user runs manually; always list these after changes):
    `just deploy-coordinator pi1` **first**, then `just deploy-node pi1`.
    Order matters: the old coordinator binary hard-errors on unknown
-   `MeshMessage` variants (wire v7) and would drop the agent connection.
+   `MeshMessage` variants and would drop the agent connection. This is now
+   two wire bumps behind (v7 pairing, v8 illuminance) — one deploy covers
+   both, no need to do it twice.
 
-3. **Hardware live gate** (blocks on sensor delivery — Aqara temp/humidity
-   + motion were "to be ordered", check with Jon). Whole flow from the
-   phone, no SSH:
+3. **Hardware live gate** — hardware is in hand: SNZB-02P ×4 (temp/humidity),
+   SNZB-03P R2 ×3 (motion + lux). Whole flow from the phone, no SSH:
    - Lighting tab → **Pair device** → hold the sensor's pair button →
-     watch the join feed ("Paired: WSDCGQ11LM ✓").
-   - Readings appear in the new sensor cards within one report interval.
-   - `curl .../api/sensors?token=…` shows temperature/humidity/battery.
+     watch the join feed ("Paired: SNZB-02P ✓" / "Paired: SNZB-03P R2 ✓").
+   - Readings appear in the new sensor cards within one report interval —
+     temp/humidity/battery for the SNZB-02P; occupancy/lux/battery for the
+     SNZB-03P R2 (its Motion/Clear flips instantly; lux only updates when
+     occupancy triggers, per the device's own behaviour — a static lux
+     reading between motion events is expected, not a bug).
+   - `curl .../api/sensors?token=…` shows the same fields.
    - Restart the coordinator → readings survive (sensor_states table).
-   - Pull the sensor's battery → after z2m's passive timeout (~25 h,
+   - Pull a sensor's battery → after z2m's passive timeout (~25 h,
      documented in `docs/pi1-lighting-setup.md` §9) the card dims to
      offline with readings intact. Don't wait a day for this one — verify
      the offline path by temporarily lowering z2m's
      `availability.passive.timeout` instead.
+   - Pair all 7 before declaring done — one of each isn't sufficient
+     coverage for confirming the pairing UX at realistic bridge-wide scale
+     (permit-join window length, feed readability with multiple joins).
+   - Delete one from the dashboard and confirm it actually leaves the
+     Zigbee network (re-pairing is required to bring it back — not just a
+     vanished registry row). The unpair-on-delete path only has a mocked
+     connection test so far (`delete_device_requests_network_removal`);
+     this is its first exercise against a real bridge.
    - On pass: mark Phase B **complete** in `docs/roadmap.md` (11.8 section)
      and update the focus memory.
 

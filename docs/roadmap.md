@@ -704,10 +704,24 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > Lighting tab gains a Pair-device button + live feed (interim home until
 > Phase D's Devices tab). 805 tests.
 >
-> **Next: `plans/sensor-readout-and-completion.md`** — the one visible gap
-> (no UI renders sensor readings; frontend `SensorUpdate` handler missing)
-> plus the ordered completion checklist: interim readout → deploy → hardware
-> live gate → Phase C.
+> **Sensor readout + illuminance (2026-07-04, wire v8)** — closed the one
+> visible gap from `plans/sensor-readout-and-completion.md` Part 1: Lighting
+> panel gains read-only sensor cards (`SensorUpdate` WS handler was the
+> missing piece; the coordinator pipeline was already complete) — dimmed
+> when offline, readings kept rather than blanked. Real hardware arrived
+> (SONOFF SNZB-02P ×4 temp/humidity, SNZB-03P R2 ×3 motion) — checked their
+> exact z2m `exposes` before pairing: SNZB-03P R2 reports a *numeric lux*
+> `illuminance` (its non-R2 sibling instead uses a `dim`/`bright` enum on a
+> differently-named property, `illumination` — not parsed). Added
+> `SensorReport.illuminance: Option<f32>`, threaded through the zigbee
+> parser, the coordinator's field-wise merge (the easy place to silently
+> drop it), and the readout card (`💡lx`). See `docs/pi1-lighting-setup.md`
+> §9 for the model-specific note.
+>
+> **Next:** `plans/sensor-readout-and-completion.md` Part 2 — deploy
+> (`deploy-coordinator` before `deploy-node`, wire v8) → hardware live gate
+> (pair all 7, verify readings/battery/availability/restart-survival) →
+> Phase C (get_climate tool + sensor context + multi-command chat).
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
