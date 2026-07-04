@@ -70,6 +70,7 @@ pub fn router(
         .route("/api/nodes/{id}", delete(api::nodes::remove_node))
         .route("/api/lights/names", get(api::lights::get_device_names))
         .route("/api/sensors", get(api::sensors::list_sensors))
+        .route("/api/zigbee/permit-join", post(api::zigbee::permit_join))
         .route(
             "/api/lights/{device}/command",
             post(api::lights::light_command),

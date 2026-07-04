@@ -178,6 +178,19 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Replay recent pairing-feed events — the phone's screen locking mid-pairing
+    // drops the WS, and the join/interview lines must survive the reconnect.
+    for evt in state.get_join_feed() {
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot ZigbeeJoinEvent: {e}"),
+        }
+    }
+
     // Push error log snapshot so the Errors panel populates immediately on connect.
     let errors = state.get_error_snapshot();
     if !errors.is_empty() {

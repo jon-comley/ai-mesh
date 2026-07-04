@@ -25,6 +25,13 @@ pub enum ZigbeeEvent {
         device_id: String,
         online: bool,
     },
+    /// One `bridge/event` during pairing (join/interview/announce/leave) —
+    /// drives the dashboard's live pairing feed.
+    JoinEvent {
+        event: String,
+        device_id: String,
+        model: Option<String>,
+    },
     /// Fires when `zigbee2mqtt/bridge/state` changes — indicates whether the
     /// zigbee2mqtt process itself is up and connected to the dongle.
     BridgeState {
@@ -172,6 +179,17 @@ impl ZigbeeClient {
                                 if online { "online" } else { "offline" }
                             );
                             let _ = tx_loop.send(ZigbeeEvent::BridgeState { online });
+                        } else if topic == "zigbee2mqtt/bridge/event" {
+                            if let Some((event, device_id, model)) =
+                                parse_join_event(p.payload.as_ref())
+                            {
+                                info!(%event, %device_id, "zigbee: bridge event");
+                                let _ = tx_loop.send(ZigbeeEvent::JoinEvent {
+                                    event,
+                                    device_id,
+                                    model,
+                                });
+                            }
                         } else if topic.ends_with("/state") || topic.matches('/').count() == 1 {
                             // Both the legacy "<device>/state" subtopic and the standard Z2M
                             // base topic "<device>" carry device state. Route by the device's
@@ -287,6 +305,38 @@ impl ZigbeeClient {
             .map_err(|e| ZigbeeError::Client(e.to_string()))
     }
 
+    /// Open the bridge-wide pairing window. z2m caps the window at 254 s.
+    /// The `value` field is redundant on current z2m but kept for
+    /// compatibility with 1.x payload shape (matches the CLI recipe).
+    pub async fn permit_join(&self, seconds: u8) -> Result<(), ZigbeeError> {
+        let payload = format!(r#"{{"value":true,"time":{}}}"#, seconds.min(254));
+        self.mqtt
+            .publish(
+                "zigbee2mqtt/bridge/request/permit_join",
+                QoS::AtMostOnce,
+                false,
+                payload,
+            )
+            .await
+            .map_err(|e| ZigbeeError::Client(e.to_string()))
+    }
+
+    /// Remove a device from the Zigbee network (not just from z2m's list).
+    /// z2m republishes `bridge/devices` afterwards, which flows back to the
+    /// coordinator as the usual device-list update.
+    pub async fn remove_device(&self, device_id: &str) -> Result<(), ZigbeeError> {
+        let payload = serde_json::json!({ "id": device_id }).to_string();
+        self.mqtt
+            .publish(
+                "zigbee2mqtt/bridge/request/device/remove",
+                QoS::AtMostOnce,
+                false,
+                payload,
+            )
+            .await
+            .map_err(|e| ZigbeeError::Client(e.to_string()))
+    }
+
     pub fn device_registry(&self) -> Arc<DeviceRegistry> {
         Arc::clone(&self.registry)
     }
@@ -342,6 +392,32 @@ fn parse_bridge_online(payload: &[u8]) -> Option<bool> {
                     .map(|s| s == "online")
             }),
     }
+}
+
+/// Parse a z2m `bridge/event` publish into `(event, device_id, model)` for
+/// the pairing feed. Interview events fold their `status` into the event
+/// name; unknown event types return None.
+fn parse_join_event(payload: &[u8]) -> Option<(String, String, Option<String>)> {
+    let json: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    let kind = json.get("type")?.as_str()?;
+    let data = json.get("data")?;
+    let device_id = data.get("friendly_name")?.as_str()?.to_owned();
+    let event = match kind {
+        "device_interview" => {
+            let status = data
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("started");
+            format!("device_interview_{status}")
+        }
+        "device_joined" | "device_announce" | "device_leave" => kind.to_owned(),
+        _ => return None,
+    };
+    let model = data
+        .pointer("/definition/model")
+        .and_then(|m| m.as_str())
+        .map(String::from);
+    Some((event, device_id, model))
 }
 
 /// Parse a sensor-class device's publish: temperature/humidity/battery/
@@ -670,5 +746,37 @@ mod tests {
     #[test]
     fn parse_sensor_malformed_json_returns_none() {
         assert!(parse_sensor_report("office_climate", b"not json", "pi1").is_none());
+    }
+
+    #[test]
+    fn parse_join_event_device_joined() {
+        let payload = br#"{"type":"device_joined","data":{"friendly_name":"0x00158d0001","ieee_address":"0x00158d0001"}}"#;
+        let (event, device_id, model) = parse_join_event(payload).unwrap();
+        assert_eq!(event, "device_joined");
+        assert_eq!(device_id, "0x00158d0001");
+        assert!(model.is_none());
+    }
+
+    #[test]
+    fn parse_join_event_interview_folds_status_and_model() {
+        let payload = br#"{"type":"device_interview","data":{"friendly_name":"0x00158d0001","status":"successful","definition":{"model":"WSDCGQ11LM","vendor":"Aqara"}}}"#;
+        let (event, device_id, model) = parse_join_event(payload).unwrap();
+        assert_eq!(event, "device_interview_successful");
+        assert_eq!(device_id, "0x00158d0001");
+        assert_eq!(model.as_deref(), Some("WSDCGQ11LM"));
+
+        let failed =
+            br#"{"type":"device_interview","data":{"friendly_name":"0xdead","status":"failed"}}"#;
+        let (event, _, model) = parse_join_event(failed).unwrap();
+        assert_eq!(event, "device_interview_failed");
+        assert!(model.is_none());
+    }
+
+    #[test]
+    fn parse_join_event_ignores_unknown_types_and_garbage() {
+        let unknown = br#"{"type":"scene_added","data":{"friendly_name":"x"}}"#;
+        assert!(parse_join_event(unknown).is_none());
+        assert!(parse_join_event(b"not json").is_none());
+        assert!(parse_join_event(br#"{"type":"device_joined"}"#).is_none());
     }
 }

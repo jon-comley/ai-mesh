@@ -158,9 +158,13 @@ If Z2M reports EZSP version < 13, update the EFR32 radio firmware via the SLZB-0
 
 ---
 
-## 5. Pairing bulbs
+## 5. Pairing devices
 
-From OmniLink1:
+**Primary path — the dashboard:** the Lighting tab's **Pair device** button
+opens the 254-second bridge-wide window (`POST /api/zigbee/permit-join`) and
+streams join/interview events live into the panel. Works from the phone.
+
+**CLI fallback** from OmniLink1:
 
 ```bash
 just pair-bulb
@@ -168,6 +172,11 @@ just pair-bulb
 
 This opens a 254-second pairing window and streams join events. Power-cycle the
 bulb to trigger pairing. When it joins, Z2M will interview it and log the IEEE address.
+
+**Removing a device** from the dashboard's delete button unpairs it from the
+Zigbee network (`bridge/request/device/remove`) as well as clearing the
+coordinator's records — deleting while pi1 is offline only clears local
+records, and the device reappears when the node returns.
 
 **Rename the device** after pairing:
 
@@ -240,10 +249,10 @@ No extra infrastructure — sensors join the same Z2M bridge. The agent needs th
 `sensors` feature (`NODE_FEATURES=llm,lighting,sensors` in `nodes/pi1.env`,
 baked in by `just deploy-node pi1`).
 
-**Pairing** is identical to bulbs (`just pair-bulb` opens the bridge-wide
-permit-join window — Zigbee pairing is not device-type specific). Battery
-devices usually need a button held to start joining; check the device manual.
-Rename after pairing exactly as in §5.
+**Pairing** is identical to bulbs (§5 — the dashboard's Pair device button or
+`just pair-bulb`; the window is bridge-wide because Zigbee pairing is not
+device-type specific). Battery devices usually need a button held to start
+joining; check the device manual. Rename after pairing exactly as in §5.
 
 Everything downstream is automatic:
 

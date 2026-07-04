@@ -691,6 +691,18 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > `docs/pi1-lighting-setup.md`. 792 tests. **Remaining: the live gate** —
 > pair one temp/humidity + one motion sensor, verify readings + battery +
 > availability land in registry/dashboard snapshot.
+>
+> **Pair/remove from the app (2026-07-04, wire v7)** — Phase D item 2's
+> *backend* pulled forward so the sensor live gate needs no SSH:
+> `MeshMessage::{PermitJoin, DeviceRemove, ZigbeeJoin}`; the long-deferred
+> `bridge/event` subscription now parsed into a join feed
+> (`ZigbeeEvent::JoinEvent` → `DashboardEvent::ZigbeeJoinEvent`);
+> `POST /api/zigbee/permit-join` (api/zigbee.rs — bridge admin, deliberately
+> not a device-domain module) routed to the bridge-owning node tracked in
+> `DashboardState::zigbee_node`; `DELETE /api/lights/{device}` now actually
+> unpairs (was registry-only — the device re-announced and came back);
+> Lighting tab gains a Pair-device button + live feed (interim home until
+> Phase D's Devices tab). 805 tests.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
