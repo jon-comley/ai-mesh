@@ -226,108 +226,152 @@ fn kill_stray_on_port(_port: u16) {}
 
 #[derive(Debug)]
 struct GgufSpec {
-    repo: &'static str,
+    repo: String,
     /// All shard filenames in order. Single-file models have one entry.
-    shards: &'static [&'static str],
+    shards: Vec<String>,
 }
 
+impl GgufSpec {
+    fn single(repo: &str, shard: &str) -> Self {
+        Self {
+            repo: repo.to_string(),
+            shards: vec![shard.to_string()],
+        }
+    }
+    fn multi(repo: &str, shards: &[&str]) -> Self {
+        Self {
+            repo: repo.to_string(),
+            shards: shards.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+/// Curated names cover only ~20 models; a Hugging Face leaderboard lists
+/// thousands. Rather than growing this match forever, `hf:<org>/<repo>:<filename>`
+/// lets any single-file GGUF be loaded directly — no ai-mesh code change needed
+/// to try a new model. (Multi-shard custom models aren't supported this way —
+/// there's no reliable way to know the shard count/order without querying the
+/// HF API, so those still need a curated entry below.)
 fn resolve_gguf(model_name: &str) -> Result<GgufSpec, String> {
+    if let Some(rest) = model_name.strip_prefix("hf:") {
+        let bad_format = || {
+            format!("custom model '{model_name}' must look like hf:<org>/<repo>:<filename.gguf>")
+        };
+        let (repo, filename) = rest.rsplit_once(':').ok_or_else(bad_format)?;
+        if !repo.contains('/') || !filename.ends_with(".gguf") {
+            return Err(bad_format());
+        }
+        // Shard-set members (e.g. "…-00001-of-00003.gguf") can't be loaded this
+        // way: pull_model only downloads the one filename given, so the rest of
+        // the set would be silently missing and llama-server would fail with a
+        // confusing "can't find split N" error instead of a clear one here.
+        if filename.contains("-of-") {
+            return Err(format!(
+                "custom model '{model_name}' looks like one file of a multi-shard \
+                 set — only single-file GGUFs are supported via hf:; add a curated \
+                 entry to resolve_gguf for multi-shard models"
+            ));
+        }
+        return Ok(GgufSpec::single(repo, filename));
+    }
+
     match model_name {
-        "qwen2.5:0.5b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-            shards: &["qwen2.5-0.5b-instruct-q4_k_m.gguf"],
-        }),
-        "qwen2.5:1.5b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-            shards: &["qwen2.5-1.5b-instruct-q4_k_m.gguf"],
-        }),
-        "qwen2.5:7b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen2.5-7B-Instruct-GGUF",
-            shards: &[
+        "qwen2.5:0.5b" => Ok(GgufSpec::single(
+            "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+            "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        )),
+        "qwen2.5:1.5b" => Ok(GgufSpec::single(
+            "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+            "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        )),
+        "qwen2.5:7b" => Ok(GgufSpec::multi(
+            "Qwen/Qwen2.5-7B-Instruct-GGUF",
+            &[
                 "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
                 "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
             ],
-        }),
-        "qwen2.5:14b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen2.5-14B-Instruct-GGUF",
-            shards: &[
+        )),
+        "qwen2.5:14b" => Ok(GgufSpec::multi(
+            "Qwen/Qwen2.5-14B-Instruct-GGUF",
+            &[
                 "qwen2.5-14b-instruct-q4_k_m-00001-of-00003.gguf",
                 "qwen2.5-14b-instruct-q4_k_m-00002-of-00003.gguf",
                 "qwen2.5-14b-instruct-q4_k_m-00003-of-00003.gguf",
             ],
-        }),
-        "qwen2.5:32b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen2.5-32B-Instruct-GGUF",
-            shards: &[
+        )),
+        "qwen2.5:32b" => Ok(GgufSpec::multi(
+            "Qwen/Qwen2.5-32B-Instruct-GGUF",
+            &[
                 "qwen2.5-32b-instruct-q4_k_m-00001-of-00005.gguf",
                 "qwen2.5-32b-instruct-q4_k_m-00002-of-00005.gguf",
                 "qwen2.5-32b-instruct-q4_k_m-00003-of-00005.gguf",
                 "qwen2.5-32b-instruct-q4_k_m-00004-of-00005.gguf",
                 "qwen2.5-32b-instruct-q4_k_m-00005-of-00005.gguf",
             ],
-        }),
-        "qwen3:4b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen3-4B-GGUF",
-            shards: &["Qwen3-4B-Q4_K_M.gguf"],
-        }),
-        "qwen3:8b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen3-8B-GGUF",
-            shards: &["Qwen3-8B-Q4_K_M.gguf"],
-        }),
-        "qwen3:14b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen3-14B-GGUF",
-            shards: &["Qwen3-14B-Q4_K_M.gguf"],
-        }),
-        "qwen3:32b" => Ok(GgufSpec {
-            repo: "Qwen/Qwen3-32B-GGUF",
-            shards: &["Qwen3-32B-Q4_K_M.gguf"],
-        }),
-        "llama3.2:1b" => Ok(GgufSpec {
-            repo: "bartowski/Llama-3.2-1B-Instruct-GGUF",
-            shards: &["Llama-3.2-1B-Instruct-Q4_K_M.gguf"],
-        }),
-        "llama3.2:3b" => Ok(GgufSpec {
-            repo: "bartowski/Llama-3.2-3B-Instruct-GGUF",
-            shards: &["Llama-3.2-3B-Instruct-Q4_K_M.gguf"],
-        }),
-        "llama3.1:8b" => Ok(GgufSpec {
-            repo: "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
-            shards: &["Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"],
-        }),
-        "phi4:14b" => Ok(GgufSpec {
-            repo: "bartowski/phi-4-GGUF",
-            shards: &["phi-4-Q4_K_M.gguf"],
-        }),
-        "gemma3:4b" => Ok(GgufSpec {
-            repo: "bartowski/google_gemma-3-4b-it-GGUF",
-            shards: &["google_gemma-3-4b-it-Q4_K_M.gguf"],
-        }),
-        "gemma3:12b" => Ok(GgufSpec {
-            repo: "bartowski/google_gemma-3-12b-it-GGUF",
-            shards: &["google_gemma-3-12b-it-Q4_K_M.gguf"],
-        }),
-        "mistral:7b" => Ok(GgufSpec {
-            repo: "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
-            shards: &["Mistral-7B-Instruct-v0.3-Q4_K_M.gguf"],
-        }),
-        "deepseek-r1:7b" => Ok(GgufSpec {
-            repo: "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
-            shards: &["DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"],
-        }),
-        "deepseek-r1:8b" => Ok(GgufSpec {
-            repo: "bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF",
-            shards: &["DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"],
-        }),
-        "deepseek-r1:14b" => Ok(GgufSpec {
-            repo: "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF",
-            shards: &["DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf"],
-        }),
-        "deepseek-r1:32b" => Ok(GgufSpec {
-            repo: "bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF",
-            shards: &["DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf"],
-        }),
+        )),
+        "qwen3:4b" => Ok(GgufSpec::single(
+            "Qwen/Qwen3-4B-GGUF",
+            "Qwen3-4B-Q4_K_M.gguf",
+        )),
+        "qwen3:8b" => Ok(GgufSpec::single(
+            "Qwen/Qwen3-8B-GGUF",
+            "Qwen3-8B-Q4_K_M.gguf",
+        )),
+        "qwen3:14b" => Ok(GgufSpec::single(
+            "Qwen/Qwen3-14B-GGUF",
+            "Qwen3-14B-Q4_K_M.gguf",
+        )),
+        "qwen3:32b" => Ok(GgufSpec::single(
+            "Qwen/Qwen3-32B-GGUF",
+            "Qwen3-32B-Q4_K_M.gguf",
+        )),
+        "llama3.2:1b" => Ok(GgufSpec::single(
+            "bartowski/Llama-3.2-1B-Instruct-GGUF",
+            "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        )),
+        "llama3.2:3b" => Ok(GgufSpec::single(
+            "bartowski/Llama-3.2-3B-Instruct-GGUF",
+            "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        )),
+        "llama3.1:8b" => Ok(GgufSpec::single(
+            "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+            "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        )),
+        "phi4:14b" => Ok(GgufSpec::single(
+            "bartowski/phi-4-GGUF",
+            "phi-4-Q4_K_M.gguf",
+        )),
+        "gemma3:4b" => Ok(GgufSpec::single(
+            "bartowski/google_gemma-3-4b-it-GGUF",
+            "google_gemma-3-4b-it-Q4_K_M.gguf",
+        )),
+        "gemma3:12b" => Ok(GgufSpec::single(
+            "bartowski/google_gemma-3-12b-it-GGUF",
+            "google_gemma-3-12b-it-Q4_K_M.gguf",
+        )),
+        "mistral:7b" => Ok(GgufSpec::single(
+            "bartowski/Mistral-7B-Instruct-v0.3-GGUF",
+            "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
+        )),
+        "deepseek-r1:7b" => Ok(GgufSpec::single(
+            "bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF",
+            "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+        )),
+        "deepseek-r1:8b" => Ok(GgufSpec::single(
+            "bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF",
+            "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf",
+        )),
+        "deepseek-r1:14b" => Ok(GgufSpec::single(
+            "bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF",
+            "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+        )),
+        "deepseek-r1:32b" => Ok(GgufSpec::single(
+            "bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF",
+            "DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+        )),
         other => Err(format!(
-            "unknown model '{other}' — add it to llama::resolve_gguf"
+            "unknown model '{other}' — add it to llama::resolve_gguf, or load it \
+             directly with hf:<org>/<repo>:<filename.gguf>"
         )),
     }
 }
@@ -476,19 +520,19 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
         .map_err(|e| format!("http client error: {e}"))?;
 
     let shard_hint = size_mb.saturating_mul(1024 * 1024) / spec.shards.len().max(1) as u64;
-    for shard in spec.shards {
+    for shard in &spec.shards {
         let dest = dir.join(shard);
         if dest.exists() {
             tracing::info!(shard, "shard already present — skipping download");
             continue;
         }
         tracing::info!(shard, "downloading shard from HuggingFace...");
-        download_shard(&client, spec.repo, shard, &dest, shard_hint).await?;
+        download_shard(&client, &spec.repo, shard, &dest, shard_hint).await?;
         tracing::info!(shard, "download complete");
     }
 
     // First shard is the entry-point llama-server expects.
-    let model_path = dir.join(spec.shards[0]);
+    let model_path = dir.join(&spec.shards[0]);
 
     UNLOAD_REQUESTED.store(false, Ordering::Relaxed);
     kill_existing().await;
@@ -979,6 +1023,39 @@ mod tests {
         let err = resolve_gguf("llama3:8b").unwrap_err();
         assert!(err.contains("unknown model"));
         assert!(err.contains("llama3:8b"));
+    }
+
+    #[test]
+    fn resolve_gguf_custom_hf_model_loads_directly() {
+        let spec =
+            resolve_gguf("hf:TheBloke/Mistral-7B-v0.1-GGUF:mistral-7b-v0.1.Q4_K_M.gguf").unwrap();
+        assert_eq!(spec.repo, "TheBloke/Mistral-7B-v0.1-GGUF");
+        assert_eq!(spec.shards, vec!["mistral-7b-v0.1.Q4_K_M.gguf"]);
+    }
+
+    #[test]
+    fn resolve_gguf_custom_hf_model_rejects_missing_filename() {
+        let err = resolve_gguf("hf:TheBloke/Mistral-7B-v0.1-GGUF").unwrap_err();
+        assert!(err.contains("hf:<org>/<repo>:<filename.gguf>"));
+    }
+
+    #[test]
+    fn resolve_gguf_custom_hf_model_rejects_non_gguf_filename() {
+        let err = resolve_gguf("hf:TheBloke/Mistral-7B-v0.1-GGUF:readme.md").unwrap_err();
+        assert!(err.contains("hf:<org>/<repo>:<filename.gguf>"));
+    }
+
+    #[test]
+    fn resolve_gguf_custom_hf_model_rejects_repo_without_slash() {
+        let err = resolve_gguf("hf:not-a-repo:model.gguf").unwrap_err();
+        assert!(err.contains("hf:<org>/<repo>:<filename.gguf>"));
+    }
+
+    #[test]
+    fn resolve_gguf_custom_hf_model_rejects_multi_shard_filename() {
+        let err = resolve_gguf("hf:TheBloke/Big-Model-GGUF:big-model-q4_k_m-00001-of-00002.gguf")
+            .unwrap_err();
+        assert!(err.contains("multi-shard"));
     }
 
     #[test]

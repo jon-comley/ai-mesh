@@ -1,10 +1,13 @@
-//! Statistical prompt compression — Phase A of the online-AI ("gateway") feature.
+//! Statistical prompt compression — originally Phase A of the online-AI
+//! ("gateway") feature, now shared by local inference too.
 //!
 //! Wraps the pure-Rust [`compression_prompt`] crate (statistical IDF/importance
 //! filtering — no model, no network, <1 ms). Compression is only ever applied to
-//! bulky *context* (device list + conversation history) on the cloud-forward
-//! path; the user's actual question and any tool-calling prompt are never
-//! compressed. See `intent.rs` for where this is invoked.
+//! bulky *context* (device list + conversation history), never the user's
+//! actual question or any tool-calling prompt. Applies uniformly whether the
+//! request is forwarded to a cloud provider or served by a local model — see
+//! `intent.rs::build_history` for where this is invoked and how the two paths
+//! share the same `compress`/`engine` gateway prefs.
 //!
 //! The crate's defaults already protect structured content inline
 //! (`enable_protection_masks` for code/JSON/paths/identifiers, plus negation and

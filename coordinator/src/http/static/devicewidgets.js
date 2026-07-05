@@ -54,13 +54,38 @@ export function buildRoomSelect(rooms, currentRoomId, onChange) {
   return select;
 }
 
+const PINNED_SENSORS_KEY = 'mesh-pinned-sensors';
+
+/// Pin is a global per-device preference (not per-room) — a pinned sensor
+/// stays visible in a room's collapsed summary regardless of which room it's
+/// in. Deliberately sensor-only; lights don't get this (explicit product
+/// call — effects already keep light cards busy, and the room card itself
+/// is the "collapsed summary" for lights).
+export function isSensorPinned(deviceId) {
+  try {
+    const raw = localStorage.getItem(PINNED_SENSORS_KEY);
+    return raw ? JSON.parse(raw).includes(deviceId) : false;
+  } catch { return false; }
+}
+
+export function toggleSensorPin(deviceId) {
+  let pinned = [];
+  try { pinned = JSON.parse(localStorage.getItem(PINNED_SENSORS_KEY) ?? '[]'); } catch { pinned = []; }
+  const idx = pinned.indexOf(deviceId);
+  if (idx === -1) pinned.push(deviceId); else pinned.splice(idx, 1);
+  localStorage.setItem(PINNED_SENSORS_KEY, JSON.stringify(pinned));
+  return idx === -1; // now pinned?
+}
+
 /// One sensor's card: name + node badge + read-only readout, optionally with
-/// management controls (rename/delete/room-assignment) when `opts` is given
-/// — the Devices tab passes these; the Home tab's per-room strip doesn't.
+/// management controls (rename/delete/room-assignment/remove-from-room/pin)
+/// when `opts` is given — the Devices tab passes rename/delete/rooms; the
+/// Home tab's per-room strip passes onRemoveFromRoom + pinnable.
 export function buildSensorCard(dev, opts = {}) {
   const card = document.createElement('div');
   card.className = `light-card sensor-card${dev.online === false ? ' is-offline' : ''}`;
   card.dataset.deviceId = dev.device_id;
+  if (opts.draggable) card.setAttribute('draggable', 'true');
 
   const displayName = formatDeviceName(dev.device_id);
   const readout = formatSensorReadout(dev);
@@ -76,7 +101,26 @@ export function buildSensorCard(dev, opts = {}) {
       ${statusBadge}
     </div>`;
 
-  if (opts.onRename || opts.onDelete || opts.rooms) {
+  if (opts.pinnable) {
+    const pinBtn = document.createElement('button');
+    pinBtn.className = 'device-row-btn sensor-pin-btn';
+    const paintPin = () => {
+      const pinned = isSensorPinned(dev.device_id);
+      pinBtn.textContent = pinned ? '📌' : '📍';
+      pinBtn.title = pinned ? 'Pinned — shows when room is collapsed' : 'Pin — keep visible when room is collapsed';
+      pinBtn.classList.toggle('sensor-pin-btn-active', pinned);
+    };
+    paintPin();
+    pinBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleSensorPin(dev.device_id);
+      paintPin();
+      opts.onPinChange?.();
+    });
+    card.querySelector('.light-card-header-right')?.appendChild(pinBtn);
+  }
+
+  if (opts.onRename || opts.onDelete || opts.onRemoveFromRoom || opts.rooms) {
     const actions = document.createElement('div');
     actions.className = 'device-row-actions';
 
@@ -90,6 +134,14 @@ export function buildSensorCard(dev, opts = {}) {
       btn.textContent = '✎';
       btn.title = 'Rename';
       btn.addEventListener('click', () => opts.onRename());
+      actions.appendChild(btn);
+    }
+    if (opts.onRemoveFromRoom) {
+      const btn = document.createElement('button');
+      btn.className = 'device-row-btn';
+      btn.textContent = '✕';
+      btn.title = 'Remove from room';
+      btn.addEventListener('click', () => opts.onRemoveFromRoom());
       actions.appendChild(btn);
     }
     if (opts.onDelete) {

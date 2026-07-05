@@ -84,6 +84,24 @@ if (modelListEl) {
       const select = pickerRow.querySelector('.model-picker-select');
       const opt    = select.selectedOptions[0];
       loadModel(pickerRow.dataset.pickerNode, opt.value, Number(opt.dataset.size), btn, pickerRow.querySelector('.model-load-error'));
+      return;
+    }
+    const customRow = e.target.closest('[data-custom-node]');
+    if (customRow) {
+      const btn = e.target.closest('.model-custom-load');
+      if (!btn) return;
+      const errEl = customRow.querySelector('.model-load-error');
+      const name = customRow.querySelector('.model-custom-input').value.trim();
+      const sizeMb = Number(customRow.querySelector('.model-custom-size').value);
+      if (!name.startsWith('hf:')) {
+        errEl.textContent = 'Must start with hf:org/repo:filename.gguf';
+        return;
+      }
+      if (!sizeMb || sizeMb <= 0) {
+        errEl.textContent = 'Enter the model size in MB';
+        return;
+      }
+      loadModel(customRow.dataset.customNode, name, sizeMb, btn, errEl);
     }
   });
 }
@@ -214,8 +232,6 @@ function loadFooter(node) {
     m.size_mb <= memLimitMb &&
     m.size_mb * 2 <= diskFreeMb
   );
-  // Nothing to offer and the node isn't busy → no footer at all.
-  if (available.length === 0 && !busy) return '';
 
   let options = '';
   if (available.length > 0) {
@@ -244,14 +260,36 @@ function loadFooter(node) {
     ? `<span class="model-picker-busy">${esc(busy)}</span>`
     : '<span class="model-load-error"></span>';
 
-  return `<div class="model-picker-row" data-picker-node="${esc(node.node_id)}">
+  // Curated picker only makes sense when there's something in it (or the node
+  // is busy, so the note still needs somewhere to show).
+  const pickerRow = (available.length > 0 || busy)
+    ? `<div class="model-picker-row" data-picker-node="${esc(node.node_id)}">
   <select class="model-picker-select"${disabled}>${options}</select>
   <button class="model-picker-load"${disabled}>Load</button>
   ${note}
+</div>`
+    : '';
+
+  // Any single-file GGUF on Hugging Face, not just the curated list above —
+  // there are thousands of models on the leaderboards this crate doesn't have
+  // a name for. hf:<org>/<repo>:<filename.gguf> loads it directly (see
+  // capabilities/llm's resolve_gguf); size is needed up front for the
+  // disk-space check, same as the curated picker already requires. Always
+  // offered, even when the curated picker above has nothing to show.
+  const customRow = `<div class="model-custom-row" data-custom-node="${esc(node.node_id)}">
+  <input class="model-custom-input" type="text" autocomplete="off"
+         placeholder="hf:org/repo:filename.gguf"${disabled}>
+  <input class="model-custom-size" type="number" min="1" step="1"
+         placeholder="size MB"${disabled}>
+  <button class="model-custom-load"${disabled}>Load custom</button>
+  <span class="model-load-error"></span>
 </div>`;
+
+  return pickerRow + customRow;
 }
 
 async function loadModel(nodeId, modelName, sizeMb, btn, errEl) {
+  const originalLabel = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Loading…';
   errEl.textContent = '';
@@ -265,13 +303,13 @@ async function loadModel(nodeId, modelName, sizeMb, btn, errEl) {
     if (!r.ok) {
       errEl.textContent = `Failed (HTTP ${r.status})`;
       btn.disabled = false;
-      btn.textContent = 'Load';
+      btn.textContent = originalLabel;
     }
     // Success: WS ModelUpdate will re-render the card
   } catch (e) {
     errEl.textContent = e.message;
     btn.disabled = false;
-    btn.textContent = 'Load';
+    btn.textContent = originalLabel;
   }
 }
 

@@ -6,7 +6,7 @@ import * as layout from '/static/layout.js';
 import { xyToRgb, hslToXy } from '/static/colormath.js';
 import { buildSlider, buildColourWheel } from '/static/controls.js';
 import { buildLightControls, buildTempBar, dismissOpenLightControl } from '/static/lightcontrols.js';
-import { buildSensorCard } from '/static/devicewidgets.js';
+import { buildSensorCard, isSensorPinned } from '/static/devicewidgets.js';
 import {
   createRoom, deleteRoom, renameRoom, reorderRooms,
   addDeviceToRoom, removeDeviceFromRoom, reorderRoomDevices,
@@ -48,10 +48,14 @@ let dragSrc = null;             // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;          // room reorder drag: room id being dragged
 let _roomCtrlDismiss = null;          // document outside-pointerdown listener for the open room colour/temp panel (only one at a time)
 
-function markPending(deviceId, field, value) {
+// ttlMs override lets a caller hold a value longer than the default drag
+// window — scenes.js uses this to bridge a bulb's physical ramp-to-target
+// (the sequence of intermediate MQTT state reports would otherwise jerk the
+// slider through every mid-transition value before it settles).
+function markPending(deviceId, field, value, ttlMs) {
   let fields = pendingCommands.get(deviceId);
   if (!fields) { fields = {}; pendingCommands.set(deviceId, fields); }
-  fields[field] = { value, ts: Date.now() };
+  fields[field] = { value, ts: Date.now(), ttlMs };
 }
 
 // Optimistically merge fields into a device's cached state (no-op if unknown).
@@ -66,8 +70,8 @@ function reconcilePending(dev) {
   const now = Date.now();
   let out = dev;
   for (const field of Object.keys(fields)) {
-    const { value, ts } = fields[field];
-    if (dev[field] === value || now - ts > PENDING_TTL_MS) {
+    const { value, ts, ttlMs } = fields[field];
+    if (dev[field] === value || now - ts > (ttlMs ?? PENDING_TTL_MS)) {
       delete fields[field];
       continue;
     }
@@ -166,6 +170,7 @@ function startPulse(deviceId) {
   if (activePulse) stopPulse(false); // cancel previous without restoring
   const preGrabState = devicesMap.get(deviceId) ?? null;
   if (!preGrabState) return; // device not yet known — can't pulse safely
+  if (preGrabState.device_type === 'sensor') return; // no on/off/brightness to identify-pulse with
 
   sendDeviceCommand(deviceId, { action: 'on' });
   // Candle temperature (500 mireds ≈ 2000 K) on any colour-capable bulb
@@ -314,16 +319,23 @@ function patchDeviceCards() {
     const isOffline = dev.online === false;
     card.classList.toggle('device-offline', isOffline);
 
-    // Always update on/off badge (clears any stale "Offline" text).
-    const badge = card.querySelector('.light-toggle-btn .badge');
-    if (badge) {
-      if (isOffline) {
-        badge.className = 'badge badge-offline';
-        badge.textContent = 'Offline';
-      } else {
-        badge.className = `badge ${dev.on ? 'badge-green' : 'badge-muted'}`;
-        badge.textContent = dev.on ? 'On' : 'Off';
-      }
+    // Always update BOTH on/off badges (clears any stale "Offline" text).
+    // buildLightControls renders on/off as two separate segmented buttons
+    // (light-toggle-on / light-toggle-off), not one shared toggle — this used
+    // to query a single `.light-toggle-btn .badge` (matching only the On
+    // button's badge, since it's first in DOM order), so the Off button's
+    // colour/text was only ever set at initial render() and went stale the
+    // moment the light's state changed without a full re-render (e.g. under
+    // an active effect) — the reported "off button randomly red or not,
+    // fixed by leaving and reopening the tab" bug.
+    const onBadge = card.querySelector('.light-toggle-on .badge');
+    const offBadge = card.querySelector('.light-toggle-off .badge');
+    if (isOffline) {
+      if (onBadge) { onBadge.className = 'badge badge-offline'; onBadge.textContent = 'Offline'; }
+      if (offBadge) { offBadge.className = 'badge badge-offline'; offBadge.textContent = 'Offline'; }
+    } else {
+      if (onBadge) { onBadge.className = `badge ${dev.on ? 'badge-green' : 'badge-muted'}`; onBadge.textContent = 'On'; }
+      if (offBadge) { offBadge.className = `badge ${!dev.on ? 'badge-red' : 'badge-muted'}`; offBadge.textContent = 'Off'; }
     }
 
     // Repaint the active-domain dot from current state (colour tint or CCT tint).
@@ -401,12 +413,11 @@ function render() {
   inferZigbeeStatus();
 
   const assigned = new Set(model.rooms.flatMap(r => r.device_ids));
-  // Lights only — this strip is the light-specific drag-and-drop assignment
-  // UI (chips carry on/off state, pulse-identify, etc). Sensors are assigned
-  // to rooms via the Devices tab's dropdown instead (devices.js), so an
-  // unassigned sensor must never render here as a light-shaped chip.
+  // Both lights and sensors — renderChip renders each appropriately (a
+  // sensor chip skips the on/off dot and identify-pulse, neither of which
+  // apply to it).
   const unassigned = [...devicesMap.entries()]
-    .filter(([id, d]) => d.device_type === 'light' && !assigned.has(id))
+    .filter(([id]) => !assigned.has(id))
     .map(([id]) => id);
 
   // An open temp/colour section has a document-level pointerdown listener bound
@@ -628,7 +639,7 @@ function renderUnassigned(deviceIds) {
   chips.className = 'room-chips';
 
   if (devicesMap.size === 0) {
-    chips.innerHTML = '<span class="room-empty-hint">No lighting devices discovered yet.</span>';
+    chips.innerHTML = '<span class="room-empty-hint">No devices discovered yet.</span>';
   } else if (deviceIds.length === 0) {
     chips.innerHTML = '<span class="room-unassigned-drop-hint">Drop here to unassign.</span>';
   } else {
@@ -854,7 +865,12 @@ function renderRoomCard(room) {
     layout.openLayout(room);
   });
 
-  // Top row: [On|Off]  ───spacer───  [effect]  🎨  ⊞
+  // Top row: [On|Off]  ───spacer───  🎨  🌡  ⊞
+  // Effect badge deliberately lives on its own row below (see effectRow) —
+  // sharing this row with colour/temp/layout caused them to wrap to a second
+  // line on mobile, and whether that wrap happened shifted with whether an
+  // effect happened to be active. Keeping this row's contents fixed regardless
+  // of effect state means it never reflows.
   const topRow = document.createElement('div');
   topRow.className = 'room-controls-top';
   topRow.appendChild(onOffWrap);
@@ -863,15 +879,21 @@ function renderRoomCard(room) {
   topSpacer.className = 'room-controls-spacer';
   topRow.appendChild(topSpacer);
 
-  if (activeEffect) {
-    topRow.appendChild(buildEffectBadge(room, activeEffect));
-  } else if (lastEffectByRoom.has(room.id)) {
-    topRow.appendChild(buildEffectGhostBadge(room, lastEffectByRoom.get(room.id)));
-  }
   if (colourBtn) topRow.appendChild(colourBtn);
   if (tempBtn) topRow.appendChild(tempBtn);
   topRow.appendChild(layoutBtn);
   ctrlRow.appendChild(topRow);
+
+  if (activeEffect || lastEffectByRoom.has(room.id)) {
+    const effectRow = document.createElement('div');
+    effectRow.className = 'room-controls-effect-row';
+    if (activeEffect) {
+      effectRow.appendChild(buildEffectBadge(room, activeEffect));
+    } else {
+      effectRow.appendChild(buildEffectGhostBadge(room, lastEffectByRoom.get(room.id)));
+    }
+    ctrlRow.appendChild(effectRow);
+  }
 
   // ── Brightness — always visible (top casual control) ─────────────────────
   if (!empty) {
@@ -1018,6 +1040,23 @@ function renderRoomCard(room) {
     card.appendChild(sceneWrap);
   }
 
+  // Pinned sensors — rendered outside the collapsible body so a pinned
+  // sensor stays visible even when the room card is collapsed. Sensor-only
+  // (not offered for lights, per explicit product call — see
+  // devicewidgets.js isSensorPinned).
+  const roomSensorsAll = room.device_ids
+    .map(id => devicesMap.get(id))
+    .filter(d => d?.device_type === 'sensor');
+  const pinnedSensors = roomSensorsAll.filter(d => isSensorPinned(d.device_id));
+  if (pinnedSensors.length > 0) {
+    const pinnedEl = document.createElement('div');
+    pinnedEl.className = 'room-pinned-sensors';
+    for (const dev of pinnedSensors) {
+      pinnedEl.appendChild(buildSensorCard(dev, { pinnable: true, onPinChange: render }));
+    }
+    card.appendChild(pinnedEl);
+  }
+
   // Collapsible body
   const body = document.createElement('div');
   body.className = 'room-body' + (isCollapsed ? ' collapsed' : '');
@@ -1062,15 +1101,23 @@ function renderRoomCard(room) {
   body.appendChild(devicesEl);
   wireDropZone(body, room.id);
 
-  // Sensor members — read-only, room-assignment happens on the Devices tab.
-  const roomSensors = room.device_ids
-    .map(id => devicesMap.get(id))
-    .filter(d => d?.device_type === 'sensor');
-  if (roomSensors.length > 0) {
+  // Sensor members — read-only readout, but (unlike a light card) draggable
+  // and removable just like a bulb: drag onto another room, or onto the
+  // Unassigned strip, to move it; ✕ un-assigns back to Unassigned. Room
+  // reassignment used to be Devices-tab-only; this brings it to the Home tab
+  // to match how lights already work.
+  if (roomSensorsAll.length > 0) {
     const sensorsEl = document.createElement('div');
     sensorsEl.className = 'room-sensors';
-    for (const dev of roomSensors) {
-      sensorsEl.appendChild(buildSensorCard(dev));
+    for (const dev of roomSensorsAll) {
+      const sensorCard = buildSensorCard(dev, {
+        draggable: true,
+        pinnable: true,
+        onPinChange: render,
+        onRemoveFromRoom: () => removeDeviceFromRoom(room.id, dev.device_id),
+      });
+      wireDeviceDrag(sensorCard, dev.device_id, room.id);
+      sensorsEl.appendChild(sensorCard);
     }
     body.appendChild(sensorsEl);
   }
@@ -1321,16 +1368,21 @@ function wireDeviceDrag(card, deviceId, roomId) {
 
 function renderChip(deviceId, fromRoomId, showRemove) {
   const dev = devicesMap.get(deviceId);
+  const isSensor = dev?.device_type === 'sensor';
   const chip = document.createElement('div');
-  chip.className = 'room-chip' + (dev?.on ? ' room-chip-on' : '');
+  chip.className = 'room-chip' + (!isSensor && dev?.on ? ' room-chip-on' : '');
   chip.setAttribute('draggable', 'true');
   chip.dataset.deviceId = deviceId;
   chip.title = deviceId;
 
-  const dot = document.createElement('span');
-  dot.className = 'room-chip-dot' + (dev?.on ? ' room-chip-dot-on' : '');
-  dot.setAttribute('aria-hidden', 'true');
-  chip.appendChild(dot);
+  // On/off dot doesn't apply to a sensor (no on/off state) — skip it rather
+  // than showing a misleading "off" dot on every sensor chip.
+  if (!isSensor) {
+    const dot = document.createElement('span');
+    dot.className = 'room-chip-dot' + (dev?.on ? ' room-chip-dot-on' : '');
+    dot.setAttribute('aria-hidden', 'true');
+    chip.appendChild(dot);
+  }
 
   const label = document.createElement('span');
   label.className = 'room-chip-label';

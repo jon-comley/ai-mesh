@@ -72,6 +72,10 @@ fn warm_start_scenes(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardS
         .into_iter()
         .map(|s| {
             let preview_color = s.preview_color();
+            let effect_params = s
+                .effect_params_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok());
             SceneInfo {
                 id: s.id,
                 name: s.name,
@@ -80,6 +84,8 @@ fn warm_start_scenes(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardS
                 position: s.position,
                 preview_color,
                 states: s.states,
+                effect_id: s.effect_id,
+                effect_params,
             }
         })
         .collect();

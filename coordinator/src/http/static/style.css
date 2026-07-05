@@ -519,6 +519,56 @@ body {
   padding-top: 1px;
 }
 
+.model-custom-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 6px 0 0;
+  margin-top: 6px;
+}
+
+.model-custom-input {
+  flex: 2;
+  min-width: 0;
+}
+
+.model-custom-size {
+  flex: 0 0 80px;
+  min-width: 0;
+}
+
+.model-custom-input,
+.model-custom-size {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+
+.model-custom-load {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.9rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-family: inherit;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.model-custom-input:disabled,
+.model-custom-size:disabled,
+.model-custom-load:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ── Lighting cards ────────────────────────────────────────────────────────── */
 .light-card {
   background: var(--surface);
@@ -1103,6 +1153,11 @@ body {
   flex-wrap: wrap;
 }
 
+.room-controls-effect-row {
+  display: flex;
+  align-items: center;
+}
+
 .room-slider {
   width: 100%;
   display: flex;
@@ -1376,6 +1431,46 @@ body {
 .room-body.collapsed {
   max-height: 0;
   opacity: 0;
+}
+
+.device-category-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.device-category-collapse-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px;
+  flex-shrink: 0;
+  line-height: 1;
+  transition: color 0.15s;
+}
+.device-category-collapse-btn:hover { color: var(--text); }
+
+.device-category-body {
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+  max-height: 8000px;
+  opacity: 1;
+}
+.device-category-body.collapsed {
+  max-height: 0;
+  opacity: 0;
+}
+
+.device-subcategory-heading {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin: 12px 0 4px;
 }
 
 .room-name-wrap {
@@ -1655,7 +1750,34 @@ body {
 }
 .room-sensors .sensor-card {
   padding: 8px 12px;
+  cursor: grab;
 }
+.room-sensors .sensor-card.dragging {
+  opacity: 0.4;
+}
+
+.room-pinned-sensors {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+.room-pinned-sensors .sensor-card {
+  padding: 6px 12px;
+  background: var(--surface-2);
+}
+
+.sensor-pin-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
+.sensor-pin-btn:hover { opacity: 1; }
+.sensor-pin-btn-active { opacity: 1; }
 
 .room-device-card {
   border-radius: 8px;

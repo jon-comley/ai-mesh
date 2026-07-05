@@ -57,6 +57,12 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             models: &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
         },
         ProviderPreset {
+            id: "openai",
+            label: "OpenAI (ChatGPT)",
+            base_url: "https://api.openai.com/v1",
+            models: &["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3-mini"],
+        },
+        ProviderPreset {
             id: "groq",
             label: "Groq (free)",
             base_url: "https://api.groq.com/openai/v1",
