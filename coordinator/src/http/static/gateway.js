@@ -18,7 +18,7 @@ export function init(panel) {
     <div class="gw">
       <div class="gw-modes">
         <button id="gw-enable" class="gw-toggle" type="button">Online AI: —</button>
-        <button id="gw-compress" class="gw-toggle" type="button" title="Off = swap only the inference backend (send full history)">Compress context: —</button>
+        <button id="gw-compress" class="gw-toggle" type="button" title="Applies to local inference too, not just Online AI — off sends full history either way">Compress context: —</button>
       </div>
 
       <div id="gw-keybanner" class="gw-banner" hidden>⚠ No API key set — cloud requests fall back to local. Add a key below.</div>
@@ -152,10 +152,12 @@ function render(snap) {
   const banner = document.getElementById('gw-keybanner');
   if (banner) banner.hidden = snap.key_set;
 
-  // Model selection / compression only take effect once Online AI is on —
-  // grey them out rather than leave them clickable but inert. API key,
-  // endpoint, and the test-call button stay live either way: you need to be
-  // able to set them up and verify a key works *before* flipping the switch.
+  // Model selection only takes effect once Online AI is on — grey it out
+  // rather than leave it clickable but inert. API key, endpoint, and the
+  // test-call button stay live either way: you need to be able to set them
+  // up and verify a key works *before* flipping the switch. Compression is
+  // NOT gated on this anymore: it applies to local inference too now, so the
+  // toggle and engine picker stay usable regardless of Online AI's state.
   const offline = !snap.enabled;
 
   const norm = (u) => (u || '').replace(/\/+$/, '');
@@ -180,11 +182,10 @@ function render(snap) {
   if (modelCustom) modelCustom.disabled = offline;
   if (modelCustomSave) modelCustomSave.disabled = offline;
 
-  if (compressBtn) compressBtn.disabled = offline;
   document.querySelectorAll('#gw-engine-btns button[data-engine]').forEach(btn => {
     btn.dataset.active = btn.dataset.engine === snap.engine ? '1' : '0';
     const engine = ENGINES.find(e => e.id === btn.dataset.engine);
-    btn.disabled = offline || !engine?.ready;
+    btn.disabled = !engine?.ready;
   });
 
   const keyStatus = document.getElementById('gw-key-status');

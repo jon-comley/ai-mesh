@@ -27,6 +27,10 @@ fn scenes_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<SceneInfo> {
         .into_iter()
         .map(|s| {
             let preview_color = s.preview_color();
+            let effect_params = s
+                .effect_params_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok());
             SceneInfo {
                 id: s.id,
                 name: s.name,
@@ -35,6 +39,8 @@ fn scenes_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<SceneInfo> {
                 position: s.position,
                 preview_color,
                 states: s.states,
+                effect_id: s.effect_id,
+                effect_params,
             }
         })
         .collect()
@@ -74,6 +80,26 @@ pub async fn save_scene(
         return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
     }
     let all_states = state.get_light_snapshot();
+    let to_snapshot = |s: LightStateReport| DeviceSnapshot {
+        device_id: s.device_id.clone(),
+        node_id: s.node_id.clone(),
+        on: s.on,
+        brightness: s.brightness,
+        color_xy: s.color_xy,
+        color_temp: s.color_temp,
+    };
+
+    // A room with an active effect gets a different kind of scene: the effect
+    // (id + params) is what's saved, and `states` narrows to just the devices
+    // manually overridden out of it — every other member is driven by the
+    // effect on recall, not a frozen snapshot of whatever it happened to be
+    // outputting at save time (which would look static and wrong the moment
+    // the effect moves on).
+    let active_effect = body
+        .room_id
+        .as_deref()
+        .and_then(|rid| registry.lock().unwrap().get_active_effect(rid));
+
     let device_states: Vec<DeviceSnapshot> = if let Some(ref rid) = body.room_id {
         let room_device_ids: Vec<String> = registry
             .lock()
@@ -83,34 +109,30 @@ pub async fn save_scene(
             .find(|r| &r.id == rid)
             .map(|r| r.device_ids)
             .unwrap_or_default();
+        let overridden: Option<Vec<String>> = active_effect
+            .as_ref()
+            .map(|eff| serde_json::from_str(&eff.overrides_json).unwrap_or_default());
         all_states
             .into_iter()
             .filter(|s| room_device_ids.contains(&s.device_id))
-            .map(|s| DeviceSnapshot {
-                device_id: s.device_id.clone(),
-                node_id: s.node_id.clone(),
-                on: s.on,
-                brightness: s.brightness,
-                color_xy: s.color_xy,
-                color_temp: s.color_temp,
+            .filter(|s| {
+                overridden
+                    .as_ref()
+                    .is_none_or(|ov| ov.contains(&s.device_id))
             })
+            .map(to_snapshot)
             .collect()
     } else {
-        all_states
-            .into_iter()
-            .map(|s| DeviceSnapshot {
-                device_id: s.device_id.clone(),
-                node_id: s.node_id.clone(),
-                on: s.on,
-                brightness: s.brightness,
-                color_xy: s.color_xy,
-                color_temp: s.color_temp,
-            })
-            .collect()
+        all_states.into_iter().map(to_snapshot).collect()
     };
+
+    let effect_arg = active_effect
+        .as_ref()
+        .map(|eff| (eff.effect_id.as_str(), eff.params_json.as_str()));
+
     let scene_id = {
         let mut reg = registry.lock().unwrap();
-        reg.save_scene(&name, body.room_id.as_deref(), device_states)
+        reg.save_scene(&name, body.room_id.as_deref(), device_states, effect_arg)
             .id
     };
     state.push_scenes_update(scenes_from_registry(&registry));
@@ -328,6 +350,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_scene_with_active_effect_captures_effect_and_only_overrides() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.add_device_to_room(&room_id, "bulb1");
+            reg.add_device_to_room(&room_id, "bulb2");
+            reg.set_active_effect(&room_id, "aurora", r#"{"speed":1}"#, None, 0)
+                .unwrap();
+            // Only bulb1 is manually overridden out of the effect; bulb2 stays
+            // effect-driven and must NOT get a frozen snapshot in the scene.
+            reg.set_effect_override(&room_id, "bulb1", true).unwrap();
+        }
+        let state = make_state(vec![], empty_connections());
+        seed_light(&state, "bulb1", "pi1");
+        seed_light(&state, "bulb2", "pi1");
+
+        send(
+            scenes_router(state, Arc::clone(&registry)),
+            "POST",
+            "/api/scenes?token=",
+            &format!(r#"{{"name":"Aurora night","room_id":"{room_id}"}}"#),
+        )
+        .await;
+
+        let scenes = registry.lock().unwrap().list_scenes();
+        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes[0].effect_id.as_deref(), Some("aurora"));
+        assert_eq!(
+            scenes[0].effect_params_json.as_deref(),
+            Some(r#"{"speed":1}"#)
+        );
+        assert_eq!(
+            scenes[0].states.len(),
+            1,
+            "only the overridden device should be snapshotted"
+        );
+        assert_eq!(scenes[0].states[0].device_id, "bulb1");
+    }
+
+    #[tokio::test]
+    async fn save_scene_without_active_effect_has_no_effect_id() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+        let state = make_state(vec![], empty_connections());
+        seed_light(&state, "bulb1", "pi1");
+
+        send(
+            scenes_router(state, Arc::clone(&registry)),
+            "POST",
+            "/api/scenes?token=",
+            &format!(r#"{{"name":"Plain","room_id":"{room_id}"}}"#),
+        )
+        .await;
+
+        let scenes = registry.lock().unwrap().list_scenes();
+        assert!(scenes[0].effect_id.is_none());
+        assert_eq!(scenes[0].states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_scene_with_active_effect_and_no_overrides_has_empty_states() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.add_device_to_room(&room_id, "bulb1");
+            reg.add_device_to_room(&room_id, "bulb2");
+            reg.set_active_effect(&room_id, "aurora", r#"{"speed":1}"#, None, 0)
+                .unwrap();
+            // No overrides at all — every member is effect-driven.
+        }
+        let state = make_state(vec![], empty_connections());
+        seed_light(&state, "bulb1", "pi1");
+        seed_light(&state, "bulb2", "pi1");
+
+        send(
+            scenes_router(state, Arc::clone(&registry)),
+            "POST",
+            "/api/scenes?token=",
+            &format!(r#"{{"name":"Aurora night","room_id":"{room_id}"}}"#),
+        )
+        .await;
+
+        let scenes = registry.lock().unwrap().list_scenes();
+        assert_eq!(scenes[0].effect_id.as_deref(), Some("aurora"));
+        assert!(
+            scenes[0].states.is_empty(),
+            "no device should be snapshotted when nothing is overridden"
+        );
+    }
+
+    #[tokio::test]
     async fn save_scene_broadcasts_scenes_update() {
         let registry = make_registry();
         let state = make_state(vec![], empty_connections());
@@ -435,6 +554,7 @@ mod tests {
                     color_xy: None,
                     color_temp: Some(370),
                 }],
+                None,
             )
             .id
         };
@@ -473,7 +593,7 @@ mod tests {
         };
         let scene_id = {
             let mut reg = registry.lock().unwrap();
-            reg.save_scene("Test", None, vec![mk("bulb1"), mk("bulb2")])
+            reg.save_scene("Test", None, vec![mk("bulb1"), mk("bulb2")], None)
                 .id
         };
 
@@ -521,6 +641,7 @@ mod tests {
                     color_xy: None,
                     color_temp: Some(370),
                 }],
+                None,
             )
             .id;
         let state = make_state(vec![], empty_connections()); // device not in light_snapshot
@@ -538,7 +659,11 @@ mod tests {
     #[tokio::test]
     async fn delete_scene_returns_204() {
         let registry = make_registry();
-        let scene_id = registry.lock().unwrap().save_scene("Temp", None, vec![]).id;
+        let scene_id = registry
+            .lock()
+            .unwrap()
+            .save_scene("Temp", None, vec![], None)
+            .id;
         let state = make_state(vec![], empty_connections());
         let status = send(
             scenes_router(state, registry),
@@ -567,7 +692,11 @@ mod tests {
     #[tokio::test]
     async fn delete_scene_returns_401_for_wrong_token() {
         let registry = make_registry();
-        let scene_id = registry.lock().unwrap().save_scene("Temp", None, vec![]).id;
+        let scene_id = registry
+            .lock()
+            .unwrap()
+            .save_scene("Temp", None, vec![], None)
+            .id;
         let state = make_state(vec!["secret".into()], empty_connections());
         let status = send(
             scenes_router(state, registry),
@@ -582,7 +711,11 @@ mod tests {
     #[tokio::test]
     async fn delete_scene_broadcasts_scenes_update() {
         let registry = make_registry();
-        let scene_id = registry.lock().unwrap().save_scene("Temp", None, vec![]).id;
+        let scene_id = registry
+            .lock()
+            .unwrap()
+            .save_scene("Temp", None, vec![], None)
+            .id;
         let state = make_state(vec![], empty_connections());
         let mut rx = state.tx.subscribe();
         send(

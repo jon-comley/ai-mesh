@@ -16,7 +16,7 @@ import { createPointerDrag, makeGhost, moveGhost, insertionBefore } from '/stati
 import { api } from '/static/api.js';
 import { showToast } from '/static/util.js';
 import { saveScene, deleteSceneApi, reorderScenes } from '/static/actions.js';
-import { clearEffect } from '/static/effects.js';
+import { clearEffect, activateEffect, excludeFromEffect } from '/static/effects.js';
 import { clearDotForRoom } from '/static/indicators.js';
 import {
   model, devicesMap, pendingCommands,
@@ -40,6 +40,24 @@ function clearPendingControlState(deviceId) {
     const el = card.querySelector(`[data-ctrl="${ctrl}"]`);
     if (el && document.activeElement === el) el.blur();
   }
+}
+
+// A bulb ramping toward a scene's target sends several intermediate MQTT
+// state reports along the way; patchDeviceCards snaps the slider to each one
+// as it arrives, which reads as the slider jerking back and forth before
+// settling. Holding the slider at the known final target (the scene's own
+// saved snapshot) for a few seconds — same pendingCommands mechanism a live
+// drag uses, just a longer TTL — hides the ramp and shows the true end state
+// immediately instead.
+const SCENE_SETTLE_TTL_MS = 5000;
+
+function holdAtSceneTarget(deviceId, snap) {
+  if (!snap) return;
+  let fields = pendingCommands.get(deviceId);
+  if (!fields) { fields = {}; pendingCommands.set(deviceId, fields); }
+  const now = Date.now();
+  if (snap.brightness != null) fields.brightness = { value: snap.brightness, ts: now, ttlMs: SCENE_SETTLE_TTL_MS };
+  if (snap.color_temp != null) fields.color_temp = { value: snap.color_temp, ts: now, ttlMs: SCENE_SETTLE_TTL_MS };
 }
 
 // ── Scene divergence reconciliation ──────────────────────────────────────────
@@ -402,6 +420,7 @@ export async function recallScene(id) {
         const snap = preState.get(deviceId);
         if (!snap) continue;
         clearPendingControlState(deviceId);
+        holdAtSceneTarget(deviceId, snap);
         if (!snap.on) { _sendDeviceCommand(deviceId, { action: 'off' }); continue; }
         if (snap.brightness != null)
           _sendDeviceCommand(deviceId, { action: 'brightness', value: snap.brightness, transition_secs: 0.8 });
@@ -435,6 +454,22 @@ export async function recallScene(id) {
     await clearEffect(roomId);
   }
 
+  // A scene saved while an effect was active carries that effect + its
+  // params rather than a frozen per-light snapshot for every member.
+  // Reactivate it first so the non-overridden lights are driven by the
+  // effect again; the /recall fan-out below then applies the saved explicit
+  // values to just the handful of lights manually overridden out of it
+  // (scene.states already holds only those — see save_scene in
+  // http/api/scenes.rs). Excluding them here too, before recall fires their
+  // commands, stops the freshly (re)activated effect from fighting the
+  // explicit values on its next tick.
+  if (roomId && scene?.effect_id) {
+    await activateEffect(roomId, scene.effect_id, scene.effect_params ?? {});
+    for (const snap of scene.states ?? []) {
+      await excludeFromEffect(roomId, snap.device_id);
+    }
+  }
+
   try {
     const res = await api(`/scenes/${encodeURIComponent(id)}/recall`, { method: 'POST', body: { transition_secs: 1.0 } });
     if (res.ok || res.status === 503) {
@@ -442,7 +477,10 @@ export async function recallScene(id) {
         activeSceneByRoom.set(roomId, id);
         updateSceneChipStates(roomId);
         const room = model.rooms.find(r => r.id === roomId);
-        for (const deviceId of (room?.device_ids ?? [])) clearPendingControlState(deviceId);
+        for (const deviceId of (room?.device_ids ?? [])) {
+          clearPendingControlState(deviceId);
+          holdAtSceneTarget(deviceId, scene.states?.find(s => s.device_id === deviceId));
+        }
       }
       if (res.status === 503) showToast('Some devices offline — others recalled', false);
     } else {

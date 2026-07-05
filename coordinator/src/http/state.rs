@@ -250,7 +250,13 @@ pub struct SceneInfo {
     /// command, a physical switch, another client) without the coordinator
     /// needing to track "active scene per room" itself — the frontend
     /// already gets every live state change over the wire and can compare.
+    /// When `effect_id` is set, this holds only the devices overridden out
+    /// of the effect — everything else is driven by the effect on recall.
     pub states: Vec<DeviceSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_params: Option<serde_json::Value>,
 }
 
 /// Per-model entry in a `ModelUpdate` event — one per non-Unloaded allocation.
@@ -2138,6 +2144,8 @@ mod tests {
             position: 0,
             preview_color: None,
             states: vec![],
+            effect_id: None,
+            effect_params: None,
         }
     }
 
@@ -2206,6 +2214,8 @@ mod tests {
                 position: 0,
                 preview_color: None,
                 states: vec![],
+                effect_id: None,
+                effect_params: None,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();
@@ -2235,6 +2245,8 @@ mod tests {
                 position: 0,
                 preview_color: None,
                 states: vec![],
+                effect_id: None,
+                effect_params: None,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();

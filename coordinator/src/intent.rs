@@ -39,13 +39,18 @@ fn collect_tool_schemas(registry: &Arc<Mutex<Registry>>) -> Vec<serde_json::Valu
 }
 
 /// Render the trailing conversation turns into the prompt's history blob,
-/// compressing it when forwarding to the cloud (local inference is not
-/// token-billed, so it keeps full fidelity). The device context and the
+/// optionally compressing it. Compression is no longer cloud-only: the same
+/// `compress`/`engine` gateway prefs apply to local inference too (fitting
+/// more turns into a small on-device context window is real value there even
+/// though local isn't token-billed) — the caller resolves which settings
+/// apply (cloud-invocation settings when forwarding, else the standalone
+/// local prefs) and passes them in uniformly. The device context and the
 /// user's current question stay verbatim so tool-calling fidelity is never
 /// degraded. Returns (history, compressed?, tokens_before, tokens_after).
 fn build_history(
     request: &IntentRequest,
-    gateway: Option<&crate::cloud::GatewayInvocation>,
+    compress: bool,
+    engine: crate::compress::CompressionEngine,
 ) -> (String, bool, u32, u32) {
     const MAX_CONTEXT_TURNS: usize = 20;
     let context = if request.context.len() > MAX_CONTEXT_TURNS {
@@ -65,15 +70,15 @@ fn build_history(
         }
     }
 
-    if let Some(gw) = gateway.filter(|gw| gw.compress) {
-        let outcome = crate::compress::compress(&history_blob, gw.engine);
+    if compress {
+        let outcome = crate::compress::compress(&history_blob, engine);
         if outcome.compressed {
             info!(
                 request_id = %request.request_id,
                 before = outcome.orig_tokens,
                 after = outcome.new_tokens,
                 ratio = outcome.ratio,
-                "compressed history for cloud forward"
+                "compressed history"
             );
         }
         (
@@ -155,8 +160,19 @@ pub async fn handle_intent(
         &scene_names,
     );
     let sensor_ctx = build_sensor_context(&known_sensors, &sensor_states, &device_room_map);
+    // Cloud calls use the invocation's own compress/engine (set from the same
+    // prefs at the point the gateway was built); a local-only request has no
+    // GatewayInvocation, so fall back to reading those same prefs directly —
+    // this is what makes local compression happen at all.
+    let (compress, compress_engine) = match &gateway {
+        Some(gw) => (gw.compress, gw.engine),
+        None => {
+            let cfg = crate::cloud::GatewayConfig::load(&registry.lock().unwrap());
+            (cfg.compress, cfg.engine)
+        }
+    };
     let (history_for_prompt, compression_applied, prompt_tokens_before, prompt_tokens_after) =
-        build_history(&request, gateway.as_ref());
+        build_history(&request, compress, compress_engine);
 
     let user_prompt = format!(
         "{device_ctx}{sensor_ctx}{history_for_prompt}{}",
@@ -1917,6 +1933,49 @@ mod tests {
             !p.contains("/think"),
             "system prompt must not contain /think"
         );
+    }
+
+    fn long_history_request() -> IntentRequest {
+        let turn = shared::IntentTurn {
+            role: shared::IntentRole::User,
+            content: "The coordinator schedules inference requests across the mesh of nodes. \
+                      Each node advertises its capabilities and the models it currently holds \
+                      in a Ready state, and the scheduler picks one at random among those that \
+                      can serve the requested model. "
+                .repeat(6),
+        };
+        IntentRequest {
+            request_id: "test".into(),
+            text: "what's the temperature?".into(),
+            model_name: None,
+            context: vec![turn],
+        }
+    }
+
+    #[test]
+    fn build_history_compresses_with_no_cloud_gateway() {
+        // Local-only request (no GatewayInvocation) with compress=true still
+        // compresses — this is the whole point of local compression: it must
+        // not be gated on a cloud call being in flight.
+        let req = long_history_request();
+        let (_, compressed, before, after) =
+            build_history(&req, true, crate::compress::CompressionEngine::Statistical);
+        assert!(
+            compressed,
+            "local compression should apply without a gateway"
+        );
+        assert!(after < before);
+    }
+
+    #[test]
+    fn build_history_skips_compression_when_disabled() {
+        let req = long_history_request();
+        let (text, compressed, before, after) =
+            build_history(&req, false, crate::compress::CompressionEngine::Statistical);
+        assert!(!compressed);
+        assert_eq!(before, 0);
+        assert_eq!(after, 0);
+        assert!(text.contains("coordinator schedules inference"));
     }
 
     #[test]

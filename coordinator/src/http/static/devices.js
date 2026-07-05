@@ -100,6 +100,43 @@ function buildLightRow(dev) {
   return row;
 }
 
+// Collapse chevron per category — mirrors rooms.js's room-collapse-btn
+// pattern (default expanded, remembered per-browser via localStorage).
+function buildCategoryHeading(category, count) {
+  const heading = document.createElement('h3');
+  heading.className = 'device-category-heading';
+
+  const key = `mesh-devcat-collapsed-${category}`;
+  const isCollapsed = localStorage.getItem(key) === '1';
+
+  const chevron = document.createElement('button');
+  chevron.className = 'device-category-collapse-btn';
+  chevron.title = 'Collapse / expand';
+  chevron.textContent = isCollapsed ? '▸' : '▾';
+  heading.appendChild(chevron);
+
+  const label = document.createElement('span');
+  label.textContent = `${category} (${count})`;
+  heading.appendChild(label);
+
+  return { heading, chevron, isCollapsed, key };
+}
+
+function buildCategorySection(category, count) {
+  const { heading, chevron, isCollapsed, key } = buildCategoryHeading(category, count);
+  const body = document.createElement('div');
+  body.className = 'device-category-body' + (isCollapsed ? ' collapsed' : '');
+  const toggle = () => {
+    const nowCollapsed = !body.classList.contains('collapsed');
+    body.classList.toggle('collapsed', nowCollapsed);
+    chevron.textContent = nowCollapsed ? '▸' : '▾';
+    localStorage.setItem(key, nowCollapsed ? '1' : '0');
+  };
+  chevron.addEventListener('click', toggle);
+  heading.addEventListener('click', e => { if (e.target !== chevron) toggle(); });
+  return { heading, body };
+}
+
 function render() {
   const container = document.getElementById('device-list');
   if (!container) return;
@@ -115,31 +152,70 @@ function render() {
   container.innerHTML = '';
 
   if (lights.length > 0) {
-    const heading = document.createElement('h3');
-    heading.textContent = 'Lights';
+    const { heading, body } = buildCategorySection('Lights', lights.length);
     container.appendChild(heading);
     for (const dev of lights.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
-      container.appendChild(buildLightRow(dev));
+      body.appendChild(buildLightRow(dev));
     }
+    container.appendChild(body);
   }
 
   if (sensors.length > 0) {
-    const heading = document.createElement('h3');
-    heading.textContent = 'Sensors';
+    const { heading, body } = buildCategorySection('Sensors', sensors.length);
     container.appendChild(heading);
-    for (const dev of sensors.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
-      const currentRoomId = roomIdForDevice(dev.device_id);
-      container.appendChild(buildSensorCard(dev, {
-        rooms: model.rooms,
-        currentRoomId,
-        onRoomChange: newRoomId => onRoomChange(dev.device_id, newRoomId),
-        onRename: () => {
-          const nameEl = container.querySelector(
-            `[data-device-id="${CSS.escape(dev.device_id)}"] .light-name`);
-          if (nameEl) startRename(nameEl, dev.device_id);
-        },
-        onDelete: () => confirmDelete(dev.device_id),
-      }));
+    renderSensorSubcategories(body, sensors, container);
+    container.appendChild(body);
+  }
+}
+
+// Sensors get sub-categories rather than one flat list — grouped by which
+// readings a device reports (a device can appear in more than one group,
+// e.g. a combined temp/humidity + motion sensor).
+const SENSOR_SUBCATEGORIES = [
+  { key: 'climate', label: 'Temperature & Humidity', test: d => d.temperature != null || d.humidity != null },
+  { key: 'motion', label: 'Motion & Occupancy', test: d => d.occupancy != null },
+  { key: 'contact', label: 'Contact', test: d => d.contact != null },
+];
+
+function buildSensorRow(dev, container) {
+  const currentRoomId = roomIdForDevice(dev.device_id);
+  return buildSensorCard(dev, {
+    rooms: model.rooms,
+    currentRoomId,
+    onRoomChange: newRoomId => onRoomChange(dev.device_id, newRoomId),
+    onRename: () => {
+      const nameEl = container.querySelector(
+        `[data-device-id="${CSS.escape(dev.device_id)}"] .light-name`);
+      if (nameEl) startRename(nameEl, dev.device_id);
+    },
+    onDelete: () => confirmDelete(dev.device_id),
+  });
+}
+
+function renderSensorSubcategories(body, sensors, container) {
+  const remaining = new Set(sensors.map(d => d.device_id));
+  const byId = new Map(sensors.map(d => [d.device_id, d]));
+
+  for (const sub of SENSOR_SUBCATEGORIES) {
+    const members = sensors.filter(d => sub.test(d));
+    if (members.length === 0) continue;
+    const subHeading = document.createElement('h4');
+    subHeading.className = 'device-subcategory-heading';
+    subHeading.textContent = `${sub.label} (${members.length})`;
+    body.appendChild(subHeading);
+    for (const dev of members.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
+      body.appendChild(buildSensorRow(dev, container));
+      remaining.delete(dev.device_id);
+    }
+  }
+
+  if (remaining.size > 0) {
+    const subHeading = document.createElement('h4');
+    subHeading.className = 'device-subcategory-heading';
+    subHeading.textContent = `Other (${remaining.size})`;
+    body.appendChild(subHeading);
+    for (const id of [...remaining].sort()) {
+      body.appendChild(buildSensorRow(byId.get(id), container));
     }
   }
 }

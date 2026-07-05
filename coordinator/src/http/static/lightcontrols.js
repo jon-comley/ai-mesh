@@ -54,13 +54,13 @@ export function buildLightControls(dev, cb) {
   row1.className = 'lc-row lc-row-controls';
 
   const onBtn = document.createElement('button');
-  onBtn.className = 'light-toggle-btn';
+  onBtn.className = 'light-toggle-btn light-toggle-on';
   onBtn.innerHTML = `<span class="badge ${dev.on ? 'badge-green' : 'badge-muted'}">On</span>`;
   // on/off clears this bulb's (and its room's) colour/temp dot back to an icon.
   onBtn.addEventListener('click', e => { e.stopPropagation(); clearDotForDevice(dev.device_id); refreshDots(); cb.onOn?.(); });
 
   const offBtn = document.createElement('button');
-  offBtn.className = 'light-toggle-btn';
+  offBtn.className = 'light-toggle-btn light-toggle-off';
   offBtn.innerHTML = `<span class="badge ${!dev.on ? 'badge-red' : 'badge-muted'}">Off</span>`;
   offBtn.addEventListener('click', e => { e.stopPropagation(); clearDotForDevice(dev.device_id); refreshDots(); cb.onOff?.(); });
 
