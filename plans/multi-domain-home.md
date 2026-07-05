@@ -78,7 +78,7 @@ MQTT poll loop).
 ## Verification
 
 - Phase A: full test suite (rename sweep compiler-driven); live regression `just intent "turn test_bulb on"`, dashboard rooms unchanged.
-- Phase B: pair one temp/humidity + one motion sensor; `SensorState` visible in registry + dashboard snapshot; availability + battery reported.
+- Phase B: pair one temp/humidity + one motion sensor; `SensorState` visible in registry + dashboard snapshot; availability + battery reported. **Exceeded (2026-07-05):** all 7 paired and reporting (4× SNZB-02P temp/humidity, 3× SNZB-03P R2 motion) — see `plans/sensor-readout-and-completion.md` Part 2 for what's still unexercised (restart-survival, offline-dim, unpair).
 - Phase C: `just intent "what temperature is the living room?"` answers from real sensor data; multi-command intent executes both actions.
 - Phase D: room card shows light controls + sensor strip together; Devices view lists both domains; no browser on WSL2 — REST/WS contract via curl, visual check on phone (pi1:9001).
 

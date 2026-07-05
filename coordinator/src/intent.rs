@@ -144,6 +144,7 @@ pub async fn handle_intent(
         .unwrap()
         .devices_of_type(shared::DeviceType::Sensor);
     let device_room_map = registry.lock().unwrap().device_room_name_map();
+    let device_names = registry.lock().unwrap().get_all_device_names();
     let scene_names: Vec<String> = registry
         .lock()
         .unwrap()
@@ -159,7 +160,12 @@ pub async fn handle_intent(
         &device_room_map,
         &scene_names,
     );
-    let sensor_ctx = build_sensor_context(&known_sensors, &sensor_states, &device_room_map);
+    let sensor_ctx = build_sensor_context(
+        &known_sensors,
+        &sensor_states,
+        &device_room_map,
+        &device_names,
+    );
     // Cloud calls use the invocation's own compress/engine (set from the same
     // prefs at the point the gateway was built); a local-only request has no
     // GatewayInvocation, so fall back to reading those same prefs directly —
@@ -495,8 +501,14 @@ fn dispatch_get_climate(
     registry: &Arc<Mutex<Registry>>,
     sensor_states: &[SensorReport],
 ) -> String {
+    // Schema says "room", but local models generalize from light_command's
+    // "target" parameter and sometimes emit that name instead (confirmed live
+    // 2026-07-05: a real query for "the kitchen" arrived as {"target":
+    // "kitchen"} — args.get("room") found nothing, so every sensor in the
+    // house was returned instead of just the kitchen's). Accept either.
     let room_arg = args
         .get("room")
+        .or_else(|| args.get("target"))
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
@@ -523,6 +535,7 @@ fn dispatch_get_climate(
         }
         None => None,
     };
+    let device_names = reg.get_all_device_names();
     drop(reg);
 
     let matches: Vec<&SensorReport> = sensor_states
@@ -544,9 +557,29 @@ fn dispatch_get_climate(
 
     matches
         .iter()
-        .map(|s| format!("{}: {}", s.device_id, format_sensor_readout(s)))
+        .map(|s| {
+            format!(
+                "{}: {}",
+                resolve_display_name(&s.device_id, &device_names),
+                format_sensor_readout(s)
+            )
+        })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// A device's user-given name if it has one (set via the Devices tab's
+/// rename), else its raw id — which for a Zigbee device that's never been
+/// renamed is z2m's default `friendly_name`, commonly the IEEE address in
+/// hex (e.g. "0x8c73dafffe83ef31"). Lights usually get a sensible name from
+/// pairing; battery sensors and remotes far more often don't, which is why
+/// this matters most for `get_climate`'s output and the sensor/device
+/// context injected into the LLM prompt.
+fn resolve_display_name(device_id: &str, device_names: &HashMap<String, String>) -> String {
+    device_names
+        .get(device_id)
+        .cloned()
+        .unwrap_or_else(|| device_id.to_string())
 }
 
 /// `light_command`: validate/resolve the target (device, group, or room name),
@@ -1866,16 +1899,24 @@ pub fn build_device_context(
 /// motion sensor), and per-device lines let the model see exactly which
 /// device each reading came from without a merge step here duplicating the
 /// one `DashboardState::push_sensor_update` already does for persistence.
+/// `device_names` resolves each sensor's raw id (commonly a Zigbee IEEE
+/// address in hex if never renamed — battery sensors rarely get a sensible
+/// default name the way bulbs often do) to its friendly name for display.
+/// Safe to do here and not in `build_device_context`: sensors are read-only
+/// (no `sensor_command` tool), so nothing downstream needs to parse this
+/// name back into a device id — `get_climate`'s only argument is `room`.
 pub fn build_sensor_context(
     known_sensors: &[String],
     sensor_states: &[SensorReport],
     device_room_map: &HashMap<String, String>,
+    device_names: &HashMap<String, String>,
 ) -> String {
     if known_sensors.is_empty() {
         return String::new();
     }
     let mut lines = vec!["Known sensors:".to_string()];
     for name in known_sensors {
+        let display_name = resolve_display_name(name, device_names);
         let room_tag = device_room_map
             .get(name)
             .map(|r| format!(" [{r}]"))
@@ -1885,7 +1926,7 @@ pub fn build_sensor_context(
             .find(|s| &s.device_id == name)
             .map(format_sensor_readout)
             .unwrap_or_else(|| "no reading yet".to_string());
-        lines.push(format!("  - {name}{room_tag}: {readout}"));
+        lines.push(format!("  - {display_name}{room_tag}: {readout}"));
     }
     format!("{}\n\n", lines.join("\n"))
 }
@@ -2012,7 +2053,7 @@ mod tests {
 
     #[test]
     fn build_sensor_context_empty_returns_empty() {
-        assert!(build_sensor_context(&[], &[], &HashMap::new()).is_empty());
+        assert!(build_sensor_context(&[], &[], &HashMap::new(), &HashMap::new()).is_empty());
     }
 
     #[test]
@@ -2021,7 +2062,7 @@ mod tests {
         let states = vec![sensor_report("office_climate")];
         let mut rooms = HashMap::new();
         rooms.insert("office_climate".to_string(), "Office".to_string());
-        let ctx = build_sensor_context(&known, &states, &rooms);
+        let ctx = build_sensor_context(&known, &states, &rooms, &HashMap::new());
         assert!(ctx.contains("Known sensors"));
         assert!(ctx.contains("office_climate [Office]"));
         assert!(ctx.contains("21.4°C"));
@@ -2032,9 +2073,30 @@ mod tests {
     #[test]
     fn build_sensor_context_no_reading_yet() {
         let known = vec!["new_sensor".to_string()];
-        let ctx = build_sensor_context(&known, &[], &HashMap::new());
+        let ctx = build_sensor_context(&known, &[], &HashMap::new(), &HashMap::new());
         assert!(ctx.contains("new_sensor"));
         assert!(ctx.contains("no reading yet"));
+    }
+
+    #[test]
+    fn build_sensor_context_uses_friendly_name_when_set() {
+        let known = vec!["0x8c73dafffe83ef31".to_string()];
+        let states = vec![sensor_report("0x8c73dafffe83ef31")];
+        let mut names = HashMap::new();
+        names.insert(
+            "0x8c73dafffe83ef31".to_string(),
+            "Kitchen Climate".to_string(),
+        );
+        let ctx = build_sensor_context(&known, &states, &HashMap::new(), &names);
+        assert!(ctx.contains("Kitchen Climate"));
+        assert!(!ctx.contains("0x8c73dafffe83ef31"));
+    }
+
+    #[test]
+    fn build_sensor_context_falls_back_to_raw_id_when_unnamed() {
+        let known = vec!["0x8c73dafffe83ef31".to_string()];
+        let ctx = build_sensor_context(&known, &[], &HashMap::new(), &HashMap::new());
+        assert!(ctx.contains("0x8c73dafffe83ef31"));
     }
 
     #[test]
@@ -2106,6 +2168,65 @@ mod tests {
             dispatch_get_climate(&serde_json::json!({"room": "Office"}), &registry, &states);
         assert!(office_only.contains("office_climate"));
         assert!(!office_only.contains("hall_motion"));
+    }
+
+    #[test]
+    fn dispatch_get_climate_accepts_target_as_room_alias() {
+        // Live-observed model behaviour (2026-07-05): some models emit
+        // {"target": "..."} instead of {"room": "..."} for get_climate,
+        // generalizing from light_command's parameter name.
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.update_devices(
+                "pi1",
+                vec![
+                    shared::DeviceEntry {
+                        id: "office_climate".into(),
+                        device_type: shared::DeviceType::Sensor,
+                    },
+                    shared::DeviceEntry {
+                        id: "hall_motion".into(),
+                        device_type: shared::DeviceType::Sensor,
+                    },
+                ],
+                vec![],
+            );
+            let office = reg.create_room("Office");
+            reg.add_device_to_room(&office.id, "office_climate");
+            let hall = reg.create_room("Hallway");
+            reg.add_device_to_room(&hall.id, "hall_motion");
+        }
+        let states = vec![
+            sensor_report("office_climate"),
+            sensor_report("hall_motion"),
+        ];
+
+        let office_only =
+            dispatch_get_climate(&serde_json::json!({"target": "Office"}), &registry, &states);
+        assert!(office_only.contains("office_climate"));
+        assert!(!office_only.contains("hall_motion"));
+    }
+
+    #[test]
+    fn dispatch_get_climate_uses_friendly_name_when_set() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.update_devices(
+                "pi1",
+                vec![shared::DeviceEntry {
+                    id: "0x8c73dafffe83ef31".into(),
+                    device_type: shared::DeviceType::Sensor,
+                }],
+                vec![],
+            );
+            reg.set_device_name("0x8c73dafffe83ef31", "Kitchen Climate");
+        }
+        let states = vec![sensor_report("0x8c73dafffe83ef31")];
+        let result = dispatch_get_climate(&serde_json::json!({}), &registry, &states);
+        assert!(result.contains("Kitchen Climate"));
+        assert!(!result.contains("0x8c73dafffe83ef31"));
     }
 
     #[test]

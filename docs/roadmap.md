@@ -801,6 +801,34 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > old `/static/lighting.js` now 404s) — **no browser on WSL2**, so the
 > actual room-card/Devices-tab rendering needs a visual check on the phone
 > (pi1:9001) after deploy, alongside the sensor live gate above.
+>
+> **Switches + Blinds/HVAC presence + glass ceiling (2026-07-05, wire
+> unchanged, commit `84e82f9`)** — ahead of the E/F hardware, added a
+> `DeviceType::Switch` (generic action-only classification: a bare `action`
+> property or `switch` composite — covers button remotes/dials, not just one
+> model) and a presence-only `DeviceInventoryUpdate` pipeline so Cover/
+> Climate/Switch devices show up in the Devices tab under new Blinds/HVAC/
+> Switches headings and can be room-assigned, even with no control capability
+> built yet (that's still E/F). A Switch button press/dial rotation gets a
+> transient flash + label on its row (`SwitchAction` — no persisted state,
+> since there's nothing to persist). Also added a glass/partial-glass ceiling
+> room attribute (`"skylight"` opening type + a `"C"` ceiling sentinel
+> wall_edge) so a conservatory-style room gets sun exposure in the solar
+> effect without needing a wall-facing window. Fixed a pinned-sensor
+> double-render bug in the same pass. Full test suite + clippy clean.
+>
+> **Hardware live gate (2026-07-05)** — deployed and confirmed live: all 7
+> sensors paired and reporting (4× SNZB-02P temp/humidity, 3× SNZB-03P R2
+> motion). Two Hue Tap Dial-style switches also paired — the first real-
+> hardware exercise of the `Switch`/`SwitchAction` work above, confirmed
+> working end-to-end (button press/dial rotation flows Zigbee → coordinator
+> → dashboard flash). Switches are deliberately inert right now: they report
+> what was pressed but trigger no action — binding a button/rotation to a
+> light or scene is unscoped future work, not part of Phase B/C. Still open
+> from the Part 2 checklist (`plans/sensor-readout-and-completion.md`):
+> restart-survival, the battery-pull offline-dim path, and the delete/unpair
+> test haven't been explicitly exercised. Phase C's LLM gate (`just intent
+> "what's the office temperature?"`) also still needs a live run.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
