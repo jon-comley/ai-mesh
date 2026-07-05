@@ -111,6 +111,23 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
+    // Push current Cover/Climate/Switch inventory so the Devices tab's
+    // Blinds/HVAC/Switches sections populate immediately on connect.
+    let other_devices = state.get_other_device_snapshot();
+    if !other_devices.is_empty() {
+        let evt = DashboardEvent::DeviceInventoryUpdate {
+            devices: other_devices,
+        };
+        match serde_json::to_string(&evt) {
+            Ok(json) => {
+                if socket.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => debug!("failed to serialise snapshot DeviceInventoryUpdate: {e}"),
+        }
+    }
+
     // Push current rooms snapshot so the Rooms panel populates immediately on connect.
     let rooms = state.get_room_snapshot();
     if !rooms.is_empty() {

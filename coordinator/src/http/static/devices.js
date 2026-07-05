@@ -9,7 +9,9 @@ import { esc, showToast } from '/static/util.js';
 import { api } from '/static/api.js';
 import { model, devicesMap } from '/static/state.js';
 import { addDeviceToRoom, removeDeviceFromRoom, deleteDevice, patchDeviceName } from '/static/actions.js';
-import { buildSensorCard, buildRoomSelect, formatLightStatus } from '/static/devicewidgets.js';
+import {
+  buildSensorCard, buildRoomSelect, formatLightStatus, applySwitchFlashIfActive,
+} from '/static/devicewidgets.js';
 
 function formatDeviceName(id) {
   return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -60,6 +62,44 @@ function confirmDelete(deviceId) {
   if (confirm(`Delete "${formatDeviceName(deviceId)}"? This unpairs it from the Zigbee network.`)) {
     deleteDevice(deviceId);
   }
+}
+
+// Cover/Climate/Switch rows: name + room-assignment + delete, no status
+// readout — none of these classes has a live-state pipeline yet (see
+// rooms.js's notifyOtherDevices), just presence.
+function buildPresenceRow(dev) {
+  const row = document.createElement('div');
+  row.className = 'light-card device-row';
+  row.dataset.deviceId = dev.device_id;
+
+  const displayName = formatDeviceName(dev.device_id);
+  row.innerHTML = `
+    <div class="light-name-group">
+      <span class="light-name device-row-name">${esc(displayName)}</span>
+    </div>`;
+
+  const nameEl = row.querySelector('.device-row-name');
+  nameEl.style.cursor = 'pointer';
+  nameEl.title = 'Click to rename';
+  nameEl.addEventListener('click', () => startRename(nameEl, dev.device_id));
+
+  const actions = document.createElement('div');
+  actions.className = 'device-row-actions';
+
+  const currentRoomId = roomIdForDevice(dev.device_id);
+  actions.appendChild(buildRoomSelect(model.rooms, currentRoomId,
+    roomId => onRoomChange(dev.device_id, roomId)));
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'device-row-btn device-row-btn-delete';
+  deleteBtn.textContent = '✕';
+  deleteBtn.title = 'Delete';
+  deleteBtn.addEventListener('click', () => confirmDelete(dev.device_id));
+  actions.appendChild(deleteBtn);
+
+  row.appendChild(actions);
+  applySwitchFlashIfActive(dev.device_id);
+  return row;
 }
 
 function buildLightRow(dev) {
@@ -143,8 +183,12 @@ function render() {
 
   const lights = [...devicesMap.values()].filter(d => d.device_type === 'light');
   const sensors = [...devicesMap.values()].filter(d => d.device_type === 'sensor');
+  const blinds = [...devicesMap.values()].filter(d => d.device_type === 'cover');
+  const hvac = [...devicesMap.values()].filter(d => d.device_type === 'climate');
+  const switches = [...devicesMap.values()].filter(d => d.device_type === 'switch');
 
-  if (lights.length === 0 && sensors.length === 0) {
+  if (lights.length === 0 && sensors.length === 0 && blinds.length === 0
+      && hvac.length === 0 && switches.length === 0) {
     container.innerHTML = '<p class="placeholder">No devices paired yet.</p>';
     return;
   }
@@ -164,6 +208,22 @@ function render() {
     const { heading, body } = buildCategorySection('Sensors', sensors.length);
     container.appendChild(heading);
     renderSensorSubcategories(body, sensors, container);
+    container.appendChild(body);
+  }
+
+  // Blinds/HVAC/Switches: presence-only rows (name + room assignment), no
+  // status readout — none of these classes has a live-state pipeline yet.
+  for (const [label, list] of [
+    ['Blinds', blinds],
+    ['HVAC', hvac],
+    ['Switches', switches],
+  ]) {
+    if (list.length === 0) continue;
+    const { heading, body } = buildCategorySection(label, list.length);
+    container.appendChild(heading);
+    for (const dev of list.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
+      body.appendChild(buildPresenceRow(dev));
+    }
     container.appendChild(body);
   }
 }

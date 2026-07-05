@@ -32,6 +32,13 @@ pub enum ZigbeeEvent {
         device_id: String,
         model: Option<String>,
     },
+    /// A Switch-class device (button remote, dial) published a button press
+    /// or dial rotation. Switches have no persisted state — this is a
+    /// transient UI indicator only, not a state report.
+    SwitchAction {
+        device_id: String,
+        action: String,
+    },
     /// Fires when `zigbee2mqtt/bridge/state` changes — indicates whether the
     /// zigbee2mqtt process itself is up and connected to the dongle.
     BridgeState {
@@ -213,6 +220,29 @@ impl ZigbeeClient {
                                         .copied()
                                         .unwrap_or(true);
                                     let _ = tx_loop.send(ZigbeeEvent::SensorChanged(report));
+                                }
+                                continue;
+                            }
+                            // KNOWN LIMITATION (accepted, not a bug to fix): if this publish
+                            // arrives before `bridge/devices` has classified topic_device (e.g.
+                            // a button pressed in the first instant after a reconnect, before
+                            // the just-requested device list response lands), get_by_name
+                            // returns None here and below, is_switch is false, and the action
+                            // falls through to parse_state_report — which requires light fields
+                            // and silently drops it. Negligible in practice: bridge/devices is
+                            // retained, so the broker delivers it within milliseconds of
+                            // subscribing, long before a human could react and press a button.
+                            // The sensor path above has the identical dependency and has never
+                            // needed a fix for it either — don't add buffering/replay for this.
+                            let is_switch = registry_loop
+                                .get_by_name(topic_device)
+                                .is_some_and(|d| d.device_type == shared::DeviceType::Switch);
+                            if is_switch {
+                                if let Some(action) = parse_switch_action(p.payload.as_ref()) {
+                                    let _ = tx_loop.send(ZigbeeEvent::SwitchAction {
+                                        device_id: topic_device.to_owned(),
+                                        action,
+                                    });
                                 }
                                 continue;
                             }
@@ -480,6 +510,19 @@ fn parse_sensor_report(
         illuminance,
         online: true,
     })
+}
+
+/// Parse a Switch-class device's publish: just the raw `action` value (e.g.
+/// "button_1_press", "1_rotate_left" — the exact naming varies by z2m
+/// converter/model, so this passes it through as-is rather than trying to
+/// enumerate every model's action set). Returns None for publishes with no
+/// `action` field (battery-only heartbeats, linkquality-only publishes).
+fn parse_switch_action(payload: &[u8]) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    json.get("action")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
 }
 
 fn parse_state_report(topic: &str, payload: &[u8], node_id: &str) -> Option<LightStateReport> {
@@ -767,6 +810,33 @@ mod tests {
                 .is_none()
         );
         assert!(parse_sensor_report("remote", br#"{"linkquality":87}"#, "pi1").is_none());
+    }
+
+    #[test]
+    fn parse_switch_action_extracts_action() {
+        let a = parse_switch_action(br#"{"action":"button_1_press","linkquality":95}"#).unwrap();
+        assert_eq!(a, "button_1_press");
+    }
+
+    #[test]
+    fn parse_switch_action_rotation() {
+        let a = parse_switch_action(br#"{"action":"1_rotate_left","battery":88}"#).unwrap();
+        assert_eq!(a, "1_rotate_left");
+    }
+
+    #[test]
+    fn parse_switch_action_missing_action_returns_none() {
+        assert!(parse_switch_action(br#"{"battery":88,"linkquality":95}"#).is_none());
+    }
+
+    #[test]
+    fn parse_switch_action_empty_string_returns_none() {
+        assert!(parse_switch_action(br#"{"action":""}"#).is_none());
+    }
+
+    #[test]
+    fn parse_switch_action_malformed_json_returns_none() {
+        assert!(parse_switch_action(b"not json").is_none());
     }
 
     #[test]

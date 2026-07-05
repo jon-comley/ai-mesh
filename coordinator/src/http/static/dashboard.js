@@ -11,6 +11,7 @@ import * as security from '/static/security.js';
 import * as chat from '/static/chat.js';
 import * as reaper from '/static/reaper.js';
 import * as gateway from '/static/gateway.js';
+import { registerSwitchAction } from '/static/devicewidgets.js';
 
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
@@ -87,6 +88,11 @@ const handlers = {
     rooms.notifySensors(evt.sensors);
     devices.refresh();
   },
+  DeviceInventoryUpdate: evt => {
+    rooms.notifyOtherDevices(evt.devices);
+    devices.refresh();
+  },
+  SwitchAction: evt => registerSwitchAction(evt.device_id, evt.action),
   ErrorUpdate: evt => errors.handleErrorUpdate(evt),
   SecurityUpdate: evt => security.handleSecurityUpdate(evt),
   ReaperUpdate: evt => reaper.handleReaperUpdate(evt),

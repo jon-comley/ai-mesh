@@ -367,6 +367,11 @@ pub struct UpdateOpeningBody {
 }
 
 const VALID_WALL_EDGES: &[&str] = &["N", "S", "E", "W"];
+/// Sentinel `wall_edge` for a ceiling-mounted opening (skylight / glass
+/// ceiling) — it has no compass-facing wall, so it's excluded from
+/// `VALID_WALL_EDGES` and the directional facing math in `effects/solar.rs`
+/// (`wall_edge_to_degrees`/facing-diff), which only apply to wall openings.
+const CEILING_WALL_EDGE: &str = "C";
 
 pub async fn list_openings(
     Path(room_id): Path<String>,
@@ -384,15 +389,28 @@ pub async fn create_opening(
     Json(body): Json<CreateOpeningBody>,
 ) -> impl IntoResponse {
     let opening_type = body.opening_type.as_str();
-    if opening_type != "window" && opening_type != "door" {
+    if opening_type != "window" && opening_type != "door" && opening_type != "skylight" {
         return (
             StatusCode::BAD_REQUEST,
-            "opening_type must be 'window' or 'door'",
+            "opening_type must be 'window', 'door', or 'skylight'",
         )
             .into_response();
     }
-    if !VALID_WALL_EDGES.contains(&body.wall_edge.as_str()) {
-        return (StatusCode::BAD_REQUEST, "wall_edge must be N, S, E, or W").into_response();
+    // A skylight has no compass-facing wall — it must use the ceiling
+    // sentinel, never a real wall edge; conversely a wall opening can't use
+    // the ceiling sentinel.
+    let wall_edge_ok = if opening_type == "skylight" {
+        body.wall_edge == CEILING_WALL_EDGE
+    } else {
+        VALID_WALL_EDGES.contains(&body.wall_edge.as_str())
+    };
+    if !wall_edge_ok {
+        let msg = if opening_type == "skylight" {
+            "wall_edge must be 'C' (ceiling) for a skylight"
+        } else {
+            "wall_edge must be N, S, E, or W"
+        };
+        return (StatusCode::BAD_REQUEST, msg).into_response();
     }
     {
         let reg = registry.lock().unwrap();
@@ -400,7 +418,7 @@ pub async fn create_opening(
             return StatusCode::NOT_FOUND.into_response();
         }
     }
-    let default_transmission = if opening_type == "window" { 1.0 } else { 0.1 };
+    let default_transmission = if opening_type == "door" { 0.1 } else { 1.0 };
     let transmission = body
         .transmission
         .unwrap_or(default_transmission)
@@ -948,7 +966,56 @@ mod tests {
             openings_router(make_state(vec![], empty_connections()), registry),
             "POST",
             &format!("/api/rooms/{room_id}/openings?token="),
+            r#"{"opening_type":"toaster","wall_edge":"N","x_norm":0.5,"width_norm":0.3}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_opening_accepts_skylight_with_ceiling_wall_edge() {
+        // A glass/partial-glass ceiling: skylight paired with the ceiling
+        // sentinel "C" — no compass-facing wall to assign.
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Conservatory");
+        let (status, body) = send_with_body(
+            openings_router(make_state(vec![], empty_connections()), registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/openings?token="),
+            r#"{"opening_type":"skylight","wall_edge":"C","x_norm":0.5,"width_norm":1.0}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(body.contains("\"id\""));
+    }
+
+    #[tokio::test]
+    async fn create_opening_rejects_skylight_with_a_wall_edge() {
+        // A skylight has no compass-facing wall — "N" is a real wall opening's
+        // edge, not a valid placement for a ceiling opening.
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Hall");
+        let status = send(
+            openings_router(make_state(vec![], empty_connections()), registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/openings?token="),
             r#"{"opening_type":"skylight","wall_edge":"N","x_norm":0.5,"width_norm":0.3}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_opening_rejects_window_with_ceiling_wall_edge() {
+        // The ceiling sentinel is skylight-only — a window/door must use a
+        // real compass wall edge.
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Hall");
+        let status = send(
+            openings_router(make_state(vec![], empty_connections()), registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/openings?token="),
+            r#"{"opening_type":"window","wall_edge":"C","x_norm":0.5,"width_norm":0.3}"#,
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);

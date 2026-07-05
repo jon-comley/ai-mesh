@@ -1052,6 +1052,7 @@ async fn process_message(
                     .map(|d| d.id.clone())
                     .collect();
                 dash.push_device_discovery(&report.node_id, light_names, true);
+                dash.push_other_devices(&report.node_id, &report.devices);
             }
             {
                 let mut reg = registry.lock().unwrap();
@@ -1087,6 +1088,17 @@ async fn process_message(
             );
             if let Some(dash) = dashboard {
                 dash.push_join_event(report.event, report.device_id, report.model);
+            }
+            None
+        }
+        MeshMessage::SwitchAction(report) => {
+            info!(
+                device_id = %report.device_id,
+                action = %report.action,
+                "zigbee: switch action"
+            );
+            if let Some(dash) = dashboard {
+                dash.push_switch_action(report.device_id, report.action);
             }
             None
         }
