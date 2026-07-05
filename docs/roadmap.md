@@ -752,15 +752,28 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > *closed* (reed switch made), not open — `lighting.js`'s card had it
 > backwards since the readout shipped; no contact sensors were in the
 > hardware batch yet, so it was never exercised live. 824 tests (+11).
-> **Not yet live-verified against a real LLM** — needs a working local
-> model + the hardware live gate to actually watch "what's the office
-> temperature?" resolve correctly.
 >
-> **Next:** `plans/sensor-readout-and-completion.md` Part 2 — deploy
-> (`deploy-coordinator` before `deploy-node`, wire v8) → hardware live gate
-> (pair all 7, verify readings/battery/availability/restart-survival, then
-> exercise Phase C's `get_climate` for real: `just intent "what's the
-> office temperature?"` and a mixed action+climate turn).
+> **Live-verified against a real LLM (2026-07-05)** — `just intent "what
+> temperature is the kitchen?"` surfaced two real bugs on first run, both
+> fixed and confirmed working on retest: (1) readings displayed the raw
+> Zigbee device id (unrenamed sensors default to their IEEE hex address;
+> `dispatch_get_climate` and `build_sensor_context` now resolve a friendly
+> name from `get_all_device_names()` when one's been set — deliberately
+> sensor-only, since a light's device id is the literal token
+> `dispatch_light_command` matches against, and changing that display
+> without also teaching command dispatch to resolve names back would have
+> silently broken control of any renamed bulb); (2) a kitchen-only question
+> returned every sensor in the house because the model called the tool
+> with `{"target": "kitchen"}` instead of the schema's `{"room": "kitchen"}`
+> — generalizing from `light_command`'s parameter name. `dispatch_get_climate`
+> now accepts `target` as an alias for `room`. Commit `2c067cb`.
+>
+> **Next:** the remaining Part 2 hardware-gate sub-checks — restart-
+> survival, the battery-pull offline-dim path, and the delete/unpair test
+> (see `plans/sensor-readout-and-completion.md` Part 2) — or start scoping
+> Phase E (blinds; hardware-gated) or a Switch→action binding layer (button
+> presses currently just flash on screen, per the 2026-07-05 Switches entry
+> above).
 >
 > **Phase D shipped (2026-07-04)** — frontend-only, no wire bump (every REST
 > endpoint touched — `PATCH /api/rooms/{id}/devices`, `PATCH`/`DELETE
