@@ -21,7 +21,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub use crate::http::state::NodeConnections as Connections;
 pub use crate::http::state::{PendingInferences, PendingIntents, PendingStreams};
@@ -1092,7 +1092,10 @@ async fn process_message(
             None
         }
         MeshMessage::SwitchAction(report) => {
-            info!(
+            // debug, not info: unlike a pairing event (rare), a dial rotation
+            // can fire many times per interaction — info! here would make
+            // fiddling with one Tap Dial dominate the log.
+            debug!(
                 device_id = %report.device_id,
                 action = %report.action,
                 "zigbee: switch action"

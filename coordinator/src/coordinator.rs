@@ -6,6 +6,48 @@ use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+/// Runs the mesh TCP server (port 9000 — what every agent connects to) in a
+/// supervised loop: if `run()` returns, errors, or the task panics, log it
+/// and restart after a short backoff, forever. Without this, a single panic
+/// or deadlock anywhere in the accept loop or a per-connection handler
+/// silently kills the mesh listener for good — the coordinator process
+/// keeps running and the HTTP/dashboard side (a separate spawned task) stays
+/// fully healthy throughout, so nothing in the dashboard indicates the mesh
+/// side is dead. An agent then just times out trying to connect, retrying
+/// forever with no explanation (observed live 2026-07-05: Beelink1's agent
+/// retried against `10.0.0.10:9000` for minutes with no response, while the
+/// dashboard on port 9001 was fully responsive).
+fn spawn_supervised_server(server: Arc<Server>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // Capped exponential backoff (1s, 2s, 4s, ... up to 30s): a single
+        // transient failure restarts almost immediately, but a persistent
+        // one (e.g. the bind address stuck unavailable) backs off instead
+        // of spinning at a fixed 1/s and flooding the log. Reset to 1s once
+        // a restart survives a full minute, so one bad patch doesn't leave
+        // the backoff permanently inflated.
+        let mut backoff = std::time::Duration::from_secs(1);
+        const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
+        const RESET_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+        loop {
+            let s = Arc::clone(&server);
+            let started_at = std::time::Instant::now();
+            match tokio::spawn(async move { s.run().await }).await {
+                Ok(Ok(())) => warn!("mesh TCP server exited cleanly — restarting"),
+                Ok(Err(e)) => warn!(error = %e, "mesh TCP server errored — restarting"),
+                Err(join_err) => {
+                    warn!(error = %join_err, "mesh TCP server task panicked — restarting")
+                }
+            }
+            if started_at.elapsed() >= RESET_AFTER {
+                backoff = std::time::Duration::from_secs(1);
+            } else {
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+            tokio::time::sleep(backoff).await;
+        }
+    })
+}
+
 /// Generate a cryptographically random 64-character lowercase hex auth token (32 bytes).
 pub(crate) fn generate_auth_token() -> String {
     let mut buf = [0u8; 32];
@@ -195,9 +237,7 @@ impl Coordinator {
             warm_start_sensors(&self.registry, &dashboard);
             warm_start_rooms(&self.registry, &dashboard);
             warm_start_scenes(&self.registry, &dashboard);
-            let handle = tokio::spawn(async move {
-                let _ = server.run().await;
-            });
+            let handle = spawn_supervised_server(Arc::new(server));
             return (handle, dashboard);
         }
 
@@ -232,9 +272,7 @@ impl Coordinator {
         warm_start_rooms(&self.registry, &dashboard);
         warm_start_scenes(&self.registry, &dashboard);
 
-        let handle = tokio::spawn(async move {
-            let _ = server.run().await;
-        });
+        let handle = spawn_supervised_server(Arc::new(server));
         (handle, dashboard)
     }
 
