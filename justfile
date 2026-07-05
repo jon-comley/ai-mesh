@@ -400,6 +400,9 @@ deploy-node node:
         scp_dots ">>> Uploading install script" \
             scp {{ssh_opts}} -q scripts/install-node-windows.ps1 \
                 ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\install-node-windows.ps1"
+        scp_dots ">>> Uploading stop-and-swap script" \
+            scp {{ssh_opts}} -q scripts/stop-and-swap-agent-windows.ps1 \
+                ${NODE_USER}@${NODE_HOST}:"${WIN_PATH}\\stop-and-swap-agent-windows.ps1"
 
         PUBKEY=""
         if [ -f "$HOME/.ssh/id_ed25519.pub" ]; then
@@ -410,11 +413,7 @@ deploy-node node:
 
         scp_dots ">>> Stopping service and swapping binary" \
             ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
-                taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
-                taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
-                sc.exe stop ai-mesh-agent 2>&1 | Out-Null;\
-                Start-Sleep 1;\
-                cmd /c 'copy /Y ${WIN_PATH}\\agent_next.exe ${WIN_PATH}\\agent.exe';\
+                & '${WIN_PATH}\\stop-and-swap-agent-windows.ps1' -WinPath '${WIN_PATH}'\
             \""
         echo ">>> Running provisioning script (this takes a minute — installing NSSM, llama.cpp, registering service)..."
         scp_dots ">>> Provisioning" \
