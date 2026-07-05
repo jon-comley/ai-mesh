@@ -163,7 +163,7 @@ export async function openLayout(room) {
   { const s = solarPosition(Date.now(), meshLat, meshLon); lastSolar = { azimuth: s.azimuth, elevation: s.elevation }; }
 
   loadPlacedBulbs(room.id);
-  loadPlacedOpenings(room.id);
+  loadPlacedOpenings(room.id).then(syncCeilingControl);
   renderCrosshair(room);
   renderWallDims(room);
   initThree(room, lastSolar).catch(() => {});
@@ -1307,6 +1307,29 @@ function buildSidebar(room) {
     openingChips.appendChild(chip);
   }
   openings.body.appendChild(openingChips);
+
+  // Glass/partial-glass ceiling (skylight/conservatory roof): unlike a
+  // window/door, it has no compass-facing wall to drop onto, so it's a
+  // simple dropdown rather than a draggable canvas chip — see
+  // setCeilingGlazing/syncCeilingControl below.
+  const ceiling = makeCollapsibleSection('Ceiling', 'mesh-layout-sb-ceiling', true);
+  sidebar.appendChild(ceiling.wrap);
+  const ceilingSelect = document.createElement('select');
+  ceilingSelect.id = 'layout-ceiling-select';
+  ceilingSelect.className = 'layout-ceiling-select';
+  for (const [value, label] of [
+    ['none', 'None'],
+    ['partial', 'Partial glass'],
+    ['full', 'Full glass'],
+  ]) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    ceilingSelect.appendChild(opt);
+  }
+  ceilingSelect.value = 'none';
+  ceilingSelect.addEventListener('change', () => setCeilingGlazing(ceilingSelect.value));
+  ceiling.body.appendChild(ceilingSelect);
 
   const dims = makeCollapsibleSection('Room size (m)', 'mesh-layout-sb-dims', true);
   sidebar.appendChild(dims.wrap);
@@ -3334,6 +3357,47 @@ async function removeOpening(id) {
   removeOpeningFromThree(id);
   delete layoutState.openings[id];
   rebuildPlacedPanel();
+}
+
+// ── Ceiling (glass / partial-glass) ──────────────────────────────────────────
+// Mirrors the "C" sentinel in coordinator/src/http/api/rooms.rs
+// (CEILING_WALL_EDGE) — a skylight opening with no compass-facing wall.
+const CEILING_WALL_EDGE = 'C';
+
+function findCeilingOpening() {
+  return Object.values(layoutState.openings).find(o => o.wall_edge === CEILING_WALL_EDGE);
+}
+
+// Reflects the current room's ceiling opening (if any) into the sidebar
+// dropdown — called once loadPlacedOpenings resolves so it sees the freshly
+// loaded state, and again whenever setCeilingGlazing changes it.
+function syncCeilingControl() {
+  const sel = document.getElementById('layout-ceiling-select');
+  if (!sel) return;
+  const current = findCeilingOpening();
+  sel.value = !current ? 'none' : current.width_norm >= 0.7 ? 'full' : 'partial';
+}
+
+async function setCeilingGlazing(kind) {
+  const roomId = layoutState.room?.id;
+  if (!roomId) return;
+  const current = findCeilingOpening();
+  if (kind === 'none') {
+    if (current) await removeOpening(current.id);
+    syncCeilingControl();
+    return;
+  }
+  const widthNorm = kind === 'full' ? 1.0 : 0.4;
+  if (current) {
+    current.width_norm = widthNorm;
+    await patchOpening(current.id, { width_norm: widthNorm });
+  } else {
+    // x_norm is meaningless for a ceiling opening (no wall position) — the
+    // default is never read since openingToSvgRect/effect math skip it for
+    // wall_edge === 'C'.
+    await postCreateOpening(roomId, 'skylight', CEILING_WALL_EDGE, 0.5, widthNorm, 1.0);
+  }
+  syncCeilingControl();
 }
 
 // ── Openings — server I/O ─────────────────────────────────────────────────────

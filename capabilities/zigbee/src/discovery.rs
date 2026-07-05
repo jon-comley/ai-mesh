@@ -16,7 +16,11 @@ pub struct DeviceInfo {
 /// `cover` composite, `climate` composite, or bare sensor properties like
 /// `temperature` / `humidity` / `occupancy` / `contact`). Order matters:
 /// anything actuating (light/cover/climate) wins over sensor properties,
-/// because actuators commonly also report sensor-ish fields.
+/// because actuators commonly also report sensor-ish fields. Switch/button
+/// devices (wall switches, remotes, the Hue Tap Dial) are checked last,
+/// after both actuator and sensor properties have had a chance to match —
+/// they carry no state of their own, just an `action` event and often a
+/// bare `switch` composite, so anything more specific should win first.
 fn classify(exposes: Option<&serde_json::Value>) -> DeviceType {
     let Some(list) = exposes.and_then(|e| e.as_array()) else {
         return DeviceType::Unknown;
@@ -53,7 +57,21 @@ fn classify(exposes: Option<&serde_json::Value>) -> DeviceType {
             .is_some_and(|p| SENSOR_PROPS.contains(&p))
     });
     if has_sensor_prop {
-        DeviceType::Sensor
+        return DeviceType::Sensor;
+    }
+    // Button/dial/remote devices: a `switch` composite (wired wall switches,
+    // z2m's generic "switch" exposes group), or a bare `action` property
+    // (battery remotes and dials like the Hue Tap Dial, which enumerate
+    // their button/rotation events under `action` with no composite type).
+    let has_switch_prop = types.contains(&"switch")
+        || list.iter().any(|e| {
+            e.get("property")
+                .or_else(|| e.get("name"))
+                .and_then(|p| p.as_str())
+                == Some("action")
+        });
+    if has_switch_prop {
+        DeviceType::Switch
     } else {
         DeviceType::Unknown
     }
@@ -232,6 +250,51 @@ mod tests {
         let reg = DeviceRegistry::new();
         let found = reg.update_from_payload(payload.as_bytes());
         assert_eq!(found[0].device_type, DeviceType::Unknown);
+    }
+
+    #[test]
+    fn classifies_action_only_remote_as_switch() {
+        // Hue Tap Dial shape: rotation/button events under a bare `action`
+        // enum, plus battery — no light/cover/climate/sensor properties.
+        let payload = r#"[{
+            "ieee_address": "0x8", "friendly_name": "tap_dial",
+            "definition": {"exposes": [
+                {"property": "action", "type": "enum", "values": ["press_1", "rotate_left"]},
+                {"property": "battery", "type": "numeric"}
+            ]}
+        }]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Switch);
+    }
+
+    #[test]
+    fn classifies_switch_composite_as_switch() {
+        // Wired wall switches expose a `switch` composite type.
+        let payload = r#"[{
+            "ieee_address": "0x9", "friendly_name": "hallway_switch",
+            "definition": {"exposes": [{"type": "switch", "features": []}]}
+        }]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Switch);
+    }
+
+    #[test]
+    fn sensor_properties_win_over_switch_action() {
+        // A combo device (e.g. a scene remote that also reports battery-only
+        // "sensor-ish" data) should still classify by its real sensor prop
+        // when one is present, not fall through to Switch.
+        let payload = r#"[{
+            "ieee_address": "0xa", "friendly_name": "combo_device",
+            "definition": {"exposes": [
+                {"property": "action", "type": "enum", "values": ["single"]},
+                {"property": "occupancy", "type": "binary"}
+            ]}
+        }]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Sensor);
     }
 
     #[test]

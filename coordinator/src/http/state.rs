@@ -86,6 +86,13 @@ pub enum DashboardEvent {
     SensorUpdate {
         sensors: Vec<SensorReport>,
     },
+    /// Presence-only inventory for device classes with no dedicated live-state
+    /// pipeline yet (Cover/Climate/Switch) — just enough for the Devices tab
+    /// to list them and assign a room. Unlike LightingUpdate/SensorUpdate this
+    /// carries no state fields, since none of these classes report any yet.
+    DeviceInventoryUpdate {
+        devices: Vec<shared::DeviceEntry>,
+    },
     RoomsUpdate {
         rooms: Vec<RoomInfo>,
         #[serde(default)]
@@ -119,6 +126,13 @@ pub enum DashboardEvent {
         device_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+    },
+    /// A Switch-class device (button remote, dial) fired — purely a
+    /// transient UI indicator, not persisted state. See `push_switch_action`.
+    SwitchAction {
+        device_id: String,
+        action: String,
+        ts_ms: u64,
     },
     ErrorUpdate {
         errors: Vec<ErrorEntry>,
@@ -323,6 +337,9 @@ pub struct DashboardState {
     light_snapshot: Mutex<HashMap<String, LightStateReport>>,
     /// Latest merged readings per sensor device (see `push_sensor_update`).
     sensor_snapshot: Mutex<HashMap<String, SensorReport>>,
+    /// Presence-only inventory for Cover/Climate/Switch devices, keyed by
+    /// device id → (owning node_id, type). See `push_other_devices`.
+    other_device_snapshot: Mutex<HashMap<String, (String, shared::DeviceType)>>,
     /// Group friendly name → node_id that owns it.
     group_snapshot: Mutex<HashMap<String, String>>,
     room_snapshot: Mutex<Vec<RoomInfo>>,
@@ -383,6 +400,7 @@ impl DashboardState {
             model_snapshot: Mutex::new(Vec::new()),
             light_snapshot: Mutex::new(HashMap::new()),
             sensor_snapshot: Mutex::new(HashMap::new()),
+            other_device_snapshot: Mutex::new(HashMap::new()),
             group_snapshot: Mutex::new(HashMap::new()),
             room_snapshot: Mutex::new(Vec::new()),
             scene_snapshot: Mutex::new(Vec::new()),
@@ -672,6 +690,46 @@ impl DashboardState {
             .collect()
     }
 
+    /// Store this node's Cover/Climate/Switch devices (replacing its previous
+    /// rows, same full-snapshot-per-node semantics as `push_group_update`) and
+    /// broadcast the merged inventory. Light/Sensor/Unknown are skipped —
+    /// those already have their own live-state pipelines (or, for Unknown,
+    /// nothing useful to show).
+    pub fn push_other_devices(&self, node_id: &str, devices: &[shared::DeviceEntry]) {
+        use shared::DeviceType;
+        {
+            let mut snap = self.other_device_snapshot.lock().unwrap();
+            snap.retain(|_, (nid, _)| nid != node_id);
+            for d in devices {
+                if matches!(
+                    d.device_type,
+                    DeviceType::Cover | DeviceType::Climate | DeviceType::Switch
+                ) {
+                    snap.insert(d.id.clone(), (node_id.to_owned(), d.device_type));
+                }
+            }
+        }
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::DeviceInventoryUpdate {
+                devices: self.get_other_device_snapshot(),
+            });
+        }
+    }
+
+    /// Return the current Cover/Climate/Switch inventory — used to warm-start
+    /// new WS clients (see `push_other_devices`).
+    pub fn get_other_device_snapshot(&self) -> Vec<shared::DeviceEntry> {
+        self.other_device_snapshot
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, (_, device_type))| shared::DeviceEntry {
+                id: id.clone(),
+                device_type: *device_type,
+            })
+            .collect()
+    }
+
     /// Return all known group friendly names — used to warm-start new WS clients.
     pub fn get_group_snapshot(&self) -> Vec<String> {
         self.group_snapshot
@@ -859,6 +917,25 @@ impl DashboardState {
     /// Recent pairing-feed events for warm-starting new WS clients, oldest first.
     pub fn get_join_feed(&self) -> Vec<DashboardEvent> {
         self.join_feed.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Broadcast a Switch-class button press / dial rotation. Purely a
+    /// transient UI indicator (a device row briefly flashes) — unlike the
+    /// join feed, there's no replay buffer: a client not connected when it
+    /// fires just misses the flash, which is fine for what this is.
+    pub fn push_switch_action(&self, device_id: String, action: String) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let _ = self.tx.send(DashboardEvent::SwitchAction {
+            device_id,
+            action,
+            ts_ms,
+        });
     }
 
     /// Broadcast the current solar position to all connected clients.
@@ -1953,6 +2030,37 @@ mod tests {
         );
     }
 
+    // ── push_switch_action ────────────────────────────────────────────────────
+
+    #[test]
+    fn push_switch_action_broadcasts_event() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut rx = state.tx.subscribe();
+        state.push_switch_action("tap_dial".into(), "button_1_press".into());
+        match rx.try_recv().unwrap() {
+            DashboardEvent::SwitchAction {
+                device_id, action, ..
+            } => {
+                assert_eq!(device_id, "tap_dial");
+                assert_eq!(action, "button_1_press");
+            }
+            _ => panic!("expected SwitchAction"),
+        }
+    }
+
+    #[test]
+    fn push_switch_action_with_no_receivers_is_noop() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        // Must not panic with zero subscribers (no persisted snapshot to update either).
+        state.push_switch_action("tap_dial".into(), "button_1_press".into());
+    }
+
     // ── push_group_update / get_group_snapshot ───────────────────────────────
 
     #[test]
@@ -1983,6 +2091,78 @@ mod tests {
             "old_group should be replaced, not accumulated"
         );
         assert!(snap.contains(&"all".to_string()));
+    }
+
+    #[test]
+    fn push_other_devices_stores_cover_climate_switch_only() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_other_devices(
+            "pi1",
+            &[
+                shared::DeviceEntry {
+                    id: "blind1".into(),
+                    device_type: shared::DeviceType::Cover,
+                },
+                shared::DeviceEntry {
+                    id: "trv1".into(),
+                    device_type: shared::DeviceType::Climate,
+                },
+                shared::DeviceEntry {
+                    id: "tap_dial".into(),
+                    device_type: shared::DeviceType::Switch,
+                },
+                shared::DeviceEntry {
+                    id: "bulb1".into(),
+                    device_type: shared::DeviceType::Light,
+                },
+                shared::DeviceEntry {
+                    id: "temp1".into(),
+                    device_type: shared::DeviceType::Sensor,
+                },
+                shared::DeviceEntry {
+                    id: "mystery".into(),
+                    device_type: shared::DeviceType::Unknown,
+                },
+            ],
+        );
+        let snap = state.get_other_device_snapshot();
+        let ids: std::collections::HashSet<&str> = snap.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(snap.len(), 3, "only Cover/Climate/Switch should be kept");
+        assert!(ids.contains("blind1"));
+        assert!(ids.contains("trv1"));
+        assert!(ids.contains("tap_dial"));
+    }
+
+    #[test]
+    fn push_other_devices_replaces_for_same_node() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_other_devices(
+            "pi1",
+            &[shared::DeviceEntry {
+                id: "old_blind".into(),
+                device_type: shared::DeviceType::Cover,
+            }],
+        );
+        state.push_other_devices(
+            "pi1",
+            &[shared::DeviceEntry {
+                id: "new_blind".into(),
+                device_type: shared::DeviceType::Cover,
+            }],
+        );
+        let snap = state.get_other_device_snapshot();
+        assert_eq!(
+            snap.len(),
+            1,
+            "old_blind should be replaced, not accumulated"
+        );
+        assert_eq!(snap[0].id, "new_blind");
     }
 
     #[test]

@@ -34,6 +34,69 @@ function formatDeviceName(id) {
   return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
+// ── Switch action flash ──────────────────────────────────────────────────────
+// A Switch device (button remote, dial) has no persisted state to render —
+// a button press / rotation is a one-off event, so instead of a status line
+// it gets a brief flash + action label on whichever row(s) currently render
+// it. A device can be visible in more than one place at once (Devices tab
+// and, if room-assigned, the Home tab's read-only strip both stay mounted
+// simultaneously, just hidden via CSS when their tab isn't active), so this
+// flashes every matching `[data-device-id]` element, not just the first.
+const SWITCH_FLASH_MS = 1500;
+const switchFlashState = new Map(); // device_id -> { action, timer }
+
+export function formatSwitchAction(action) {
+  return action.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+}
+
+function paintSwitchFlash(deviceId, action) {
+  const rows = document.querySelectorAll(`[data-device-id="${CSS.escape(deviceId)}"]`);
+  for (const row of rows) {
+    row.classList.remove('switch-action-flash');
+    // Force reflow so re-triggering the animation on a rapid second press restarts it.
+    void row.offsetWidth;
+    row.classList.add('switch-action-flash');
+    let badge = row.querySelector('.switch-action-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'switch-action-badge';
+      // The badge's text is the whole point of the flash (which button/
+      // direction fired) — announce it for screen readers same as a toast.
+      badge.setAttribute('aria-live', 'polite');
+      (row.querySelector('.light-card-header-right') ?? row).appendChild(badge);
+    }
+    badge.textContent = formatSwitchAction(action);
+  }
+}
+
+function clearSwitchFlash(deviceId) {
+  const rows = document.querySelectorAll(`[data-device-id="${CSS.escape(deviceId)}"]`);
+  for (const row of rows) {
+    row.classList.remove('switch-action-flash');
+    row.querySelector('.switch-action-badge')?.remove();
+  }
+}
+
+/// Called on a fresh SwitchAction WS event.
+export function registerSwitchAction(deviceId, action) {
+  const existing = switchFlashState.get(deviceId);
+  if (existing) clearTimeout(existing.timer);
+  const timer = setTimeout(() => {
+    switchFlashState.delete(deviceId);
+    clearSwitchFlash(deviceId);
+  }, SWITCH_FLASH_MS);
+  switchFlashState.set(deviceId, { action, timer });
+  paintSwitchFlash(deviceId, action);
+}
+
+/// Called when (re)building a switch's row/card, so an in-progress flash
+/// survives a full re-render triggered by an unrelated WS event (e.g. a
+/// SensorUpdate arriving mid-flash rebuilds every row from scratch).
+export function applySwitchFlashIfActive(deviceId) {
+  const state = switchFlashState.get(deviceId);
+  if (state) paintSwitchFlash(deviceId, state.action);
+}
+
 /// Room-assignment dropdown, shared by the Devices tab's rows (both types)
 /// and the post-pair "assign to room" prompt in the join feed.
 export function buildRoomSelect(rooms, currentRoomId, onChange) {
@@ -94,7 +157,7 @@ export function buildSensorCard(dev, opts = {}) {
   card.innerHTML = `
     <div class="light-name-group">
       <span class="light-name">${esc(displayName)}</span>
-      <span class="light-node-badge">${esc(dev.node_id)}</span>
+      ${dev.node_id ? `<span class="light-node-badge">${esc(dev.node_id)}</span>` : ''}
     </div>
     <div class="light-card-header-right">
       ${readout ? `<span class="sensor-readout">${esc(readout)}</span>` : ''}
@@ -155,5 +218,6 @@ export function buildSensorCard(dev, opts = {}) {
     card.appendChild(actions);
   }
 
+  applySwitchFlashIfActive(dev.device_id);
   return card;
 }

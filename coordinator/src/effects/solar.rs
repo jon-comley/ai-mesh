@@ -195,6 +195,12 @@ fn bulb_exposure(bulb: &super::BulbInRoom, effective_azimuth: f64, elevation: f6
     }
 }
 
+/// Ceiling-mounted openings (skylights / glass ceilings) use this sentinel
+/// `wall_edge` — see `http/api/rooms.rs::CEILING_WALL_EDGE`. They admit
+/// sunlight from directly overhead regardless of compass direction, so they
+/// skip the wall-facing diff entirely and contribute by elevation alone.
+const CEILING_WALL_EDGE: &str = "C";
+
 fn openings_intensity_scale(
     openings: &[super::OpeningContext],
     effective_azimuth: f64,
@@ -206,6 +212,13 @@ fn openings_intensity_scale(
     }
     let mut contribution = 0.0_f32;
     for o in openings {
+        if o.wall_edge == CEILING_WALL_EDGE {
+            // Overhead glass: no facing to be off-axis from — full contribution
+            // scales with elevation alone (highest when the sun is near zenith).
+            let elev_factor = (elevation as f32 / 90.0).clamp(0.0, 1.0);
+            contribution += o.transmission * o.width_norm * elev_factor;
+            continue;
+        }
         let facing = wall_edge_to_degrees(&o.wall_edge);
         let adj = (facing - room_orientation + 360.0) % 360.0;
         let diff = (effective_azimuth - adj).abs();
@@ -332,6 +345,35 @@ mod tests {
         let scale = openings_intensity_scale(&openings, 180.0, 45.0, 0.0);
         // Contribution = (1 - 0/90) * 1.0 * 0.5 * (45/45) = 0.5 → scale = 1.0 + 0.5*0.5 = 1.25
         assert!((scale - 1.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn openings_intensity_skylight_ignores_azimuth() {
+        // A glass ceiling should contribute the same regardless of which way
+        // the sun bears — only elevation and room_orientation matter, and
+        // room_orientation is irrelevant here too since there's no facing.
+        let openings = vec![OpeningContext {
+            wall_edge: "C".into(),
+            width_norm: 1.0,
+            transmission: 1.0,
+        }];
+        let scale_east = openings_intensity_scale(&openings, 90.0, 45.0, 0.0);
+        let scale_west = openings_intensity_scale(&openings, 270.0, 45.0, 0.0);
+        assert!((scale_east - scale_west).abs() < 1e-6);
+        // At 45° elevation: contribution = 1.0 * 1.0 * (45/90) = 0.5 → scale = 1.25
+        assert!((scale_east - 1.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn openings_intensity_skylight_peaks_at_zenith() {
+        let openings = vec![OpeningContext {
+            wall_edge: "C".into(),
+            width_norm: 1.0,
+            transmission: 1.0,
+        }];
+        let scale = openings_intensity_scale(&openings, 180.0, 90.0, 0.0);
+        // contribution = 1.0 * 1.0 * (90/90) = 1.0 → clamped, scale = 1.0 + 1.0*0.5 = 1.5
+        assert!((scale - 1.5).abs() < 1e-3);
     }
 
     #[test]

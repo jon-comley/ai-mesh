@@ -129,6 +129,15 @@ impl Capability for LightingCapability {
                             };
                             let _ = Self::send_via_ctx(&ctx, MeshMessage::ZigbeeJoin(report)).await;
                         }
+                        Ok(ZigbeeEvent::SwitchAction { device_id, action }) => {
+                            let report = shared::SwitchActionReport {
+                                node_id: node_id.clone(),
+                                device_id,
+                                action,
+                            };
+                            let _ =
+                                Self::send_via_ctx(&ctx, MeshMessage::SwitchAction(report)).await;
+                        }
                         Ok(ZigbeeEvent::DeviceAvailability { device_id, online }) => {
                             // Availability fires for every device on the bridge; only
                             // lights get the warm-white restore and LightState offline

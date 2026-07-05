@@ -252,6 +252,7 @@ pub enum DeviceType {
     Sensor,
     Cover,
     Climate,
+    Switch,
     Unknown,
 }
 
@@ -263,6 +264,7 @@ impl DeviceType {
             DeviceType::Sensor => "sensor",
             DeviceType::Cover => "cover",
             DeviceType::Climate => "climate",
+            DeviceType::Switch => "switch",
             DeviceType::Unknown => "unknown",
         }
     }
@@ -273,6 +275,7 @@ impl DeviceType {
             "sensor" => DeviceType::Sensor,
             "cover" => DeviceType::Cover,
             "climate" => DeviceType::Climate,
+            "switch" => DeviceType::Switch,
             _ => DeviceType::Unknown,
         }
     }
@@ -344,6 +347,18 @@ pub struct ZigbeeJoinEvent {
     /// Model name from the interview definition (only on interview success).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+}
+
+/// One button press / dial rotation from a Switch-class device (e.g. the Hue
+/// Tap Dial), forwarded by the zigbee-owning node. Purely a transient UI
+/// indicator — Switch devices have no persisted state, so this is broadcast
+/// and forgotten rather than stored in a snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SwitchActionReport {
+    pub node_id: String,
+    pub device_id: String,
+    /// Raw z2m `action` value, e.g. "button_1_press" or "1_rotate_left".
+    pub action: String,
 }
 
 /// Full device inventory for a node's Zigbee bridge, sent on every MQTT
@@ -506,6 +521,7 @@ pub enum MeshMessage {
     PermitJoin(PermitJoinRequest),
     DeviceRemove(DeviceRemoveRequest),
     ZigbeeJoin(ZigbeeJoinEvent),
+    SwitchAction(SwitchActionReport),
     SceneLoad(SceneLoadRequest),
     SceneLoaded(SceneLoadedReport),
     // Intent routing
@@ -1152,6 +1168,17 @@ mod tests {
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("model"));
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn switch_action_roundtrip() {
+        let msg = MeshMessage::SwitchAction(SwitchActionReport {
+            node_id: "pi1".into(),
+            device_id: "tap_dial".into(),
+            action: "button_1_press".into(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
     }
 

@@ -170,7 +170,7 @@ function startPulse(deviceId) {
   if (activePulse) stopPulse(false); // cancel previous without restoring
   const preGrabState = devicesMap.get(deviceId) ?? null;
   if (!preGrabState) return; // device not yet known — can't pulse safely
-  if (preGrabState.device_type === 'sensor') return; // no on/off/brightness to identify-pulse with
+  if (preGrabState.device_type !== 'light') return; // no on/off/brightness to identify-pulse with
 
   sendDeviceCommand(deviceId, { action: 'on' });
   // Candle temperature (500 mireds ≈ 2000 K) on any colour-capable bulb
@@ -259,6 +259,10 @@ async function fetchDeviceNames() {
 // WS event (LightingUpdate/SensorUpdate) is always a full domain snapshot, so
 // each notify* function only ever clears+repopulates ITS OWN type's entries,
 // never touching the other domain's.
+// Device classes with no on/off/brightness shape — rendered read-only
+// (buildSensorCard) rather than as a light control card.
+const READ_ONLY_DEVICE_TYPES = new Set(['sensor', 'cover', 'climate', 'switch']);
+
 function clearByType(type) {
   for (const [id, dev] of devicesMap) {
     if (dev.device_type === type) devicesMap.delete(id);
@@ -296,6 +300,21 @@ export function notifySensors(sensors) {
   clearByType('sensor');
   for (const dev of sensors) {
     devicesMap.set(dev.device_id, { ...dev, device_type: 'sensor' });
+  }
+  render();
+}
+
+// Cover/Climate/Switch devices (blinds, thermostats, the Hue Tap Dial and
+// similar remotes) have no live-state pipeline yet — just presence, so they
+// can be listed and assigned to a room ahead of any control capability. One
+// DeviceInventoryUpdate carries all three types together (a full snapshot,
+// same as LightingUpdate/SensorUpdate), so clear all three before repopulating.
+export function notifyOtherDevices(devices) {
+  clearByType('cover');
+  clearByType('climate');
+  clearByType('switch');
+  for (const dev of devices) {
+    devicesMap.set(dev.id, { device_id: dev.id, device_type: dev.device_type });
   }
   render();
 }
@@ -715,7 +734,7 @@ function renderRoomCard(room) {
     const ghostName = document.createElement('span');
     ghostName.className = 'room-drag-ghost-name';
     ghostName.textContent = room.name || 'Room';
-    const bulbCount = room.device_ids.filter(id => devicesMap.get(id)?.device_type !== 'sensor').length;
+    const bulbCount = room.device_ids.filter(id => devicesMap.get(id)?.device_type === 'light').length;
     const ghostCount = document.createElement('span');
     ghostCount.className = 'room-drag-ghost-count';
     ghostCount.textContent = bulbCount
@@ -756,10 +775,11 @@ function renderRoomCard(room) {
 
   // Shared state for header — lights only: on/off, colour, brightness, and the
   // "empty" gate for the On/Off/brightness controls are all light-specific
-  // concepts, so a room holding only a sensor must still count as empty here.
+  // concepts, so a room holding only a sensor/cover/climate/switch must still
+  // count as empty here.
   const roomDevicesAll = room.device_ids
     .map(id => devicesMap.get(id))
-    .filter(d => d && d.device_type !== 'sensor');
+    .filter(d => d && d.device_type === 'light');
   const anyOn = roomDevicesAll.some(d => d.on);
   const hasColour = roomDevicesAll.some(d => d.color_xy != null);
   const activeEffect = roomEffectsMap.get(room.id) || null;
@@ -1023,10 +1043,11 @@ function renderRoomCard(room) {
       }
       if (activeSceneByRoom.get(room.id) === scene.id) {
         chip.classList.add('active');
-        // Scenes are a lights-only concept — a sensor sharing the room isn't
-        // "in" or "paused from" the scene, so it must not count as a member.
+        // Scenes are a lights-only concept — a sensor/cover/climate/switch
+        // sharing the room isn't "in" or "paused from" the scene, so it must
+        // not count as a member.
         const memberCount = (room.device_ids ?? [])
-          .filter(id => devicesMap.get(id)?.device_type !== 'sensor').length;
+          .filter(id => devicesMap.get(id)?.device_type === 'light').length;
         const pausedCount = pausedSceneDevices.get(room.id)?.size ?? 0;
         if (pausedCount > 0 && pausedCount < memberCount) chip.classList.add('partly-paused');
         if (memberCount > 0 && pausedCount >= memberCount) chip.classList.add('all-paused');
@@ -1044,10 +1065,10 @@ function renderRoomCard(room) {
   // sensor stays visible even when the room card is collapsed. Sensor-only
   // (not offered for lights, per explicit product call — see
   // devicewidgets.js isSensorPinned).
-  const roomSensorsAll = room.device_ids
+  const roomReadOnlyAll = room.device_ids
     .map(id => devicesMap.get(id))
-    .filter(d => d?.device_type === 'sensor');
-  const pinnedSensors = roomSensorsAll.filter(d => isSensorPinned(d.device_id));
+    .filter(d => d && READ_ONLY_DEVICE_TYPES.has(d.device_type));
+  const pinnedSensors = roomReadOnlyAll.filter(d => d.device_type === 'sensor' && isSensorPinned(d.device_id));
   if (pinnedSensors.length > 0) {
     const pinnedEl = document.createElement('div');
     pinnedEl.className = 'room-pinned-sensors';
@@ -1069,13 +1090,13 @@ function renderRoomCard(room) {
   });
 
   // Device cards
-  // room.device_ids is untyped (any device, light or sensor); the light-only
-  // ids drive this list, a placeholder covers a light not yet reported.
-  // Sensor members render in their own read-only strip below instead — they
-  // have no brightness/on-off shape for buildDeviceCard to work with, and no
-  // controls to expose (see buildSensorCard's own comment for why the widget
-  // is shared as-is between here and the Devices tab).
-  const lightIds = room.device_ids.filter(id => devicesMap.get(id)?.device_type !== 'sensor');
+  // room.device_ids is untyped (any device type); only actual lights drive
+  // this list, a placeholder covers a light not yet reported. Sensor/Cover/
+  // Climate/Switch members render in their own read-only strip below instead
+  // — they have no brightness/on-off shape for buildDeviceCard to work with,
+  // and no controls to expose (see buildSensorCard's own comment for why the
+  // widget is shared as-is between here and the Devices tab).
+  const lightIds = room.device_ids.filter(id => devicesMap.get(id)?.device_type === 'light');
   const devicesEl = document.createElement('div');
   devicesEl.className = 'room-devices';
   if (lightIds.length === 0) {
@@ -1101,18 +1122,22 @@ function renderRoomCard(room) {
   body.appendChild(devicesEl);
   wireDropZone(body, room.id);
 
-  // Sensor members — read-only readout, but (unlike a light card) draggable
-  // and removable just like a bulb: drag onto another room, or onto the
-  // Unassigned strip, to move it; ✕ un-assigns back to Unassigned. Room
-  // reassignment used to be Devices-tab-only; this brings it to the Home tab
-  // to match how lights already work.
-  if (roomSensorsAll.length > 0) {
+  // Sensor/Cover/Climate/Switch members — read-only readout, but (unlike a
+  // light card) draggable and removable just like a bulb: drag onto another
+  // room, or onto the Unassigned strip, to move it; ✕ un-assigns back to
+  // Unassigned. Room reassignment used to be Devices-tab-only; this brings
+  // it to the Home tab to match how lights already work. Pinned sensors are
+  // excluded here — they already render in the always-visible strip above,
+  // so a pinned sensor wouldn't need to show twice in the same room card.
+  // Pin is still sensor-only (see the comment above pinnedSensors).
+  const unpinnedReadOnly = roomReadOnlyAll.filter(d => !(d.device_type === 'sensor' && isSensorPinned(d.device_id)));
+  if (unpinnedReadOnly.length > 0) {
     const sensorsEl = document.createElement('div');
     sensorsEl.className = 'room-sensors';
-    for (const dev of roomSensorsAll) {
+    for (const dev of unpinnedReadOnly) {
       const sensorCard = buildSensorCard(dev, {
         draggable: true,
-        pinnable: true,
+        pinnable: dev.device_type === 'sensor',
         onPinChange: render,
         onRemoveFromRoom: () => removeDeviceFromRoom(room.id, dev.device_id),
       });
@@ -1368,16 +1393,16 @@ function wireDeviceDrag(card, deviceId, roomId) {
 
 function renderChip(deviceId, fromRoomId, showRemove) {
   const dev = devicesMap.get(deviceId);
-  const isSensor = dev?.device_type === 'sensor';
+  const isLight = dev?.device_type === 'light';
   const chip = document.createElement('div');
-  chip.className = 'room-chip' + (!isSensor && dev?.on ? ' room-chip-on' : '');
+  chip.className = 'room-chip' + (isLight && dev?.on ? ' room-chip-on' : '');
   chip.setAttribute('draggable', 'true');
   chip.dataset.deviceId = deviceId;
   chip.title = deviceId;
 
-  // On/off dot doesn't apply to a sensor (no on/off state) — skip it rather
-  // than showing a misleading "off" dot on every sensor chip.
-  if (!isSensor) {
+  // On/off dot doesn't apply to a sensor/cover/climate/switch (no on/off
+  // state) — skip it rather than showing a misleading "off" dot.
+  if (isLight) {
     const dot = document.createElement('span');
     dot.className = 'room-chip-dot' + (dev?.on ? ' room-chip-dot-on' : '');
     dot.setAttribute('aria-hidden', 'true');
@@ -1574,12 +1599,12 @@ async function sendRoomCommand(roomId, body, room, isGlobal = false) {
   if (!isGlobal) model.globalLight = null;
   clearRoomActiveScene(roomId);
   // Optimistic update — lights only; a room command is a light command, and
-  // stamping fake on/brightness fields onto a sensor's cached reading would
-  // corrupt it for no reason.
+  // stamping fake on/brightness fields onto a sensor/cover/climate/switch's
+  // cached reading would corrupt it for no reason.
   if (room) {
     for (const deviceId of room.device_ids) {
       const dev = devicesMap.get(deviceId);
-      if (dev && dev.device_type !== 'sensor') {
+      if (dev && dev.device_type === 'light') {
         let updated = dev;
         if (body.action === 'on') updated = { ...updated, on: true };
         else if (body.action === 'off') updated = { ...updated, on: false };
