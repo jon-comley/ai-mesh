@@ -127,30 +127,30 @@ touching `SensorReport` again:
 
 3. **Hardware live gate** — hardware is in hand: SNZB-02P ×4 (temp/humidity),
    SNZB-03P R2 ×3 (motion + lux). Whole flow from the phone, no SSH:
-   - Lighting tab → **Pair device** → hold the sensor's pair button →
-     watch the join feed ("Paired: SNZB-02P ✓" / "Paired: SNZB-03P R2 ✓").
-   - Readings appear in the new sensor cards within one report interval —
-     temp/humidity/battery for the SNZB-02P; occupancy/lux/battery for the
-     SNZB-03P R2 (its Motion/Clear flips instantly; lux only updates when
-     occupancy triggers, per the device's own behaviour — a static lux
-     reading between motion events is expected, not a bug).
-   - `curl .../api/sensors?token=…` shows the same fields.
-   - Restart the coordinator → readings survive (sensor_states table).
+   - ~~Pair all 7~~ **Done (2026-07-05).** All 4× SNZB-02P + 3× SNZB-03P R2
+     paired and actively reporting via the Devices tab / Home tab room
+     strips. Two Hue Tap Dial-style switches paired alongside them,
+     confirming the newer `Switch`/`SwitchAction` work (see the roadmap's
+     2026-07-05 entries) against real hardware too — presses/rotation flash
+     as expected; no action bound to them yet (out of scope here).
+   - `curl .../api/sensors?token=…` shows the same fields — not yet
+     explicitly checked (dashboard readings are visibly correct, but the
+     raw endpoint wasn't curled separately).
+   - Restart the coordinator → readings survive (sensor_states table) —
+     **not yet exercised.**
    - Pull a sensor's battery → after z2m's passive timeout (~25 h,
      documented in `docs/pi1-lighting-setup.md` §9) the card dims to
      offline with readings intact. Don't wait a day for this one — verify
      the offline path by temporarily lowering z2m's
-     `availability.passive.timeout` instead.
-   - Pair all 7 before declaring done — one of each isn't sufficient
-     coverage for confirming the pairing UX at realistic bridge-wide scale
-     (permit-join window length, feed readability with multiple joins).
+     `availability.passive.timeout` instead. **Not yet exercised.**
    - Delete one from the dashboard and confirm it actually leaves the
      Zigbee network (re-pairing is required to bring it back — not just a
      vanished registry row). The unpair-on-delete path only has a mocked
      connection test so far (`delete_device_requests_network_removal`);
-     this is its first exercise against a real bridge.
-   - On pass: mark Phase B **complete** in `docs/roadmap.md` (11.8 section)
-     and update the focus memory.
+     this is its first exercise against a real bridge. **Not yet exercised.**
+   - On pass (all sub-items above, not just pairing): mark Phase B
+     **complete** in `docs/roadmap.md` (11.8 section) and update the focus
+     memory.
 
 4. **Phase C — the differentiator** — code shipped 2026-07-04
    (`coordinator/src/intent.rs`, no wire bump, 824 tests), **not yet
