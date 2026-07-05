@@ -1085,6 +1085,43 @@ Design sketch:
 
 ---
 
+## Phase 11.9 — Frame TV Art Display (design ratified 2026-07-05)
+
+Local, subscription-free replacement for Samsung's Art Store on a QE32LS03C
+Frame TV: a Pi Zero 2 W hidden in an in-wall recess feeds the TV a fullscreen
+HDMI slideshow sourced from public-domain art collections (WikiArt,
+Rijksmuseum, The Met, Unsplash), driven by ai-mesh — the TV's own Art Mode /
+SmartThings / cloud features are never engaged; the TV is a dumb HDMI panel
+with a local WebSocket remote-control channel for input-switch/power only.
+
+Full design + hardware/electrical notes: `plans/frame-tv-art-display.md`.
+Hands-on provisioning guide (once the recess/socket work is done):
+`docs/frame-tv-setup.md`.
+
+New domain, same shape as every other one in this mesh: a `capability-art`
+crate (mirrors `capability-reaper` — drives an external process rather than
+Zigbee/MQTT) + a coordinator `api/art.rs` module, following the existing
+domain-module recipe. Automation triggers (occupancy, ambient light,
+time-of-day) are deliberately just new *consumers* of the sensor pipeline
+already shipped in Phase 11.8 (the SNZB-03P R2 motion sensors already report
+both occupancy and illuminance) rather than new infrastructure — sequenced
+last, after the basic slideshow works reliably on its own.
+
+**Added idea (2026-07-05):** voice/chat browsing — "show me some Monet",
+"show the collection in date order" — via a new `art_show` intent tool
+copying Phase C's `get_climate` pattern exactly (coordinator answers/acts
+from its own catalogue, no node round-trip for the query itself). Needs
+per-image metadata (artist/year/movement) captured at ingest, already
+planned in the art-pipeline step for this reason. Arguably the strongest
+showcase yet for this project's actual differentiator — "talk to your
+house, and it never leaves your house."
+
+Blocking on: electrician-designed recess + socket (wall has
+tanking/shower on the other side — flagged explicitly in the plan as
+needing a qualified Part P registered electrician, not a DIY job).
+
+---
+
 ## Phase 12 — Distributed Execution
 
 - Multi-node inference
