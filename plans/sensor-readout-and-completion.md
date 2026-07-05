@@ -153,8 +153,8 @@ touching `SensorReport` again:
      memory.
 
 4. **Phase C — the differentiator** — code shipped 2026-07-04
-   (`coordinator/src/intent.rs`, no wire bump, 824 tests), **not yet
-   live-verified against a real LLM**:
+   (`coordinator/src/intent.rs`, no wire bump, 824 tests), **live-verified
+   against a real LLM 2026-07-05** (see the gate below):
    - ~~`"sensors"` arm in the intent router's tool schemas~~ **Done**:
      `get_climate { room? }` answered from the coordinator's sensor
      snapshot — no node round-trip.
@@ -173,9 +173,16 @@ touching `SensorReport` again:
      showed "Open". No contact sensors were in the hardware batch, so this
      was never exercised live; caught while writing the same formatting
      logic in Rust and checked against z2m's docs.
-   - **Gate (needs the live hardware + a working local LLM, not yet run):**
-     `just intent "what temperature is the office?"` answers from real
-     sensor data; a mixed action+climate turn produces both effects.
+   - **Gate** ✓ **passed (2026-07-05)**: `just intent "what temperature is
+     the kitchen?"` answers from real sensor data. First run surfaced two
+     real bugs, both fixed same day (commit `2c067cb`) and confirmed on
+     retest: raw device ids shown instead of friendly names (sensors only —
+     see `docs/roadmap.md`'s 2026-07-05 Phase C entry for why lights were
+     deliberately left alone), and the model calling the tool with
+     `{"target": ...}` instead of the schema's `{"room": ...}`, silently
+     returning every sensor in the house — `dispatch_get_climate` now
+     accepts `target` as an alias. A mixed action+climate turn in one
+     reply is not yet separately confirmed live.
    - **Deferred (not this slice):** no recency/staleness timestamp on
      readings. `offline: true` covers the dead-sensor case, but a live
      sensor whose last real update was a while ago (illuminance only
