@@ -214,6 +214,28 @@ pub struct RoomEffectInfo {
     pub overrides: Vec<String>,
 }
 
+/// A room group's wire representation - see `RoomGroupRecord`'s doc comment
+/// in `registry/mod.rs` for why this is not the same thing as a Zigbee/z2m
+/// group.
+#[derive(Clone, Debug, Serialize)]
+pub struct GroupInfo {
+    pub id: String,
+    pub name: String,
+    pub position: i64,
+    pub device_ids: Vec<String>,
+}
+
+impl From<crate::registry::RoomGroupRecord> for GroupInfo {
+    fn from(g: crate::registry::RoomGroupRecord) -> Self {
+        Self {
+            id: g.id,
+            name: g.name,
+            position: g.position,
+            device_ids: g.device_ids,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomInfo {
     pub id: String,
@@ -228,6 +250,7 @@ pub struct RoomInfo {
     pub height_m: f64,
     pub origin_x: f64,
     pub origin_y: f64,
+    pub groups: Vec<GroupInfo>,
 }
 
 impl From<RoomRecord> for RoomInfo {
@@ -245,6 +268,7 @@ impl From<RoomRecord> for RoomInfo {
             height_m: r.height_m,
             origin_x: r.origin_x,
             origin_y: r.origin_y,
+            groups: r.groups.into_iter().map(GroupInfo::from).collect(),
         }
     }
 }
@@ -2222,6 +2246,7 @@ mod tests {
             height_m: 2.5,
             origin_x: 0.5,
             origin_y: 0.5,
+            groups: vec![],
         }
     }
 
@@ -2294,6 +2319,7 @@ mod tests {
                 height_m: 2.5,
                 origin_x: 0.5,
                 origin_y: 0.5,
+                groups: vec![],
             }],
             device_names: std::collections::HashMap::new(),
         };

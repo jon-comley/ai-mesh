@@ -174,6 +174,43 @@ pub async fn reorder_room_devices(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Fan a light action out to a set of device ids: resolve each device's
+/// node, apply the optimistic snapshot update, send. Returns false if any
+/// device was unreachable (unknown node or send failure) - shared by
+/// `room_command` and `group_command` so the fan-out logic lives once.
+fn dispatch_light_command(
+    state: &DashboardState,
+    device_ids: &[String],
+    command: &shared::LightAction,
+) -> bool {
+    let mut all_ok = true;
+    for device_id in device_ids {
+        let Some(node_id) = state.get_node_for_device(device_id) else {
+            tracing::warn!(
+                device_id,
+                "dispatch_light_command: no node known for device"
+            );
+            all_ok = false;
+            continue;
+        };
+        state.apply_command_to_snapshot(device_id, command);
+        let cmd = LightCommandRequest {
+            request_id: gen_request_id(),
+            target: LightTarget::Device(device_id.clone()),
+            command: command.clone(),
+        };
+        if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+            tracing::warn!(
+                device_id,
+                node_id,
+                "dispatch_light_command: send_to_node failed"
+            );
+            all_ok = false;
+        }
+    }
+    all_ok
+}
+
 pub async fn room_command(
     Path(room_id): Path<String>,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
@@ -199,26 +236,170 @@ pub async fn room_command(
         )
             .into_response();
     };
-    let mut any_unavailable = false;
-    for device_id in &device_ids {
-        let Some(node_id) = state.get_node_for_device(device_id) else {
-            any_unavailable = true;
-            continue;
-        };
-        state.apply_command_to_snapshot(device_id, &command);
-        let cmd = LightCommandRequest {
-            request_id: gen_request_id(),
-            target: LightTarget::Device(device_id.clone()),
-            command: command.clone(),
-        };
-        if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
-            any_unavailable = true;
+    if dispatch_light_command(&state, &device_ids, &command) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+
+// ── Room groups ─────────────────────────────────────────────────────────────
+// Named, exclusive-membership subsets of a room's devices (e.g. Kitchen's
+// Counter pendants vs. its ceiling spots). Groups live here, not a new
+// device-domain module: a group is a partition of room membership, same
+// reasoning that already keeps `room_command` (an actual device-domain
+// action) in this domain-agnostic file. Never confuse with `light_groups` -
+// real Zigbee/z2m groups dispatched as one MQTT command; a room group fans
+// a command out to each member device individually via the same
+// `dispatch_light_command` helper `room_command` uses.
+
+#[derive(Deserialize)]
+pub struct CreateRoomGroupBody {
+    name: String,
+}
+
+pub async fn create_room_group(
+    Path(room_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<CreateRoomGroupBody>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_owned();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
+    }
+    let group_id = {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        reg.create_room_group(&room_id, &name).id
+    };
+    state.push_rooms_update(rooms_from_registry(&registry));
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": group_id })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RenameRoomGroupBody {
+    name: String,
+}
+
+pub async fn rename_room_group(
+    Path((room_id, group_id)): Path<(String, String)>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<RenameRoomGroupBody>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_owned();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
+    }
+    {
+        let mut reg = registry.lock().unwrap();
+        match reg.get_room_group(&group_id) {
+            Some(g) if g.room_id == room_id => {}
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        }
+        reg.rename_room_group(&group_id, &name);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn delete_room_group(
+    Path((room_id, group_id)): Path<(String, String)>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    {
+        let mut reg = registry.lock().unwrap();
+        match reg.get_room_group(&group_id) {
+            Some(g) if g.room_id == room_id => {}
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        }
+        reg.delete_room_group(&group_id);
+    }
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SetDeviceGroupBody {
+    group_id: Option<String>,
+}
+
+pub async fn set_device_group(
+    Path((room_id, device_id)): Path<(String, String)>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<SetDeviceGroupBody>,
+) -> impl IntoResponse {
+    {
+        let reg = registry.lock().unwrap();
+        if !reg.room_exists(&room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        if reg.get_room_for_device(&device_id).as_deref() != Some(room_id.as_str()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                "device is not a member of this room",
+            )
+                .into_response();
+        }
+        if let Some(gid) = &body.group_id {
+            match reg.get_room_group(gid) {
+                Some(g) if g.room_id == room_id => {}
+                _ => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "group does not belong to this room",
+                    )
+                        .into_response();
+                }
+            }
         }
     }
-    if any_unavailable {
-        StatusCode::SERVICE_UNAVAILABLE.into_response()
-    } else {
+    registry
+        .lock()
+        .unwrap()
+        .set_device_group(&device_id, body.group_id.as_deref());
+    state.push_rooms_update(rooms_from_registry(&registry));
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn group_command(
+    Path((room_id, group_id)): Path<(String, String)>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<LightCommandBody>,
+) -> impl IntoResponse {
+    let device_ids: Vec<String> = {
+        let reg = registry.lock().unwrap();
+        match reg.get_room_group(&group_id) {
+            Some(g) if g.room_id == room_id => g.device_ids,
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        }
+    };
+    let Some(command) = build_light_action(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "unknown action or missing required fields",
+        )
+            .into_response();
+    };
+    if dispatch_light_command(&state, &device_ids, &command) {
         StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
     }
 }
 
@@ -503,6 +684,20 @@ mod tests {
                 axum::routing::patch(modify_room_devices),
             )
             .route("/api/rooms/{id}/command", post(room_command))
+            .route("/api/rooms/{id}/groups", post(create_room_group))
+            .route(
+                "/api/rooms/{id}/groups/{gid}/name",
+                axum::routing::patch(rename_room_group),
+            )
+            .route(
+                "/api/rooms/{id}/groups/{gid}",
+                axum::routing::delete(delete_room_group),
+            )
+            .route("/api/rooms/{id}/groups/{gid}/command", post(group_command))
+            .route(
+                "/api/rooms/{id}/devices/{did}/group",
+                axum::routing::patch(set_device_group),
+            )
             .layer(axum::Extension(registry))
             .with_state(state)
     }
@@ -865,6 +1060,309 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── room groups ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_room_group_returns_201_with_id() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let state = make_state(vec![], empty_connections());
+        let (status, body) = send_with_body(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/groups?token="),
+            r#"{"name":"Counter"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(
+            body.contains("\"id\""),
+            "response should contain id: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_room_group_returns_400_for_empty_name() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/groups?token="),
+            r#"{"name":"  "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_room_group_returns_404_for_unknown_room() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            "/api/rooms/ghost/groups?token=",
+            r#"{"name":"Counter"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn rename_room_group_returns_204() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let group_id = registry
+            .lock()
+            .unwrap()
+            .create_room_group(&room_id, "Counter")
+            .id;
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry.clone()),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/groups/{group_id}/name?token="),
+            r#"{"name":"Island"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            registry
+                .lock()
+                .unwrap()
+                .get_room_group(&group_id)
+                .unwrap()
+                .name,
+            "Island"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_room_group_returns_404_for_group_in_wrong_room() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let other_room_id = make_room(&registry, "Lounge");
+        let group_id = registry
+            .lock()
+            .unwrap()
+            .create_room_group(&room_id, "Counter")
+            .id;
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "PATCH",
+            &format!("/api/rooms/{other_room_id}/groups/{group_id}/name?token="),
+            r#"{"name":"Island"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_room_group_returns_204_and_ungroups_members() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "pendant1");
+        let group_id = {
+            let mut reg = registry.lock().unwrap();
+            let g = reg.create_room_group(&room_id, "Counter").id;
+            reg.set_device_group("pendant1", Some(&g));
+            g
+        };
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry.clone()),
+            "DELETE",
+            &format!("/api/rooms/{room_id}/groups/{group_id}?token="),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let rooms = registry.lock().unwrap().list_rooms();
+        let room = rooms.iter().find(|r| r.id == room_id).unwrap();
+        assert!(room.groups.is_empty());
+        assert!(room.device_ids.contains(&"pendant1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn set_device_group_returns_204_and_updates_membership() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "pendant1");
+        let group_id = registry
+            .lock()
+            .unwrap()
+            .create_room_group(&room_id, "Counter")
+            .id;
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry.clone()),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/devices/pendant1/group?token="),
+            &format!(r#"{{"group_id":"{group_id}"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let group = registry.lock().unwrap().get_room_group(&group_id).unwrap();
+        assert_eq!(group.device_ids, vec!["pendant1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn set_device_group_returns_400_for_device_in_other_room() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let other_room_id = make_room(&registry, "Lounge");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&other_room_id, "lamp1");
+        let group_id = registry
+            .lock()
+            .unwrap()
+            .create_room_group(&room_id, "Counter")
+            .id;
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/devices/lamp1/group?token="),
+            &format!(r#"{{"group_id":"{group_id}"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn set_device_group_returns_400_for_group_in_different_room() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let other_room_id = make_room(&registry, "Lounge");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "pendant1");
+        let group_id = registry
+            .lock()
+            .unwrap()
+            .create_room_group(&other_room_id, "Sofa")
+            .id;
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/devices/pendant1/group?token="),
+            &format!(r#"{{"group_id":"{group_id}"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn set_device_group_null_clears_membership() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "pendant1");
+        let group_id = {
+            let mut reg = registry.lock().unwrap();
+            let g = reg.create_room_group(&room_id, "Counter").id;
+            reg.set_device_group("pendant1", Some(&g));
+            g
+        };
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry.clone()),
+            "PATCH",
+            &format!("/api/rooms/{room_id}/devices/pendant1/group?token="),
+            r#"{"group_id":null}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let group = registry.lock().unwrap().get_room_group(&group_id).unwrap();
+        assert!(group.device_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_command_fans_out_to_group_members_only() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(8);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+
+        seed_light(&state, "spot1", "pi1");
+        seed_light(&state, "pendant1", "pi1");
+
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "spot1");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "pendant1");
+        let group_id = {
+            let mut reg = registry.lock().unwrap();
+            let g = reg.create_room_group(&room_id, "Counter").id;
+            reg.set_device_group("pendant1", Some(&g));
+            g
+        };
+
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{room_id}/groups/{group_id}/command?token="),
+            r#"{"action":"on"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Only pendant1 (the group member) should have received a command.
+        let msg = rx.try_recv().unwrap();
+        match msg {
+            MeshMessage::LightCommand(req) => {
+                assert_eq!(req.target, LightTarget::Device("pendant1".into()));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "spot1 (not in the group) should not have received a command"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_command_returns_404_for_group_in_wrong_room() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let other_room_id = make_room(&registry, "Lounge");
+        let group_id = registry
+            .lock()
+            .unwrap()
+            .create_room_group(&room_id, "Counter")
+            .id;
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            rooms_router(state, registry),
+            "POST",
+            &format!("/api/rooms/{other_room_id}/groups/{group_id}/command?token="),
+            r#"{"action":"on"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     // ── reorder_rooms ─────────────────────────────────────────────────────────

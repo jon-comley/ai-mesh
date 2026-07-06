@@ -144,6 +144,7 @@ pub async fn handle_intent(
         .unwrap()
         .devices_of_type(shared::DeviceType::Sensor);
     let device_room_map = registry.lock().unwrap().device_room_name_map();
+    let device_group_map = registry.lock().unwrap().device_group_name_map();
     let device_names = registry.lock().unwrap().get_all_device_names();
     let scene_names: Vec<String> = registry
         .lock()
@@ -158,6 +159,7 @@ pub async fn handle_intent(
         &known_groups,
         &device_states,
         &device_room_map,
+        &device_group_map,
         &scene_names,
     );
     let sensor_ctx = build_sensor_context(
@@ -586,7 +588,7 @@ fn resolve_display_name(device_id: &str, device_names: &HashMap<String, String>)
 /// refuse offline devices, and fan the command out to the lighting node.
 async fn dispatch_light_command(
     request_id: &str,
-    mut args: serde_json::Value,
+    args: serde_json::Value,
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
     device_states: &[LightStateReport],
@@ -596,12 +598,16 @@ async fn dispatch_light_command(
     else {
         return "no lighting node connected".into();
     };
-    // Validate target; if it names a room instead of a device, resolve to
-    // the first device in that room so the command still goes through.
+    // Validate target; if it names a room or an in-room group instead of a
+    // known device/z2m-group, resolve to every member device so the command
+    // reaches all of them (previously this only sent to the room's *first*
+    // device — "turn on the kitchen" lit one bulb; a room-group needs the
+    // same multi-device fan-out anyway, so both get fixed together here).
     if let Some(target) = args
         .get("target")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
+        .map(str::to_owned)
     {
         let (devices, groups) = registry.lock().unwrap().lighting_targets();
         let known: Vec<&str> = devices
@@ -609,27 +615,44 @@ async fn dispatch_light_command(
             .chain(groups.iter())
             .map(String::as_str)
             .collect();
-        if !known.is_empty() && !known.contains(&target) {
-            // Not a device/group — try matching against a room name.
-            let resolved = registry
+        if !known.is_empty() && !known.contains(&target.as_str()) {
+            // Not a known device/z2m-group — try a room name, then a
+            // room-group name (searched across all rooms; group names are
+            // only unique within their own room, same simplifying
+            // assumption already made for room names elsewhere here).
+            let member_ids: Option<Vec<String>> = registry
                 .lock()
                 .unwrap()
                 .list_rooms()
                 .into_iter()
-                .find(|r| r.name.eq_ignore_ascii_case(target))
-                .and_then(|r| r.device_ids.into_iter().next());
-            match resolved {
-                Some(device_id) => {
-                    args["target"] = serde_json::Value::String(device_id);
+                .find_map(|r| {
+                    if r.name.eq_ignore_ascii_case(&target) {
+                        Some(r.device_ids.clone())
+                    } else {
+                        r.groups
+                            .iter()
+                            .find(|g| g.name.eq_ignore_ascii_case(&target))
+                            .map(|g| g.device_ids.clone())
+                    }
+                });
+            return match member_ids {
+                Some(ids) if !ids.is_empty() => {
+                    dispatch_light_command_fanout(
+                        request_id,
+                        &args,
+                        &ids,
+                        &lighting_tx,
+                        device_states,
+                        &target,
+                    )
+                    .await
                 }
-                None => {
-                    return format!(
-                        "unknown target '{}' — known targets: {}",
-                        target,
-                        known.join(", ")
-                    );
-                }
-            }
+                _ => format!(
+                    "unknown target '{}' — known targets: {}",
+                    target,
+                    known.join(", ")
+                ),
+            };
         }
     }
     // Reject commands to individual devices that are known to be offline.
@@ -656,6 +679,56 @@ async fn dispatch_light_command(
         }
     }
     "ok".into()
+}
+
+/// Fans a single tool call out to every device in a resolved room/room-group
+/// (`member_ids`), skipping offline ones individually rather than the
+/// single-device all-or-nothing check the normal path uses. Builds the
+/// `LightAction` once via the existing `build_light_command` (reusing its
+/// tested action-parsing, ignoring the single `LightTarget` it produces —
+/// each device gets its own) and re-targets it per device.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_light_command_fanout(
+    request_id: &str,
+    args: &serde_json::Value,
+    member_ids: &[String],
+    lighting_tx: &tokio::sync::mpsc::Sender<MeshMessage>,
+    device_states: &[LightStateReport],
+    target_name: &str,
+) -> String {
+    let Some(mut cmds) = build_light_command(request_id, args) else {
+        return "unrecognised colour — no command sent".into();
+    };
+    let action = cmds.remove(0).command;
+    let mut sent = 0usize;
+    let mut skipped_offline = 0usize;
+    for device_id in member_ids {
+        if device_is_offline(device_id, device_states) {
+            skipped_offline += 1;
+            continue;
+        }
+        let cmd = LightCommandRequest {
+            request_id: request_id.to_string(),
+            target: LightTarget::Device(device_id.clone()),
+            command: action.clone(),
+        };
+        if lighting_tx
+            .send(MeshMessage::LightCommand(cmd))
+            .await
+            .is_err()
+        {
+            warn!(request_id, "failed to send LightCommand to lighting node");
+            return "failed to send LightCommand to lighting node".into();
+        }
+        sent += 1;
+    }
+    if sent == 0 {
+        format!("all {skipped_offline} device(s) in '{target_name}' are currently offline")
+    } else if skipped_offline > 0 {
+        format!("ok ({sent} device(s) updated, {skipped_offline} offline and skipped)")
+    } else {
+        "ok".into()
+    }
 }
 
 /// `scene_load`: forward to the lighting node and await its SceneLoaded reply.
@@ -1831,11 +1904,18 @@ Rules:
     )
 }
 
+/// `device_group_map` names an in-room group a device belongs to (see
+/// `RoomGroupRecord` in `registry/mod.rs` - not a Zigbee/z2m group, those
+/// are `known_groups` below). A device tagged `[Kitchen/Counter]` can be
+/// targeted by "Counter" the same way a room can be targeted by its own
+/// name - `dispatch_light_command`'s room/group-name fallback resolves
+/// either. Ungrouped devices just get the existing `[Room]` tag.
 pub fn build_device_context(
     known_devices: &[String],
     known_groups: &[String],
     device_states: &[LightStateReport],
     device_room_map: &HashMap<String, String>,
+    device_group_map: &HashMap<String, String>,
     scene_names: &[String],
 ) -> String {
     let device_section = if known_devices.is_empty() && known_groups.is_empty() {
@@ -1847,7 +1927,10 @@ pub fn build_device_context(
             for name in known_devices {
                 let room_tag = device_room_map
                     .get(name)
-                    .map(|r| format!(" [{}]", r))
+                    .map(|r| match device_group_map.get(name) {
+                        Some(g) => format!(" [{r}/{g}]"),
+                        None => format!(" [{r}]"),
+                    })
                     .unwrap_or_default();
                 let state = device_states.iter().find(|s| &s.device_id == name);
                 let status = match state {
@@ -2023,7 +2106,14 @@ mod tests {
     fn build_device_context_injects_known_devices_and_groups() {
         let devices = vec!["test_bulb".to_string(), "desk_lamp".to_string()];
         let groups = vec!["all".to_string()];
-        let ctx = build_device_context(&devices, &groups, &[], &HashMap::new(), &[]);
+        let ctx = build_device_context(
+            &devices,
+            &groups,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+        );
         assert!(ctx.contains("test_bulb"));
         assert!(ctx.contains("desk_lamp"));
         assert!(ctx.contains("all"));
@@ -2032,8 +2122,29 @@ mod tests {
     }
 
     #[test]
+    fn build_device_context_tags_room_group_when_assigned() {
+        let devices = vec!["pendant1".to_string()];
+        let mut rooms = HashMap::new();
+        rooms.insert("pendant1".to_string(), "Kitchen".to_string());
+        let mut groups = HashMap::new();
+        groups.insert("pendant1".to_string(), "Counter".to_string());
+        let ctx = build_device_context(&devices, &[], &[], &rooms, &groups, &[]);
+        assert!(ctx.contains("pendant1 [Kitchen/Counter]"));
+    }
+
+    #[test]
+    fn build_device_context_room_tag_without_group_unchanged() {
+        let devices = vec!["spot1".to_string()];
+        let mut rooms = HashMap::new();
+        rooms.insert("spot1".to_string(), "Kitchen".to_string());
+        let ctx = build_device_context(&devices, &[], &[], &rooms, &HashMap::new(), &[]);
+        assert!(ctx.contains("spot1 [Kitchen]"));
+        assert!(!ctx.contains("Kitchen/"));
+    }
+
+    #[test]
     fn build_device_context_empty_returns_empty() {
-        let ctx = build_device_context(&[], &[], &[], &HashMap::new(), &[]);
+        let ctx = build_device_context(&[], &[], &[], &HashMap::new(), &HashMap::new(), &[]);
         assert!(ctx.is_empty());
     }
 
@@ -2526,10 +2637,81 @@ mod tests {
         assert!(build_light_command("r11", &args).is_none());
     }
 
+    fn light_state(device_id: &str, online: bool) -> LightStateReport {
+        LightStateReport {
+            node_id: "pi1".into(),
+            device_id: device_id.into(),
+            on: false,
+            brightness: None,
+            color_xy: None,
+            color_temp: None,
+            online,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_light_command_fanout_sends_to_all_online_members() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<MeshMessage>(8);
+        let args = serde_json::json!({"action": "on"});
+        let member_ids = vec!["spot1".to_string(), "pendant1".to_string()];
+        let result =
+            dispatch_light_command_fanout("r1", &args, &member_ids, &tx, &[], "Kitchen").await;
+        assert_eq!(result, "ok");
+        let mut seen: Vec<String> = vec![];
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                MeshMessage::LightCommand(cmd) => {
+                    assert!(matches!(cmd.command, LightAction::On));
+                    if let LightTarget::Device(id) = cmd.target {
+                        seen.push(id);
+                    }
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+        assert_eq!(seen, vec!["spot1".to_string(), "pendant1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_light_command_fanout_skips_offline_devices() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<MeshMessage>(8);
+        let args = serde_json::json!({"action": "on"});
+        let member_ids = vec!["spot1".to_string(), "pendant1".to_string()];
+        let states = vec![light_state("pendant1", false)];
+        let result =
+            dispatch_light_command_fanout("r1", &args, &member_ids, &tx, &states, "Kitchen").await;
+        assert!(result.contains("1 device(s) updated"));
+        assert!(result.contains("1 offline and skipped"));
+        let msg = rx.try_recv().unwrap();
+        match msg {
+            MeshMessage::LightCommand(cmd) => {
+                assert_eq!(cmd.target, LightTarget::Device("spot1".into()));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "offline pendant1 must not receive a command"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_light_command_fanout_all_offline_sends_nothing() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<MeshMessage>(8);
+        let args = serde_json::json!({"action": "on"});
+        let member_ids = vec!["spot1".to_string()];
+        let states = vec![light_state("spot1", false)];
+        let result =
+            dispatch_light_command_fanout("r1", &args, &member_ids, &tx, &states, "Kitchen").await;
+        assert!(result.contains("all 1 device(s)"));
+        assert!(result.contains("currently offline"));
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn build_device_context_devices_only_no_groups() {
         let devices = vec!["test_bulb".to_string()];
-        let ctx = build_device_context(&devices, &[], &[], &HashMap::new(), &[]);
+        let ctx = build_device_context(&devices, &[], &[], &HashMap::new(), &HashMap::new(), &[]);
         assert!(ctx.contains("Known devices"));
         assert!(!ctx.contains("Known groups"));
     }
@@ -2537,7 +2719,7 @@ mod tests {
     #[test]
     fn build_device_context_groups_only_no_devices() {
         let groups = vec!["all".to_string()];
-        let ctx = build_device_context(&[], &groups, &[], &HashMap::new(), &[]);
+        let ctx = build_device_context(&[], &groups, &[], &HashMap::new(), &HashMap::new(), &[]);
         assert!(!ctx.contains("Known devices"));
         assert!(ctx.contains("Known groups"));
     }
@@ -2546,7 +2728,14 @@ mod tests {
     fn build_device_context_injects_device_list_into_target_description() {
         let devices = vec!["test_bulb".to_string()];
         let groups = vec!["all".to_string()];
-        let ctx = build_device_context(&devices, &groups, &[], &HashMap::new(), &[]);
+        let ctx = build_device_context(
+            &devices,
+            &groups,
+            &[],
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+        );
         assert!(ctx.contains("test_bulb"));
         assert!(ctx.contains("all"));
     }
@@ -2617,7 +2806,14 @@ mod tests {
                 online: false,
             },
         ];
-        let ctx = build_device_context(&devices, &[], &states, &HashMap::new(), &[]);
+        let ctx = build_device_context(
+            &devices,
+            &[],
+            &states,
+            &HashMap::new(),
+            &HashMap::new(),
+            &[],
+        );
         assert!(ctx.contains("kitchen_light"), "device name must appear");
         assert!(
             ctx.contains("online"),

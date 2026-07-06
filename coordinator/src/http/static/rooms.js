@@ -452,7 +452,7 @@ function render() {
     banner.textContent = '⚠ Zigbee bridge offline — lights unavailable';
     container.appendChild(banner);
   }
-  if (model.rooms.length > 0) container.appendChild(renderGlobalControls());
+  if (model.rooms.length > 0) container.appendChild(renderHouseSummary());
   container.appendChild(renderNewRoomBtn());
   container.appendChild(renderEffectsPalette());
   container.appendChild(renderUnassigned(unassigned));
@@ -460,9 +460,20 @@ function render() {
   const roomList = document.createElement('div');
   roomList.className = 'room-list rooms-layout-root' + (zigbeeOnline ? '' : ' zigbee-offline');
 
+  // Whole-house average temperature — computed once here rather than per
+  // card, so every room's "notable" badge compares against the same
+  // baseline. Sensor-only concept; a house with no temp sensors yet just
+  // gets `null`, which suppresses the notable-temp badge everywhere.
+  const allTemps = [...devicesMap.values()]
+    .filter(d => d.device_type === 'sensor' && d.temperature != null)
+    .map(d => d.temperature);
+  const houseAvgTemp = allTemps.length > 0
+    ? allTemps.reduce((s, t) => s + t, 0) / allTemps.length
+    : null;
+
   const sorted = [...model.rooms].sort((a, b) => a.position - b.position);
   for (const room of sorted) {
-    roomList.appendChild(renderRoomCard(room));
+    roomList.appendChild(renderRoomCard(room, houseAvgTemp));
   }
 
   container.appendChild(roomList);
@@ -520,6 +531,49 @@ function renderGlobalControls() {
   bar.appendChild(allOnBtn);
   bar.appendChild(allOffBtn);
   return bar;
+}
+
+// One line answering "is everything fine?" without reading any individual
+// tile, plus the existing All On/Off actions (renderGlobalControls) right
+// below it — entirely derived from devicesMap/model.rooms already held
+// client-side, no backend support needed.
+function renderHouseSummary() {
+  const wrap = document.createElement('div');
+  wrap.className = 'room-house-summary-wrap';
+
+  const lights = [...devicesMap.values()].filter(d => d.device_type === 'light');
+  const lightsOn = lights.filter(d => d.on).length;
+  const occupiedRooms = new Set(
+    model.rooms
+      .filter(r => r.device_ids.some(id => devicesMap.get(id)?.occupancy === true))
+      .map(r => r.id)
+  ).size;
+  const allTemps = [...devicesMap.values()]
+    .filter(d => d.device_type === 'sensor' && d.temperature != null)
+    .map(d => d.temperature);
+  const avgTemp = allTemps.length > 0
+    ? allTemps.reduce((s, t) => s + t, 0) / allTemps.length
+    : null;
+  const needsAttention =
+    lights.filter(d => d.online === false).length +
+    [...devicesMap.values()].filter(d => d.device_type === 'sensor' && d.battery != null && d.battery < 20).length;
+
+  const parts = [`💡 ${lightsOn}/${lights.length} lights on`];
+  if (occupiedRooms > 0) parts.push(`${occupiedRooms} room${occupiedRooms !== 1 ? 's' : ''} occupied`);
+  if (avgTemp != null) parts.push(`${avgTemp.toFixed(1)}°C avg`);
+
+  const line = document.createElement('div');
+  line.className = 'room-house-summary';
+  line.textContent = parts.join(' · ');
+  if (needsAttention > 0) {
+    const warn = document.createElement('span');
+    warn.className = 'room-house-summary-warn';
+    warn.textContent = ` · ⚠ ${needsAttention} device${needsAttention !== 1 ? 's' : ''} need attention`;
+    line.appendChild(warn);
+  }
+  wrap.appendChild(line);
+  wrap.appendChild(renderGlobalControls());
+  return wrap;
 }
 
 // ── Effects palette ──────────────────────────────────────────────────────────
@@ -707,7 +761,7 @@ function renderUnassigned(deviceIds) {
 
 // ── Room card ────────────────────────────────────────────────────────────────
 
-function renderRoomCard(room) {
+function renderRoomCard(room, houseAvgTemp) {
   const card = document.createElement('div');
   card.className = 'room-card';
   card.dataset.roomId = room.id;
@@ -784,19 +838,37 @@ function renderRoomCard(room) {
   const hasColour = roomDevicesAll.some(d => d.color_xy != null);
   const activeEffect = roomEffectsMap.get(room.id) || null;
   const empty = roomDevicesAll.length === 0;
+  // Computed early (not just for the pinned-sensor strip further down) so the
+  // tile's notable-icon row can read it too.
+  const roomReadOnlyAll = room.device_ids
+    .map(id => devicesMap.get(id))
+    .filter(d => d && READ_ONLY_DEVICE_TYPES.has(d.device_type));
+
+  // Everything built below that isn't tile-face content (on/off/brightness/
+  // colour cluster, effect editor, quick scenes) gets queued here and
+  // appended into the collapsible body once it exists, rather than straight
+  // onto the always-visible header — see the tile/panel split below.
+  const bodyPrepend = [];
 
   // Header: two rows — name row on top, controls row below
   const header = document.createElement('div');
   header.className = 'room-card-header';
 
-  // Row 1: collapse chevron + room name
+  // Row 1: collapse chevron + room name + tile-face content (power toggle,
+  // colour-wash, notable-only icon row). This row (and the colour wash
+  // applied to `card` below) is the only thing visible when collapsed —
+  // "collapsed" is the new default (a fresh room, no stored preference,
+  // starts as a tile) so the Home tab reads as status-at-a-glance rather
+  // than every room's full control set shown all the time. An explicit
+  // prior preference (from before this redesign, or a deliberate choice) is
+  // still honoured either way — only the *default* changed.
   const nameRow = document.createElement('div');
   nameRow.className = 'room-header-name-row';
 
   const collapseBtn = document.createElement('button');
   collapseBtn.className = 'room-collapse-btn';
   collapseBtn.title = 'Collapse / expand';
-  const isCollapsed = localStorage.getItem(`mesh-room-collapsed-${room.id}`) === '1';
+  const isCollapsed = localStorage.getItem(`mesh-room-collapsed-${room.id}`) !== '0';
   collapseBtn.textContent = isCollapsed ? '▸' : '▾';
   nameRow.appendChild(collapseBtn);
 
@@ -813,9 +885,100 @@ function renderRoomCard(room) {
   pencilBtn.addEventListener('click', e => { e.stopPropagation(); startRename(nameEl, room); });
   nameWrap.appendChild(pencilBtn);
   nameRow.appendChild(nameWrap);
+
+  // Power icon — quick toggle without expanding. Tapping the rest of the
+  // tile expands instead (decided with Jon: avoids Apple Home's widely-
+  // complained-about accidental toggle while scrolling).
+  const powerBtn = document.createElement('button');
+  powerBtn.className = 'room-power-btn' + (anyOn ? ' room-power-on' : '');
+  powerBtn.title = empty ? 'No lights in this room' : (anyOn ? 'Turn off' : 'Turn on');
+  powerBtn.textContent = '⏻';
+  powerBtn.disabled = empty;
+  if (!empty) {
+    powerBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const turningOn = !anyOn;
+      clearDotForRoom(room);
+      if (activeEffect) await clearEffect(room.id);
+      if (turningOn) {
+        for (const c of HUE_DEFAULT_ON) await sendRoomCommand(room.id, c, room);
+      } else {
+        sendRoomCommand(room.id, { action: 'off' }, room);
+      }
+    });
+  }
+  nameRow.appendChild(powerBtn);
   header.appendChild(nameRow);
 
-  // Row 2: quick controls + layout button + actions
+  // Notable-only icon row — nothing shown when nothing's noteworthy, not a
+  // permanent status bar every room always carries.
+  const anyMotion = roomReadOnlyAll.some(d => d.occupancy === true);
+  const anyLowBattery = roomReadOnlyAll.some(d => d.battery != null && d.battery < 20);
+  const tempReading = roomReadOnlyAll.find(d => d.temperature != null)?.temperature;
+  const tempIsNotable = tempReading != null && houseAvgTemp != null
+    && Math.abs(tempReading - houseAvgTemp) >= 2;
+  if (anyMotion || anyLowBattery || tempIsNotable) {
+    const notableRow = document.createElement('div');
+    notableRow.className = 'room-notable-row';
+    if (tempIsNotable) {
+      const badge = document.createElement('span');
+      badge.className = 'room-notable-badge';
+      badge.textContent = `${tempReading.toFixed(1)}°C`;
+      notableRow.appendChild(badge);
+    }
+    if (anyMotion) {
+      const badge = document.createElement('span');
+      badge.className = 'room-notable-badge';
+      badge.textContent = '● motion';
+      notableRow.appendChild(badge);
+    }
+    if (anyLowBattery) {
+      const badge = document.createElement('span');
+      badge.className = 'room-notable-badge room-notable-warn';
+      badge.textContent = '🔋 low';
+      notableRow.appendChild(badge);
+    }
+    header.appendChild(notableRow);
+  }
+
+  // Colour wash — the tile's aggregate-state-at-a-glance treatment. Reuses
+  // the existing colour pipelines rather than inventing a new one: xyToRgb
+  // (colormath.js, already used for scene-chip preview colours) for
+  // colour-capable lights, layout.ctToHex (already used everywhere else in
+  // this codebase for colour-temp display — the temp bar gradient, mode
+  // dots) for colour-temp-only ones. Lights-only concept, same as the rest
+  // of this header's state — a sensor-only room (or an empty one) just
+  // gets no wash, not a "dark" one, since there's no light state to
+  // represent.
+  if (anyOn) {
+    const litDevices = roomDevicesAll.filter(d => d.on);
+    const xySnaps = litDevices.map(d => d.color_xy).filter(Boolean);
+    let washColor = null;
+    if (xySnaps.length > 0) {
+      const n = xySnaps.length;
+      const avgX = xySnaps.reduce((s, [x]) => s + x, 0) / n;
+      const avgY = xySnaps.reduce((s, [, y]) => s + y, 0) / n;
+      const { r, g, b } = xyToRgb(avgX, avgY, 200);
+      washColor = `rgb(${r},${g},${b})`;
+    } else {
+      const ctSnaps = litDevices.map(d => d.color_temp).filter(Boolean);
+      if (ctSnaps.length > 0) {
+        const avgCt = ctSnaps.reduce((s, c) => s + c, 0) / ctSnaps.length;
+        washColor = layout.ctToHex(avgCt);
+      }
+    }
+    if (washColor) {
+      card.style.background = `linear-gradient(135deg, ` +
+        `color-mix(in srgb, ${washColor} 16%, transparent), ` +
+        `color-mix(in srgb, ${washColor} 4%, transparent))`;
+      card.classList.add('room-card-lit');
+    }
+  }
+
+  // Row 2: quick controls + layout button + actions — moved into the
+  // collapsible body (queued via bodyPrepend) rather than the always-
+  // visible header, so a collapsed tile only shows the name/power/notable
+  // row above, not the full control cluster.
   const ctrlRow = document.createElement('div');
   ctrlRow.className = 'room-header-controls-row';
 
@@ -1010,12 +1173,12 @@ function renderRoomCard(room) {
     topRow.style.display = 'none';
   }
 
-  header.appendChild(ctrlRow);
   card.appendChild(header);
+  bodyPrepend.push(ctrlRow);
 
   // Effect param editor popover — visible when the badge for this room is clicked
   if (activeEffect && effectEditor.openRoomId === room.id) {
-    card.appendChild(buildEffectEditor(room, activeEffect));
+    bodyPrepend.push(buildEffectEditor(room, activeEffect));
   }
 
   // Quick scenes bar — always visible, horizontal scroll (primary casual control)
@@ -1058,16 +1221,15 @@ function renderRoomCard(room) {
     }
     wireSceneBarDrag(sceneBar, room.id);
     sceneWrap.appendChild(sceneBar);
-    card.appendChild(sceneWrap);
+    bodyPrepend.push(sceneWrap);
   }
 
   // Pinned sensors — rendered outside the collapsible body so a pinned
-  // sensor stays visible even when the room card is collapsed. Sensor-only
-  // (not offered for lights, per explicit product call — see
-  // devicewidgets.js isSensorPinned).
-  const roomReadOnlyAll = room.device_ids
-    .map(id => devicesMap.get(id))
-    .filter(d => d && READ_ONLY_DEVICE_TYPES.has(d.device_type));
+  // sensor stays visible even when the room card is collapsed (now: even
+  // when it's just a tile). Sensor-only (not offered for lights, per
+  // explicit product call — see devicewidgets.js isSensorPinned).
+  // roomReadOnlyAll itself was computed earlier, before the tile's
+  // notable-icon row, which needs the same data.
   const pinnedSensors = roomReadOnlyAll.filter(d => d.device_type === 'sensor' && isSensorPinned(d.device_id));
   if (pinnedSensors.length > 0) {
     const pinnedEl = document.createElement('div');
@@ -1078,15 +1240,25 @@ function renderRoomCard(room) {
     card.appendChild(pinnedEl);
   }
 
-  // Collapsible body
+  // Collapsible body — everything queued in bodyPrepend (the on/off/
+  // brightness/colour cluster, effect editor, quick scenes) renders first,
+  // then the device list/sensors/scenes-section/delete-row as before.
   const body = document.createElement('div');
   body.className = 'room-body' + (isCollapsed ? ' collapsed' : '');
+  for (const el of bodyPrepend) body.appendChild(el);
   collapseBtn.addEventListener('click', e => {
     e.stopPropagation();
     const nowCollapsed = !body.classList.contains('collapsed');
     body.classList.toggle('collapsed', nowCollapsed);
     collapseBtn.textContent = nowCollapsed ? '▸' : '▾';
     setPref(`mesh-room-collapsed-${room.id}`, nowCollapsed ? '1' : '0');
+  });
+  // Tapping anywhere on the tile face (outside a button/input/control)
+  // expands/collapses too — the power icon and other controls already
+  // stopPropagation() so they don't trigger this.
+  header.addEventListener('click', e => {
+    if (e.target.closest('button, input')) return;
+    collapseBtn.click();
   });
 
   // Device cards

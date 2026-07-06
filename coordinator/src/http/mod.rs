@@ -132,6 +132,26 @@ pub fn router(
             patch(api::rooms::set_room_dimensions),
         )
         .route("/api/rooms/{id}/command", post(api::rooms::room_command))
+        .route(
+            "/api/rooms/{id}/groups",
+            post(api::rooms::create_room_group),
+        )
+        .route(
+            "/api/rooms/{id}/groups/{gid}/name",
+            patch(api::rooms::rename_room_group),
+        )
+        .route(
+            "/api/rooms/{id}/groups/{gid}",
+            delete(api::rooms::delete_room_group),
+        )
+        .route(
+            "/api/rooms/{id}/groups/{gid}/command",
+            post(api::rooms::group_command),
+        )
+        .route(
+            "/api/rooms/{id}/devices/{did}/group",
+            patch(api::rooms::set_device_group),
+        )
         // PUBLIC — no Authed: the dashboard's solar calculator fetches this
         // before any token is entered; it exposes only lat/lon. Every other
         // /api/* handler must take `_: Authed` (see http/auth.rs).
