@@ -103,12 +103,6 @@ let solarConfigLoaded = false;
 let sunCalibMode = false;
 let lightModel = 'parallel-beam';  // persists across room switches
 
-// Wall-photo backdrop (Phase 4 tracing aid) — which wall's photo is shown
-// and how visible it is. Session/UI-only, not persisted per room; resets to
-// the same default on every room switch, same as the other UI-state lets above.
-let activeWallEdge = 'N';
-let wallPhotoOpacity = 0.45;
-
 const LIGHT_MODELS = [
   { id: 'parallel-beam',   label: 'Parallel beam' },
   { id: 'beam-footprint',  label: 'Beam + footprint' },
@@ -143,12 +137,10 @@ export async function openLayout(room) {
   layoutState.room = room;
   layoutState.bulbs = {};
   layoutState.openings = {};
-  layoutState.wallPhotos = {};
   undoStack = [];
   redoStack = [];
   scrubberLive = true;
   sunCalibMode = false;
-  activeWallEdge = 'N';
   compassDeg = room.orientation_degrees ?? 0;
 
   const container = document.getElementById('home-list');
@@ -172,7 +164,6 @@ export async function openLayout(room) {
 
   loadPlacedBulbs(room.id);
   loadPlacedOpenings(room.id).then(syncCeilingControl);
-  loadWallPhotos(room.id);
   renderCrosshair(room);
   renderWallDims(room);
   initThree(room, lastSolar).catch(() => {});
@@ -1340,8 +1331,6 @@ function buildSidebar(room) {
   ceilingSelect.addEventListener('change', () => setCeilingGlazing(ceilingSelect.value));
   ceiling.body.appendChild(ceilingSelect);
 
-  sidebar.appendChild(buildWallPhotoSection());
-
   const dims = makeCollapsibleSection('Room size (m)', 'mesh-layout-sb-dims', true);
   sidebar.appendChild(dims.wrap);
 
@@ -1673,21 +1662,6 @@ function buildCanvas() {
   floor.setAttribute('fill', 'var(--layout-floor, #1a1a2e)');
   floor.setAttribute('rx', '8');
   svg.appendChild(floor);
-
-  // Wall-photo backdrop (Phase 4 tracing aid) — a manual reference photo
-  // shown semi-transparent behind the walls/openings/bulbs layers, purely so
-  // proportions can be eyeballed while dragging the existing markers into
-  // place. Sits right above the floor, below everything interactive.
-  // pointer-events:none since it's decorative only — canvas clicks must
-  // always reach the floor/openings/bulbs beneath, never this image.
-  const backdrop = document.createElementNS('http://www.w3.org/2000/svg', 'image');
-  backdrop.id = 'lc-wall-backdrop';
-  backdrop.setAttribute('x', '0'); backdrop.setAttribute('y', '0');
-  backdrop.setAttribute('width', '1000'); backdrop.setAttribute('height', '1000');
-  backdrop.setAttribute('preserveAspectRatio', 'xMidYMid slice');
-  backdrop.setAttribute('opacity', '0');
-  backdrop.style.pointerEvents = 'none';
-  svg.appendChild(backdrop);
 
   // Layer order: wall-glow behind everything, compass on top.
   // `lc-crosshair-hit` sits above bulbs so the crosshair grab handle remains
@@ -3424,219 +3398,6 @@ async function setCeilingGlazing(kind) {
     await postCreateOpening(roomId, 'skylight', CEILING_WALL_EDGE, 0.5, widthNorm, 1.0);
   }
   syncCeilingControl();
-}
-
-// ── Wall photo backdrop (Phase 4 tracing aid) ─────────────────────────────────
-// Not room scanning — a manual-tracing aid for this editor's existing
-// dimensions/orientation/opening-placement flow. One photo per wall (N/S/E/W;
-// the ceiling has no wall to photograph), shown as a semi-transparent
-// backdrop behind the canvas so proportions can be eyeballed while dragging
-// the existing markers into place. See plans/home-ui-redesign.md Phase 4.
-const WALL_EDGES = ['N', 'S', 'E', 'W'];
-// 1600px/q0.82 is plenty for eyeballing proportions on a phone screen and
-// keeps a typical modern-phone photo's data URI in the low hundreds of KB
-// (comfortably under MAX_WALL_PHOTO_DATA_URI_LEN server-side) — this is a
-// tracing aid, not a photo gallery, so more resolution buys nothing.
-const WALL_PHOTO_MAX_DIM = 1600;     // px, longest edge after downscale
-const WALL_PHOTO_JPEG_QUALITY = 0.82;
-
-function buildWallPhotoSection() {
-  const section = makeCollapsibleSection('Wall photo', 'mesh-layout-sb-wallphoto', true);
-  section.wrap.id = 'layout-wallphoto-section';
-
-  const tabs = document.createElement('div');
-  tabs.className = 'layout-wallphoto-tabs';
-  for (const edge of WALL_EDGES) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'layout-wallphoto-tab';
-    btn.dataset.wallEdge = edge;
-    btn.textContent = edge;
-    btn.addEventListener('click', () => {
-      activeWallEdge = edge;
-      refreshWallPhotoSidebar();
-      updateWallPhotoBackdrop();
-    });
-    tabs.appendChild(btn);
-  }
-  section.body.appendChild(tabs);
-
-  const thumbWrap = document.createElement('div');
-  thumbWrap.className = 'layout-wallphoto-thumb-wrap';
-  const thumb = document.createElement('img');
-  thumb.className = 'layout-wallphoto-thumb';
-  thumb.id = 'layout-wallphoto-thumb';
-  thumbWrap.appendChild(thumb);
-  section.body.appendChild(thumbWrap);
-
-  const btnRow = document.createElement('div');
-  btnRow.className = 'layout-wallphoto-btn-row';
-
-  const fileInput = document.createElement('input');
-  fileInput.type = 'file';
-  fileInput.accept = 'image/*';
-  fileInput.style.display = 'none';
-  fileInput.addEventListener('change', async () => {
-    const file = fileInput.files?.[0];
-    fileInput.value = '';
-    if (!file) return;
-    const roomId = layoutState.room?.id;
-    if (!roomId) return;
-    let dataUri;
-    try {
-      dataUri = await downscaleImageFile(file);
-    } catch (err) {
-      console.warn('layout: failed to process wall photo', err);
-      return;
-    }
-    layoutState.wallPhotos[activeWallEdge] = dataUri;
-    refreshWallPhotoSidebar();
-    updateWallPhotoBackdrop();
-    await putWallPhoto(roomId, activeWallEdge, dataUri);
-  });
-  section.body.appendChild(fileInput);
-
-  const addBtn = document.createElement('button');
-  addBtn.type = 'button';
-  addBtn.className = 'layout-wallphoto-btn';
-  addBtn.id = 'layout-wallphoto-add-btn';
-  addBtn.addEventListener('click', () => fileInput.click());
-  btnRow.appendChild(addBtn);
-
-  const removeBtn = document.createElement('button');
-  removeBtn.type = 'button';
-  removeBtn.className = 'layout-wallphoto-btn layout-wallphoto-remove-btn';
-  removeBtn.id = 'layout-wallphoto-remove-btn';
-  removeBtn.textContent = '✕ Remove';
-  removeBtn.addEventListener('click', async () => {
-    const roomId = layoutState.room?.id;
-    if (!roomId) return;
-    delete layoutState.wallPhotos[activeWallEdge];
-    refreshWallPhotoSidebar();
-    updateWallPhotoBackdrop();
-    await deleteWallPhotoApi(roomId, activeWallEdge);
-  });
-  btnRow.appendChild(removeBtn);
-  section.body.appendChild(btnRow);
-
-  const opacityRow = document.createElement('label');
-  opacityRow.className = 'layout-wallphoto-opacity-row';
-  opacityRow.textContent = 'Opacity ';
-  const opacitySlider = document.createElement('input');
-  opacitySlider.type = 'range';
-  opacitySlider.min = '0';
-  opacitySlider.max = '100';
-  opacitySlider.value = String(Math.round(wallPhotoOpacity * 100));
-  opacitySlider.id = 'layout-wallphoto-opacity';
-  opacitySlider.addEventListener('input', () => {
-    wallPhotoOpacity = Number(opacitySlider.value) / 100;
-    updateWallPhotoBackdrop();
-  });
-  opacityRow.appendChild(opacitySlider);
-  section.body.appendChild(opacityRow);
-
-  refreshWallPhotoSidebar(section.wrap);
-  return section.wrap;
-}
-
-// Reflects layoutState.wallPhotos/activeWallEdge into the tab highlight,
-// thumbnail, and add/remove button visibility. `root` defaults to the whole
-// document so callers elsewhere in the module don't need the section element.
-function refreshWallPhotoSidebar(root) {
-  root = root ?? document.getElementById('layout-wallphoto-section');
-  if (!root) return;
-  const uri = layoutState.wallPhotos[activeWallEdge];
-  root.querySelectorAll('.layout-wallphoto-tab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.wallEdge === activeWallEdge);
-    btn.classList.toggle('has-photo', !!layoutState.wallPhotos[btn.dataset.wallEdge]);
-  });
-  const thumb = root.querySelector('#layout-wallphoto-thumb');
-  if (thumb) {
-    thumb.src = uri ?? '';
-    thumb.style.display = uri ? '' : 'none';
-  }
-  const addBtn = root.querySelector('#layout-wallphoto-add-btn');
-  if (addBtn) addBtn.textContent = uri ? `📷 Replace ${activeWallEdge} photo` : `📷 Add ${activeWallEdge} photo`;
-  const removeBtn = root.querySelector('#layout-wallphoto-remove-btn');
-  if (removeBtn) removeBtn.style.display = uri ? '' : 'none';
-}
-
-// Shows the active wall's photo behind the canvas at the configured opacity,
-// or hides the backdrop entirely when that wall has none.
-function updateWallPhotoBackdrop() {
-  const img = document.getElementById('lc-wall-backdrop');
-  if (!img) return;
-  const uri = layoutState.wallPhotos[activeWallEdge];
-  if (uri) {
-    img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', uri);
-    img.setAttribute('href', uri);
-    img.setAttribute('opacity', String(wallPhotoOpacity));
-  } else {
-    img.setAttribute('opacity', '0');
-  }
-}
-
-// Downscales+re-encodes an uploaded photo client-side before it's ever sent
-// to the coordinator — this is a proportions-eyeballing aid, not a gallery,
-// so a modest resolution is plenty, and it keeps the stored data URI (and
-// the request body) small regardless of what the phone's camera produced.
-function downscaleImageFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error);
-    reader.onload = () => {
-      const img = new Image();
-      img.onerror = () => reject(new Error('could not decode image'));
-      img.onload = () => {
-        const scale = Math.min(1, WALL_PHOTO_MAX_DIM / Math.max(img.width, img.height));
-        const w = Math.max(1, Math.round(img.width * scale));
-        const h = Math.max(1, Math.round(img.height * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', WALL_PHOTO_JPEG_QUALITY));
-      };
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-// ── Wall photo — server I/O ───────────────────────────────────────────────────
-
-async function loadWallPhotos(roomId) {
-  try {
-    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/wall-photos?token=${encodeURIComponent(tok())}`);
-    if (!res.ok) return;
-    layoutState.wallPhotos = await res.json();
-  } catch (err) {
-    console.warn('layout: failed to load wall photos', err);
-  }
-  refreshWallPhotoSidebar();
-  updateWallPhotoBackdrop();
-}
-
-async function putWallPhoto(roomId, wallEdge, dataUri) {
-  try {
-    const res = await fetch(
-      `/api/rooms/${encodeURIComponent(roomId)}/wall-photos/${encodeURIComponent(wallEdge)}?token=${encodeURIComponent(tok())}`,
-      { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data_uri: dataUri }) }
-    );
-    if (!res.ok) console.warn('layout: wall photo upload failed', res.status);
-  } catch (err) {
-    console.warn('layout: wall photo upload error', err);
-  }
-}
-
-async function deleteWallPhotoApi(roomId, wallEdge) {
-  try {
-    await fetch(
-      `/api/rooms/${encodeURIComponent(roomId)}/wall-photos/${encodeURIComponent(wallEdge)}?token=${encodeURIComponent(tok())}`,
-      { method: 'DELETE' }
-    );
-  } catch (err) {
-    console.warn('layout: wall photo delete error', err);
-  }
 }
 
 // ── Openings — server I/O ─────────────────────────────────────────────────────

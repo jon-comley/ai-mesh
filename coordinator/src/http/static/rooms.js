@@ -41,6 +41,15 @@ import {
   reconcileSceneDivergence,
 } from '/static/scenes.js';
 
+// The ⏻ power-symbol codepoint (U+23FB) has no glyph in some Android system
+// fonts (confirmed missing/tofu on a Samsung S22) — an inline SVG renders
+// identically everywhere regardless of font/emoji coverage. stroke="currentColor"
+// so it still tracks .room-power-btn's existing off/on text colour (muted grey /
+// amber) without any separate icon-colour CSS.
+const POWER_ICON_SVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" ' +
+  'stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M12 3v8"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg>';
+
 // Shared state model + collections live in state.js (imported above). The vars
 // below are drag gestures that only rooms.js touches. The effects and scenes
 // domains live in effects.js / scenes.js; their cross-module UI state shares via
@@ -831,7 +840,7 @@ function buildGroupCluster(room, group) {
 
   const powerBtn = document.createElement('button');
   powerBtn.className = 'room-power-btn' + (anyOn ? ' room-power-on' : '');
-  powerBtn.textContent = '⏻';
+  powerBtn.innerHTML = POWER_ICON_SVG;
   powerBtn.title = anyOn ? 'Turn group off' : 'Turn group on';
   powerBtn.disabled = empty;
   if (!empty) {
@@ -1114,7 +1123,7 @@ function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
   const powerBtn = document.createElement('button');
   powerBtn.className = 'room-power-btn' + (anyOn ? ' room-power-on' : '');
   powerBtn.title = empty ? 'No lights in this room' : (anyOn ? 'Turn off' : 'Turn on');
-  powerBtn.textContent = '⏻';
+  powerBtn.innerHTML = POWER_ICON_SVG;
   powerBtn.disabled = empty;
   if (!empty) {
     powerBtn.addEventListener('click', async e => {

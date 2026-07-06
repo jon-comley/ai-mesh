@@ -13,7 +13,6 @@ use tracing::warn;
 mod effects;
 mod openings;
 mod scenes;
-mod wall_photos;
 
 fn degrees_to_cardinal(deg: f32) -> &'static str {
     let d = ((deg % 360.0) + 360.0) % 360.0;
@@ -304,18 +303,12 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             height_norm   REAL NOT NULL DEFAULT 0.3,
             height_span   REAL NOT NULL DEFAULT 0.5
         );
-        -- Phase 4: a manual-tracing aid, not room scanning — one photo per
-        -- wall (N/S/E/W only, never the ceiling sentinel 'C'), shown as a
-        -- semi-transparent backdrop behind the 2D layout canvas so a user
-        -- can eyeball window/door proportions while dragging the existing
-        -- opening markers into place. `data_uri` is the full data: URI
-        -- (client downscales before upload; see layout.js).
-        CREATE TABLE IF NOT EXISTS room_wall_photos (
-            room_id   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-            wall_edge TEXT NOT NULL,
-            data_uri  TEXT NOT NULL,
-            PRIMARY KEY (room_id, wall_edge)
-        );
+        -- room_wall_photos (Phase 4's photo-backdrop aid) was tried and
+        -- dropped — real phone photos of a wall inevitably include floor/
+        -- ceiling/perspective distortion, which looked wrong stretched onto
+        -- a flat plane in both the 2D and 3D views. Dropped rather than kept
+        -- around unused; see the DROP TABLE below for existing databases.
+        DROP TABLE IF EXISTS room_wall_photos;
         CREATE TABLE IF NOT EXISTS device_names (
             device_id   TEXT PRIMARY KEY,
             custom_name TEXT NOT NULL

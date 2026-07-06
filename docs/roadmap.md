@@ -924,6 +924,53 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > originally rated the highest-effort/risk phase turned out low-effort
 > once the false premise was caught early. 623 tests (unchanged —
 > frontend-only).
+>
+> **Live-testing feedback batch (2026-07-06)** — power icon: the ⏻
+> Unicode codepoint (U+23FB) has no glyph in the Samsung S22's system
+> font (confirmed live — rendered as a blank/tofu box), replaced with an
+> inline SVG in both places it's used (tile-face + group-cluster power
+> buttons); SVG renders identically regardless of font/emoji coverage,
+> using `stroke="currentColor"` so it still tracks the existing muted/
+> amber on-off colouring with no extra CSS. Also: ceiling dropdown "None"
+> → "Plastered" (a normal ceiling isn't "no ceiling"), removed the room
+> panel's redundant On/Off buttons (the tile power button already does
+> the same thing), toned down the whole-house summary's "needs attention"
+> warning from bold red to plain amber, room-layout button now
+> floorplan-view-only, Devices tab sensor subcategories are independently
+> collapsible, and every device row gets the same "✎ Edit" link under its
+> name. Plus a Hugging Face model search (repo search → file listing,
+> coordinator-proxied) for the Models panel's existing `hf:org/repo:file`
+> custom-load flow, with guards against the search UI being wiped
+> mid-interaction, stale/superseded fetch responses, and state getting
+> stuck after the tab is backgrounded. 628 tests.
+>
+> **Wall-photo backdrop tried and removed (2026-07-06)** — Phase 4's
+> photo-backdrop aid didn't hold up in live use: a real phone photo of a
+> wall inevitably includes floor/ceiling/perspective distortion, which
+> looked wrong stretched onto a flat plane in both the 2D and (after an
+> attempted fix) 3D views. Removed entirely — `room_wall_photos` table,
+> its 3 REST endpoints, and all the layout.js/layout3d.js/style.css UI for
+> it. 614 tests (-14, the removed feature's own tests).
+>
+> **Room-scanning research → deferred (2026-07-06)** — the actual original
+> ask ("a proper scan of the room, like Apple do when they scan your
+> face") needed real research before any code: full findings, what was
+> tried and rejected, and the planned integration shape are all in
+> `plans/roomplan-ios-scan.md`. Short version: no automatic/AR-assisted
+> scanning path exists for the Samsung S22 (Android, no LiDAR) that beats
+> manual measurement — confirmed even Magicplan, a leading commercial
+> room-scanning app, falls back to plain tap-corners-on-a-grid for
+> non-LiDAR Android devices. The iPad Pro (M5) does have a LiDAR Scanner
+> (confirmed from Apple's own spec page) and could run Apple's real
+> RoomPlan API — but only as a native iPadOS/Swift app, which is a hard
+> platform requirement (Xcode/macOS-only, no route from this project's
+> Linux dev environment) rather than something buildable/verifiable the
+> way everything else in this project has been so far. **Deferred until
+> Jon's new Mac Studio is unboxed and set up** — plan doc has the intended
+> shape (RoomPlan capture → post wall dimensions/openings straight into
+> the existing `rooms`/`openings` REST API, syncing to every device via
+> the shared coordinator database same as everything else) ready to pick
+> up at that point.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
