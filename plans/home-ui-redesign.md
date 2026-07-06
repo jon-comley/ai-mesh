@@ -32,19 +32,19 @@
   or a group id, safe to mix since both come from the same UUID
   generator) so a room-wide scene and any of its groups' own scenes can be
   independently active/paused at once, without a second set of Maps.
-- **Phase 4 — shipped.** Wall-photo backdrop in the layout editor: one photo
-  per wall (N/S/E/W), client-downscaled (capped at 1600px, JPEG q=0.82)
-  before upload so the stored data URI and request body stay small without
-  a native app or any CV/ML. `room_wall_photos(room_id, wall_edge, data_uri)`
-  cascades on room delete; fetched lazily via `GET /api/rooms/{id}/wall-photos`
-  when the layout editor opens for a room rather than riding the WS
-  `RoomsUpdate` snapshot — a photo can be a few hundred KB and has no
-  business on every unrelated room-membership broadcast. New sidebar
-  section (N/S/E/W tabs, thumbnail, opacity slider) and an SVG `<image>`
-  backdrop layer sitting just above the floor rect, below every interactive
-  layer, `pointer-events: none` so it never intercepts clicks. Global axum
-  body limit raised (2MB → 8MB+4096) to fit an upload; every other route's
-  bodies stay tiny JSON so this only widens headroom.
+- **Phase 4 — shipped, then removed (2026-07-06).** Wall-photo backdrop in
+  the layout editor: one photo per wall (N/S/E/W), client-downscaled before
+  upload, shown first as a 2D canvas backdrop, then (after that was pointed
+  out as geometrically wrong — a wall photo is a front-on/elevation shot, the
+  2D view is a straight-down plan, no rotation reconciles those two
+  projections) as a texture on the matching wall in the 3D view instead.
+  Removed entirely after live testing: a real phone photo of a wall in a
+  normal-sized room inevitably includes floor/ceiling/perspective distortion,
+  and stretching it onto a flat plane made that worse, not better. All of
+  `room_wall_photos`, its REST endpoints, and the layout.js/layout3d.js/
+  style.css UI for it were deleted. Superseded by a native iPad LiDAR
+  RoomPlan scan, deferred until the Mac Studio needed to build it is set up
+  — see `plans/roomplan-ios-scan.md`.
 - **Phase 3 — shipped, rescoped.** Before implementing, found the plan's
   premise was wrong: `RoomRecord.origin_x`/`origin_y` are a *within-room*
   crosshair reference point (bulb-placement snapping, 3D centering), not a
@@ -316,7 +316,24 @@ picked. What actually shipped:
   once that data turned out not to exist, the schematic version reduced
   to a sizing/styling variant of code that already existed.
 
-## Phase 4 — Camera-assisted room setup (small, scoped)
+## Phase 4 — Camera-assisted room setup — REMOVED, see roomplan-ios-scan.md
+
+This phase shipped as originally scoped below (a photo-backdrop tracing
+aid, no CV/native app/ML), but didn't survive live testing: a real phone
+photo of a wall in a normal-sized room inevitably includes floor/ceiling/
+perspective distortion, which looked wrong stretched onto a flat plane —
+tried behind the 2D canvas first, then as a 3D wall texture once the 2D
+version was correctly identified as a geometric mismatch (elevation photo
+vs. top-down plan), neither held up. Removed entirely (2026-07-06).
+
+The actual underlying want — accurate room geometry without manually
+typing dimensions — is being pursued instead via the iPad Pro's LiDAR
+Scanner and Apple's RoomPlan API (native iPadOS app, deferred until a Mac
+is available to build it). Full research and the planned integration
+shape: **`plans/roomplan-ios-scan.md`**.
+
+<details>
+<summary>Original scope (for reference — no longer built)</summary>
 
 Not room scanning — a manual-tracing aid for the *existing* dimensions/
 orientation/opening-placement flow in `layout.js`, which already covers
@@ -333,6 +350,8 @@ compass orientation, opening positions — no furniture, no photorealism).
 - Improves the accuracy of the data feeding *both* Phase 3's floorplan
   shapes and the existing solar/sun-position engine's window-facing
   calculations — the actual value driver, not the photo itself.
+
+</details>
 
 ---
 

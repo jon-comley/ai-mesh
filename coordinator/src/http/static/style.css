@@ -1263,11 +1263,13 @@ body {
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--text-muted);
-  font-size: 14px;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
 }
+.room-power-btn svg { display: block; }
 .room-power-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 .room-power-btn.room-power-on {
   background: color-mix(in srgb, var(--amber) 25%, var(--surface-2));
@@ -3181,71 +3183,6 @@ body {
   outline: none;
   border-color: var(--accent);
 }
-
-/* Wall photo backdrop (Phase 4 tracing aid) */
-.layout-wallphoto-tabs {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 8px;
-}
-.layout-wallphoto-tab {
-  flex: 1;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 4px 0;
-}
-.layout-wallphoto-tab.active {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.layout-wallphoto-tab.has-photo {
-  box-shadow: inset 0 -2px 0 var(--accent);
-}
-.layout-wallphoto-thumb-wrap {
-  margin-bottom: 8px;
-}
-.layout-wallphoto-thumb {
-  display: none;
-  width: 100%;
-  max-height: 120px;
-  object-fit: cover;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-}
-.layout-wallphoto-btn-row {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-.layout-wallphoto-btn {
-  flex: 1;
-  background: var(--surface-2);
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-  color: var(--accent);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 6px 8px;
-}
-.layout-wallphoto-btn:hover { border-color: var(--accent); }
-.layout-wallphoto-remove-btn {
-  flex: 0 0 auto;
-  border-style: solid;
-  color: var(--text-muted);
-}
-.layout-wallphoto-remove-btn:hover { color: var(--red); border-color: var(--red); }
-.layout-wallphoto-opacity-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-.layout-wallphoto-opacity-row input[type="range"] { flex: 1; }
 
 /* Placed-bulbs position panel */
 .layout-placed-header {
