@@ -11,6 +11,7 @@ export const layoutState = {
   bulbs: {},           // device_id → { x, y, z, fixture_type, el, labelEl }
   openings: {},        // opening_id → { opening_type, wall_edge, x_norm, width_norm, transmission, el }
   devices: new Map(),  // reference to rooms.js devicesMap — set via layout.init()
+  wallPhotos: {},      // wall_edge ('N'|'S'|'E'|'W') → data URI, sparse — Phase 4 tracing aid
 };
 
 // Wall thickness in canvas units (1000 = room span). Shared by the 2D opening
