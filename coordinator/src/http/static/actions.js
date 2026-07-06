@@ -103,9 +103,11 @@ export async function patchDeviceName(deviceId, name) {
 }
 
 // ── Scenes ───────────────────────────────────────────────────────────────────
-export async function saveScene(name, roomId) {
+export async function saveScene(name, roomId, groupId) {
   try {
-    const body = roomId ? { name, room_id: roomId } : { name };
+    const body = { name };
+    if (roomId) body.room_id = roomId;
+    if (groupId) body.group_id = groupId;
     const res = await api('/scenes', { method: 'POST', body });
     if (!res.ok) showToast(`Save scene failed (${res.status})`, true);
   } catch (e) { showToast(`Save scene error: ${e.message}`, true); }

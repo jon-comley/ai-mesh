@@ -41,6 +41,7 @@ fn scenes_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<SceneInfo> {
                 states: s.states,
                 effect_id: s.effect_id,
                 effect_params,
+                group_id: s.group_id,
             }
         })
         .collect()
@@ -67,6 +68,11 @@ pub struct SaveSceneBody {
     name: String,
     #[serde(default)]
     room_id: Option<String>,
+    /// Scopes the scene to one of `room_id`'s groups instead of the whole
+    /// room. Always a flat per-device snapshot when set — no effect
+    /// capture, since effects stay room-wide only (see below).
+    #[serde(default)]
+    group_id: Option<String>,
 }
 
 pub async fn save_scene(
@@ -88,6 +94,47 @@ pub async fn save_scene(
         color_xy: s.color_xy,
         color_temp: s.color_temp,
     };
+
+    // A group-scoped save: resolve the group's own member devices and skip
+    // effect capture entirely — a group scene is always a flat per-device
+    // snapshot of just its members, regardless of any room-wide effect.
+    if let Some(ref gid) = body.group_id {
+        let group = registry.lock().unwrap().get_room_group(gid);
+        let Some(group) = group else {
+            return (StatusCode::BAD_REQUEST, "unknown group").into_response();
+        };
+        if let Some(ref rid) = body.room_id
+            && &group.room_id != rid
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                "group does not belong to this room",
+            )
+                .into_response();
+        }
+        let device_states: Vec<DeviceSnapshot> = all_states
+            .into_iter()
+            .filter(|s| group.device_ids.contains(&s.device_id))
+            .map(to_snapshot)
+            .collect();
+        let scene_id = {
+            let mut reg = registry.lock().unwrap();
+            reg.save_scene(
+                &name,
+                Some(&group.room_id),
+                device_states,
+                None,
+                Some(gid.as_str()),
+            )
+            .id
+        };
+        state.push_scenes_update(scenes_from_registry(&registry));
+        return (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "id": scene_id })),
+        )
+            .into_response();
+    }
 
     // A room with an active effect gets a different kind of scene: the effect
     // (id + params) is what's saved, and `states` narrows to just the devices
@@ -132,8 +179,14 @@ pub async fn save_scene(
 
     let scene_id = {
         let mut reg = registry.lock().unwrap();
-        reg.save_scene(&name, body.room_id.as_deref(), device_states, effect_arg)
-            .id
+        reg.save_scene(
+            &name,
+            body.room_id.as_deref(),
+            device_states,
+            effect_arg,
+            None,
+        )
+        .id
     };
     state.push_scenes_update(scenes_from_registry(&registry));
     (
@@ -414,6 +467,112 @@ mod tests {
         assert_eq!(scenes[0].states.len(), 1);
     }
 
+    // ── group-scoped scenes ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn save_scene_with_group_id_snapshots_only_group_members() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let group_id = {
+            let mut reg = registry.lock().unwrap();
+            reg.add_device_to_room(&room_id, "spot1");
+            reg.add_device_to_room(&room_id, "pendant1");
+            let g = reg.create_room_group(&room_id, "Counter").id;
+            reg.set_device_group("pendant1", Some(&g));
+            g
+        };
+        let state = make_state(vec![], empty_connections());
+        seed_light(&state, "spot1", "pi1");
+        seed_light(&state, "pendant1", "pi1");
+
+        let (status, body) = send_with_body(
+            scenes_router(state, Arc::clone(&registry)),
+            "POST",
+            "/api/scenes?token=",
+            &format!(r#"{{"name":"Bright","room_id":"{room_id}","group_id":"{group_id}"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(body.contains("\"id\""));
+
+        let scenes = registry.lock().unwrap().list_scenes();
+        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes[0].group_id.as_deref(), Some(group_id.as_str()));
+        assert_eq!(
+            scenes[0].states.len(),
+            1,
+            "only the group's own member should be snapshotted"
+        );
+        assert_eq!(scenes[0].states[0].device_id, "pendant1");
+    }
+
+    #[tokio::test]
+    async fn save_scene_with_group_id_ignores_active_room_effect() {
+        // Group scenes are always a flat snapshot — never carry an effect,
+        // even if the room happens to have one active at save time.
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let group_id = {
+            let mut reg = registry.lock().unwrap();
+            reg.add_device_to_room(&room_id, "pendant1");
+            let g = reg.create_room_group(&room_id, "Counter").id;
+            reg.set_device_group("pendant1", Some(&g));
+            reg.set_active_effect(&room_id, "aurora", r#"{"speed":1}"#, None, 0)
+                .unwrap();
+            g
+        };
+        let state = make_state(vec![], empty_connections());
+        seed_light(&state, "pendant1", "pi1");
+
+        send(
+            scenes_router(state, Arc::clone(&registry)),
+            "POST",
+            "/api/scenes?token=",
+            &format!(r#"{{"name":"Bright","room_id":"{room_id}","group_id":"{group_id}"}}"#),
+        )
+        .await;
+
+        let scenes = registry.lock().unwrap().list_scenes();
+        assert!(scenes[0].effect_id.is_none());
+        assert_eq!(scenes[0].states.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn save_scene_returns_400_for_unknown_group() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            scenes_router(state, registry),
+            "POST",
+            "/api/scenes?token=",
+            &format!(r#"{{"name":"Bright","room_id":"{room_id}","group_id":"ghost"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn save_scene_returns_400_for_group_in_different_room() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Kitchen");
+        let other_room_id = make_room(&registry, "Lounge");
+        let group_id = registry
+            .lock()
+            .unwrap()
+            .create_room_group(&other_room_id, "Sofa")
+            .id;
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            scenes_router(state, registry),
+            "POST",
+            "/api/scenes?token=",
+            &format!(r#"{{"name":"Bright","room_id":"{room_id}","group_id":"{group_id}"}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn save_scene_with_active_effect_and_no_overrides_has_empty_states() {
         let registry = make_registry();
@@ -555,6 +714,7 @@ mod tests {
                     color_temp: Some(370),
                 }],
                 None,
+                None,
             )
             .id
         };
@@ -593,7 +753,7 @@ mod tests {
         };
         let scene_id = {
             let mut reg = registry.lock().unwrap();
-            reg.save_scene("Test", None, vec![mk("bulb1"), mk("bulb2")], None)
+            reg.save_scene("Test", None, vec![mk("bulb1"), mk("bulb2")], None, None)
                 .id
         };
 
@@ -642,6 +802,7 @@ mod tests {
                     color_temp: Some(370),
                 }],
                 None,
+                None,
             )
             .id;
         let state = make_state(vec![], empty_connections()); // device not in light_snapshot
@@ -662,7 +823,7 @@ mod tests {
         let scene_id = registry
             .lock()
             .unwrap()
-            .save_scene("Temp", None, vec![], None)
+            .save_scene("Temp", None, vec![], None, None)
             .id;
         let state = make_state(vec![], empty_connections());
         let status = send(
@@ -695,7 +856,7 @@ mod tests {
         let scene_id = registry
             .lock()
             .unwrap()
-            .save_scene("Temp", None, vec![], None)
+            .save_scene("Temp", None, vec![], None, None)
             .id;
         let state = make_state(vec!["secret".into()], empty_connections());
         let status = send(
@@ -714,7 +875,7 @@ mod tests {
         let scene_id = registry
             .lock()
             .unwrap()
-            .save_scene("Temp", None, vec![], None)
+            .save_scene("Temp", None, vec![], None, None)
             .id;
         let state = make_state(vec![], empty_connections());
         let mut rx = state.tx.subscribe();

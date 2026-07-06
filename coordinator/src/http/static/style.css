@@ -1261,6 +1261,8 @@ body {
 
 .room-group-header .room-power-btn { margin-left: auto; }
 
+.room-group-cluster .room-scene-save-row { margin: 8px 0 0; }
+
 .room-group-delete-btn {
   background: none;
   border: none;

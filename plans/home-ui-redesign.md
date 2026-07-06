@@ -13,11 +13,26 @@
   checked against the actual code: one real gap found and fixed (missing
   device-level warn logging on fan-out failure); the rest were already
   handled by existing code or not real regressions.
-- **Phase 2 frontend — in progress.** Group cluster UI in the expanded
-  panel (per-group control cluster, `buildGroupSelect` dropdown, device
-  list partitioned into ungrouped + per-group sub-lists, group create/
-  rename/delete UI) not yet built. This is the immediate next step.
-- Phases 2b, 3, 4 — not started.
+- **Phase 2 frontend — shipped.** Group cluster UI in the expanded panel
+  (per-group on/off + brightness, inline rename/delete, `+ New group`,
+  `buildGroupSelect` dropdown per light card, device list partitioned into
+  Ungrouped + per-group sub-lists).
+- **Phase 2b — shipped.** Group-scoped scenes: `scenes.group_id` (cascades
+  on group delete, unlike `room_devices.group_id` which is only nulled —
+  a group-scoped scene has nowhere else to be deleted from once its group
+  is gone), `save_scene` narrows to the group's own members and never
+  captures an effect for a group scope. `recall_scene` needed zero
+  changes (confirmed by reading it — it only ever iterates `scene.states`).
+  Frontend: quick-scene chips for group scenes share the room's existing
+  bar with a `"GroupName: "` prefix; a compact `+ Save scene` row lives in
+  each group cluster (factored out of `buildScenesSection` into a shared
+  `buildSceneSaveRow`). The trickiest part was `scenes.js`'s per-room state
+  Maps (`activeSceneByRoom`/`preSceneStateByRoom`/`pausedSceneDevices`),
+  previously keyed only by room id — generalized to "scope id" (a room id
+  or a group id, safe to mix since both come from the same UUID
+  generator) so a room-wide scene and any of its groups' own scenes can be
+  independently active/paused at once, without a second set of Maps.
+- Phases 3, 4 — not started.
 
 ## Context
 

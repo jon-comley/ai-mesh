@@ -36,7 +36,7 @@ import {
   activateEffect, clearEffect, excludeFromEffect, includeInEffect,
 } from '/static/effects.js';
 import {
-  initScenes, buildScenesSection, clearRoomActiveScene, cancelSceneEdit,
+  initScenes, buildScenesSection, buildSceneSaveRow, clearRoomActiveScene, cancelSceneEdit,
   toggleSceneDevice, recallScene, wireSceneChipTouchDrag, wireSceneBarDrag,
   reconcileSceneDivergence,
 } from '/static/scenes.js';
@@ -839,6 +839,8 @@ function buildGroupCluster(room, group) {
     }));
   }
 
+  card.appendChild(buildSceneSaveRow(room.id, group.id));
+
   return card;
 }
 
@@ -921,6 +923,10 @@ function renderRoomCard(room, houseAvgTemp) {
   const card = document.createElement('div');
   card.className = 'room-card';
   card.dataset.roomId = room.id;
+
+  // Used by both the quick-scenes bar (group-name chip prefix) and the
+  // device list (per-group sub-lists) further down.
+  const groups = (room.groups ?? []).slice().sort((a, b) => a.position - b.position);
 
   // Make card draggable for reordering; disable when pointer is on controls
   card.setAttribute('draggable', 'true');
@@ -1356,24 +1362,31 @@ function renderRoomCard(room, houseAvgTemp) {
     const sceneBar = document.createElement('div');
     sceneBar.className = 'room-quick-scenes';
     for (const scene of roomScenesList) {
+      // A group-scoped scene shares this bar with room-wide ones — the name
+      // prefix is what tells them apart (see Phase 2b plan). scopeId is the
+      // group's id for those, the room's id otherwise; see the Map comments
+      // in state.js for why that's safe to mix in one keyspace.
+      const group = scene.group_id ? groups.find(g => g.id === scene.group_id) : null;
+      const scopeId = scene.group_id ?? room.id;
       const chip = document.createElement('button');
       chip.className = 'room-quick-scene-chip';
       chip.dataset.sceneId = scene.id;
       chip.setAttribute('draggable', 'true');   // mouse only; touch uses wireSceneChipTouchDrag
-      chip.textContent = scene.name;
+      chip.textContent = group ? `${group.name}: ${scene.name}` : scene.name;
       chip.title = `Recall "${scene.name}"`;
       if (scene.preview_color) {
         const { r, g, b } = xyToRgb(scene.preview_color[0], scene.preview_color[1], 180);
         chip.style.setProperty('--scene-chip-color', `rgb(${r},${g},${b})`);
       }
-      if (activeSceneByRoom.get(room.id) === scene.id) {
+      if (activeSceneByRoom.get(scopeId) === scene.id) {
         chip.classList.add('active');
         // Scenes are a lights-only concept — a sensor/cover/climate/switch
         // sharing the room isn't "in" or "paused from" the scene, so it must
         // not count as a member.
-        const memberCount = (room.device_ids ?? [])
-          .filter(id => devicesMap.get(id)?.device_type === 'light').length;
-        const pausedCount = pausedSceneDevices.get(room.id)?.size ?? 0;
+        const memberCount = group
+          ? group.device_ids.filter(id => devicesMap.get(id)?.device_type === 'light').length
+          : (room.device_ids ?? []).filter(id => devicesMap.get(id)?.device_type === 'light').length;
+        const pausedCount = pausedSceneDevices.get(scopeId)?.size ?? 0;
         if (pausedCount > 0 && pausedCount < memberCount) chip.classList.add('partly-paused');
         if (memberCount > 0 && pausedCount >= memberCount) chip.classList.add('all-paused');
       }
@@ -1431,7 +1444,6 @@ function renderRoomCard(room, houseAvgTemp) {
   // and no controls to expose (see buildSensorCard's own comment for why the
   // widget is shared as-is between here and the Devices tab).
   const lightIds = room.device_ids.filter(id => devicesMap.get(id)?.device_type === 'light');
-  const groups = (room.groups ?? []).slice().sort((a, b) => a.position - b.position);
   const groupOf = new Map(); // deviceId -> group
   for (const g of groups) for (const id of g.device_ids) groupOf.set(id, g);
 
@@ -1625,18 +1637,22 @@ function buildDeviceCard(dev, roomId, opts = {}) {
     card.querySelector('.light-card-header-right')?.prepend(btn);
   }
 
-  // Per-bulb scene indicator — present whenever the room has an active scene;
-  // lit when this light follows it, greyed when paused. Same model as effects.
-  const activeSceneId = activeSceneByRoom.get(roomId);
+  // Per-bulb scene indicator — present whenever this device's governing
+  // scope (its own group, if that group has an active scene; the room
+  // otherwise) has an active scene; lit when following it, greyed when
+  // paused. Same model as effects.
+  const sceneScopeId = (opts.currentGroupId && activeSceneByRoom.has(opts.currentGroupId))
+    ? opts.currentGroupId : roomId;
+  const activeSceneId = activeSceneByRoom.get(sceneScopeId);
   if (activeSceneId) {
-    const paused = pausedSceneDevices.get(roomId)?.has(dev.device_id) ?? false;
+    const paused = pausedSceneDevices.get(sceneScopeId)?.has(dev.device_id) ?? false;
     const sbtn = document.createElement('button');
     sbtn.className = 'device-scene-btn' + (paused ? ' device-scene-paused' : '');
     sbtn.title = paused ? 'Paused from scene — click to resume' : 'In scene — click to pause';
     sbtn.textContent = SCENE_ICON;
     sbtn.addEventListener('click', e => {
       e.stopPropagation();
-      toggleSceneDevice(roomId, dev.device_id);
+      toggleSceneDevice(sceneScopeId, dev.device_id);
     });
     card.querySelector('.light-card-header-right')?.prepend(sbtn);
   }
@@ -1995,12 +2011,11 @@ async function sendRoomCommand(roomId, body, room, isGlobal = false) {
 
 // A group command is scoped to a room-group's own member devices — same
 // optimistic-update/POST shape as sendRoomCommand, just a narrower device
-// set and a different endpoint. Group membership is a subset of the room,
-// so a group command still clears the room's active-scene tracking (a
-// scene stays room-wide only; manually moving a group is exactly the kind
-// of divergence that already un-marks a room's active scene today).
+// set and a different endpoint. Clears the GROUP's own active-scene scope
+// (not the room's) — a group scene and the room's own scene track
+// independently, see the Map comments in state.js.
 async function sendGroupCommand(roomId, group, body) {
-  clearRoomActiveScene(roomId);
+  clearRoomActiveScene(group.id);
   for (const deviceId of group.device_ids) {
     const dev = devicesMap.get(deviceId);
     if (dev && dev.device_type === 'light') {

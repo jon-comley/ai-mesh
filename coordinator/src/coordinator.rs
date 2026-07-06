@@ -128,6 +128,7 @@ fn warm_start_scenes(registry: &Arc<Mutex<Registry>>, dashboard: &Arc<DashboardS
                 states: s.states,
                 effect_id: s.effect_id,
                 effect_params,
+                group_id: s.group_id,
             }
         })
         .collect();
