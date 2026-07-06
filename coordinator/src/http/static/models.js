@@ -36,6 +36,13 @@ let dragSrc = null;
 // nodeId -> { model, startedAt, vramUsedAtStart }
 const unloadingNodes = new Map();
 
+// Node id whose Hugging Face search results/file list are currently showing
+// (or null) — guards render() against wiping the search UI mid-interaction,
+// same idea as the .model-picker-select:focus check already does for the
+// curated dropdown.
+let searchOpenFor = null;
+const SEARCH_DEBOUNCE_MS = 400;
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function handleModelUpdate(evt) {
@@ -102,8 +109,141 @@ if (modelListEl) {
         return;
       }
       loadModel(customRow.dataset.customNode, name, sizeMb, btn, errEl);
+      return;
+    }
+    const searchRow = e.target.closest('[data-search-node]');
+    if (searchRow) {
+      const backBtn = e.target.closest('[data-search-back]');
+      if (backBtn) { runSearch(searchRow, searchRow.dataset.lastQuery ?? ''); return; }
+      const hit = e.target.closest('.model-search-hit');
+      if (!hit) return;
+      if (hit.dataset.filename) {
+        // A specific file was picked — fill the custom row (same node) with
+        // the equivalent hf: string rather than duplicating the load flow,
+        // and close the search back down.
+        const customRow = modelListEl.querySelector(
+          `[data-custom-node="${CSS.escape(searchRow.dataset.searchNode)}"]`);
+        if (customRow) {
+          customRow.querySelector('.model-custom-input').value = `hf:${hit.dataset.repo}:${hit.dataset.filename}`;
+          customRow.querySelector('.model-custom-size').value = hit.dataset.sizeMb;
+        }
+        searchRow.querySelector('.model-search-input').value = '';
+        searchRow.querySelector('.model-search-results').innerHTML = '';
+        searchOpenFor = null;
+      } else {
+        showModelFiles(searchRow, hit.dataset.repo);
+      }
     }
   });
+
+  modelListEl.addEventListener('input', e => {
+    const input = e.target.closest('.model-search-input');
+    if (!input) return;
+    const row = input.closest('[data-search-node]');
+    clearTimeout(input._debounceTimer);
+    input._debounceTimer = setTimeout(() => {
+      // Guards the (narrow — the render() :focus check already covers typing)
+      // window where a render happened to land between the keystroke and the
+      // debounce firing, removing this row from the document.
+      if (!row.isConnected) return;
+      runSearch(row, input.value.trim());
+    }, SEARCH_DEBOUNCE_MS);
+  });
+}
+
+// A backgrounded tab can leave searchOpenFor set indefinitely — dashboard.js
+// force-reconnects on return-to-foreground (see its own visibilitychange
+// listener), which would otherwise arrive with fresh model/health data that
+// render() then silently discards because a search still looks "open" from
+// before the tab was backgrounded. Clearing here means the next update after
+// returning always renders; the search UI (built fresh by that render) just
+// starts blank rather than needing its own separate reset.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') searchOpenFor = null;
+});
+
+// ── Hugging Face search ───────────────────────────────────────────────────────
+
+function formatCount(n) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1000)}k`;
+  return String(n);
+}
+
+// A row's search and file-list fetches share one in-flight slot: only one of
+// them is ever meaningfully "current" for a given row at a time, so starting
+// either one aborts whatever the row was previously waiting on. This is what
+// actually prevents a slow, superseded response (typed a new query before the
+// first one returned; clicked a different repo before its file list loaded)
+// from overwriting newer results — the debounce alone only spaces out when
+// requests *start*, not the order their responses *arrive* in.
+function abortRowFetch(row) {
+  row._searchAbort?.abort();
+}
+
+async function runSearch(row, query) {
+  const resultsEl = row.querySelector('.model-search-results');
+  row.dataset.lastQuery = query;
+  abortRowFetch(row);
+  if (!query) {
+    resultsEl.innerHTML = '';
+    searchOpenFor = null;
+    return;
+  }
+  searchOpenFor = row.dataset.searchNode;
+  resultsEl.innerHTML = '<span class="model-search-status">Searching…</span>';
+  const controller = new AbortController();
+  row._searchAbort = controller;
+  const token = localStorage.getItem('meshToken') ?? '';
+  try {
+    const res = await fetch(
+      `/api/models/search?q=${encodeURIComponent(query)}&token=${encodeURIComponent(token)}`,
+      { signal: controller.signal });
+    if (!res.ok) { resultsEl.innerHTML = '<span class="model-search-status">Search failed</span>'; return; }
+    const hits = await res.json();
+    if (hits.length === 0) {
+      resultsEl.innerHTML = '<span class="model-search-status">No matches</span>';
+      return;
+    }
+    resultsEl.innerHTML = hits.map(h => `
+      <button class="model-search-hit" data-repo="${esc(h.repo)}">
+        <span class="model-search-hit-name">${esc(h.repo)}</span>
+        <span class="model-search-hit-meta">⬇ ${formatCount(h.downloads)}</span>
+      </button>`).join('');
+  } catch (e) {
+    if (e.name === 'AbortError') return; // superseded by a newer search — not a real failure
+    resultsEl.innerHTML = '<span class="model-search-status">Search error</span>';
+  }
+}
+
+async function showModelFiles(row, repo) {
+  const resultsEl = row.querySelector('.model-search-results');
+  abortRowFetch(row);
+  searchOpenFor = row.dataset.searchNode;
+  resultsEl.innerHTML = '<span class="model-search-status">Loading files…</span>';
+  const controller = new AbortController();
+  row._searchAbort = controller;
+  const token = localStorage.getItem('meshToken') ?? '';
+  try {
+    const res = await fetch(
+      `/api/models/search/files?repo=${encodeURIComponent(repo)}&token=${encodeURIComponent(token)}`,
+      { signal: controller.signal });
+    if (!res.ok) { resultsEl.innerHTML = '<span class="model-search-status">Could not load files</span>'; return; }
+    const files = await res.json();
+    const back = '<button class="model-search-back" data-search-back>← Back to results</button>';
+    if (files.length === 0) {
+      resultsEl.innerHTML = back + '<span class="model-search-status">No single-file GGUFs in this repo</span>';
+      return;
+    }
+    resultsEl.innerHTML = back + files.map(f => `
+      <button class="model-search-hit" data-repo="${esc(repo)}" data-filename="${esc(f.filename)}" data-size-mb="${f.size_mb}">
+        <span class="model-search-hit-name">${esc(f.filename)}</span>
+        <span class="model-search-hit-meta">${(f.size_mb / 1024).toFixed(1)} GB</span>
+      </button>`).join('');
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    resultsEl.innerHTML = '<span class="model-search-status">Error loading files</span>';
+  }
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -112,6 +252,10 @@ function render() {
   if (!modelListEl || dragSrc) return;
   // Don't nuke the DOM while the user has a picker open.
   if (modelListEl.querySelector('.model-picker-select:focus')) return;
+  // ...or while browsing/typing in the Hugging Face search — a HealthUpdate
+  // lands every few seconds, and without this a re-render would wipe the
+  // input or the result/file list right out from under an in-progress pick.
+  if (searchOpenFor || modelListEl.querySelector('.model-search-input:focus')) return;
   if (nodesMap.size === 0) {
     modelListEl.innerHTML = '<p class="placeholder">No model data yet.</p>';
     return;
@@ -285,7 +429,16 @@ function loadFooter(node) {
   <span class="model-load-error"></span>
 </div>`;
 
-  return pickerRow + customRow;
+  // Self-populating alternative to typing the hf: string above by hand —
+  // search Hugging Face for a repo, then pick one of its GGUF files; the
+  // pick fills the custom row above rather than duplicating the load flow.
+  const searchRow = `<div class="model-search-row" data-search-node="${esc(node.node_id)}">
+  <input class="model-search-input" type="text" autocomplete="off"
+         placeholder="🔍 Search Hugging Face for a model…"${disabled}>
+  <div class="model-search-results"></div>
+</div>`;
+
+  return pickerRow + searchRow + customRow;
 }
 
 async function loadModel(nodeId, modelName, sizeMb, btn, errEl) {

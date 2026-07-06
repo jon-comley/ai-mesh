@@ -15,6 +15,7 @@ pub mod chat;
 pub mod effects;
 pub mod gateway;
 pub mod lights;
+pub mod model_search;
 pub mod nodes;
 pub mod prefs;
 pub mod rooms;

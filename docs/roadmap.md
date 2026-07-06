@@ -1245,6 +1245,36 @@ needing a qualified Part P registered electrician, not a DIY job).
 
 ---
 
+## Hardware Decoupling — Investigation Queued (2026-07-06)
+
+Jon's question: how best to decouple this project from specific hardware —
+e.g. if someone wanted a different Zigbee antenna/dongle. Held for a
+dedicated conversation rather than a quick answer, since it's an
+architecture question, not a bug/feature ask. Starting point for that
+discussion, from a first look at the code:
+
+- **Zigbee already looks mostly decoupled.** `capability-zigbee` only ever
+  talks MQTT to zigbee2mqtt (`MQTT_HOST`/`MQTT_PORT`) — it has no idea what
+  radio z2m is fronting. z2m itself is the actual hardware-abstraction
+  layer here and already supports a wide range of coordinator adapters
+  (the SLZB-06 currently in use, ConBee II, Sonoff dongles, TI CC253x/
+  CC2652, Silicon Labs EFR32MG21, etc.). Swapping the physical dongle/
+  antenna looks like it would only ever touch z2m's own
+  `configuration.yaml` (adapter type + serial/network port — the exact
+  thing already hand-edited once before, see
+  `project_zigbee_bridge_stale_ip` memory) and never `capability-zigbee`
+  or coordinator code.
+- Worth checking during the real discussion: whether the same
+  domain-module boundary (capability crate ↔ `MeshMessage` protocol ↔
+  coordinator) holds up as cleanly for the *other* hardware-coupled
+  pieces of this project — inference hardware/GPU vendor
+  (`capability-llm`/llama.cpp), and REAPER (`capability-reaper`, already
+  process-based rather than hardware-based) — or whether "decouple
+  hardware" actually means something more specific that didn't come up
+  in the first pass.
+
+---
+
 ## Phase 12 — Distributed Execution
 
 - Multi-node inference

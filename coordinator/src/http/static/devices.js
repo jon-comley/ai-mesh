@@ -11,6 +11,7 @@ import { model, devicesMap } from '/static/state.js';
 import { addDeviceToRoom, removeDeviceFromRoom, deleteDevice, patchDeviceName } from '/static/actions.js';
 import {
   buildSensorCard, buildRoomSelect, formatLightStatus, applySwitchFlashIfActive,
+  appendEditLink,
 } from '/static/devicewidgets.js';
 
 function formatDeviceName(id) {
@@ -82,6 +83,7 @@ function buildPresenceRow(dev) {
   nameEl.style.cursor = 'pointer';
   nameEl.title = 'Click to rename';
   nameEl.addEventListener('click', () => startRename(nameEl, dev.device_id));
+  appendEditLink(row.querySelector('.light-name-group'), () => startRename(nameEl, dev.device_id));
 
   const actions = document.createElement('div');
   actions.className = 'device-row-actions';
@@ -121,6 +123,7 @@ function buildLightRow(dev) {
   nameEl.style.cursor = 'pointer';
   nameEl.title = 'Click to rename';
   nameEl.addEventListener('click', () => startRename(nameEl, dev.device_id));
+  appendEditLink(row.querySelector('.light-name-group'), () => startRename(nameEl, dev.device_id));
 
   const actions = document.createElement('div');
   actions.className = 'device-row-actions';
@@ -252,6 +255,42 @@ function buildSensorRow(dev, container) {
   });
 }
 
+// Collapse chevron per sensor subcategory — same pattern as
+// buildCategoryHeading/buildCategorySection above, just one level deeper
+// (h4 instead of h3, its own localStorage key so each subcategory remembers
+// its own state independently of its siblings and of the parent "Sensors"
+// category).
+function buildSubcategorySection(key, label, count) {
+  const heading = document.createElement('h4');
+  heading.className = 'device-subcategory-heading';
+
+  const storageKey = `mesh-devsubcat-collapsed-${key}`;
+  const isCollapsed = localStorage.getItem(storageKey) === '1';
+
+  const chevron = document.createElement('button');
+  chevron.className = 'device-category-collapse-btn';
+  chevron.title = 'Collapse / expand';
+  chevron.textContent = isCollapsed ? '▸' : '▾';
+  heading.appendChild(chevron);
+
+  const labelEl = document.createElement('span');
+  labelEl.textContent = `${label} (${count})`;
+  heading.appendChild(labelEl);
+
+  const body = document.createElement('div');
+  body.className = 'device-subcategory-body' + (isCollapsed ? ' collapsed' : '');
+  const toggle = () => {
+    const nowCollapsed = !body.classList.contains('collapsed');
+    body.classList.toggle('collapsed', nowCollapsed);
+    chevron.textContent = nowCollapsed ? '▸' : '▾';
+    localStorage.setItem(storageKey, nowCollapsed ? '1' : '0');
+  };
+  chevron.addEventListener('click', toggle);
+  heading.addEventListener('click', e => { if (e.target !== chevron) toggle(); });
+
+  return { heading, body };
+}
+
 function renderSensorSubcategories(body, sensors, container) {
   const remaining = new Set(sensors.map(d => d.device_id));
   const byId = new Map(sensors.map(d => [d.device_id, d]));
@@ -259,24 +298,22 @@ function renderSensorSubcategories(body, sensors, container) {
   for (const sub of SENSOR_SUBCATEGORIES) {
     const members = sensors.filter(d => sub.test(d));
     if (members.length === 0) continue;
-    const subHeading = document.createElement('h4');
-    subHeading.className = 'device-subcategory-heading';
-    subHeading.textContent = `${sub.label} (${members.length})`;
-    body.appendChild(subHeading);
+    const { heading, body: subBody } = buildSubcategorySection(sub.key, sub.label, members.length);
+    body.appendChild(heading);
     for (const dev of members.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
-      body.appendChild(buildSensorRow(dev, container));
+      subBody.appendChild(buildSensorRow(dev, container));
       remaining.delete(dev.device_id);
     }
+    body.appendChild(subBody);
   }
 
   if (remaining.size > 0) {
-    const subHeading = document.createElement('h4');
-    subHeading.className = 'device-subcategory-heading';
-    subHeading.textContent = `Other (${remaining.size})`;
-    body.appendChild(subHeading);
+    const { heading, body: subBody } = buildSubcategorySection('other', 'Other', remaining.size);
+    body.appendChild(heading);
     for (const id of [...remaining].sort()) {
-      body.appendChild(buildSensorRow(byId.get(id), container));
+      subBody.appendChild(buildSensorRow(byId.get(id), container));
     }
+    body.appendChild(subBody);
   }
 }
 

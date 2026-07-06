@@ -1204,40 +1204,10 @@ function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
   const ctrlRow = document.createElement('div');
   ctrlRow.className = 'room-header-controls-row';
 
-  // ── On / Off — big segmented control (primary casual action) ─────────────
-  const onBtn  = document.createElement('button');
-  const offBtn = document.createElement('button');
-  const setRoomOnOff = (isOn) => {
-    onBtn.classList.toggle('active', isOn);
-    offBtn.classList.toggle('active', !isOn);
-  };
-  onBtn.className = 'room-onoff-btn room-onoff-on';
-  onBtn.textContent = 'On';
-  onBtn.disabled = empty;
-  if (!empty) onBtn.addEventListener('click', async e => {
-    e.stopPropagation();
-    setRoomOnOff(true);
-    clearDotForRoom(room);   // on/off resets colour/temp dots to icons
-    // Power on at the Hue default warm white so on/off is consistent.
-    if (activeEffect) await clearEffect(room.id);
-    for (const c of HUE_DEFAULT_ON) await sendRoomCommand(room.id, c, room);
-  });
-  offBtn.className = 'room-onoff-btn room-onoff-off';
-  offBtn.textContent = 'Off';
-  offBtn.disabled = empty;
-  if (!empty) offBtn.addEventListener('click', async e => {
-    e.stopPropagation();
-    setRoomOnOff(false);
-    clearDotForRoom(room);   // on/off resets colour/temp dots to icons
-    if (activeEffect) await clearEffect(room.id);
-    sendRoomCommand(room.id, { action: 'off' }, room);
-  });
-  setRoomOnOff(anyOn);
-
-  const onOffWrap = document.createElement('div');
-  onOffWrap.className = 'room-onoff';
-  onOffWrap.appendChild(onBtn);
-  onOffWrap.appendChild(offBtn);
+  // On/Off used to have its own big segmented control here — removed as
+  // redundant with the tile-face power button (⏻, added in Phase 1), which
+  // does the exact same thing (Hue-default-warm-white on / off, clearing any
+  // active effect first) with one fewer control on screen.
 
   // Secondary controls: separate colour (🎨) and temperature (🌡) triggers, floor plan
   const hasTempDevices = roomDevicesAll.some(d => d.color_temp != null);
@@ -1278,7 +1248,6 @@ function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
   // of effect state means it never reflows.
   const topRow = document.createElement('div');
   topRow.className = 'room-controls-top';
-  topRow.appendChild(onOffWrap);
 
   const topSpacer = document.createElement('span');
   topSpacer.className = 'room-controls-spacer';
@@ -1286,7 +1255,9 @@ function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
 
   if (colourBtn) topRow.appendChild(colourBtn);
   if (tempBtn) topRow.appendChild(tempBtn);
-  topRow.appendChild(layoutBtn);
+  // Floorplan-only now that it has its own tab — spatial layout editing
+  // belongs with the spatial view, not cluttering every tile's panel.
+  if (isFloorplan) topRow.appendChild(layoutBtn);
   ctrlRow.appendChild(topRow);
 
   if (activeEffect || lastEffectByRoom.has(room.id)) {

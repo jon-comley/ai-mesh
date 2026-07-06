@@ -162,6 +162,19 @@ export function toggleSensorPin(deviceId) {
   return idx === -1; // now pinned?
 }
 
+/// Small "✎ Edit" affordance placed directly under a device's name (a child
+/// of `.light-name-group`, which is already `flex-direction: column`) —
+/// shared by every row type in the Devices tab so renaming is equally
+/// discoverable whether the row is a light, sensor, or presence-only device.
+export function appendEditLink(nameGroupEl, onRename) {
+  if (!nameGroupEl) return;
+  const btn = document.createElement('button');
+  btn.className = 'device-edit-link';
+  btn.textContent = '✎ Edit';
+  btn.addEventListener('click', e => { e.stopPropagation(); onRename(); });
+  nameGroupEl.appendChild(btn);
+}
+
 /// One sensor's card: name + node badge + read-only readout, optionally with
 /// management controls (rename/delete/room-assignment/remove-from-room/pin)
 /// when `opts` is given — the Devices tab passes rename/delete/rooms; the
@@ -186,6 +199,8 @@ export function buildSensorCard(dev, opts = {}) {
       ${statusBadge}
     </div>`;
 
+  if (opts.onRename) appendEditLink(card.querySelector('.light-name-group'), opts.onRename);
+
   if (opts.pinnable) {
     const pinBtn = document.createElement('button');
     pinBtn.className = 'device-row-btn sensor-pin-btn';
@@ -205,21 +220,13 @@ export function buildSensorCard(dev, opts = {}) {
     card.querySelector('.light-card-header-right')?.appendChild(pinBtn);
   }
 
-  if (opts.onRename || opts.onDelete || opts.onRemoveFromRoom || opts.rooms) {
+  if (opts.onDelete || opts.onRemoveFromRoom || opts.rooms) {
     const actions = document.createElement('div');
     actions.className = 'device-row-actions';
 
     if (opts.rooms) {
       actions.appendChild(buildRoomSelect(opts.rooms, opts.currentRoomId,
         roomId => opts.onRoomChange?.(roomId)));
-    }
-    if (opts.onRename) {
-      const btn = document.createElement('button');
-      btn.className = 'device-row-btn';
-      btn.textContent = '✎';
-      btn.title = 'Rename';
-      btn.addEventListener('click', () => opts.onRename());
-      actions.appendChild(btn);
     }
     if (opts.onRemoveFromRoom) {
       const btn = document.createElement('button');
