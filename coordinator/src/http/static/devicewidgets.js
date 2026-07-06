@@ -117,6 +117,28 @@ export function buildRoomSelect(rooms, currentRoomId, onChange) {
   return select;
 }
 
+/// In-room-group assignment dropdown for a light — mirrors buildRoomSelect
+/// but scoped to one room's groups (a device can only belong to a group
+/// inside its own room). Only rendered when the room has at least one
+/// group defined (rooms.js's caller checks this).
+export function buildGroupSelect(groups, currentGroupId, onChange) {
+  const select = document.createElement('select');
+  select.className = 'device-group-select';
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = 'Ungrouped';
+  select.appendChild(noneOpt);
+  for (const group of groups) {
+    const o = document.createElement('option');
+    o.value = group.id;
+    o.textContent = group.name;
+    if (group.id === currentGroupId) o.selected = true;
+    select.appendChild(o);
+  }
+  select.addEventListener('change', () => onChange(select.value || null));
+  return select;
+}
+
 const PINNED_SENSORS_KEY = 'mesh-pinned-sensors';
 
 /// Pin is a global per-device preference (not per-room) — a pinned sensor

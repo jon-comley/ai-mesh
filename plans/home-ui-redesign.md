@@ -1,5 +1,24 @@
 # Home Tab Redesign + In-Room Groups — Unified Implementation Plan
 
+## Status (2026-07-06)
+
+- **Phase 1 — shipped, deployed, live-verified.** Tile grid, colour wash,
+  power toggle, notable-only badges, whole-house summary all landed in
+  `7e6ef30` and confirmed looking good on a live phone check against pi1.
+- **Phase 2 backend — shipped** in the same commit: `room_groups` schema/
+  registry/CRUD, `dispatch_light_command` fan-out helper shared by
+  `room_command`/`group_command`, all 5 group API routes, and voice/intent
+  targeting (group-name resolution + the room-name multi-device fan-out
+  fix). Two independent code reviews (Bing, Gemini) of this commit were
+  checked against the actual code: one real gap found and fixed (missing
+  device-level warn logging on fan-out failure); the rest were already
+  handled by existing code or not real regressions.
+- **Phase 2 frontend — in progress.** Group cluster UI in the expanded
+  panel (per-group control cluster, `buildGroupSelect` dropdown, device
+  list partitioned into ungrouped + per-group sub-lists, group create/
+  rename/delete UI) not yet built. This is the immediate next step.
+- Phases 2b, 3, 4 — not started.
+
 ## Context
 
 Current room cards try to show everything at once for every room, all the

@@ -58,6 +58,36 @@ export async function reorderRoomDevices(roomId, ids) {
   } catch (e) { showToast(`Device reorder error: ${e.message}`, true); }
 }
 
+// ── Room groups ──────────────────────────────────────────────────────────────
+export async function createRoomGroup(roomId, name) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/groups`, { method: 'POST', body: { name } });
+    if (!res.ok) showToast(`Create group failed (${res.status})`, true);
+  } catch (e) { showToast(`Create group error: ${e.message}`, true); }
+}
+
+export async function renameRoomGroup(roomId, groupId, name) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/groups/${encodeURIComponent(groupId)}/name`, { method: 'PATCH', body: { name } });
+    if (!res.ok) showToast(`Rename group failed (${res.status})`, true);
+  } catch (e) { showToast(`Rename group error: ${e.message}`, true); }
+}
+
+export async function deleteRoomGroup(roomId, groupId) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) showToast(`Delete group failed (${res.status})`, true);
+  } catch (e) { showToast(`Delete group error: ${e.message}`, true); }
+}
+
+export async function setDeviceGroup(roomId, deviceId, groupId) {
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/devices/${encodeURIComponent(deviceId)}/group`,
+      { method: 'PATCH', body: { group_id: groupId } });
+    if (!res.ok) showToast(`Set group failed (${res.status})`, true);
+  } catch (e) { showToast(`Set group error: ${e.message}`, true); }
+}
+
 // ── Devices ──────────────────────────────────────────────────────────────────
 export async function deleteDevice(deviceId) {
   try {
