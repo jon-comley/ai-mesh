@@ -32,7 +32,20 @@
   or a group id, safe to mix since both come from the same UUID
   generator) so a room-wide scene and any of its groups' own scenes can be
   independently active/paused at once, without a second set of Maps.
-- Phases 3, 4 — not started.
+- **Phase 4 — shipped.** Wall-photo backdrop in the layout editor: one photo
+  per wall (N/S/E/W), client-downscaled (capped at 1600px, JPEG q=0.82)
+  before upload so the stored data URI and request body stay small without
+  a native app or any CV/ML. `room_wall_photos(room_id, wall_edge, data_uri)`
+  cascades on room delete; fetched lazily via `GET /api/rooms/{id}/wall-photos`
+  when the layout editor opens for a room rather than riding the WS
+  `RoomsUpdate` snapshot — a photo can be a few hundred KB and has no
+  business on every unrelated room-membership broadcast. New sidebar
+  section (N/S/E/W tabs, thumbnail, opacity slider) and an SVG `<image>`
+  backdrop layer sitting just above the floor rect, below every interactive
+  layer, `pointer-events: none` so it never intercepts clicks. Global axum
+  body limit raised (2MB → 8MB+4096) to fit an upload; every other route's
+  bodies stay tiny JSON so this only widens headroom.
+- Phase 3 — not started.
 
 ## Context
 

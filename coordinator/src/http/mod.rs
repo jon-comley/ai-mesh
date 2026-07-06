@@ -113,6 +113,14 @@ pub fn router(
             "/api/rooms/{id}/openings/{oid}",
             patch(api::rooms::update_opening).delete(api::rooms::delete_opening),
         )
+        .route(
+            "/api/rooms/{id}/wall-photos",
+            get(api::rooms::get_wall_photos),
+        )
+        .route(
+            "/api/rooms/{id}/wall-photos/{wall_edge}",
+            put(api::rooms::set_wall_photo).delete(api::rooms::delete_wall_photo),
+        )
         .route("/api/effects", get(api::effects::list_effects))
         .route(
             "/api/rooms/{id}/effect",
@@ -176,6 +184,13 @@ pub fn router(
         .route("/api/reaper/state", get(api::nodes::get_reaper_state))
         .layer(axum::Extension(registry))
         .layer(axum::Extension(effects))
+        // Raises axum's 2MB default so a wall-photo upload (a base64 data
+        // URI; layout.js downscales client-side before sending) doesn't get
+        // rejected outright — every other route's bodies are tiny JSON, so
+        // this only widens headroom, it doesn't loosen anything meaningful.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            api::rooms::MAX_WALL_PHOTO_DATA_URI_LEN + 4096,
+        ))
         .with_state(dashboard)
 }
 

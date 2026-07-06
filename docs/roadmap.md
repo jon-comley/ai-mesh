@@ -885,6 +885,24 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > `"GroupName: "` prefix; each group cluster gets its own compact
 > `+ Save scene` row (factored out into `buildSceneSaveRow`, shared with
 > the room-wide one). 609 tests.
+>
+> **Phase 4 — wall-photo layout aid (2026-07-06)** — not room scanning: a
+> manual-tracing aid for the layout editor's existing dimensions/
+> orientation/opening flow. One photo per wall (N/S/E/W — the ceiling
+> sentinel `C` has no wall to photograph, rejected with 400).
+> `room_wall_photos(room_id, wall_edge, data_uri)` cascades on room delete;
+> deliberately kept off `RoomInfo`/the WS snapshot (a photo can be a few
+> hundred KB, no business on every room-membership broadcast) — the layout
+> editor fetches it lazily via `GET /api/rooms/{id}/wall-photos` when it
+> opens for a room. The client downscales to 1600px/JPEG q=0.82 before
+> upload, so a legitimate photo lands well under the raised body limit
+> (axum's 2MB default → 8MB+4096, applied globally since every other
+> route's body is tiny JSON anyway); the server enforces its own 8MB cap
+> on the stored string regardless. New sidebar section (N/S/E/W tabs,
+> thumbnail, add/replace/remove, opacity slider) plus an SVG `<image>`
+> backdrop sitting just above the floor rect and below every interactive
+> layer, `pointer-events: none` so it never intercepts canvas clicks. 623
+> tests.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
