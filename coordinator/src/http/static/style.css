@@ -587,6 +587,81 @@ body {
   cursor: not-allowed;
 }
 
+.model-search-row {
+  padding: 6px 0 0;
+  margin-top: 6px;
+}
+
+.model-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+.model-search-input:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.model-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.model-search-status {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  padding: 2px 0;
+}
+
+.model-search-hit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.78rem;
+  font-family: inherit;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.model-search-hit:hover { border-color: var(--accent); }
+
+.model-search-hit-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.model-search-hit-meta {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.model-search-back {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-family: inherit;
+  padding: 2px 0;
+  text-align: left;
+}
+
 /* ── Lighting cards ────────────────────────────────────────────────────────── */
 .light-card {
   background: var(--surface);
@@ -635,6 +710,20 @@ body {
   color: var(--text-muted);
   white-space: nowrap;
 }
+
+/* Sits directly under the name — .light-name-group is flex-column, so this
+   is just its next child — same discoverable rename affordance for every
+   device row type in the Devices tab (light, sensor, presence-only). */
+.device-edit-link {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+.device-edit-link:hover { color: var(--accent); }
 
 .light-card-header-right {
   display: flex;
@@ -1220,7 +1309,10 @@ body {
   font-size: 13px;
   color: var(--text-muted);
 }
-.room-house-summary-warn { color: var(--red); font-weight: 600; }
+/* Muted on purpose — a low-battery sensor or two is common and not urgent;
+   this used to be bold red, which read as an alarm every time the Home tab
+   opened rather than an ambient status note. */
+.room-house-summary-warn { color: var(--amber); }
 
 /* ── Home tab view mode (Tiles / Floorplan) ────────────────────────────────── */
 .room-view-mode-toggle {
@@ -1516,36 +1608,6 @@ body {
   gap: 6px;
 }
 
-/* ── Room On/Off — big segmented control ─────────────────────────────────── */
-.room-onoff {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-}
-.room-onoff-btn {
-  background: var(--surface-2);
-  border: none;
-  color: var(--text-muted);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 7px 18px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.room-onoff-btn + .room-onoff-btn {
-  border-left: 1px solid var(--border);
-}
-.room-onoff-on.active {
-  background: color-mix(in srgb, var(--green) 22%, transparent);
-  color: var(--green);
-}
-.room-onoff-off.active {
-  background: color-mix(in srgb, var(--red) 20%, transparent);
-  color: var(--red);
-}
-.room-onoff-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-
 .room-controls-spacer { flex: 1; }
 
 /* Room controls popup panel — same style as effect editor */
@@ -1687,11 +1749,27 @@ body {
 }
 
 .device-subcategory-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   color: var(--text-muted);
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
   margin: 12px 0 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.device-subcategory-body {
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+  max-height: 4000px;
+  opacity: 1;
+}
+.device-subcategory-body.collapsed {
+  max-height: 0;
+  opacity: 0;
 }
 
 .room-name-wrap {
@@ -3654,7 +3732,6 @@ body {
   }
   /* Rename pencil always tappable on touch (no hover) */
   .room-rename-pencil { opacity: 0.6; }
-  .room-onoff-btn { padding: 9px 22px; }
   /* Sliders are easier to grab with a bigger thumb */
   .light-slider::-webkit-slider-thumb { width: 22px; height: 22px; }
   .light-slider::-moz-range-thumb { width: 22px; height: 22px; }

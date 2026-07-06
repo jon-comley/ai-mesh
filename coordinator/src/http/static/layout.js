@@ -1327,7 +1327,7 @@ function buildSidebar(room) {
   ceilingSelect.id = 'layout-ceiling-select';
   ceilingSelect.className = 'layout-ceiling-select';
   for (const [value, label] of [
-    ['none', 'None'],
+    ['none', 'Plastered'],
     ['partial', 'Partial glass'],
     ['full', 'Full glass'],
   ]) {

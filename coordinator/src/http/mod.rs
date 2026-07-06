@@ -68,6 +68,11 @@ pub fn router(
         )
         .route("/api/models/load", post(api::nodes::load_model))
         .route("/api/models/unload", post(api::nodes::unload_model))
+        .route("/api/models/search", get(api::model_search::search_models))
+        .route(
+            "/api/models/search/files",
+            get(api::model_search::search_model_files),
+        )
         .route("/api/nodes/{id}", delete(api::nodes::remove_node))
         .route("/api/lights/names", get(api::lights::get_device_names))
         .route("/api/sensors", get(api::sensors::list_sensors))
