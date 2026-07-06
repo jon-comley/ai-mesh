@@ -90,6 +90,23 @@ pub struct RoomRecord {
     pub height_m: f64,
     pub origin_x: f64,
     pub origin_y: f64,
+    pub groups: Vec<RoomGroupRecord>,
+}
+
+/// A named, exclusive-membership subset of a room's devices (e.g. Kitchen's
+/// "Counter" pendants vs. its ceiling spots) — an ai-mesh-only concept, not
+/// a Zigbee/z2m group (see `light_groups`/`LightTarget::Group` in
+/// `lights.rs`, which this deliberately does not reuse or collide with:
+/// those are real z2m groups dispatched as one MQTT command; a room group
+/// fans a command out to each member device individually, same as a
+/// whole-room command already does).
+#[derive(Debug, Clone)]
+pub struct RoomGroupRecord {
+    pub id: String,
+    pub room_id: String,
+    pub name: String,
+    pub position: i64,
+    pub device_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -231,6 +248,16 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             room_id   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
             device_id TEXT NOT NULL,
             PRIMARY KEY (room_id, device_id)
+        );
+        -- Named, exclusive-membership subset of a room's devices (e.g.
+        -- Kitchen's Counter pendants vs. its ceiling spots). Not a
+        -- Zigbee/z2m group (see light_groups above) - see RoomGroupRecord's
+        -- doc comment for why these must never collide.
+        CREATE TABLE IF NOT EXISTS room_groups (
+            id       TEXT PRIMARY KEY,
+            room_id  TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+            name     TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS scenes (
             id                 TEXT PRIMARY KEY,
@@ -395,6 +422,21 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
                 SELECT COUNT(*) FROM room_devices r2
                 WHERE r2.room_id = room_devices.room_id AND r2.device_id < room_devices.device_id
             )",
+        )?;
+    }
+
+    // Migration: Add group_id column to room_devices if it doesn't exist.
+    // Nullable, no ON DELETE action (same as light_positions.room_id below,
+    // an existing ALTER-added FK column) - delete_room_group nulls it out
+    // explicitly rather than relying on SQLite to cascade it.
+    let rd_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(room_devices)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !rd_cols.contains(&"group_id".to_string()) {
+        conn.execute(
+            "ALTER TABLE room_devices ADD COLUMN group_id TEXT REFERENCES room_groups(id)",
+            [],
         )?;
     }
 
@@ -1025,22 +1067,71 @@ impl Registry {
 
     // ── Rooms ─────────────────────────────────────────────────────────────────
 
-    fn room_device_ids(&self, room_id: &str) -> Vec<String> {
+    /// (device_id, group_id) pairs for every device in a room. Single query
+    /// shared by `list_rooms` (for the flat `device_ids` list) and
+    /// `room_groups_for` (to partition members per group) rather than one
+    /// query per group.
+    fn room_device_rows(&self, room_id: &str) -> Vec<(String, Option<String>)> {
         let mut stmt = match self.conn.prepare(
-            "SELECT device_id FROM room_devices WHERE room_id = ?1 ORDER BY position, device_id",
+            "SELECT device_id, group_id FROM room_devices \
+             WHERE room_id = ?1 ORDER BY position, device_id",
         ) {
             Ok(s) => s,
             Err(e) => {
-                warn!(error = %e, "room_device_ids prepare failed");
+                warn!(error = %e, "room_device_rows prepare failed");
                 return vec![];
             }
         };
-        stmt.query_map(params![room_id], |row| row.get(0))
+        stmt.query_map(params![room_id], |row| Ok((row.get(0)?, row.get(1)?)))
             .map(|rows| {
-                rows.collect::<rusqlite::Result<Vec<String>>>()
+                rows.collect::<rusqlite::Result<Vec<(String, Option<String>)>>>()
                     .unwrap_or_default()
             })
             .unwrap_or_default()
+    }
+
+    /// All groups for a room, each with its member device ids already
+    /// resolved from `device_rows` (avoids a second per-room query).
+    fn room_groups_for(
+        &self,
+        room_id: &str,
+        device_rows: &[(String, Option<String>)],
+    ) -> Vec<RoomGroupRecord> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, name, position FROM room_groups WHERE room_id = ?1 ORDER BY position, name",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "room_groups_for prepare failed");
+                return vec![];
+            }
+        };
+        let groups: Vec<(String, String, i64)> = stmt
+            .query_map(params![room_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map(|rows| {
+                rows.collect::<rusqlite::Result<Vec<(String, String, i64)>>>()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        groups
+            .into_iter()
+            .map(|(id, name, position)| {
+                let device_ids = device_rows
+                    .iter()
+                    .filter(|(_, gid)| gid.as_deref() == Some(id.as_str()))
+                    .map(|(device_id, _)| device_id.clone())
+                    .collect();
+                RoomGroupRecord {
+                    id,
+                    room_id: room_id.to_owned(),
+                    name,
+                    position,
+                    device_ids,
+                }
+            })
+            .collect()
     }
 
     pub fn list_rooms(&self) -> Vec<RoomRecord> {
@@ -1100,7 +1191,9 @@ impl Registry {
                     origin_x,
                     origin_y,
                 )| {
-                    let device_ids = self.room_device_ids(&id);
+                    let device_rows = self.room_device_rows(&id);
+                    let groups = self.room_groups_for(&id, &device_rows);
+                    let device_ids = device_rows.into_iter().map(|(d, _)| d).collect();
                     RoomRecord {
                         id,
                         name,
@@ -1114,6 +1207,7 @@ impl Registry {
                         height_m,
                         origin_x,
                         origin_y,
+                        groups,
                     }
                 },
             )
@@ -1141,6 +1235,7 @@ impl Registry {
             height_m: 2.5,
             origin_x: 0.5,
             origin_y: 0.5,
+            groups: vec![],
         }
     }
 
@@ -1371,6 +1466,128 @@ impl Registry {
             }
         }
         map
+    }
+
+    /// Returns a map of device_id → room-group display name, for devices
+    /// that are actually assigned to a group (ungrouped devices are simply
+    /// absent, same convention as `device_room_name_map` for unassigned
+    /// devices).
+    pub fn device_group_name_map(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        let mut stmt = match self.conn.prepare(
+            "SELECT rd.device_id, rg.name FROM room_devices rd \
+             JOIN room_groups rg ON rd.group_id = rg.id",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "device_group_name_map prepare failed");
+                return map;
+            }
+        };
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for row in rows.flatten() {
+                map.insert(row.0, row.1);
+            }
+        }
+        map
+    }
+
+    // ── Room groups ── named, exclusive-membership subsets of a room's ─────────
+    // devices (e.g. Kitchen's Counter pendants vs. its ceiling spots). Not a
+    // Zigbee/z2m group - see RoomGroupRecord's doc comment.
+
+    pub fn room_group_exists(&self, group_id: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM room_groups WHERE id = ?1",
+                params![group_id],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
+    pub fn get_room_group(&self, group_id: &str) -> Option<RoomGroupRecord> {
+        let (room_id, name, position): (String, String, i64) = self
+            .conn
+            .query_row(
+                "SELECT room_id, name, position FROM room_groups WHERE id = ?1",
+                params![group_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok()?;
+        let device_rows = self.room_device_rows(&room_id);
+        let device_ids = device_rows
+            .into_iter()
+            .filter(|(_, gid)| gid.as_deref() == Some(group_id))
+            .map(|(device_id, _)| device_id)
+            .collect();
+        Some(RoomGroupRecord {
+            id: group_id.to_owned(),
+            room_id,
+            name,
+            position,
+            device_ids,
+        })
+    }
+
+    pub fn create_room_group(&mut self, room_id: &str, name: &str) -> RoomGroupRecord {
+        let id = gen_uuid();
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO room_groups (id, room_id, name, position)
+             VALUES (?1, ?2, ?3, COALESCE((SELECT MAX(position) + 1 FROM room_groups WHERE room_id = ?2), 0))",
+            params![id, room_id, name],
+        ) {
+            warn!(error = %e, "create_room_group failed");
+        }
+        RoomGroupRecord {
+            id,
+            room_id: room_id.to_owned(),
+            name: name.to_owned(),
+            position: 0,
+            device_ids: vec![],
+        }
+    }
+
+    pub fn rename_room_group(&mut self, group_id: &str, name: &str) {
+        if let Err(e) = self.conn.execute(
+            "UPDATE room_groups SET name = ?1 WHERE id = ?2",
+            params![name, group_id],
+        ) {
+            warn!(error = %e, "rename_room_group failed");
+        }
+    }
+
+    /// Deletes the group and returns its members to ungrouped (never orphans
+    /// them out of the room) - mirrors how `delete_room` clears
+    /// `light_positions.room_id` before removing the room itself.
+    pub fn delete_room_group(&mut self, group_id: &str) {
+        if let Err(e) = self.conn.execute(
+            "UPDATE room_devices SET group_id = NULL WHERE group_id = ?1",
+            params![group_id],
+        ) {
+            warn!(error = %e, "delete_room_group: clear members failed");
+        }
+        if let Err(e) = self
+            .conn
+            .execute("DELETE FROM room_groups WHERE id = ?1", params![group_id])
+        {
+            warn!(error = %e, "delete_room_group failed");
+        }
+    }
+
+    /// Exclusive membership: assigns a device to a group (or clears it back
+    /// to ungrouped with `None`) with a single UPDATE. The caller (HTTP
+    /// handler) is responsible for validating that `group_id` actually
+    /// belongs to the device's current room - this method trusts its input.
+    pub fn set_device_group(&mut self, device_id: &str, group_id: Option<&str>) {
+        if let Err(e) = self.conn.execute(
+            "UPDATE room_devices SET group_id = ?1 WHERE device_id = ?2",
+            params![group_id, device_id],
+        ) {
+            warn!(error = %e, "set_device_group failed");
+        }
     }
 
     // ── Scenes ── see registry/scenes.rs ───────────────────────────────────────
@@ -2184,6 +2401,103 @@ mod tests {
 
         reg.delete_room(&r.id);
         assert!(reg.get_room_for_device("test_bulb").is_none());
+    }
+
+    #[test]
+    fn create_room_group_appears_in_room() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Kitchen");
+        let g = reg.create_room_group(&r.id, "Counter");
+        let rooms = reg.list_rooms();
+        let room = rooms.iter().find(|room| room.id == r.id).unwrap();
+        assert_eq!(room.groups.len(), 1);
+        assert_eq!(room.groups[0].id, g.id);
+        assert_eq!(room.groups[0].name, "Counter");
+        assert!(room.groups[0].device_ids.is_empty());
+    }
+
+    #[test]
+    fn set_device_group_is_exclusive() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Kitchen");
+        reg.add_device_to_room(&r.id, "spot1");
+        reg.add_device_to_room(&r.id, "pendant1");
+        let counter = reg.create_room_group(&r.id, "Counter");
+        let spots = reg.create_room_group(&r.id, "Spots");
+
+        reg.set_device_group("pendant1", Some(&counter.id));
+        reg.set_device_group("spot1", Some(&spots.id));
+
+        let rooms = reg.list_rooms();
+        let room = rooms.iter().find(|room| room.id == r.id).unwrap();
+        let counter_group = room.groups.iter().find(|g| g.id == counter.id).unwrap();
+        let spots_group = room.groups.iter().find(|g| g.id == spots.id).unwrap();
+        assert_eq!(counter_group.device_ids, vec!["pendant1".to_string()]);
+        assert_eq!(spots_group.device_ids, vec!["spot1".to_string()]);
+
+        // Moving pendant1 into Spots removes it from Counter - exclusive membership.
+        reg.set_device_group("pendant1", Some(&spots.id));
+        let rooms = reg.list_rooms();
+        let room = rooms.iter().find(|room| room.id == r.id).unwrap();
+        let counter_group = room.groups.iter().find(|g| g.id == counter.id).unwrap();
+        assert!(counter_group.device_ids.is_empty());
+
+        // Clearing back to ungrouped.
+        reg.set_device_group("pendant1", None);
+        let rooms = reg.list_rooms();
+        let room = rooms.iter().find(|room| room.id == r.id).unwrap();
+        assert!(
+            room.groups
+                .iter()
+                .all(|g| !g.device_ids.contains(&"pendant1".to_string()))
+        );
+    }
+
+    #[test]
+    fn delete_room_group_clears_group_id_but_keeps_devices_in_room() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Kitchen");
+        reg.add_device_to_room(&r.id, "pendant1");
+        let counter = reg.create_room_group(&r.id, "Counter");
+        reg.set_device_group("pendant1", Some(&counter.id));
+
+        reg.delete_room_group(&counter.id);
+
+        assert!(reg.get_room_group(&counter.id).is_none());
+        // The device is still in the room, just ungrouped.
+        assert_eq!(reg.get_room_for_device("pendant1"), Some(r.id.clone()));
+        let rooms = reg.list_rooms();
+        let room = rooms.iter().find(|room| room.id == r.id).unwrap();
+        assert!(room.device_ids.contains(&"pendant1".to_string()));
+        assert!(room.groups.is_empty());
+    }
+
+    #[test]
+    fn delete_room_cascades_to_room_groups() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Kitchen");
+        let g = reg.create_room_group(&r.id, "Counter");
+        reg.delete_room(&r.id);
+        assert!(reg.get_room_group(&g.id).is_none());
+    }
+
+    #[test]
+    fn rename_room_group_updates_name() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Kitchen");
+        let g = reg.create_room_group(&r.id, "Counter");
+        reg.rename_room_group(&g.id, "Island");
+        assert_eq!(reg.get_room_group(&g.id).unwrap().name, "Island");
+    }
+
+    #[test]
+    fn room_group_exists_reflects_creation_and_deletion() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Kitchen");
+        let g = reg.create_room_group(&r.id, "Counter");
+        assert!(reg.room_group_exists(&g.id));
+        reg.delete_room_group(&g.id);
+        assert!(!reg.room_group_exists(&g.id));
     }
 
     #[test]
