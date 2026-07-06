@@ -6,11 +6,12 @@ import * as layout from '/static/layout.js';
 import { xyToRgb, hslToXy } from '/static/colormath.js';
 import { buildSlider, buildColourWheel } from '/static/controls.js';
 import { buildLightControls, buildTempBar, dismissOpenLightControl } from '/static/lightcontrols.js';
-import { buildSensorCard, isSensorPinned } from '/static/devicewidgets.js';
+import { buildSensorCard, isSensorPinned, buildGroupSelect } from '/static/devicewidgets.js';
 import {
   createRoom, deleteRoom, renameRoom, reorderRooms,
   addDeviceToRoom, removeDeviceFromRoom, reorderRoomDevices,
   deleteDevice, patchDeviceName,
+  createRoomGroup, renameRoomGroup, deleteRoomGroup, setDeviceGroup,
 } from '/static/actions.js';
 import { esc, showToast } from '/static/util.js';
 import { setPref } from '/static/prefs.js';
@@ -759,6 +760,161 @@ function renderUnassigned(deviceIds) {
   return strip;
 }
 
+// ── In-room groups ────────────────────────────────────────────────────────────
+// Named, exclusive-membership subsets of a room's lights (e.g. Kitchen's 8
+// ceiling spots vs its 3 counter pendants) — independently controllable but
+// still full room members for scenes/effects (which stay room-wide only).
+// Naming/behaviour mirrors `room_groups` on the backend; never confuse with
+// the pre-existing Zigbee `light_groups` concept.
+
+function buildGroupCluster(room, group) {
+  const memberDevices = group.device_ids
+    .map(id => devicesMap.get(id))
+    .filter(d => d && d.device_type === 'light');
+  const anyOn = memberDevices.some(d => d.on);
+  const empty = memberDevices.length === 0;
+
+  const card = document.createElement('div');
+  card.className = 'room-group-cluster';
+  card.dataset.groupId = group.id;
+
+  const header = document.createElement('div');
+  header.className = 'room-group-header';
+
+  const nameEl = document.createElement('span');
+  nameEl.className = 'room-group-name';
+  nameEl.title = 'Click to rename';
+  nameEl.textContent = group.name;
+  nameEl.addEventListener('click', e => {
+    e.stopPropagation();
+    startGroupRename(nameEl, room.id, group);
+  });
+  header.appendChild(nameEl);
+
+  const count = document.createElement('span');
+  count.className = 'room-group-count';
+  count.textContent = `${memberDevices.length} light${memberDevices.length !== 1 ? 's' : ''}`;
+  header.appendChild(count);
+
+  const powerBtn = document.createElement('button');
+  powerBtn.className = 'room-power-btn' + (anyOn ? ' room-power-on' : '');
+  powerBtn.textContent = '⏻';
+  powerBtn.title = anyOn ? 'Turn group off' : 'Turn group on';
+  powerBtn.disabled = empty;
+  if (!empty) {
+    powerBtn.addEventListener('click', async e => {
+      e.stopPropagation();
+      if (!anyOn) {
+        for (const c of HUE_DEFAULT_ON) await sendGroupCommand(room.id, group, c);
+      } else {
+        sendGroupCommand(room.id, group, { action: 'off' });
+      }
+    });
+  }
+  header.appendChild(powerBtn);
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'room-group-delete-btn';
+  deleteBtn.textContent = '✕';
+  deleteBtn.title = 'Delete group (its lights stay in the room, ungrouped)';
+  deleteBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (confirm(`Delete "${group.name}"? Its lights stay in the room, ungrouped.`)) {
+      deleteRoomGroup(room.id, group.id);
+    }
+  });
+  header.appendChild(deleteBtn);
+
+  card.appendChild(header);
+
+  if (!empty) {
+    const briDevices = memberDevices.filter(d => d.brightness != null);
+    const avgBri = briDevices.length > 0
+      ? Math.round(briDevices.reduce((s, d) => s + (d.brightness ?? 0), 0) / briDevices.length)
+      : 200;
+    card.appendChild(buildSlider({
+      label: 'Brightness', min: 1, max: 254, value: avgBri,
+      format: v => Math.round((v / 254) * 100) + '%',
+      onCommit: v => sendGroupCommand(room.id, group, { action: 'brightness', value: v }),
+    }));
+  }
+
+  return card;
+}
+
+function startNewGroupInput(wrap, roomId, addBtn) {
+  addBtn.style.display = 'none';
+  const input = document.createElement('input');
+  input.className = 'room-group-name-input';
+  input.name = 'group-name';
+  input.autocomplete = 'off';
+  input.placeholder = 'Group name…';
+  let confirmed = false;
+  const confirm = () => {
+    if (confirmed) return;
+    confirmed = true;
+    const name = input.value.trim();
+    input.remove();
+    addBtn.style.display = '';
+    if (name) createRoomGroup(roomId, name);
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') confirm();
+    if (e.key === 'Escape') { confirmed = true; input.remove(); addBtn.style.display = ''; }
+  });
+  input.addEventListener('blur', confirm);
+  wrap.insertBefore(input, addBtn);
+  input.focus();
+}
+
+function startGroupRename(nameEl, roomId, group) {
+  const input = document.createElement('input');
+  input.value = group.name;
+  input.className = 'room-group-rename-input';
+  input.name = 'group-rename';
+  input.autocomplete = 'off';
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+  let saved = false;
+  const save = () => {
+    if (saved) return;
+    saved = true;
+    const name = input.value.trim();
+    input.replaceWith(nameEl);
+    if (name && name !== group.name) {
+      nameEl.textContent = name;
+      renameRoomGroup(roomId, group.id, name);
+    }
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') { saved = true; input.replaceWith(nameEl); }
+  });
+  input.addEventListener('blur', save);
+}
+
+function buildRoomGroupsSection(room) {
+  const groups = (room.groups ?? []).slice().sort((a, b) => a.position - b.position);
+  const wrap = document.createElement('div');
+  wrap.className = 'room-groups-section';
+
+  for (const group of groups) {
+    wrap.appendChild(buildGroupCluster(room, group));
+  }
+
+  const addBtn = document.createElement('button');
+  addBtn.className = 'room-group-add-btn';
+  addBtn.textContent = '+ New group';
+  addBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    startNewGroupInput(wrap, room.id, addBtn);
+  });
+  wrap.appendChild(addBtn);
+
+  return wrap;
+}
+
 // ── Room card ────────────────────────────────────────────────────────────────
 
 function renderRoomCard(room, houseAvgTemp) {
@@ -1176,6 +1332,12 @@ function renderRoomCard(room, houseAvgTemp) {
   card.appendChild(header);
   bodyPrepend.push(ctrlRow);
 
+  // In-room groups — same tier as the room's own on/off/brightness/colour
+  // cluster above, so a group stays actionable without opening every
+  // sub-section. Rendered even for a room with zero groups (just the "+ New
+  // group" affordance) so the feature is discoverable.
+  if (!empty) bodyPrepend.push(buildRoomGroupsSection(room));
+
   // Effect param editor popover — visible when the badge for this room is clicked
   if (activeEffect && effectEditor.openRoomId === room.id) {
     bodyPrepend.push(buildEffectEditor(room, activeEffect));
@@ -1269,27 +1431,47 @@ function renderRoomCard(room, houseAvgTemp) {
   // and no controls to expose (see buildSensorCard's own comment for why the
   // widget is shared as-is between here and the Devices tab).
   const lightIds = room.device_ids.filter(id => devicesMap.get(id)?.device_type === 'light');
+  const groups = (room.groups ?? []).slice().sort((a, b) => a.position - b.position);
+  const groupOf = new Map(); // deviceId -> group
+  for (const g of groups) for (const id of g.device_ids) groupOf.set(id, g);
+
   const devicesEl = document.createElement('div');
   devicesEl.className = 'room-devices';
+  // Device cards are intentionally NOT draggable — accidental drags were
+  // yanking bulbs out of rooms. Removal is via the card's ✕ button only.
+  // (Assigning a bulb INTO a room still works by dragging it from the
+  // Unassigned strip onto the room.)
+  const cardFor = (deviceId, opts) => {
+    const dev = devicesMap.get(deviceId);
+    return dev ? buildDeviceCard(dev, room.id, opts) : buildDevicePlaceholder(deviceId, room.id);
+  };
   if (lightIds.length === 0) {
     const hint = document.createElement('span');
     hint.className = 'room-drop-hint';
     hint.textContent = 'Drop bulbs here';
     devicesEl.appendChild(hint);
+  } else if (groups.length === 0) {
+    // No groups defined — flat list, same as before groups existed.
+    for (const deviceId of lightIds) devicesEl.appendChild(cardFor(deviceId));
   } else {
-    for (const deviceId of lightIds) {
-      const dev = devicesMap.get(deviceId);
-      if (dev) {
-        // Device cards are intentionally NOT draggable — accidental drags were
-        // yanking bulbs out of rooms. Removal is via the card's ✕ button only.
-        // (Assigning a bulb INTO a room still works by dragging it from the
-        // Unassigned strip onto the room.)
-        const devCard = buildDeviceCard(dev, room.id);
-        devicesEl.appendChild(devCard);
-      } else {
-        devicesEl.appendChild(buildDevicePlaceholder(deviceId, room.id));
-      }
+    // Partitioned: one labelled sub-list per non-empty group, then Ungrouped.
+    // Each card gets a group-select so membership can be reassigned inline.
+    const subList = (label, deviceIds, currentGroupId) => {
+      const sub = document.createElement('div');
+      sub.className = 'room-devices-subgroup';
+      const labelEl = document.createElement('div');
+      labelEl.className = 'room-devices-subgroup-label';
+      labelEl.textContent = label;
+      sub.appendChild(labelEl);
+      for (const deviceId of deviceIds) sub.appendChild(cardFor(deviceId, { groups, currentGroupId }));
+      devicesEl.appendChild(sub);
+    };
+    for (const g of groups) {
+      const memberIds = lightIds.filter(id => groupOf.get(id) === g);
+      if (memberIds.length > 0) subList(g.name, memberIds, g.id);
     }
+    const ungroupedIds = lightIds.filter(id => !groupOf.has(id));
+    if (ungroupedIds.length > 0) subList('Ungrouped', ungroupedIds, null);
   }
   body.appendChild(devicesEl);
   wireDropZone(body, room.id);
@@ -1379,7 +1561,7 @@ function renderRoomCard(room, houseAvgTemp) {
 
 // ── Device card inside a room ────────────────────────────────────────────────
 
-function buildDeviceCard(dev, roomId) {
+function buildDeviceCard(dev, roomId, opts = {}) {
   const card = document.createElement('div');
   const offline = dev.online === false;
   card.className = 'light-card room-device-card' + (offline ? ' device-offline' : '');
@@ -1416,6 +1598,16 @@ function buildDeviceCard(dev, roomId) {
   card.querySelector('[data-ctrl="room-remove"]')?.addEventListener('click', e => {
     e.stopPropagation(); removeDeviceFromRoom(roomId, dev.device_id);
   });
+
+  // Group-assignment dropdown — only shown once the room has at least one
+  // group (nothing to reassign into otherwise).
+  if (opts.groups && opts.groups.length > 0) {
+    const groupSelect = buildGroupSelect(opts.groups, opts.currentGroupId ?? null,
+      groupId => setDeviceGroup(roomId, dev.device_id, groupId));
+    groupSelect.title = 'Assign to group';
+    groupSelect.addEventListener('click', e => e.stopPropagation());
+    card.querySelector('.light-card-header-right')?.appendChild(groupSelect);
+  }
 
   // Per-bulb effect indicator — lit when participating, greyed when paused.
   if (eff) {
@@ -1799,6 +1991,36 @@ async function sendRoomCommand(roomId, body, room, isGlobal = false) {
       else showToast(`Room command failed (${res.status})`, true);
     }
   } catch (e) { showToast(`Room command error: ${e.message}`, true); }
+}
+
+// A group command is scoped to a room-group's own member devices — same
+// optimistic-update/POST shape as sendRoomCommand, just a narrower device
+// set and a different endpoint. Group membership is a subset of the room,
+// so a group command still clears the room's active-scene tracking (a
+// scene stays room-wide only; manually moving a group is exactly the kind
+// of divergence that already un-marks a room's active scene today).
+async function sendGroupCommand(roomId, group, body) {
+  clearRoomActiveScene(roomId);
+  for (const deviceId of group.device_ids) {
+    const dev = devicesMap.get(deviceId);
+    if (dev && dev.device_type === 'light') {
+      let updated = dev;
+      if (body.action === 'on') updated = { ...updated, on: true };
+      else if (body.action === 'off') updated = { ...updated, on: false };
+      else if (body.action === 'brightness') updated = { ...updated, brightness: body.value, on: true };
+      else if (body.action === 'color_temp') updated = { ...updated, color_temp: body.value };
+      else if (body.action === 'color_xy') updated = { ...updated, color_xy: [body.x, body.y] };
+      devicesMap.set(deviceId, updated);
+    }
+  }
+  if (body.action !== 'color_xy') render();
+  try {
+    const res = await api(`/rooms/${encodeURIComponent(roomId)}/groups/${encodeURIComponent(group.id)}/command`, { method: 'POST', body });
+    if (!res.ok) {
+      if (res.status === 503) showToast('Some devices offline — others updated', false);
+      else showToast(`Group command failed (${res.status})`, true);
+    }
+  } catch (e) { showToast(`Group command error: ${e.message}`, true); }
 }
 
 async function sendDeviceCommand(deviceId, body, opts = {}) {

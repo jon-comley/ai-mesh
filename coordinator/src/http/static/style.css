@@ -1222,6 +1222,97 @@ body {
 }
 .room-house-summary-warn { color: var(--red); font-weight: 600; }
 
+/* ── In-room groups ─────────────────────────────────────────────────────── */
+.room-groups-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+
+.room-group-cluster {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.room-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.room-group-name {
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-group-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.room-group-header .room-power-btn { margin-left: auto; }
+
+.room-group-delete-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 4px;
+  flex-shrink: 0;
+}
+.room-group-delete-btn:hover { color: var(--red); }
+
+.room-group-add-btn {
+  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 6px 12px;
+  width: 100%;
+  text-align: left;
+  transition: border-color 0.15s;
+}
+.room-group-add-btn:hover { border-color: var(--accent); }
+
+.room-group-name-input,
+.room-group-rename-input {
+  background: var(--surface-2);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+}
+.room-group-name-input { width: 100%; margin-bottom: 6px; }
+
+.room-devices-subgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.room-devices-subgroup + .room-devices-subgroup { margin-top: 10px; }
+
+.room-devices-subgroup-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 .room-header-controls-row {
   display: flex;
   flex-direction: column;
@@ -2226,7 +2317,8 @@ body {
   align-items: center;
   gap: 6px;
 }
-.device-room-select {
+.device-room-select,
+.device-group-select {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: 6px;

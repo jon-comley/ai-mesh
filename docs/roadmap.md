@@ -842,6 +842,28 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > restart-survival, the battery-pull offline-dim path, and the delete/unpair
 > test haven't been explicitly exercised. Phase C's LLM gate (`just intent
 > "what's the office temperature?"`) also still needs a live run.
+>
+> **Home tab tile redesign + in-room groups backend (2026-07-06, commit
+> `7e6ef30`)** — full plan at `plans/home-ui-redesign.md`, written after
+> reviewing 6 candidate UI directions plus two external appraisals (Bing,
+> Gemini). Phase 1: room cards collapse into glanceable tiles by default
+> (colour-wash background from aggregate light xy/CT, a dedicated power
+> toggle, notable-only badges for motion/low-battery/off-average temp) with
+> a whole-house summary line above the grid — deployed and **live-verified
+> on the phone against pi1**. Phase 2 backend: `room_groups` table (named to
+> avoid colliding with the pre-existing Zigbee `light_groups`), full
+> registry CRUD, a shared `dispatch_light_command` fan-out helper used by
+> both `room_command` and the new `group_command`, 5 new REST routes, and
+> voice/intent targeting — group names now resolve and fan out, and the
+> adjacent pre-existing bug where "turn on the kitchen" only lit the room's
+> *first* device is fixed the same way. No `WIRE_VERSION` bump (rides the
+> existing `RoomsUpdate` event). Both external reviews of this commit were
+> checked claim-by-claim against the actual code before acting on either:
+> one real gap confirmed and fixed (no logging on which device failed in
+> the fan-out loop); the other five points were already handled by existing
+> code (`xyToRgb` already clamps, group members were already position-
+> sorted, etc.) or not actual regressions. **Next:** Phase 2's frontend —
+> the group cluster UI in the expanded room panel (still to build).
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
