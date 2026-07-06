@@ -45,7 +45,24 @@
   layer, `pointer-events: none` so it never intercepts clicks. Global axum
   body limit raised (2MB → 8MB+4096) to fit an upload; every other route's
   bodies stay tiny JSON so this only widens headroom.
-- Phase 3 — not started.
+- **Phase 3 — shipped, rescoped.** Before implementing, found the plan's
+  premise was wrong: `RoomRecord.origin_x`/`origin_y` are a *within-room*
+  crosshair reference point (bulb-placement snapping, 3D centering), not a
+  whole-house world position — there was no data to assemble a true house
+  layout from, and adding one (new position fields + a drag-to-arrange UI)
+  would have been a real feature in itself before the view even rendered.
+  Given the choice, went with a **schematic proportional view** instead of
+  building that: a "Tiles / Floorplan" toggle on the Home tab (persisted in
+  localStorage), reusing 100% of `renderRoomCard`'s existing internals
+  (group clusters, scenes, device list, click-to-expand) unchanged. In
+  floorplan mode each collapsed tile's height is shaped by its own
+  `depth_m`/`width_m` ratio (schematic — a fixed reference height scaled by
+  the ratio, not real pixels-per-metre, since this is a single-column
+  phone-width list, not a 2D house collage), a subtle graph-paper texture
+  distinguishes the mode, and a tiny compass glyph reuses
+  `orientation_degrees` (already captured for the solar effect) rotated the
+  same way the layout editor's own compass dial rotates its N label. No
+  backend changes at all — pure frontend, no wire/schema impact.
 
 ## Context
 
@@ -254,41 +271,50 @@ to each member device individually.
   quick-scene chips get a group-label prefix ("Counter: Bright") so
   they read distinctly from room-wide chips in the same bar.
 
-## Phase 3 — Spatial floorplan view (the differentiator)
+## Phase 3 — Floorplan view mode (rescoped from the original plan — SHIPPED)
 
-**Positioning: an alternate view mode, not a replacement.** A toggle
-between "Tiles" (Phase 1) and "Floorplan" for the Home tab, not a
-wholesale bet on the riskiest option for daily use. If the floorplan
-doesn't read well on a phone screen, Phase 1 remains the reliable
-default — this directly addresses the "must be fast and legible or it
-becomes a gimmick" risk both external reviews flagged, without giving up
-the differentiator.
+**Original premise was wrong, corrected before writing any code.** This
+section originally assumed `RoomRecord.origin_x`/`origin_y` were world
+coordinates placing each room relative to the others, making "assemble a
+whole-house plan" a rendering exercise over data that already existed.
+Checked before implementing: they're actually a *within-room* crosshair
+reference point (bulb-placement snapping, 3D centering) — there is no
+data anywhere describing one room's position relative to another, and
+building that (new position fields + a one-time drag-to-arrange UI) would
+have been real, unscoped engineering before the view could even render.
 
-- Builds on the *existing* spatial data already captured for the layout
-  editor (`coordinator/src/http/static/layout.js` — room dimensions,
-  orientation, openings) — not a new geometry system. Crucially,
-  `RoomRecord` already carries `origin_x`/`origin_y` world coordinates
-  alongside `width_m`/`depth_m`, so assembling rooms into a whole-house
-  plan is real, not speculative. **Multi-floor is explicitly out of scope
-  for v1** (no floor/z concept exists in the room model; a floor selector
-  is a later addition if ever needed).
-- New **read-only, simplified rendering mode**: real room shapes/relative
-  positions (not the full bulb-placement editing canvas — no drag
-  handles, no popovers for editing openings), colour-washed by aggregate
-  state using the same visual language as Phase 1's tiles. Tapping a room
-  opens the same expanded control panel Phase 1/2 already built — the
-  floorplan is a different way to *reach* a room's controls, not a
-  parallel control surface.
-- Groups do not get their own spatial sub-regions in v1 (both external
-  appraisals flagged this as awkward) — a room's group clusters still
-  live in the expanded panel reached by tapping the room shape.
-- **Effort/risk**: highest of the three UI phases. The geometry exists,
-  but was built for an editing tool, not a fast-glance daily dashboard —
-  adapting it needs its own focused implementation pass (a fresh
-  read-only render path, likely reusing `layout.js`'s SVG primitives
-  rather than its full interactive canvas) before coding starts. Land
-  Phase 1 first and use it for a while before committing engineering time
-  here, per the phasing rationale above.
+Put to Jon as an explicit choice (true whole-house arrangement vs. a
+schematic proportional view vs. holding off entirely); **schematic** was
+picked. What actually shipped:
+
+- **Positioning: an alternate view mode, not a replacement** — a
+  "▦ Tiles / ⌂ Floorplan" toggle on the Home tab (persisted in
+  localStorage as `mesh-home-view-mode`), living beside the whole-house
+  summary line. Tiles stays the default; if floorplan doesn't read well,
+  switching back costs one tap.
+- **Schematic, not scaled**: since the Home tab is a single-column
+  phone-width list (confirmed — `.room-list` is `flex-direction: column`,
+  there's no multi-column canvas to lay rooms out across), "floorplan"
+  means each room's *collapsed tile* is shaped by its own
+  `depth_m`/`width_m` ratio (clamped 0.4–2.5, height clamped 70–240px off
+  a 90px reference) rather than every tile sharing one uniform height —
+  not a true scaled 2D house collage. A subtle CSS graph-paper texture
+  (`.room-card::before`, layered behind the existing colour-wash
+  background) is the only other visual cue that the mode changed.
+- **Zero new data, zero new backend** — no `origin_x`/`origin_y` reuse, no
+  new registry/API work, no wire change. `renderRoomCard`'s internals
+  (group clusters, scenes, device list, click-to-expand) are 100% shared
+  between both modes; only the tile-face sizing and a small orientation
+  compass glyph (reusing `orientation_degrees`, already captured for the
+  solar effect — rotated the same way the layout editor's own compass
+  dial rotates its N label) are new.
+- Groups still don't get their own spatial sub-regions — a room's group
+  clusters live in the same expanded panel reached by tapping the tile,
+  identical in both view modes.
+- **Effort ended up low, not high** — the original "highest effort/risk"
+  assessment assumed a genuine new render path over real spatial data;
+  once that data turned out not to exist, the schematic version reduced
+  to a sizing/styling variant of code that already existed.
 
 ## Phase 4 — Camera-assisted room setup (small, scoped)
 

@@ -49,6 +49,14 @@ let dragSrc = null;             // chip drag: { deviceId, fromRoomId }
 let roomDragId = null;          // room reorder drag: room id being dragged
 let _roomCtrlDismiss = null;          // document outside-pointerdown listener for the open room colour/temp panel (only one at a time)
 
+// Phase 3 — Home tab view mode: 'tiles' (default, uniform height) or
+// 'floorplan' (each room's collapsed tile shaped by its real width_m/depth_m
+// aspect ratio — schematic, not a true scaled house layout; see
+// plans/home-ui-redesign.md Phase 3 for why). Persisted like the other
+// per-user display prefs in this file.
+const HOME_VIEW_MODE_KEY = 'mesh-home-view-mode';
+let homeViewMode = localStorage.getItem(HOME_VIEW_MODE_KEY) === 'floorplan' ? 'floorplan' : 'tiles';
+
 // ttlMs override lets a caller hold a value longer than the default drag
 // window — scenes.js uses this to bridge a bulb's physical ramp-to-target
 // (the sequence of intermediate MQTT state reports would otherwise jerk the
@@ -459,7 +467,9 @@ function render() {
   container.appendChild(renderUnassigned(unassigned));
 
   const roomList = document.createElement('div');
-  roomList.className = 'room-list rooms-layout-root' + (zigbeeOnline ? '' : ' zigbee-offline');
+  roomList.className = 'room-list rooms-layout-root'
+    + (zigbeeOnline ? '' : ' zigbee-offline')
+    + (homeViewMode === 'floorplan' ? ' room-list-floorplan' : '');
 
   // Whole-house average temperature — computed once here rather than per
   // card, so every room's "notable" badge compares against the same
@@ -474,7 +484,7 @@ function render() {
 
   const sorted = [...model.rooms].sort((a, b) => a.position - b.position);
   for (const room of sorted) {
-    roomList.appendChild(renderRoomCard(room, houseAvgTemp));
+    roomList.appendChild(renderRoomCard(room, houseAvgTemp, homeViewMode === 'floorplan'));
   }
 
   container.appendChild(roomList);
@@ -573,8 +583,31 @@ function renderHouseSummary() {
     line.appendChild(warn);
   }
   wrap.appendChild(line);
+  wrap.appendChild(renderViewModeToggle());
   wrap.appendChild(renderGlobalControls());
   return wrap;
+}
+
+// Tiles (uniform, today's default) vs Floorplan (each room shaped by its
+// real proportions — see the homeViewMode comment above). A view preference,
+// not a control, so it lives beside the summary line rather than in the
+// global on/off bar.
+function renderViewModeToggle() {
+  const seg = document.createElement('div');
+  seg.className = 'room-view-mode-toggle';
+  for (const [mode, label] of [['tiles', '▦ Tiles'], ['floorplan', '⌂ Floorplan']]) {
+    const btn = document.createElement('button');
+    btn.className = 'room-view-mode-btn' + (homeViewMode === mode ? ' active' : '');
+    btn.textContent = label;
+    btn.addEventListener('click', () => {
+      if (homeViewMode === mode) return;
+      homeViewMode = mode;
+      localStorage.setItem(HOME_VIEW_MODE_KEY, mode);
+      render();
+    });
+    seg.appendChild(btn);
+  }
+  return seg;
 }
 
 // ── Effects palette ──────────────────────────────────────────────────────────
@@ -919,10 +952,25 @@ function buildRoomGroupsSection(room) {
 
 // ── Room card ────────────────────────────────────────────────────────────────
 
-function renderRoomCard(room, houseAvgTemp) {
+function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
   const card = document.createElement('div');
   card.className = 'room-card';
   card.dataset.roomId = room.id;
+
+  // Floorplan mode: shape the collapsed tile by the room's own width_m/
+  // depth_m aspect ratio instead of a uniform height — schematic (this is a
+  // single-column phone-width list, not a true scaled house layout), so a
+  // fixed reference height is scaled by the ratio rather than converting to
+  // real pixels-per-metre. Harmless to set unconditionally (expanded content
+  // already exceeds it), so no separate collapsed/expanded branch needed.
+  // 90px ≈ today's natural compact tile height for a roughly-square room
+  // (aspect ~1); the 0.4–2.5 aspect clamp and 70–240px height clamp guard
+  // against a wildly thin/tall tile from an oddly-shaped or mis-entered
+  // room (e.g. a 1m×20m hallway) dominating or vanishing from the list.
+  if (isFloorplan) {
+    const aspect = Math.min(2.5, Math.max(0.4, (room.depth_m || 3) / (room.width_m || 3)));
+    card.style.minHeight = `${Math.round(Math.min(240, Math.max(70, 90 * aspect)))}px`;
+  }
 
   // Used by both the quick-scenes bar (group-name chip prefix) and the
   // device list (per-group sub-lists) further down.
@@ -1046,6 +1094,18 @@ function renderRoomCard(room, houseAvgTemp) {
   pencilBtn.textContent = '✎';
   pencilBtn.addEventListener('click', e => { e.stopPropagation(); startRename(nameEl, room); });
   nameWrap.appendChild(pencilBtn);
+  // Floorplan mode only: a tiny compass glyph reusing the room's own
+  // orientation_degrees (already captured for the solar effect) — reinforces
+  // the "you're looking at a floor plan" feel with real data, not a new
+  // geometry concept. Rotates the glyph so its arrow points toward north.
+  if (isFloorplan) {
+    const compass = document.createElement('span');
+    compass.className = 'room-floorplan-compass';
+    compass.textContent = '⬆';
+    compass.title = `Room orientation: ${Math.round(room.orientation_degrees ?? 0)}°`;
+    compass.style.transform = `rotate(${-(room.orientation_degrees ?? 0)}deg)`;
+    nameWrap.appendChild(compass);
+  }
   nameRow.appendChild(nameWrap);
 
   // Power icon — quick toggle without expanding. Tapping the rest of the

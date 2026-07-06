@@ -903,6 +903,27 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > backdrop sitting just above the floor rect and below every interactive
 > layer, `pointer-events: none` so it never intercepts canvas clicks. 623
 > tests.
+>
+> **Phase 3 — floorplan view mode, rescoped before coding (2026-07-06)** —
+> the original plan assumed `RoomRecord.origin_x`/`origin_y` were
+> whole-house world coordinates, making "assemble a real floor plan" a
+> rendering exercise over existing data. Checked before writing anything:
+> they're actually a within-room crosshair reference point (bulb-placement
+> snapping, 3D centering) — no data anywhere places one room relative to
+> another, so a true house layout would have meant a new position model
+> plus a drag-to-arrange UI, real unscoped work before the view could even
+> render. Put to Jon as an explicit choice; went with a schematic
+> proportional view instead of building that. Shipped: a "▦ Tiles /
+> ⌂ Floorplan" toggle on the Home tab (persisted, defaults to Tiles) that
+> reuses `renderRoomCard`'s internals unchanged — only the collapsed
+> tile's height (shaped by its own `depth_m`/`width_m` ratio, schematic
+> since the Home tab is a single-column phone-width list, not a 2D
+> collage), a graph-paper texture, and a small compass glyph (reusing
+> `orientation_degrees`, already captured for the solar effect) are new.
+> Zero backend changes, zero wire impact — pure frontend. What was
+> originally rated the highest-effort/risk phase turned out low-effort
+> once the false premise was caught early. 623 tests (unchanged —
+> frontend-only).
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
