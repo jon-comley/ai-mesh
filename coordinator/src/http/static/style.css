@@ -1222,6 +1222,52 @@ body {
 }
 .room-house-summary-warn { color: var(--red); font-weight: 600; }
 
+/* ── Home tab view mode (Tiles / Floorplan) ────────────────────────────────── */
+.room-view-mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.room-view-mode-btn {
+  background: var(--surface-2);
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+.room-view-mode-btn + .room-view-mode-btn { border-left: 1px solid var(--border); }
+.room-view-mode-btn.active { background: var(--accent); color: var(--surface); }
+
+/* Floorplan mode: each room's collapsed tile is shaped by its own aspect
+   ratio (set inline via card.style.minHeight) rather than a uniform height —
+   this graph-paper texture is the only other visual cue, layered behind the
+   header/wash via a pseudo-element so it never fights the data-driven inline
+   background gradient. */
+.room-list-floorplan .room-card {
+  position: relative;
+  overflow: hidden;
+}
+.room-list-floorplan .room-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--border) 60%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--border) 60%, transparent) 1px, transparent 1px);
+  background-size: 20px 20px;
+  opacity: 0.35;
+}
+.room-floorplan-compass {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  margin-left: 2px;
+}
+
 /* ── In-room groups ─────────────────────────────────────────────────────── */
 .room-groups-section {
   display: flex;
