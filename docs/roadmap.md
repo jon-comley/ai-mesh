@@ -864,6 +864,27 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > code (`xyToRgb` already clamps, group members were already position-
 > sorted, etc.) or not actual regressions. **Next:** Phase 2's frontend —
 > the group cluster UI in the expanded room panel (still to build).
+>
+> **Phase 2 frontend + Phase 2b group-scoped scenes (2026-07-06, commit
+> `8840d6c` + this commit)** — Phase 2 frontend shipped first (`8840d6c`):
+> per-group on/off + brightness cluster, inline rename/delete, `+ New
+> group`, and a `buildGroupSelect` dropdown per light card partitioning the
+> device list into Ungrouped + per-group sub-lists. Phase 2b followed
+> immediately: `scenes.group_id` (cascades on group delete — unlike
+> `room_devices.group_id`, which is only nulled, a group-scoped scene has
+> no other UI path to get deleted from once its group is gone), `save_scene`
+> narrows to the group's own members and skips effect capture entirely for
+> a group scope (effects stay room-wide only). `recall_scene` needed zero
+> changes, confirmed by reading it before writing anything. The frontend
+> piece generalized `scenes.js`'s three per-room state Maps
+> (`activeSceneByRoom`/`preSceneStateByRoom`/`pausedSceneDevices`) to be
+> keyed by "scope id" (a room id or a group id — safe to mix, both come
+> from the same UUID generator) so a room's own scene and any of its
+> groups' scenes track independently active/paused at once. Quick-scene
+> chips for a group scene share the room's existing bar with a
+> `"GroupName: "` prefix; each group cluster gets its own compact
+> `+ Save scene` row (factored out into `buildSceneSaveRow`, shared with
+> the room-wide one). 609 tests.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past

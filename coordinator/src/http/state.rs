@@ -295,6 +295,10 @@ pub struct SceneInfo {
     pub effect_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect_params: Option<serde_json::Value>,
+    /// Set when this scene targets one room-group's members rather than
+    /// the whole room.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 /// Per-model entry in a `ModelUpdate` event — one per non-Unloaded allocation.
@@ -2352,6 +2356,7 @@ mod tests {
             states: vec![],
             effect_id: None,
             effect_params: None,
+            group_id: None,
         }
     }
 
@@ -2422,6 +2427,7 @@ mod tests {
                 states: vec![],
                 effect_id: None,
                 effect_params: None,
+                group_id: None,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();
@@ -2453,6 +2459,7 @@ mod tests {
                 states: vec![],
                 effect_id: None,
                 effect_params: None,
+                group_id: None,
             }],
         };
         let json = serde_json::to_string(&evt).unwrap();

@@ -26,12 +26,19 @@ export const devicesMap = new Map();
 export const lastEffectByRoom = new Map();   // roomId → { effect_id, params } — paused/remembered state
 export const openPickerIds = new Set();      // device IDs whose colour picker is currently open
 export const openRoomCtrlIds = new Set();    // room IDs whose 🎨 colour/temp panel is open (survives render)
-export const activeSceneByRoom = new Map();      // roomId → sceneId of last-recalled scene
-export const preSceneStateByRoom = new Map();    // roomId → Map<deviceId, snapshot> before last recall
-// Devices the user has paused out of the room's active scene (session-only). The
-// scene stays active for the rest; a paused light reverts to pre-scene (or warm
-// white), and clicking its greyed scene icon resumes it. Mirrors effect overrides.
-export const pausedSceneDevices = new Map();     // roomId → Set<deviceId>
+// Keyed by "scope id", not always a room id: a room-wide scene's scope is its
+// own room id; a group-scoped scene's scope is its group id instead (group ids
+// are UUIDs from the same generator as room ids, so mixing them in one Map's
+// keyspace is collision-free) — this lets a room-wide scene and any number of
+// its groups' own scenes stay independently active/paused at once, without a
+// second set of Maps per scope kind.
+export const activeSceneByRoom = new Map();      // scopeId → sceneId of last-recalled scene
+export const preSceneStateByRoom = new Map();    // scopeId → Map<deviceId, snapshot> before last recall
+// Devices the user has paused out of the active scene for their scope (session-
+// only). The scene stays active for the rest; a paused light reverts to pre-scene
+// (or warm white), and clicking its greyed scene icon resumes it. Mirrors effect
+// overrides.
+export const pausedSceneDevices = new Map();     // scopeId → Set<deviceId>
 
 // Which colour/temp domain currently shows a live DOT (vs its glyph icon), per
 // target. A dot appears when you set a colour/temperature and PERSISTS, showing
@@ -60,7 +67,9 @@ export const effectEditor = { openRoomId: null };
 // Open scene-name editor, straddling the scenes module (builders + the
 // Escape/click document listeners) and rooms.js's render() (which restores the
 // open input after a rebuild). Holder object for the same read-only-binding
-// reason as the effect holders above. `active` is { roomId, value } | null.
+// reason as the effect holders above. `active` is { roomId, groupId, value } | null
+// — groupId is set when the open editor is a group's own "+ Save scene" row
+// rather than the room-wide one.
 export const sceneEdit = { active: null };
 
 // Pending optimistic command values per (deviceId, field). Each entry { value, ts }.

@@ -131,9 +131,15 @@ pub struct SceneRecord {
     /// effect at save time — every other room member is driven by the
     /// effect itself, not a stored snapshot.
     pub states: Vec<DeviceSnapshot>,
-    /// Effect active in the room when the scene was saved, if any.
+    /// Effect active in the room when the scene was saved, if any. Always
+    /// `None` for a group-scoped scene (`group_id.is_some()`) — effects
+    /// stay a room-wide-only concept, never half-supported per-group.
     pub effect_id: Option<String>,
     pub effect_params_json: Option<String>,
+    /// When set, this scene targets only one room-group's member devices
+    /// rather than the whole room. `room_id` is still populated (the
+    /// group's owning room) so room-scoped queries keep working unchanged.
+    pub group_id: Option<String>,
 }
 
 impl SceneRecord {
@@ -468,6 +474,18 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !scene_cols.contains(&"effect_params_json".to_string()) {
         conn.execute("ALTER TABLE scenes ADD COLUMN effect_params_json TEXT", [])?;
+    }
+
+    // Migration: Add group_id column to scenes if it doesn't exist — scopes
+    // a scene to one of a room's groups rather than the whole room. Cascades
+    // on group deletion (unlike room_devices.group_id, which is deliberately
+    // nulled instead) so a deleted group doesn't leave behind an orphaned
+    // scene with no UI path to delete it.
+    if !scene_cols.contains(&"group_id".to_string()) {
+        conn.execute(
+            "ALTER TABLE scenes ADD COLUMN group_id TEXT REFERENCES room_groups(id) ON DELETE CASCADE",
+            [],
+        )?;
     }
 
     // Legacy migration: convert has_window/window_facing rows to openings rows (idempotent).
@@ -2040,8 +2058,8 @@ mod tests {
         {
             let mut reg = Registry::open(path).expect("open db");
             room_id = reg.create_room("Lounge").id;
-            reg.save_scene("Movie", Some(&room_id), Vec::new(), None);
-            reg.save_scene("Global", None, Vec::new(), None);
+            reg.save_scene("Movie", Some(&room_id), Vec::new(), None, None);
+            reg.save_scene("Global", None, Vec::new(), None, None);
         } // dropped — connection closed
 
         // Reopen: the room and both scenes must still be there ("saving").
@@ -2644,6 +2662,7 @@ mod tests {
             Some(&r.id),
             vec![make_snapshot("bulb1", true)],
             None,
+            None,
         );
         assert!(!scene.id.is_empty());
         assert_eq!(scene.name, "Evening");
@@ -2657,7 +2676,13 @@ mod tests {
     #[test]
     fn save_scene_global_has_no_room_id() {
         let mut reg = Registry::new();
-        let scene = reg.save_scene("All Off", None, vec![make_snapshot("bulb1", false)], None);
+        let scene = reg.save_scene(
+            "All Off",
+            None,
+            vec![make_snapshot("bulb1", false)],
+            None,
+            None,
+        );
         assert!(scene.room_id.is_none());
         let scenes = reg.list_scenes();
         assert_eq!(scenes.len(), 1);
@@ -2667,7 +2692,13 @@ mod tests {
     #[test]
     fn get_scene_returns_correct_record() {
         let mut reg = Registry::new();
-        let saved = reg.save_scene("Morning", None, vec![make_snapshot("bulb2", true)], None);
+        let saved = reg.save_scene(
+            "Morning",
+            None,
+            vec![make_snapshot("bulb2", true)],
+            None,
+            None,
+        );
         let fetched = reg.get_scene(&saved.id).expect("scene should exist");
         assert_eq!(fetched.id, saved.id);
         assert_eq!(fetched.name, "Morning");
@@ -2685,7 +2716,7 @@ mod tests {
     #[test]
     fn scene_exists_returns_correct_values() {
         let mut reg = Registry::new();
-        let s = reg.save_scene("Test", None, vec![], None);
+        let s = reg.save_scene("Test", None, vec![], None, None);
         assert!(reg.scene_exists(&s.id));
         assert!(!reg.scene_exists("nonexistent-id"));
     }
@@ -2693,7 +2724,7 @@ mod tests {
     #[test]
     fn delete_scene_removes_from_list() {
         let mut reg = Registry::new();
-        let s = reg.save_scene("Temp", None, vec![], None);
+        let s = reg.save_scene("Temp", None, vec![], None, None);
         reg.delete_scene(&s.id);
         assert!(reg.list_scenes().is_empty());
         assert!(!reg.scene_exists(&s.id));
@@ -2708,6 +2739,7 @@ mod tests {
             Some(&r.id),
             vec![make_snapshot("desk_lamp", false)],
             None,
+            None,
         );
         assert_eq!(reg.list_scenes().len(), 1);
         reg.delete_room(&r.id);
@@ -2718,11 +2750,31 @@ mod tests {
     }
 
     #[test]
+    fn delete_room_group_cascades_to_its_scenes() {
+        let mut reg = Registry::new();
+        let r = reg.create_room("Kitchen");
+        let g = reg.create_room_group(&r.id, "Counter");
+        reg.save_scene(
+            "Bright",
+            Some(&r.id),
+            vec![make_snapshot("pendant1", true)],
+            None,
+            Some(&g.id),
+        );
+        assert_eq!(reg.list_scenes().len(), 1);
+        reg.delete_room_group(&g.id);
+        assert!(
+            reg.list_scenes().is_empty(),
+            "group-scoped scene should be deleted with its group, unlike room_devices.group_id which is only nulled"
+        );
+    }
+
+    #[test]
     fn list_scenes_ordered_by_position_then_created_at() {
         let mut reg = Registry::new();
-        let a = reg.save_scene("First", None, vec![], None);
+        let a = reg.save_scene("First", None, vec![], None, None);
         std::thread::sleep(std::time::Duration::from_millis(2));
-        let b = reg.save_scene("Second", None, vec![], None);
+        let b = reg.save_scene("Second", None, vec![], None, None);
         let scenes = reg.list_scenes();
         assert_eq!(scenes.len(), 2);
         // New scenes get sequential positions (0, 1), so First comes before Second
@@ -2765,6 +2817,7 @@ mod tests {
                 "Bright",
                 Some(&r.id),
                 vec![make_snapshot("hall_bulb", true)],
+                None,
                 None,
             );
             scene_id = s.id.clone();

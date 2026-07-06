@@ -93,27 +93,33 @@ export function reconcileSceneDivergence(devices) {
   let changed = false;
   for (const dev of devices) {
     if (dev.online === false) continue; // stale/last-known state, not a real signal
-    const roomId = model.rooms.find(r => r.device_ids.includes(dev.device_id))?.id;
-    if (!roomId) continue;
-    const sceneId = activeSceneByRoom.get(roomId);
+    const room = model.rooms.find(r => r.device_ids.includes(dev.device_id));
+    if (!room) continue;
+    // A device's own group's active scene takes precedence over the room's
+    // — a device is rarely governed by both at once, but when it could be,
+    // the more specific scope (its own group) is the one it's actually
+    // tracking right now.
+    const group = (room.groups ?? []).find(g => g.device_ids.includes(dev.device_id));
+    const scopeId = (group && activeSceneByRoom.has(group.id)) ? group.id : room.id;
+    const sceneId = activeSceneByRoom.get(scopeId);
     if (!sceneId) continue;
     const scene = model.scenes.find(s => s.id === sceneId);
     const snap = scene?.states?.find(s => s.device_id === dev.device_id);
     if (!snap) continue; // device isn't part of this scene's saved snapshot
 
-    const set = pausedSceneDevices.get(roomId);
+    const set = pausedSceneDevices.get(scopeId);
     const wasPaused = set?.has(dev.device_id) ?? false;
     const matches = stateMatchesScene(dev, snap);
 
     if (matches && wasPaused) {
       set.delete(dev.device_id);
-      updateSceneChipStates(roomId);
+      updateSceneChipStates(room.id);
       changed = true;
     } else if (!matches && !wasPaused) {
-      let s = pausedSceneDevices.get(roomId);
-      if (!s) { s = new Set(); pausedSceneDevices.set(roomId, s); }
+      let s = pausedSceneDevices.get(scopeId);
+      if (!s) { s = new Set(); pausedSceneDevices.set(scopeId, s); }
       s.add(dev.device_id);
-      updateSceneChipStates(roomId);
+      updateSceneChipStates(room.id);
       changed = true;
     }
   }
@@ -136,35 +142,51 @@ export function initScenes({ render, sendDeviceCommand }) {
   _sendDeviceCommand = sendDeviceCommand;
 }
 
+// roomId locates the DOM card (chips for both the room's own scenes and all
+// of its groups' scenes live inside it); each chip's active/paused look is
+// computed against its OWN scope (room-wide or its group), not roomId's,
+// since a room card can host several independently-active scopes at once.
 function updateSceneChipStates(roomId) {
   const card = document.querySelector(`[data-room-id="${CSS.escape(roomId)}"]`);
   if (!card) return;
-  const activeId = activeSceneByRoom.get(roomId);
-  // Pause coverage drives the active chip's dim/grey look (mirrors effect ghost):
-  // none paused → solid active; some → partly-paused; all members → all-paused.
   const room = model.rooms.find(r => r.id === roomId);
-  const memberCount = room?.device_ids?.length ?? 0;
-  const pausedCount = pausedSceneDevices.get(roomId)?.size ?? 0;
   card.querySelectorAll('.room-quick-scene-chip[data-scene-id]').forEach(chip => {
+    const scene = model.scenes.find(s => s.id === chip.dataset.sceneId);
+    if (!scene) return;
+    const group = scene.group_id ? room?.groups?.find(g => g.id === scene.group_id) : null;
+    const scopeId = scene.group_id ?? scene.room_id;
+    const activeId = activeSceneByRoom.get(scopeId);
     const active = chip.dataset.sceneId === activeId;
+    // Pause coverage drives the active chip's dim/grey look (mirrors effect
+    // ghost): none paused → solid active; some → partly-paused; all → all-paused.
+    const memberCount = group ? group.device_ids.length : (room?.device_ids?.length ?? 0);
+    const pausedCount = pausedSceneDevices.get(scopeId)?.size ?? 0;
     chip.classList.toggle('active', active);
     chip.classList.toggle('partly-paused', active && pausedCount > 0 && pausedCount < memberCount);
     chip.classList.toggle('all-paused', active && memberCount > 0 && pausedCount >= memberCount);
   });
 }
 
-export function clearRoomActiveScene(roomId) {
-  if (!activeSceneByRoom.has(roomId)) return;
-  activeSceneByRoom.delete(roomId);
-  pausedSceneDevices.delete(roomId);
-  updateSceneChipStates(roomId);
+// `scopeId` is a room id (room-wide scene) or a group id (group scene) — see
+// the Map comments in state.js. Resolves the owning room to refresh its chips.
+export function clearRoomActiveScene(scopeId) {
+  if (!activeSceneByRoom.has(scopeId)) return;
+  activeSceneByRoom.delete(scopeId);
+  pausedSceneDevices.delete(scopeId);
+  const roomId = model.rooms.find(r => r.id === scopeId || (r.groups ?? []).some(g => g.id === scopeId))?.id;
+  if (roomId) updateSceneChipStates(roomId);
 }
 
 export function cancelSceneEdit() {
   if (!sceneEdit.active) return;
-  const card = document.querySelector(`[data-room-id="${CSS.escape(sceneEdit.active.roomId)}"]`);
-  card?.querySelector('.room-scene-name-input')?.style.setProperty('display', 'none');
-  const sb = card?.querySelector('.room-scene-save-btn');
+  const { roomId, groupId } = sceneEdit.active;
+  const card = document.querySelector(`[data-room-id="${CSS.escape(roomId)}"]`);
+  // A room card can host several save-rows at once (the room-wide one plus
+  // one per group) — each carries its own data-scope so only the row that's
+  // actually open gets reset.
+  const row = card?.querySelector(`.room-scene-save-row[data-scope="${CSS.escape(groupId ?? 'room')}"]`);
+  row?.querySelector('.room-scene-name-input')?.style.setProperty('display', 'none');
+  const sb = row?.querySelector('.room-scene-save-btn');
   if (sb) sb.style.display = '';
   sceneEdit.active = null;
 }
@@ -174,15 +196,16 @@ export function handleScenesUpdate(evt) {
   _render();
 }
 
-// ── Save/recall scene section ─────────────────────────────────────────────────
-export function buildScenesSection(roomId) {
-  const section = document.createElement('div');
-  section.className = 'room-scenes';
-  section.dataset.roomId = roomId;
-
-  // Save scene row
+// ── Save scene row ────────────────────────────────────────────────────────────
+// Shared by the room-wide scenes section below and each group cluster's own
+// compact "+ Save scene" affordance (rooms.js) — groupId is omitted for the
+// room-wide row, present for a group's own row. data-scope lets
+// cancelSceneEdit() find the one actually-open row when a room card hosts
+// several of these at once.
+export function buildSceneSaveRow(roomId, groupId = null) {
   const saveRow = document.createElement('div');
   saveRow.className = 'room-scene-save-row';
+  saveRow.dataset.scope = groupId ?? 'room';
 
   const saveBtn = document.createElement('button');
   saveBtn.className = 'room-scene-save-btn';
@@ -198,11 +221,9 @@ export function buildScenesSection(roomId) {
   nameInput.style.display = 'none';
   saveRow.appendChild(nameInput);
 
-  section.appendChild(saveRow);
-
   saveBtn.addEventListener('click', e => {
     e.stopPropagation();
-    sceneEdit.active = { roomId, value: '' };
+    sceneEdit.active = { roomId, groupId, value: '' };
     saveBtn.style.display = 'none';
     nameInput.style.display = '';
     nameInput.value = '';
@@ -222,16 +243,28 @@ export function buildScenesSection(roomId) {
     sceneEdit.active = null;
     if (!name) return;
     savingScene = true;
-    saveScene(name, roomId).finally(() => { savingScene = false; });
+    saveScene(name, roomId, groupId).finally(() => { savingScene = false; });
   };
   nameInput.addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.stopPropagation(); doSave(); }
     if (e.key === 'Escape') { e.stopPropagation(); cancelSceneEdit(); }
   });
 
-  // Scene list
+  return saveRow;
+}
+
+// ── Save/recall scene section ─────────────────────────────────────────────────
+export function buildScenesSection(roomId) {
+  const section = document.createElement('div');
+  section.className = 'room-scenes';
+  section.dataset.roomId = roomId;
+  section.appendChild(buildSceneSaveRow(roomId));
+
+  // Scene list — room-wide scenes only; each group's own scenes are managed
+  // from its own compact save row instead (they still appear as chips in the
+  // room's quick-scenes bar, just with a group-name prefix).
   const roomScenes = model.scenes
-    .filter(s => s.room_id === roomId)
+    .filter(s => s.room_id === roomId && !s.group_id)
     .sort((a, b) => (a.position - b.position) || (b.created_at - a.created_at));
 
   if (roomScenes.length > 0) {
@@ -393,9 +426,87 @@ export function toggleSceneDevice(roomId, deviceId) {
   else pauseSceneDevice(roomId, deviceId);
 }
 
+// A group-scoped scene recall — smaller sibling of the room-wide path below.
+// Scoped to just the group's own member devices (scene.states already only
+// holds those, per save_scene in http/api/scenes.rs): the room's own active
+// scene and any OTHER group's active scene are left completely untouched.
+async function recallGroupScene(scene) {
+  const groupId = scene.group_id;
+  const room = model.rooms.find(r => r.id === scene.room_id);
+  const group = room?.groups?.find(g => g.id === groupId);
+  const memberIds = group?.device_ids ?? [];
+
+  // A fresh recall/revert re-includes all — clear stale pauses from
+  // whatever scene previously governed this group (mirrors the room-wide
+  // path below), otherwise a device paused from a prior group scene would
+  // wrongly still show paused against this one until reconciled.
+  pausedSceneDevices.delete(groupId);
+
+  // Toggle: clicking the active group scene reverts to pre-scene state.
+  if (activeSceneByRoom.get(groupId) === scene.id) {
+    const preState = preSceneStateByRoom.get(groupId);
+    activeSceneByRoom.delete(groupId);
+    preSceneStateByRoom.delete(groupId);
+    if (room) updateSceneChipStates(room.id);
+    if (preState) {
+      for (const deviceId of memberIds) {
+        const snap = preState.get(deviceId);
+        if (!snap) continue;
+        clearPendingControlState(deviceId);
+        holdAtSceneTarget(deviceId, snap);
+        if (!snap.on) { _sendDeviceCommand(deviceId, { action: 'off' }); continue; }
+        if (snap.brightness != null)
+          _sendDeviceCommand(deviceId, { action: 'brightness', value: snap.brightness, transition_secs: 0.8 });
+        else
+          _sendDeviceCommand(deviceId, { action: 'on' });
+        if (snap.color_xy != null)
+          _sendDeviceCommand(deviceId, { action: 'color_xy', x: snap.color_xy[0], y: snap.color_xy[1], transition_secs: 0.8 });
+        else if (snap.color_temp != null)
+          _sendDeviceCommand(deviceId, { action: 'color_temp', value: snap.color_temp, transition_secs: 0.8 });
+      }
+    }
+    return;
+  }
+
+  const snap = new Map();
+  for (const deviceId of memberIds) {
+    const dev = devicesMap.get(deviceId);
+    if (dev) snap.set(deviceId, { on: dev.on, brightness: dev.brightness ?? null, color_xy: dev.color_xy ?? null, color_temp: dev.color_temp ?? null });
+  }
+  preSceneStateByRoom.set(groupId, snap);
+
+  // A room-wide effect would otherwise immediately drive this group's lights
+  // back on its next tick — exclude just the group's own members, leaving
+  // the effect running for the rest of the room (unlike a whole-room scene
+  // recall, which cancels the effect entirely below).
+  if (room && roomEffectsMap.has(room.id)) {
+    for (const deviceId of memberIds) await excludeFromEffect(room.id, deviceId);
+  }
+
+  try {
+    const res = await api(`/scenes/${encodeURIComponent(scene.id)}/recall`, { method: 'POST', body: { transition_secs: 1.0 } });
+    if (res.ok || res.status === 503) {
+      activeSceneByRoom.set(groupId, scene.id);
+      if (room) updateSceneChipStates(room.id);
+      for (const deviceId of memberIds) {
+        clearPendingControlState(deviceId);
+        holdAtSceneTarget(deviceId, scene.states?.find(s => s.device_id === deviceId));
+      }
+      if (res.status === 503) showToast('Some devices offline — others recalled', false);
+    } else {
+      preSceneStateByRoom.delete(groupId);
+      showToast(`Recall failed (${res.status})`, true);
+    }
+  } catch (e) {
+    preSceneStateByRoom.delete(groupId);
+    showToast(`Recall error: ${e.message}`, true);
+  }
+}
+
 // ── Recall ────────────────────────────────────────────────────────────────────
 export async function recallScene(id) {
   const scene = model.scenes.find(s => s.id === id);
+  if (scene?.group_id) { await recallGroupScene(scene); return; }
   const roomId = scene?.room_id;
 
   // A scene sets colour/temp wholesale — reset the room + member dots to icons,

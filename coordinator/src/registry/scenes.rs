@@ -8,12 +8,18 @@ impl Registry {
     /// effect at save time — the caller (HTTP handler) is responsible for
     /// resolving that and for restricting `states` to just the overridden
     /// devices in that case (see `save_scene` in http/api/scenes.rs).
+    /// `group_id`, when given, scopes the scene to one room-group's members
+    /// rather than the whole room — the caller (HTTP handler) is
+    /// responsible for resolving the group's device set and never passing
+    /// an `effect` alongside it (effects stay room-wide only).
+    #[allow(clippy::too_many_arguments)]
     pub fn save_scene(
         &mut self,
         name: &str,
         room_id: Option<&str>,
         states: Vec<DeviceSnapshot>,
         effect: Option<(&str, &str)>,
+        group_id: Option<&str>,
     ) -> SceneRecord {
         let id = gen_uuid();
         let created_at = now_unix_millis();
@@ -32,8 +38,8 @@ impl Registry {
             )
             .unwrap_or(0);
         if let Err(e) = self.conn.execute(
-            "INSERT INTO scenes (id, name, room_id, created_at, states_json, position, effect_id, effect_params_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, name, room_id, created_at, states_json, position, effect_id, effect_params_json],
+            "INSERT INTO scenes (id, name, room_id, created_at, states_json, position, effect_id, effect_params_json, group_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, name, room_id, created_at, states_json, position, effect_id, effect_params_json, group_id],
         ) {
             warn!(error = %e, "save_scene failed");
         }
@@ -46,12 +52,13 @@ impl Registry {
             states,
             effect_id,
             effect_params_json,
+            group_id: group_id.map(|s| s.to_owned()),
         }
     }
 
     pub fn list_scenes(&self) -> Vec<SceneRecord> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, name, room_id, created_at, states_json, position, effect_id, effect_params_json FROM scenes ORDER BY position ASC, created_at ASC",
+            "SELECT id, name, room_id, created_at, states_json, position, effect_id, effect_params_json, group_id FROM scenes ORDER BY position ASC, created_at ASC",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -59,6 +66,7 @@ impl Registry {
                 return vec![];
             }
         };
+        #[allow(clippy::type_complexity)]
         type SceneRow = (
             String,
             String,
@@ -66,6 +74,7 @@ impl Registry {
             i64,
             String,
             i64,
+            Option<String>,
             Option<String>,
             Option<String>,
         );
@@ -79,6 +88,7 @@ impl Registry {
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
             ))
         })
         .map(|rows| {
@@ -93,6 +103,7 @@ impl Registry {
                         position,
                         effect_id,
                         effect_params_json,
+                        group_id,
                     ): SceneRow| {
                         let states: Vec<DeviceSnapshot> =
                             serde_json::from_str(&states_json).unwrap_or_default();
@@ -105,6 +116,7 @@ impl Registry {
                             states,
                             effect_id,
                             effect_params_json,
+                            group_id,
                         }
                     },
                 )
@@ -116,7 +128,7 @@ impl Registry {
     pub fn get_scene(&self, id: &str) -> Option<SceneRecord> {
         self.conn
             .query_row(
-                "SELECT id, name, room_id, created_at, states_json, position, effect_id, effect_params_json FROM scenes WHERE id = ?1",
+                "SELECT id, name, room_id, created_at, states_json, position, effect_id, effect_params_json, group_id FROM scenes WHERE id = ?1",
                 params![id],
                 |row| {
                     Ok((
@@ -128,11 +140,12 @@ impl Registry {
                         row.get::<_, i64>(5)?,
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )
             .ok()
-            .map(|(id, name, room_id, created_at, states_json, position, effect_id, effect_params_json)| {
+            .map(|(id, name, room_id, created_at, states_json, position, effect_id, effect_params_json, group_id)| {
                 let states: Vec<DeviceSnapshot> =
                     serde_json::from_str(&states_json).unwrap_or_default();
                 SceneRecord {
@@ -144,6 +157,7 @@ impl Registry {
                     states,
                     effect_id,
                     effect_params_json,
+                    group_id,
                 }
             })
     }
