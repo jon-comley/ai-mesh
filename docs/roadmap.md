@@ -10,6 +10,25 @@ Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x`
 
 ---
 
+## TODO — 13 kitchen bulbs orphaned from the Zigbee network (2026-07-07)
+
+While testing the device-auto-naming feature (`plans/device-auto-naming.md`), deleted all 13 kitchen bulbs via the dashboard's `DELETE /api/lights/{device}` (force-unpair). z2m confirms all 13 are gone from its own device list, but z2m's health telemetry shows `leave_count: 0` for every one of them right up to removal — **none of them ever received/acknowledged an actual "leave network" command**, only `force: true` local bookkeeping removal. So each bulb still believes it's joined to the existing network with its old credentials; it's not searching for a network to join, which is why normal permit-join (from both z2m and a real Hue Bridge's own "search for lights") finds nothing — the bulb has to *want* to look, and it doesn't.
+
+**Ruled out:** a genuine Hue Bridge's normal light search (same limitation — a plain scan needs the bulb to be advertising interest in joining, which it isn't). A documented BLE factory-reset: researched the reverse-engineered Hue BLE protocol (`philble`, `HueBLE`, and a WIP GATT gist) — the only candidate characteristic (`97fe6561-0004-4f62-86e9-b71ee2da3d22`, write `0x01`) is explicitly flagged unconfirmed by its own author, requires prior BLE pairing, and nobody has verified it actually clears Zigbee network state. Not writing a script against it — no verified protocol, real hardware, not worth the risk.
+
+**Confirmed working: Touchlink factory reset.** Ran a live scan (`zigbee2mqtt/bridge/request/touchlink/scan`) — the SLZB-06/Ember radio executed a clean channel-hop scan across all 16 channels with no adapter errors, confirming the hardware supports it. Touchlink is a proximity-based Zigbee command (~cm range) that resets a light regardless of its current network association — the standard recovery path for exactly this situation.
+
+**Plan to execute (deferred — picking back up when not exhausted):**
+1. pi1 connects to the LAN over `wlan0` only — `eth0` is completely unused (confirmed via `ip -brief addr`/`nmcli`). Give `eth0` a static IP on `10.0.0.x`; this doesn't touch `wlan0`/the default route, so the dashboard and everything else on pi1 stays up throughout.
+2. Move the SLZB-06 (currently network-attached elsewhere) next to pi1, connect via a regular Ethernet cable directly into `eth0`.
+3. Confirm it comes up reachable at its usual `10.0.0.12` over that direct link — if it needs a DHCP lease rather than already being static, its MAC (`aa:bb:cc:dd:ee:04`) is captured so it can be handed exactly `10.0.0.12` and zigbee2mqtt's `configuration.yaml` needs zero changes.
+4. Per bulb (still installed in the kitchen fixture, no unscrewing needed since the radio is now in the room): Touchlink-scan to find it, then Touchlink factory-reset targeting its address, then let it join z2m fresh (permit-join already on).
+5. Afterwards: unplug the SLZB-06, return it to its normal spot, tear down the temporary `eth0` config.
+
+Related: `plans/device-auto-naming.md`'s live re-validation step is blocked on this — the auto-naming fix (keying on `definition.model` SKU, not the nonexistent `model_id`) hasn't been confirmed against a real re-pair yet.
+
+---
+
 ## Code Audit — Findings to Action (2026-06-02)
 
 Whole-codebase adversarial bug audit (all Rust crates + frontend JS, partitioned

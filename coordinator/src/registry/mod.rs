@@ -1411,6 +1411,16 @@ impl Registry {
         ) {
             warn!(error = %e, "delete_device: remove devices failed");
         }
+        // Remove the custom/auto-assigned name — otherwise a device re-paired
+        // under the same device_id (its ieee address is hardware-fixed)
+        // silently keeps its old name instead of going through auto-naming
+        // again (see plans/device-auto-naming.md).
+        if let Err(e) = self.conn.execute(
+            "DELETE FROM device_names WHERE device_id = ?1",
+            params![device_id],
+        ) {
+            warn!(error = %e, "delete_device: remove device_names failed");
+        }
         self.devices.remove(device_id);
         // Update in-memory cache
         self.light_positions.remove(device_id);
@@ -2576,6 +2586,20 @@ mod tests {
         assert!(reg.get_light_position("bulb_x").is_none());
         // The room itself survives; only the device is gone.
         assert!(reg.list_rooms().iter().any(|room| room.id == r.id));
+    }
+
+    #[test]
+    fn delete_device_clears_its_custom_name() {
+        // A device's ieee address (and so its device_id) is hardware-fixed —
+        // if it's re-paired later, a stale name row would make auto-naming
+        // (see device_catalog) wrongly think it's already named.
+        let mut reg = Registry::new();
+        reg.set_device_name("bulb_x", "Kitchen Spot");
+        assert!(reg.get_all_device_names().contains_key("bulb_x"));
+
+        reg.delete_device("bulb_x");
+
+        assert!(!reg.get_all_device_names().contains_key("bulb_x"));
     }
 
     #[test]
