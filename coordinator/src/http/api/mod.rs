@@ -11,6 +11,7 @@
 //! the handler's type. The single deliberately public route is
 //! `rooms::solar_config`, justified at its registration site.
 
+pub mod art;
 pub mod chat;
 pub mod effects;
 pub mod gateway;

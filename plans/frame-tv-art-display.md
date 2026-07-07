@@ -16,6 +16,17 @@ This document is the corrected/expanded version of an initial spec. Section
 11 lists what changed and why — worth reading before building, since a few
 of the original assumptions don't hold on this exact hardware.
 
+**2026-07-06 — development order pivoted, ahead of the recess.** The
+electrician for §2's wall recess/socket isn't booked yet, so building
+against the Pi Zero 2 W in-place isn't possible right now. Rather than wait,
+development starts on a **Pi 4** with the TV on a stand in the bedroom —
+same aarch64 target, same mesh agent, same `capability-art` code; only the
+enclosure/heat/mini-HDMI specifics in §3 are Pi-Zero-only and don't apply
+yet. §10's sequencing is reordered below to match: the software (step 3)
+now comes *before* the electrician/recess step, not after. See the updated
+§10 for the concrete new order and §3 for a call-out of what changes when
+this eventually moves to the Pi Zero 2 W.
+
 ---
 
 ## 1. Purchase & mounting
@@ -58,7 +69,20 @@ per-node health monitoring (`HealthUpdate`, already tracks CPU/RAM/GPU/temp)
 watch this node's temperature like any other — no new code needed, just
 keep an eye on the Health tab for the first few weeks in different seasons.
 
-## 3. Hardware: Pi Zero 2 W as the HDMI client
+## 3. Hardware: Pi Zero 2 W as the HDMI client (eventual target)
+
+**Development is currently happening on a Pi 4 instead** (TV on a stand,
+no recess yet — see the 2026-07-06 note above). None of the software this
+section leads into (`capability-art`, the mesh wiring) is Pi-Zero-specific;
+everything below is what changes for the *eventual* move to the Pi Zero 2
+W once the recess and that hardware are both ready — full-size HDMI vs.
+mini-HDMI, a real Ethernet port vs. a USB-OTG adapter, hardware HEVC decode
+vs. H.264-only, and far more RAM/CPU headroom on the Pi 4 in the meantime.
+None of that affects `capability-art` itself, which only shells out to
+`fbi` (see §4's correction below) and speaks the mesh protocol — the
+migration should be close to a straight card-swap (reflash, set
+`NODE_FEATURES=art`, move the HDMI cable) rather than a rewrite, which is
+the whole point of building it this way now.
 
 - **Pi Zero 2 W** — quad-core Cortex-A53 (BCM2710A1), 512 MB RAM. Same
   aarch64 architecture ai-mesh already cross-compiles for (pi1's Pi 5 uses
@@ -80,11 +104,43 @@ keep an eye on the Health tab for the first few weeks in different seasons.
 
 - **OS**: Raspberry Pi OS Lite (no desktop environment — a fullscreen
   image viewer doesn't need one, and it keeps the 512 MB budget comfortable).
-- **Art viewer**: `feh` or `pqiv` in fullscreen kiosk mode is the pragmatic
-  choice — both are scriptable (next/prev/reload via signals or a control
-  fifo), lightweight, and don't need a bespoke renderer. A custom
-  Python/OpenGL viewer is more work for no real benefit at this stage; only
-  worth it later for effects like crossfade transitions.
+- **Art viewer: `fbi` against the raw framebuffer, corrected twice from the
+  original `feh`/`pqiv` choice.** Confirmed against the first real node (a
+  Pi 4, brought up ahead of this Pi Zero migration — see the top-of-document
+  2026-07-06 note) that a Lite install has no X server at all, so an
+  X11-only viewer like feh can't start. The first fix, `mpv --vo=drm`,
+  does run without X — but Debian's `mpv` package drags in a full
+  GTK/X11/audio stack as *unused linked dependencies* (~600 MB across 265
+  packages, confirmed on the real node) purely because that's how the
+  distro build was configured, wildly disproportionate for a single-purpose
+  kiosk display and a bad fit for the eventual 512 MB Pi Zero 2 W. `fbi`
+  needs only a handful of small packages and writes straight to `/dev/fb0`.
+  Two things had to be true on the node for that device to exist and be
+  usable at all, both confirmed hands-on and now automated in
+  `scripts/install-node-linux.sh` for the next node:
+  - This SoC's default full-KMS driver (`vc4-kms-v3d`) exposes no `/dev/fb0`
+    — switching to the legacy "fake KMS" overlay (`vc4-fkms-v3d`, still
+    hardware-accelerated) plus `hdmi_force_hotplug=1` in
+    `/boot/firmware/config.txt` (so the Pi assumes a display exists even
+    before the TV is wired up) is what makes `/dev/fb0` appear, confirmed via
+    `dmesg` on the real node.
+  - Even with `/dev/fb0` readable by the agent's own user (already in the
+    `video` group), `fbi` still needs to control the active VT via
+    `/dev/tty1`, and VT-switching ioctls require actual root regardless of
+    file permissions on that device — a udev rule opening up group access
+    to `/dev/tty1` was tried and confirmed *not* sufficient (fbi silently
+    exited). Since the agent's systemd unit already runs as an account with
+    full passwordless sudo (this project's existing solo-home-lab
+    NOPASSWD rationale — see `scripts/install-node-linux.sh`), `capability-art`
+    runs fbi via `sudo -n` rather than opening a new permission hole.
+  - `sudo`'s own process exits as soon as it has forked fbi (fbi
+    immediately re-forks and detaches to hold the console) — confirmed via
+    `ps --forest` on the real node that a `Child` handle captured at spawn
+    time is stale within moments. `capability-art` kills the old viewer by
+    process name (`pkill -x fbi`) and checks liveness the same way
+    (`pgrep -x fbi`) rather than holding a child handle — a custom
+    Python/OpenGL viewer remains more work for no benefit at this stage;
+    only worth it later for effects like crossfade transitions.
 - **ai-mesh agent** with a new `art` feature (see §6) — receives
   show/next/mode commands from the coordinator over the existing mesh TCP
   connection, same as every other node.
@@ -194,7 +250,7 @@ pattern needed, this slots into what already exists:
 
 - Mirrors `capability-reaper`'s shape (a thin capability that drives an
   external process, rather than talking to Zigbee/MQTT like
-  lighting/sensors do): manages the running `feh`/`pqiv` process, switches
+  lighting/sensors do): manages the running `fbi` process, switches
   the currently-displayed image via its control mechanism, and reports back
   status.
 - New `MeshMessage` variants (wire-versioned, same convention as
@@ -247,6 +303,26 @@ should land after this project's own basic slideshow works, not before —
 get the dumb version right first.
 
 ### Voice/chat browsing (idea — captured, not yet scoped in detail)
+
+**2026-07-06 — a related but different mechanism shipped first.**
+`POST /api/art/search {query, interval_secs?}` now exists (coordinator side,
+`coordinator/src/http/api/art.rs`) and does something adjacent to what this
+section sketches, worth distinguishing clearly: it searches the Met
+Museum's Open Access API *live*, on every call — no local `art_catalogue`
+table, no ingest pipeline (§5's batch curation work is still entirely
+unbuilt) — filters to public-domain results with a usable image, optionally
+asks whatever local model is Ready to pick/order the best subset (falls
+back to the raw order otherwise), and drives the existing rotation/
+auto-advance machinery (`next_art`, the background timer in
+`spawn_art_rotation_timer`) — all via `ArtShow`, no new wire message. This
+is a REST endpoint reachable by curl/dashboard, **not yet an intent-router
+tool** — "show me some Monet" spoken or typed into chat still won't reach
+it; that wiring (a real `art_show`-shaped tool schema registered with
+`collect_tool_schemas`, same as `get_climate`) is the gap left between this
+and the sketch below. Once `art_catalogue`/§5 curation exists, whether
+`art_show` ends up querying that table, this live Met search, or both, is
+still an open question — they're not mutually exclusive (a curated local
+table for reliability/offline use; live search for "anything the Met has").
 
 "Show me some Monet", "show the collection in date order", "show me the
 Pre-Raphaelites and include sculpture" — a natural fit for the same
@@ -369,7 +445,7 @@ Coordinator (pi1)
 
 Pi Zero 2 W (new node, NODE_FEATURES=art)
   ├─ ai-mesh agent + capability-art
-  ├─ feh/pqiv fullscreen viewer (agent-controlled)
+  ├─ fbi fullscreen viewer, framebuffer (agent-controlled, via sudo)
   ├─ local image cache
   └─ HDMI → Frame TV (1080p, art slideshow or movie source)
 
@@ -393,23 +469,69 @@ Frame TV (QE32LS03C)
 
 ## 10. Sequencing
 
-1. Electrician-designed recess + socket (blocking, do this first — nothing
-   else can be tested in-place until the TV and Pi are actually mounted and
-   powered).
-2. Pi Zero 2 W provisioned as a bare ai-mesh node, HDMI showing one static
-   test image — prove the physical chain (power, heat, HDMI, network)
-   before writing any ai-mesh code.
-3. `capability-art` + `api/art.rs` — basic show/next, manual only.
+**Reordered 2026-07-06** — the electrician isn't booked yet, so step 1
+below no longer blocks starting; development moved ahead onto a Pi 4 with
+the TV on a stand instead. Steps 2–3 have already happened in that order
+(software first, since the Pi 4 + stand needed no physical work to start
+against); the electrician/recess/Pi-Zero-migration step is deferred to
+whenever it's actually booked, not treated as a prerequisite for the rest
+of this list anymore.
+
+1. ~~Electrician-designed recess + socket~~ — **deferred, no longer
+   blocking.** Book when convenient; do the Pi Zero 2 W migration (§3) at
+   the same time, once both the recess and that hardware are ready.
+2. **Done** — Pi 4 (bedroom, TV on a stand) flashed with Raspberry Pi OS
+   Lite (64-bit), hardwired into the LAN at 10.0.0.13 (node name `pi2`,
+   chosen hardware-agnostically so it carries over unchanged through the
+   eventual Pi Zero swap), SSH key access established, `just deploy-node
+   pi2` run successfully — heartbeating on the Nodes tab with `art` in its
+   feature list. Bringing it up surfaced two real corrections, both now in
+   §4 and automated in `scripts/install-node-linux.sh`: `feh` → `mpv` (no X
+   server) → `fbi` (mpv's Debian package drags in a 600 MB GTK/X11 stack),
+   plus the `vc4-fkms-v3d`/`hdmi_force_hotplug=1`/`sudo` details needed to
+   make `fbi` actually work headless.
+3. **Done (software), verified end to end** — `capability-art` crate
+   (agent-side: downloads an image, shells out to `fbi` via `sudo -n`,
+   reports status back) + coordinator `api/art.rs` (`POST /api/art/show`,
+   `GET /api/art/status`) + the `MeshMessage::ArtShow`/`ArtStatus` wire
+   types (`WIRE_VERSION` 9). `POST /api/art/show` against the live
+   coordinator correctly reached `pi2` and spawned `fbi`; a second show
+   correctly killed and replaced it (confirmed exactly one `fbi` process
+   throughout via `pgrep`). No TV wired up yet, so nothing's visibly
+   displayed — the framebuffer writes are real, just currently going
+   nowhere to be seen. Builds clean and cross-compiles for aarch64; unit-tested
+   (11 tests across `capability-art` + `coordinator`). Deliberately
+   minimal v1 slice at the time: one image, no rotation. See step 3.5 below
+   for the rotation/auto-advance work that followed the same day.
+   `MeshMessage::ArtMode` still isn't built (no TV input-switching yet —
+   step 5); `ArtNext` was never needed even once rotation existed, since
+   advancing just resends the existing `ArtShow`.
+3.5. **Done, same day — on-the-fly slideshow, ahead of the batch pipeline.**
+   Rather than wait for step 4's curated local catalogue, `POST
+   /api/art/search {query, interval_secs?}` searches the Met's Open Access
+   API live, filters to public-domain/has-image results, optionally has the
+   Ready local LLM pick/order the best subset (20s cap, falls back to raw
+   order — see the "Voice/chat browsing" section's 2026-07-06 note for the
+   full design and how it relates to that section's catalogue-based
+   sketch), and drives `next_art`/an auto-advance timer. Live-tested: "Leonardo
+   da Vinci" found 8 real candidates, got an LLM-curated order from pi1's
+   `llama3.2:1b`, displayed on `pi2`, both manual next and the timer
+   advanced correctly. This is a REST endpoint, not an intent/voice tool —
+   step 7 below is still the gap.
 4. Art library curation + pipeline (can happen in parallel with 3 — it's
-   independent server-side work).
+   independent server-side work). Not started.
 5. TV WebSocket control (input switch, power) — nice-to-have, not blocking
-   the slideshow itself.
+   the slideshow itself. Not started.
 6. Automation triggers (occupancy/light/time-of-day) — deliberately last;
    depends on 3 working reliably first.
 7. Voice/chat browsing (`art_show` filter args + the read-only `art_current`
    "what is this?" tool) — depends on 3 and 4, and on Phase C's
    `get_climate` pattern already existing to copy from; smallest step once
-   those are in place.
+   those are in place. Step 3.5's `/api/art/search` covers the mechanism
+   (live query → curated result → rotation) but isn't itself an intent
+   tool yet — this step is now specifically "expose it as one," a smaller
+   lift than before since the hard part (the search/curation/rotation
+   logic) already exists and works.
 
 ## 11. What changed from the original spec, and why
 

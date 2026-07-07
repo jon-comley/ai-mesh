@@ -212,6 +212,7 @@ async function runSearch(row, query) {
       </button>`).join('');
   } catch (e) {
     if (e.name === 'AbortError') return; // superseded by a newer search — not a real failure
+    console.error('model search failed', e);
     resultsEl.innerHTML = '<span class="model-search-status">Search error</span>';
   }
 }
@@ -242,6 +243,7 @@ async function showModelFiles(row, repo) {
       </button>`).join('');
   } catch (e) {
     if (e.name === 'AbortError') return;
+    console.error('model file listing failed', e);
     resultsEl.innerHTML = '<span class="model-search-status">Error loading files</span>';
   }
 }

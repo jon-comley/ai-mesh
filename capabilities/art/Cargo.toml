@@ -1,0 +1,21 @@
+[package]
+name = "capability-art"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+capability-core = { path = "../core" }
+shared = { path = "../../shared" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync", "time", "rt", "process", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tracing = "0.1"
+dirs = "5"
+# Matte/border compositing (see compose_matte) — jpeg+png only, no mozjpeg
+# (that needs a system C library; the default pure-Rust codec is plenty for
+# a one-shot per-image-swap job, not a hot path).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"

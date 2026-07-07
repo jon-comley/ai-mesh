@@ -9,6 +9,7 @@ llm      = ["dep:capability-llm"]
 lighting = ["dep:capability-lighting"]
 reaper   = ["dep:capability-reaper"]
 sensors  = ["dep:capability-sensors"]
+art      = ["dep:capability-art"]
 
 [dependencies]
 shared = { path = "../shared" }
@@ -17,6 +18,7 @@ capability-llm      = { path = "../capabilities/llm", optional = true }
 capability-lighting = { path = "../capabilities/lighting", optional = true }
 capability-reaper   = { path = "../capabilities/reaper", optional = true }
 capability-sensors  = { path = "../capabilities/sensors", optional = true }
+capability-art      = { path = "../capabilities/art", optional = true }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

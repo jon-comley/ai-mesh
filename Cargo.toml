@@ -7,6 +7,7 @@ members = [
     "capabilities/reaper",
     "capabilities/sensors",
     "capabilities/zigbee",
+    "capabilities/art",
     "agent",
     "coordinator",
     "cli",

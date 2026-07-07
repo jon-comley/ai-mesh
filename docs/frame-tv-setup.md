@@ -24,7 +24,9 @@ specifically. Nothing below can usefully happen until the socket exists.
 ```
 
 In the Imager's advanced options (gear icon / Ctrl+Shift+X) before writing:
-- Set hostname (e.g. `frametv`)
+- Set hostname to `pi2` — the node name is chosen hardware-agnostically (not
+  `frametv` or `pizero`) specifically so it carries over unchanged through
+  this exact migration; the dev-phase Pi 4 already used this name.
 - Enable SSH, set a password or your public key
 - Set Wi-Fi **only if you don't have the Ethernet adapter yet** — the plan
   calls for wired Ethernet via the USB-OTG port for reliability; Wi-Fi is a
@@ -33,7 +35,7 @@ In the Imager's advanced options (gear icon / Ctrl+Shift+X) before writing:
 ## 2. First boot
 
 ```bash
-ssh <user>@frametv.local   # or its DHCP-assigned IP
+ssh <user>@pi2.local   # or its DHCP-assigned IP
 sudo raspi-config          # confirm locale/timezone; expand filesystem if needed
 sudo apt update && sudo apt upgrade -y
 ```
@@ -51,30 +53,62 @@ being the coordinator's target for `art` commands is exactly that case.
 
 ## 3. Fullscreen art viewer
 
+**Not `feh`/`pqiv`/`mpv`** — confirmed against the first real node (a Pi 4
+used for development ahead of this Pi Zero migration, see the plan's
+2026-07-06 note). Raspberry Pi OS *Lite* has no X server at all, so an
+X11-only viewer like feh can't start. `mpv --vo=drm` does run without X —
+but Debian's `mpv` package drags in a full GTK/X11/audio stack as *unused
+linked dependencies* (~600 MB across 265 packages, confirmed on the real
+node), a poor fit for this single-purpose display and especially for the
+512 MB Pi Zero 2 W. `fbi` needs only a handful of small packages and writes
+straight to `/dev/fb0`:
+
 ```bash
-sudo apt install -y feh
+sudo apt install -y --no-install-recommends fbi
 ```
+
+Two more things had to be true on the real node before `/dev/fb0` even
+existed — `scripts/install-node-linux.sh` now does both automatically for
+any `art`-featured node, but they're worth understanding if something
+doesn't work:
+
+- This SoC's default full-KMS driver (`vc4-kms-v3d`) exposes no `/dev/fb0`
+  at all. Switch `/boot/firmware/config.txt`'s `dtoverlay=vc4-kms-v3d` to
+  `dtoverlay=vc4-fkms-v3d` (the legacy "fake KMS" overlay — still
+  hardware-accelerated) and add `hdmi_force_hotplug=1` under `[all]` (so the
+  Pi assumes a display is present even before the TV is wired up/powered
+  on — confirmed via `dmesg` that without a display attached, `/dev/fb0`
+  never appears otherwise). Reboot for either change to take effect.
+- Even with `/dev/fb0` accessible (the agent's user is in the `video`
+  group), `fbi` also needs to control the active VT via `/dev/tty1`, and
+  that needs real root — a udev rule opening group access to `/dev/tty1`
+  was tried and confirmed **not** sufficient (fbi exits silently). Run it
+  via `sudo -n` instead (the account already has full passwordless sudo —
+  see `scripts/install-node-linux.sh`'s existing NOPASSWD rationale).
 
 Minimal kiosk test — confirm HDMI output before wiring up ai-mesh at all:
 
 ```bash
-DISPLAY=:0 feh --fullscreen --hide-pointer /path/to/test-image.jpg
+sudo fbi -T 1 -d /dev/fb0 -a -noverbose /path/to/test-image.jpg
 ```
 
 If nothing shows: check the mini-HDMI cable/adapter (not a full-size or
 micro-HDMI connector — the Pi Zero 2 W is specifically mini-HDMI), and that
 `/boot/firmware/config.txt` isn't forcing a resolution the TV doesn't like
-(`hdmi_force_hotplug=1` plus leaving `hdmi_mode`/`hdmi_group` on auto is
-usually right — only pin an explicit mode if auto-detect picks the wrong one).
+(leaving `hdmi_mode`/`hdmi_group` on auto is usually right — only pin an
+explicit mode if auto-detect picks the wrong one).
 
-`feh`'s remote-control mechanism (for the agent to drive "next image"
-without restarting the process) is a signal-based reload — verify this
-works manually before wiring up `capability-art`:
+`capability-art` doesn't use any live-reload IPC, and — confirmed on the
+real node — `sudo`'s own process exits as soon as it forks `fbi` (which
+immediately re-forks to detach and hold the console), so there's no live
+child handle to hold onto either. It kills the old viewer by process name
+and respawns fresh on every new image. Verify that same cycle manually
+before wiring up the capability:
 
 ```bash
-feh --fullscreen --hide-pointer /path/to/dir/ &
-# swap the displayed file, then:
-kill -USR1 $(pgrep feh)   # reloads from the same file list
+sudo fbi -T 1 -d /dev/fb0 -a -noverbose /path/to/a.jpg
+sudo pkill -9 -x fbi
+sudo fbi -T 1 -d /dev/fb0 -a -noverbose /path/to/b.jpg
 ```
 
 ## 4. Install the ai-mesh agent
@@ -82,11 +116,12 @@ kill -USR1 $(pgrep feh)   # reloads from the same file list
 Same cross-compiled aarch64 binary path as pi1 — no new build target needed.
 
 ```bash
-just deploy-node frametv   # from the coordinator/OmniLink1 side, once this
-                           # node's nodes/frametv.env exists (see below)
+just deploy-node pi2   # from the coordinator/OmniLink1 side — nodes/pi2.env
+                        # already exists from the Pi 4 dev phase; just update
+                        # NODE_HOST below to this Pi's reserved IP
 ```
 
-`nodes/frametv.env`:
+`nodes/pi2.env`:
 ```
 NODE_HOST=<pi's reserved IP>
 NODE_USER=<your ssh user>
@@ -117,7 +152,7 @@ and a green heartbeat, same as any other node.
 
 1. Manually switch the TV to the Pi's HDMI input (first time — before the
    WebSocket control is wired up).
-2. Confirm `feh`'s test image displays correctly at native 1080p (no
+2. Confirm `fbi`'s test image displays correctly at native 1080p (no
    overscan/underscan cropping — adjust the TV's picture size setting if the
    image edges are cut off).
 3. Once `capability-art` is deployed: `POST /api/art/show` with a real
