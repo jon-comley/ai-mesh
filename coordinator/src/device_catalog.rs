@@ -1,21 +1,30 @@
-//! Maps a z2m `model_id` (short model code, e.g. "LCG006") to the
-//! human-readable product-line name auto-assigned the first time that
-//! device is successfully interviewed while pairing. See
+//! Maps the model identifier z2m's `device_interview_successful` event
+//! actually carries — `definition.model` — to the human-readable
+//! product-line name auto-assigned the first time a device is
+//! successfully interviewed while pairing. See
 //! `plans/device-auto-naming.md`.
+//!
+//! `definition.model` is a vendor-specific *retail SKU* for most vendors
+//! (e.g. Philips' "929003666501"), not the short internal code z2m's
+//! `bridge/devices` dump calls `model_id` ("LCG006") — that field is only
+//! present in the full device-list dump, never on the interview event
+//! itself (confirmed against a live payload), so it can't be used here.
+//! SONOFF happens to use the same short code for both.
 
 use std::collections::HashMap;
 
-/// `None` for a model_id we don't recognise — the device just keeps
-/// showing its raw hex `device_id` until someone renames it by hand.
-pub fn product_line_name(model_id: &str) -> Option<&'static str> {
-    Some(match model_id {
-        "LCG006" => "Hue GU10 Spot CCT/COL",
-        "LTA005" => "Hue Filament Globe CCT",
-        "LCT010" => "Hue Color Ambiance Bulb",
+/// `None` for a `definition.model` SKU we don't recognise — the device
+/// just keeps showing its raw hex `device_id` until someone renames it by
+/// hand.
+pub fn product_line_name(definition_model: &str) -> Option<&'static str> {
+    Some(match definition_model {
+        "929003666501" => "Hue GU10 Spot CCT/COL",   // LCG006
+        "8719514392830" => "Hue Filament Globe CCT", // LTA005
+        "9290012574" => "Hue Color Ambiance Bulb",   // LCT010
         "SNZB-02P" => "Sonoff Temp/Humidity Sensor",
         "SNZB-03PR2" => "Sonoff Motion Sensor",
-        "RDM002" => "Hue Tap Dial Switch",
-        "ROM001" => "Hue Smart Button",
+        "8719514440937/8719514440999" => "Hue Tap Dial Switch", // RDM002
+        "8718699693985" => "Hue Smart Button",                  // ROM001
         _ => return None,
     })
 }
@@ -40,7 +49,10 @@ mod tests {
 
     #[test]
     fn product_line_name_known_and_unknown() {
-        assert_eq!(product_line_name("LCG006"), Some("Hue GU10 Spot CCT/COL"));
+        assert_eq!(
+            product_line_name("929003666501"),
+            Some("Hue GU10 Spot CCT/COL")
+        );
         assert_eq!(product_line_name("totally-unknown"), None);
     }
 

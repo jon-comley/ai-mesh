@@ -185,6 +185,10 @@ pub async fn delete_device(
         }
     }
     registry.lock().unwrap().delete_device(&device_id);
+    // Registry deletion alone is invisible to already-connected clients —
+    // without this, the device keeps showing "Unassigned" forever (see
+    // DashboardState::remove_device).
+    state.remove_device(&device_id);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -451,6 +455,33 @@ mod tests {
             MeshMessage::DeviceRemove(req) => assert_eq!(req.device_id, "old_bulb"),
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn delete_device_purges_the_dashboard_snapshot() {
+        // Registry deletion alone doesn't tell already-connected clients
+        // anything — without state.remove_device the device just sits
+        // showing "Unassigned" forever (see DashboardState::remove_device).
+        let connections = empty_connections();
+        let (tx, _rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "old_bulb", "pi1");
+        let state_check = state.clone();
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let router: Router = Router::new()
+            .route("/api/lights/{device}", axum::routing::delete(delete_device))
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let status = send(router, "DELETE", "/api/lights/old_bulb", "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            !state_check
+                .get_light_snapshot()
+                .iter()
+                .any(|l| l.device_id == "old_bulb"),
+            "deleted device must be gone from the dashboard snapshot, not just the registry"
+        );
     }
 
     #[tokio::test]

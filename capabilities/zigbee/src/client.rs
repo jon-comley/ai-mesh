@@ -353,9 +353,15 @@ impl ZigbeeClient {
 
     /// Remove a device from the Zigbee network (not just from z2m's list).
     /// z2m republishes `bridge/devices` afterwards, which flows back to the
-    /// coordinator as the usual device-list update.
+    /// coordinator as the usual device-list update. `force: true` because a
+    /// graceful (non-forced) remove asks the device itself to leave the
+    /// network and silently does nothing if it never acknowledges — routine
+    /// for a sleeping battery sensor or a bulb switched off at the wall.
+    /// Forcing means z2m drops it from its own database (and clears the
+    /// retained state topic) regardless of whether the device answers, so
+    /// deletion is never blocked on the device being reachable.
     pub async fn remove_device(&self, device_id: &str) -> Result<(), ZigbeeError> {
-        let payload = serde_json::json!({ "id": device_id }).to_string();
+        let payload = serde_json::json!({ "id": device_id, "force": true }).to_string();
         self.mqtt
             .publish(
                 "zigbee2mqtt/bridge/request/device/remove",
@@ -443,15 +449,17 @@ fn parse_join_event(payload: &[u8]) -> Option<(String, String, Option<String>)> 
         "device_joined" | "device_announce" | "device_leave" => kind.to_owned(),
         _ => return None,
     };
-    // Prefer the short model code (e.g. "LCG006") over the numeric retail
-    // SKU in `definition.model` (e.g. "929003666501") — the short code is
-    // what a model → product-name lookup keys on and is far more
-    // recognisable in the live join feed. Older z2m payloads (or devices
-    // z2m has no exact match for) may lack `model_id`, so fall back.
+    // `model_id` (the short code z2m's `bridge/devices` dump uses, e.g.
+    // "LCG006") is NOT present on this event — confirmed against a live
+    // `device_interview_successful` payload, whose `data` only carries
+    // `definition` (vendor/model/description/exposes), no top-level
+    // `model_id`. `definition.model` is the only model identifier this
+    // event ever has — for most vendors it's a numeric retail SKU (e.g.
+    // Philips' "929003666501"), not the short code, so
+    // `device_catalog::product_line_name` must key on that SKU instead.
     let model = data
-        .get("model_id")
+        .pointer("/definition/model")
         .and_then(|m| m.as_str())
-        .or_else(|| data.pointer("/definition/model").and_then(|m| m.as_str()))
         .map(String::from);
     Some((event, device_id, model))
 }
@@ -875,10 +883,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_join_event_prefers_short_model_id_over_definition_sku() {
-        let payload = br#"{"type":"device_interview","data":{"friendly_name":"0x001788010fa6772b","status":"successful","model_id":"LCG006","definition":{"model":"929003666501","vendor":"Philips"}}}"#;
+    fn parse_join_event_reads_the_numeric_sku_a_real_interview_payload_carries() {
+        // Captured live off a Hue GU10 spot's actual device_interview_successful
+        // event — z2m never includes a top-level model_id here, only
+        // definition.model (a vendor-specific retail SKU, not the short code).
+        let payload = br#"{"type":"device_interview","data":{"friendly_name":"0x001788010fac846a","ieee_address":"0x001788010fac846a","status":"successful","supported":true,"definition":{"model":"929003666501","vendor":"Philips","description":"Hue White and color ambiance GU10 spot LED with Bluetooth"}}}"#;
         let (_, _, model) = parse_join_event(payload).unwrap();
-        assert_eq!(model.as_deref(), Some("LCG006"));
+        assert_eq!(model.as_deref(), Some("929003666501"));
     }
 
     #[test]

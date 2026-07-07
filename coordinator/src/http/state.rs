@@ -1040,6 +1040,55 @@ impl DashboardState {
         }
     }
 
+    /// Purge a deleted device from every in-memory snapshot it might be in
+    /// (light, sensor, or the Cover/Climate/Switch presence list) and
+    /// re-broadcast the now-smaller full snapshot for whichever one
+    /// actually held it — the same full-snapshot broadcast every
+    /// `push_*_update` already sends, so connected clients drop the row
+    /// exactly like any other update. Called from `DELETE /api/lights/
+    /// {device}`: the registry row is deleted there, but registry deletion
+    /// alone is invisible to already-connected clients — without this, the
+    /// device just sits showing "Unassigned" forever, since nothing else
+    /// ever re-broadcasts a snapshot that no longer includes it.
+    pub fn remove_device(&self, device_id: &str) {
+        let remaining_lights = {
+            let mut snap = self.light_snapshot.lock().unwrap();
+            snap.remove(device_id)
+                .map(|_| snap.values().cloned().collect::<Vec<_>>())
+        };
+        if let Some(devices) = remaining_lights
+            && self.tx.receiver_count() > 0
+        {
+            let groups = self.get_group_snapshot();
+            let _ = self
+                .tx
+                .send(DashboardEvent::LightingUpdate { devices, groups });
+        }
+
+        let remaining_sensors = {
+            let mut snap = self.sensor_snapshot.lock().unwrap();
+            snap.remove(device_id)
+                .map(|_| snap.values().cloned().collect::<Vec<_>>())
+        };
+        if let Some(sensors) = remaining_sensors
+            && self.tx.receiver_count() > 0
+        {
+            let _ = self.tx.send(DashboardEvent::SensorUpdate { sensors });
+        }
+
+        let removed_other = self
+            .other_device_snapshot
+            .lock()
+            .unwrap()
+            .remove(device_id)
+            .is_some();
+        if removed_other && self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::DeviceInventoryUpdate {
+                devices: self.get_other_device_snapshot(),
+            });
+        }
+    }
+
     /// Broadcast a Switch-class button press / dial rotation. Purely a
     /// transient UI indicator (a device row briefly flashes) — unlike the
     /// join feed, there's no replay buffer: a client not connected when it
@@ -2316,6 +2365,74 @@ mod tests {
         let snap = state.get_light_snapshot();
         let bulb2 = snap.iter().find(|l| l.device_id == "bulb2").unwrap();
         assert!(bulb2.online, "unrelated device must be untouched");
+    }
+
+    // ── remove_device ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_device_purges_a_known_light_and_broadcasts_the_rest() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_lighting_update(make_light_report("bulb1", true));
+        state.push_lighting_update(make_light_report("bulb2", true));
+        let mut rx = state.tx.subscribe();
+        state.remove_device("bulb1");
+
+        let snap = state.get_light_snapshot();
+        assert!(
+            !snap.iter().any(|l| l.device_id == "bulb1"),
+            "deleted device must be gone, not just unassigned"
+        );
+        assert!(snap.iter().any(|l| l.device_id == "bulb2"));
+        match rx.try_recv().unwrap() {
+            DashboardEvent::LightingUpdate { devices, .. } => {
+                assert!(!devices.iter().any(|l| l.device_id == "bulb1"));
+            }
+            other => panic!("expected LightingUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remove_device_purges_a_known_sensor() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_sensor_update(make_sensor_report("sensor1", Some(21.4)));
+        state.remove_device("sensor1");
+        assert!(state.get_sensor_snapshot().is_empty());
+    }
+
+    #[test]
+    fn remove_device_purges_a_known_cover_climate_or_switch() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_other_devices(
+            "pi1",
+            &[shared::DeviceEntry {
+                id: "blind1".into(),
+                device_type: shared::DeviceType::Cover,
+            }],
+        );
+        state.remove_device("blind1");
+        assert!(state.get_other_device_snapshot().is_empty());
+    }
+
+    #[test]
+    fn remove_device_is_a_noop_for_an_unknown_device() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        // Must not panic and must not insert a phantom entry anywhere.
+        state.remove_device("never-seen");
+        assert!(state.get_light_snapshot().is_empty());
+        assert!(state.get_sensor_snapshot().is_empty());
+        assert!(state.get_other_device_snapshot().is_empty());
     }
 
     // ── push_switch_action ────────────────────────────────────────────────────
