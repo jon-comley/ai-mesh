@@ -7,7 +7,14 @@
 import { api } from '/static/api.js';
 import { esc, showToast } from '/static/util.js';
 import { model } from '/static/state.js';
-import { getLastSeenAction } from '/static/devicewidgets.js';
+import { getLastSeenAction, getSeenActions } from '/static/devicewidgets.js';
+
+// A device id can contain characters that aren't safe in an HTML `id`
+// attribute (mostly moot for the "0x..." Zigbee ids in practice, but a
+// user-renamed or manually-entered device_id could contain anything).
+function safeListId(deviceId) {
+  return `switch-actions-${deviceId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+}
 
 let allBindings = [];
 let loaded = false;
@@ -124,13 +131,27 @@ function buildAddForm(deviceId, onAdded) {
   const form = document.createElement('div');
   form.className = 'switch-binding-form';
 
+  // A combo box, not a plain dropdown: <input list> + <datalist> lets you
+  // pick from every action actually observed from this switch so far, but
+  // still type an exact string by hand if it hasn't fired yet — a fresh
+  // switch has an empty datalist until you start pressing its buttons.
+  const listId = safeListId(deviceId);
   const actionInput = document.createElement('input');
   actionInput.type = 'text';
+  actionInput.setAttribute('list', listId);
   actionInput.placeholder = 'z2m action, e.g. button_1_press';
   actionInput.className = 'switch-binding-action-input';
   actionInput.autocomplete = 'off';
   const lastSeen = getLastSeenAction(deviceId);
   if (lastSeen) actionInput.value = lastSeen;
+
+  const actionList = document.createElement('datalist');
+  actionList.id = listId;
+  for (const action of getSeenActions(deviceId)) {
+    const opt = document.createElement('option');
+    opt.value = action;
+    actionList.appendChild(opt);
+  }
 
   const targetSelect = buildTargetSelect();
 
@@ -190,7 +211,7 @@ function buildAddForm(deviceId, onAdded) {
     }
   });
 
-  form.append(actionInput, targetSelect, commandSelect, deltaInput, addBtn);
+  form.append(actionInput, actionList, targetSelect, commandSelect, deltaInput, addBtn);
   return form;
 }
 

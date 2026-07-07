@@ -901,6 +901,31 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > `devices.js`) — actual phone visual check still needed (no browser on
 > WSL2).
 >
+> **Dial rotation bound + self-populating action combo box (2026-07-07)** —
+> same Tap Dial's rotation now controls brightness: bound z2m's own
+> pre-summarized `brightness_step_up`/`brightness_step_down` actions (rather
+> than the finer `dial_rotate_left/right_step/slow/fast` speed variants) to
+> the Kitchen with a ±25 step, reusing the existing `brightness_step`
+> command — **live-verified**, rotating the dial correctly dimmed and
+> brightened the real bulbs both directions. Buttons 2–4 deliberately left
+> unbound (Jon's call — decide later once button 1 + rotation have been
+> lived with a bit). Also shipped the self-populating combo box: every
+> distinct action ever observed from a switch (not just the latest one) is
+> now tracked in a `Set` per device (`devicewidgets.js`'s
+> `seenActionsByDevice`, persisted to `localStorage` so it survives a page
+> reload) and offered via an `<input list>`/`<datalist>` combo box in the
+> bindings form — press a button once and it becomes a pickable suggestion
+> from then on, no need to already know or type the exact z2m string.
+> Doesn't yet update live while the panel is sitting open (only refreshes
+> next time the panel/row is rebuilt, which in practice happens often
+> anyway since most other WS events trigger a full Devices-tab re-render) —
+> a known, minor gap, not a correctness issue.
+>
+> **Open question:** does the ±25 brightness step feel right on the actual
+> dial (too coarse, too fine, or about right)? Not yet checked with Jon
+> against real usage — `step_delta` is trivially adjustable per-binding via
+> the same `POST /api/switch-bindings` call if it needs tuning.
+>
 > **Home tab tile redesign + in-room groups backend (2026-07-06, commit
 > `7e6ef30`)** — full plan at `plans/home-ui-redesign.md`, written after
 > reviewing 6 candidate UI directions plus two external appraisals (Bing,
