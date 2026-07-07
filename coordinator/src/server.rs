@@ -1,5 +1,6 @@
+use crate::device_catalog;
 use crate::http::state::{
-    DashboardState, ModelEntry, NodeModelInfo, SecurityEvent, SecurityEventKind,
+    DashboardState, ModelEntry, NodeModelInfo, RoomInfo, SecurityEvent, SecurityEventKind,
 };
 use crate::registry::Registry;
 use crate::scheduler::Scheduler;
@@ -1167,6 +1168,37 @@ async fn process_message(
                 "zigbee: pairing event"
             );
             if let Some(dash) = dashboard {
+                // A device_leave is a much stronger, faster signal than
+                // waiting on z2m's own availability timeout (which can be
+                // ~25h for a battery/passive sensor) — act on it
+                // immediately rather than leaving stale "online" readings
+                // showing for that whole window.
+                if report.event == "device_leave" {
+                    dash.mark_device_offline(&report.device_id);
+                }
+                // The model is only known once, right here, on interview
+                // success — auto-assign a default name from the catalog so
+                // the device doesn't sit showing its raw hex id forever.
+                // Never overwrites an existing name (auto-assigned earlier
+                // or set by hand) — see plans/device-auto-naming.md.
+                if report.event == "device_interview_successful"
+                    && let Some(line) = report
+                        .model
+                        .as_deref()
+                        .and_then(device_catalog::product_line_name)
+                {
+                    let mut reg = registry.lock().unwrap();
+                    let mut names = reg.get_all_device_names();
+                    if !names.contains_key(&report.device_id) {
+                        let name = device_catalog::next_name_in_line(&names, line);
+                        reg.set_device_name(&report.device_id, &name);
+                        names.insert(report.device_id.clone(), name);
+                        let rooms: Vec<RoomInfo> =
+                            reg.list_rooms().into_iter().map(RoomInfo::from).collect();
+                        drop(reg);
+                        dash.push_rooms_update_with_names(rooms, names);
+                    }
+                }
                 dash.push_join_event(report.event, report.device_id, report.model);
             }
             None
@@ -1383,6 +1415,230 @@ mod tests {
             MeshMessage::ModelInferenceChunk(c) => assert_eq!(c.delta, "tok"),
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    // ── ZigbeeJoin device_leave → mark_device_offline ───────────────────────
+
+    #[tokio::test]
+    async fn device_leave_marks_a_known_sensor_offline() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        dashboard.push_sensor_update(shared::SensorReport {
+            node_id: "node-1".into(),
+            device_id: "sensor1".into(),
+            temperature: Some(21.4),
+            humidity: None,
+            battery: None,
+            occupancy: None,
+            contact: None,
+            illuminance: None,
+            online: true,
+        });
+        let mut node_id = Some("zigbee-node".to_string());
+
+        process_message(
+            MeshMessage::ZigbeeJoin(shared::ZigbeeJoinEvent {
+                node_id: "zigbee-node".into(),
+                event: "device_leave".into(),
+                device_id: "sensor1".into(),
+                model: None,
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        let snap = dashboard.get_sensor_snapshot();
+        let sensor = snap.iter().find(|s| s.device_id == "sensor1").unwrap();
+        assert!(
+            !sensor.online,
+            "device_leave should immediately mark it offline"
+        );
+        assert_eq!(sensor.temperature, Some(21.4), "last reading must survive");
+    }
+
+    #[tokio::test]
+    async fn other_join_events_do_not_mark_devices_offline() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        dashboard.push_sensor_update(shared::SensorReport {
+            node_id: "node-1".into(),
+            device_id: "sensor1".into(),
+            temperature: Some(21.4),
+            humidity: None,
+            battery: None,
+            occupancy: None,
+            contact: None,
+            illuminance: None,
+            online: true,
+        });
+        let mut node_id = Some("zigbee-node".to_string());
+
+        process_message(
+            MeshMessage::ZigbeeJoin(shared::ZigbeeJoinEvent {
+                node_id: "zigbee-node".into(),
+                event: "device_announce".into(),
+                device_id: "sensor1".into(),
+                model: None,
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        let snap = dashboard.get_sensor_snapshot();
+        let sensor = snap.iter().find(|s| s.device_id == "sensor1").unwrap();
+        assert!(sensor.online, "only device_leave should flip offline");
+    }
+
+    // ── device_interview_successful → auto-naming ───────────────────────────
+
+    #[tokio::test]
+    async fn interview_success_auto_names_an_unnamed_device_from_its_model() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        let mut node_id = Some("zigbee-node".to_string());
+
+        process_message(
+            MeshMessage::ZigbeeJoin(shared::ZigbeeJoinEvent {
+                node_id: "zigbee-node".into(),
+                event: "device_interview_successful".into(),
+                device_id: "0x001788010fa6772b".into(),
+                model: Some("LCG006".into()),
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        let names = registry.lock().unwrap().get_all_device_names();
+        assert_eq!(
+            names.get("0x001788010fa6772b").map(String::as_str),
+            Some("Hue GU10 Spot CCT/COL 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn interview_success_numbers_devices_in_the_same_product_line() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        registry
+            .lock()
+            .unwrap()
+            .set_device_name("0xalready-named", "Hue GU10 Spot CCT/COL 1");
+        let mut node_id = Some("zigbee-node".to_string());
+
+        process_message(
+            MeshMessage::ZigbeeJoin(shared::ZigbeeJoinEvent {
+                node_id: "zigbee-node".into(),
+                event: "device_interview_successful".into(),
+                device_id: "0xnew-spot".into(),
+                model: Some("LCG006".into()),
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        let names = registry.lock().unwrap().get_all_device_names();
+        assert_eq!(
+            names.get("0xnew-spot").map(String::as_str),
+            Some("Hue GU10 Spot CCT/COL 2")
+        );
+    }
+
+    #[tokio::test]
+    async fn interview_success_never_overwrites_an_existing_name() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        registry
+            .lock()
+            .unwrap()
+            .set_device_name("0x001788010fa6772b", "Kitchen Spot");
+        let mut node_id = Some("zigbee-node".to_string());
+
+        process_message(
+            MeshMessage::ZigbeeJoin(shared::ZigbeeJoinEvent {
+                node_id: "zigbee-node".into(),
+                event: "device_interview_successful".into(),
+                device_id: "0x001788010fa6772b".into(),
+                model: Some("LCG006".into()),
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        let names = registry.lock().unwrap().get_all_device_names();
+        assert_eq!(
+            names.get("0x001788010fa6772b").map(String::as_str),
+            Some("Kitchen Spot"),
+            "a device with an existing name (custom or previously auto-assigned) must not be renamed"
+        );
+    }
+
+    #[tokio::test]
+    async fn interview_success_with_unknown_model_does_not_assign_a_name() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        let mut node_id = Some("zigbee-node".to_string());
+
+        process_message(
+            MeshMessage::ZigbeeJoin(shared::ZigbeeJoinEvent {
+                node_id: "zigbee-node".into(),
+                event: "device_interview_successful".into(),
+                device_id: "0xunknown-model".into(),
+                model: Some("TOTALLY-UNKNOWN-MODEL".into()),
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        let names = registry.lock().unwrap().get_all_device_names();
+        assert!(!names.contains_key("0xunknown-model"));
     }
 
     // ── SwitchAction → switch-binding dispatch ──────────────────────────────

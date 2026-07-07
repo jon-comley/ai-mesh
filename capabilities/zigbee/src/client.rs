@@ -443,9 +443,15 @@ fn parse_join_event(payload: &[u8]) -> Option<(String, String, Option<String>)> 
         "device_joined" | "device_announce" | "device_leave" => kind.to_owned(),
         _ => return None,
     };
+    // Prefer the short model code (e.g. "LCG006") over the numeric retail
+    // SKU in `definition.model` (e.g. "929003666501") — the short code is
+    // what a model → product-name lookup keys on and is far more
+    // recognisable in the live join feed. Older z2m payloads (or devices
+    // z2m has no exact match for) may lack `model_id`, so fall back.
     let model = data
-        .pointer("/definition/model")
+        .get("model_id")
         .and_then(|m| m.as_str())
+        .or_else(|| data.pointer("/definition/model").and_then(|m| m.as_str()))
         .map(String::from);
     Some((event, device_id, model))
 }
@@ -866,6 +872,13 @@ mod tests {
         let (event, _, model) = parse_join_event(failed).unwrap();
         assert_eq!(event, "device_interview_failed");
         assert!(model.is_none());
+    }
+
+    #[test]
+    fn parse_join_event_prefers_short_model_id_over_definition_sku() {
+        let payload = br#"{"type":"device_interview","data":{"friendly_name":"0x001788010fa6772b","status":"successful","model_id":"LCG006","definition":{"model":"929003666501","vendor":"Philips"}}}"#;
+        let (_, _, model) = parse_join_event(payload).unwrap();
+        assert_eq!(model.as_deref(), Some("LCG006"));
     }
 
     #[test]

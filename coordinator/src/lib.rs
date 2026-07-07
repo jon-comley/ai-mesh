@@ -1,6 +1,7 @@
 pub mod cloud;
 pub mod compress;
 pub mod coordinator;
+pub mod device_catalog;
 pub mod effects;
 pub mod http;
 pub mod inference;
