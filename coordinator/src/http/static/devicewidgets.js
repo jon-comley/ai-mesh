@@ -54,6 +54,40 @@ export function getLastSeenAction(deviceId) {
   return lastSeenActionByDevice.get(deviceId) ?? null;
 }
 
+// Every distinct action ever observed from a device, so the switch-bindings
+// form (switchbindings.js) can offer a self-populating combo box instead of
+// a blind text field — press each button/rotation direction once and it
+// shows up as a suggestion from then on. Persisted to localStorage (keyed
+// per device) so the list survives a page reload, not just the current
+// session.
+const SEEN_ACTIONS_PREFIX = 'mesh-switch-actions-';
+const seenActionsByDevice = new Map(); // device_id -> Set<action>, lazily hydrated
+
+function loadSeenActions(deviceId) {
+  try {
+    const raw = localStorage.getItem(SEEN_ACTIONS_PREFIX + deviceId);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveSeenActions(deviceId, set) {
+  try {
+    localStorage.setItem(SEEN_ACTIONS_PREFIX + deviceId, JSON.stringify([...set]));
+  } catch {
+    // Storage full/unavailable — the combo box just stays a plain text
+    // field for this device; not worth surfacing an error for.
+  }
+}
+
+export function getSeenActions(deviceId) {
+  if (!seenActionsByDevice.has(deviceId)) {
+    seenActionsByDevice.set(deviceId, loadSeenActions(deviceId));
+  }
+  return [...seenActionsByDevice.get(deviceId)].sort();
+}
+
 export function formatSwitchAction(action) {
   return action.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
 }
@@ -89,6 +123,19 @@ function clearSwitchFlash(deviceId) {
 /// Called on a fresh SwitchAction WS event.
 export function registerSwitchAction(deviceId, action) {
   lastSeenActionByDevice.set(deviceId, action);
+  // Hydrate the in-memory Set unconditionally, not just when the action
+  // turns out to be new — otherwise a repeat of an already-known action
+  // (the common case) never populates seenActionsByDevice, and every
+  // subsequent press re-hits localStorage/JSON.parse instead of the cache.
+  let seen = seenActionsByDevice.get(deviceId);
+  if (!seen) {
+    seen = loadSeenActions(deviceId);
+    seenActionsByDevice.set(deviceId, seen);
+  }
+  if (!seen.has(action)) {
+    seen.add(action);
+    saveSeenActions(deviceId, seen);
+  }
   const existing = switchFlashState.get(deviceId);
   if (existing) clearTimeout(existing.timer);
   const timer = setTimeout(() => {
