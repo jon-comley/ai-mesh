@@ -133,11 +133,16 @@ touching `SensorReport` again:
      confirming the newer `Switch`/`SwitchAction` work (see the roadmap's
      2026-07-05 entries) against real hardware too — presses/rotation flash
      as expected; no action bound to them yet (out of scope here).
-   - `curl .../api/sensors?token=…` shows the same fields — not yet
-     explicitly checked (dashboard readings are visibly correct, but the
-     raw endpoint wasn't curled separately).
-   - Restart the coordinator → readings survive (sensor_states table) —
-     **not yet exercised.**
+   - ~~`curl .../api/sensors?token=…` shows the same fields~~ **Done
+     (2026-07-07).** All 7 sensors present with the expected fields
+     (temperature/humidity/battery/online on the 4 SNZB-02P; battery/
+     occupancy/illuminance/online on the 3 SNZB-03P R2) — matches the
+     dashboard.
+   - ~~Restart the coordinator → readings survive (sensor_states table)~~
+     **Done (2026-07-07).** Captured all 7 sensors' readings, restarted
+     `ai-mesh-coordinator` on pi1, re-queried — identical readings for
+     every device (array order differs, a HashMap iteration artifact, not
+     a data issue). `sensor_states` persistence confirmed working.
    - Pull a sensor's battery → after z2m's passive timeout (~25 h,
      documented in `docs/pi1-lighting-setup.md` §9) the card dims to
      offline with readings intact. Don't wait a day for this one — verify

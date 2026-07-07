@@ -2466,6 +2466,53 @@ body {
 .device-row-btn:hover { border-color: var(--accent); color: var(--accent); }
 .device-row-btn-delete:hover { border-color: var(--red); color: var(--red); }
 
+.switch-bindings-panel {
+  flex-basis: 100%;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.switch-bindings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.switch-binding-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.switch-binding-action { color: var(--text); font-weight: 600; }
+.switch-binding-arrow { opacity: 0.6; }
+.switch-binding-target { color: var(--text); }
+.switch-binding-command {
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.switch-binding-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.switch-binding-action-input,
+.switch-binding-delta-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.switch-binding-action-input { flex: 1 1 160px; min-width: 120px; }
+.switch-binding-delta-input { width: 90px; }
+
 .room-scene-save-btn {
   background: none;
   border: 1px dashed var(--border);

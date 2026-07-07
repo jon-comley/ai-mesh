@@ -44,6 +44,15 @@ function formatDeviceName(id) {
 // flashes every matching `[data-device-id]` element, not just the first.
 const SWITCH_FLASH_MS = 1500;
 const switchFlashState = new Map(); // device_id -> { action, timer }
+// Unlike switchFlashState (clears after SWITCH_FLASH_MS), this remembers the
+// last action indefinitely — the switch-bindings form (switchbindings.js)
+// pre-fills its action field from this so "press the button, then bind
+// whatever just fired" doesn't need typing the exact z2m action string.
+const lastSeenActionByDevice = new Map();
+
+export function getLastSeenAction(deviceId) {
+  return lastSeenActionByDevice.get(deviceId) ?? null;
+}
 
 export function formatSwitchAction(action) {
   return action.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
@@ -79,6 +88,7 @@ function clearSwitchFlash(deviceId) {
 
 /// Called on a fresh SwitchAction WS event.
 export function registerSwitchAction(deviceId, action) {
+  lastSeenActionByDevice.set(deviceId, action);
   const existing = switchFlashState.get(deviceId);
   if (existing) clearTimeout(existing.timer);
   const timer = setTimeout(() => {

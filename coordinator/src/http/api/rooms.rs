@@ -178,7 +178,10 @@ pub async fn reorder_room_devices(
 /// node, apply the optimistic snapshot update, send. Returns false if any
 /// device was unreachable (unknown node or send failure) - shared by
 /// `room_command` and `group_command` so the fan-out logic lives once.
-fn dispatch_light_command(
+/// `pub(crate)` so `server.rs`'s switch-binding dispatch can reuse it too —
+/// a bound button press/dial rotation is the same "fan a command out to a
+/// room/group's devices" operation these already do.
+pub(crate) fn dispatch_light_command(
     state: &DashboardState,
     device_ids: &[String],
     command: &shared::LightAction,

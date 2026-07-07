@@ -814,6 +814,86 @@ fn handle_light_state(
     None
 }
 
+/// If this exact (device_id, action) pair has a binding (see
+/// `registry::SwitchBindingRecord`), resolve its target room/group's *live*
+/// membership and dispatch the bound command through the same
+/// `dispatch_light_command` fan-out room/group commands already use — a
+/// bound button press or dial rotation is the same "send this to a set of
+/// devices" operation, just triggered by a Zigbee event instead of an HTTP
+/// request. `brightness_step` reads each target device's current
+/// brightness from the live snapshot and nudges it by the binding's signed
+/// `step_delta`, clamped to 1..=254 — computed per-device (not once for the
+/// whole target) since a group's members can be at different levels.
+fn dispatch_switch_binding(
+    device_id: &str,
+    action: &str,
+    registry: &Arc<Mutex<Registry>>,
+    dash: &DashboardState,
+) {
+    let binding = registry
+        .lock()
+        .unwrap()
+        .find_switch_binding(device_id, action);
+    let Some(binding) = binding else { return };
+    let targets = registry
+        .lock()
+        .unwrap()
+        .resolve_switch_binding_targets(&binding);
+    if targets.is_empty() {
+        warn!(binding_id = %binding.id, "switch binding target has no devices, nothing to do");
+        return;
+    }
+    match binding.command.as_str() {
+        "on" => {
+            crate::http::api::rooms::dispatch_light_command(
+                dash,
+                &targets,
+                &shared::LightAction::On,
+            );
+        }
+        "off" => {
+            crate::http::api::rooms::dispatch_light_command(
+                dash,
+                &targets,
+                &shared::LightAction::Off,
+            );
+        }
+        "toggle" => {
+            crate::http::api::rooms::dispatch_light_command(
+                dash,
+                &targets,
+                &shared::LightAction::Toggle,
+            );
+        }
+        "brightness_step" => {
+            const DEFAULT_BRIGHTNESS: u8 = 128;
+            let delta = binding.step_delta.unwrap_or(0);
+            let snapshot = dash.get_light_snapshot();
+            let current: HashMap<&str, u8> = snapshot
+                .iter()
+                .map(|l| {
+                    (
+                        l.device_id.as_str(),
+                        l.brightness.unwrap_or(DEFAULT_BRIGHTNESS),
+                    )
+                })
+                .collect();
+            for target in &targets {
+                let base = i32::from(*current.get(target.as_str()).unwrap_or(&DEFAULT_BRIGHTNESS));
+                let new_value = (base + delta).clamp(1, 254) as u8;
+                crate::http::api::rooms::dispatch_light_command(
+                    dash,
+                    std::slice::from_ref(target),
+                    &shared::LightAction::Brightness(new_value),
+                );
+            }
+        }
+        other => {
+            warn!(command = %other, binding_id = %binding.id, "unknown switch binding command")
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_message(
     msg: MeshMessage,
@@ -1101,6 +1181,7 @@ async fn process_message(
                 "zigbee: switch action"
             );
             if let Some(dash) = dashboard {
+                dispatch_switch_binding(&report.device_id, &report.action, registry, dash);
                 dash.push_switch_action(report.device_id, report.action);
             }
             None
@@ -1302,6 +1383,227 @@ mod tests {
             MeshMessage::ModelInferenceChunk(c) => assert_eq!(c.delta, "tok"),
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    // ── SwitchAction → switch-binding dispatch ──────────────────────────────
+
+    #[tokio::test]
+    async fn switch_action_without_binding_sends_no_light_command() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        let (node_tx, mut node_rx) = mpsc::channel(4);
+        dashboard
+            .connections
+            .lock()
+            .unwrap()
+            .insert("node-1".into(), node_tx);
+        let mut node_id = Some("switch-node".to_string());
+
+        let reply = process_message(
+            MeshMessage::SwitchAction(shared::SwitchActionReport {
+                node_id: "switch-node".into(),
+                device_id: "dial1".into(),
+                action: "button_1_press".into(),
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        assert_eq!(reply, None);
+        assert!(
+            node_rx.try_recv().is_err(),
+            "no binding exists — nothing should be dispatched"
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_action_with_room_binding_dispatches_toggle() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        let room_id = {
+            let mut reg = registry.lock().unwrap();
+            let room = reg.create_room("Larder");
+            reg.add_device_to_room(&room.id, "bulb1");
+            reg.create_switch_binding("dial1", "button_1_press", "room", &room.id, "toggle", None)
+                .unwrap();
+            room.id
+        };
+        dashboard.push_lighting_update(LightStateReport {
+            node_id: "node-1".into(),
+            device_id: "bulb1".into(),
+            on: false,
+            brightness: Some(100),
+            color_xy: None,
+            color_temp: None,
+            online: true,
+        });
+        let (node_tx, mut node_rx) = mpsc::channel(4);
+        dashboard
+            .connections
+            .lock()
+            .unwrap()
+            .insert("node-1".into(), node_tx);
+        let mut node_id = Some("switch-node".to_string());
+
+        let reply = process_message(
+            MeshMessage::SwitchAction(shared::SwitchActionReport {
+                node_id: "switch-node".into(),
+                device_id: "dial1".into(),
+                action: "button_1_press".into(),
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        assert_eq!(reply, None);
+        let _ = room_id;
+        match node_rx.try_recv().unwrap() {
+            MeshMessage::LightCommand(cmd) => {
+                assert_eq!(cmd.command, shared::LightAction::Toggle);
+                assert_eq!(cmd.target, shared::LightTarget::Device("bulb1".into()));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_action_brightness_step_uses_live_brightness_and_clamps() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        {
+            let mut reg = registry.lock().unwrap();
+            let room = reg.create_room("Larder");
+            reg.add_device_to_room(&room.id, "bulb1");
+            reg.create_switch_binding(
+                "dial1",
+                "brightness_step_up",
+                "room",
+                &room.id,
+                "brightness_step",
+                Some(50),
+            )
+            .unwrap();
+        }
+        // 220 + 50 = 270, clamped to 254 — verifies both the live-brightness
+        // read and the upper clamp in the same case.
+        dashboard.push_lighting_update(LightStateReport {
+            node_id: "node-1".into(),
+            device_id: "bulb1".into(),
+            on: true,
+            brightness: Some(220),
+            color_xy: None,
+            color_temp: None,
+            online: true,
+        });
+        let (node_tx, mut node_rx) = mpsc::channel(4);
+        dashboard
+            .connections
+            .lock()
+            .unwrap()
+            .insert("node-1".into(), node_tx);
+        let mut node_id = Some("switch-node".to_string());
+
+        process_message(
+            MeshMessage::SwitchAction(shared::SwitchActionReport {
+                node_id: "switch-node".into(),
+                device_id: "dial1".into(),
+                action: "brightness_step_up".into(),
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        match node_rx.try_recv().unwrap() {
+            MeshMessage::LightCommand(cmd) => {
+                assert_eq!(cmd.command, shared::LightAction::Brightness(254));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_action_with_group_binding_targets_only_group_members() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        {
+            let mut reg = registry.lock().unwrap();
+            let room = reg.create_room("Kitchen");
+            reg.add_device_to_room(&room.id, "counter1");
+            reg.add_device_to_room(&room.id, "ceiling1");
+            let group = reg.create_room_group(&room.id, "Counter");
+            reg.set_device_group("counter1", Some(&group.id));
+            reg.create_switch_binding("dial1", "button_1_press", "group", &group.id, "on", None)
+                .unwrap();
+        }
+        for (device_id, node_id_val) in [("counter1", "node-1"), ("ceiling1", "node-1")] {
+            dashboard.push_lighting_update(LightStateReport {
+                node_id: node_id_val.into(),
+                device_id: device_id.into(),
+                on: false,
+                brightness: Some(100),
+                color_xy: None,
+                color_temp: None,
+                online: true,
+            });
+        }
+        let (node_tx, mut node_rx) = mpsc::channel(4);
+        dashboard
+            .connections
+            .lock()
+            .unwrap()
+            .insert("node-1".into(), node_tx);
+        let mut node_id = Some("switch-node".to_string());
+
+        process_message(
+            MeshMessage::SwitchAction(shared::SwitchActionReport {
+                node_id: "switch-node".into(),
+                device_id: "dial1".into(),
+                action: "button_1_press".into(),
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(dashboard.as_ref()),
+            "no auth",
+        )
+        .await;
+
+        match node_rx.try_recv().unwrap() {
+            MeshMessage::LightCommand(cmd) => {
+                assert_eq!(cmd.target, shared::LightTarget::Device("counter1".into()));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+        // Only the group member should get a command — nothing else queued.
+        assert!(node_rx.try_recv().is_err());
     }
 
     // A light report carrying a stale/'unknown' node_id must be routed by the
