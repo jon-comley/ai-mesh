@@ -446,10 +446,11 @@ These are non-blocking UX improvements for after C6 ships:
 
   - **Chat-driven light changes now cancel/pause an active scene** ✓ (2026-07-05) — the naive fix would have been the coordinator broadcasting a scene-override event, but that requires the coordinator to track "active scene per room" server-side, which it doesn't (that's 100% client session state, by design — scenes are a client-composed sequence of light commands, the coordinator has no scene concept at all). Went with a cheaper design instead: every incoming `LightingUpdate` already carries live state regardless of source (chat, a physical switch, another browser), and `SceneInfo` now also carries each scene's saved per-device `states` (`DeviceSnapshot`, already stored server-side, previously never sent to the client). The client just compares the two (`scenes.js`'s `reconcileSceneDivergence`, called from `rooms.js`'s `notifyDevices`) and marks a device paused-from-scene on mismatch, auto-resuming if it later matches again — reuses the existing `pausedSceneDevices` bookkeeping and partly-/all-paused chip visuals verbatim, no new wire message, no server-side scene tracking. Never sends a command itself — whatever externally changed the device already did that. Small XY epsilon (0.01) to avoid float-jitter false positives; skips offline devices (stale last-known state isn't a real signal).
 
-  **Still open from that batch — need a product decision, not just a fix:**
-  - **Local (non-cloud) prompt compression** — confirmed in code that `build_history`'s compression is entirely gated on a cloud-gateway invocation (`intent.rs`); local-only inference never compresses context today, so there's currently zero benefit to running local. Adding it is a real feature (candidate value: fitting more chat history into a small context window on constrained nodes like the Beelink/pi1), not a bug — needs a decision on default-on/off and whether it's worth the complexity given local isn't token-billed.
-  - **Add ChatGPT/OpenAI as an online provider** — feasible in principle; needs a look at `cloud.rs`'s provider abstraction to scope the actual effort before committing to it.
-  - **Devices tab: collapse-by-category** — small addition (mirrors the existing per-room collapse chevron), blocked only on a preference call: default collapsed or expanded, remembered per-browser like rooms already are?
+  **Everything from that batch turned out already done — confirmed 2026-07-07,
+  the "still open" list below was just never checked off:**
+  - **Local (non-cloud) prompt compression** ✓ *(already implemented — `intent.rs`'s `build_history` doc comment: "Compression is no longer cloud-only: the same `compress`/`engine` gateway prefs apply to local inference too." A local-only request falls back to reading the standalone gateway prefs directly via `GatewayConfig::load` when there's no active cloud invocation. Tested: `build_history_compresses_with_no_cloud_gateway`, `build_history_skips_compression_when_disabled`.)*
+  - **Add ChatGPT/OpenAI as an online provider** ✓ *(already implemented — `cloud.rs::provider_presets()` has a real `"openai"` entry, `api.openai.com/v1`, models gpt-4o/gpt-4o-mini/gpt-4.1/o3-mini, using the same generic `OpenAiCompatProvider` client as OpenRouter/Anthropic/Groq/Gemini.)*
+  - **Devices tab: collapse-by-category** ✓ *(already shipped alongside the rest of this batch — `buildCategoryHeading`/`buildCategorySection` in `devices.js`, plus the deeper `buildSubcategorySection` for Sensors' own Temperature & Humidity/Motion & Occupancy/Contact/Other split. Confirmed 2026-07-07: defaults to expanded, remembered per-browser via localStorage.)*
   - **Two of three compression engines still show "(soon)"** (`local_llm_distiller`, `llmlingua2` in `gateway.js`'s `ENGINES` list) — not a bug, just an accurate WIP status; noted here so it isn't mistaken for one later.
 
 #### Layout view — known issues / deferred fixes (2026-06-05)
@@ -837,11 +838,68 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > working end-to-end (button press/dial rotation flows Zigbee → coordinator
 > → dashboard flash). Switches are deliberately inert right now: they report
 > what was pressed but trigger no action — binding a button/rotation to a
-> light or scene is unscoped future work, not part of Phase B/C. Still open
-> from the Part 2 checklist (`plans/sensor-readout-and-completion.md`):
-> restart-survival, the battery-pull offline-dim path, and the delete/unpair
-> test haven't been explicitly exercised. Phase C's LLM gate (`just intent
-> "what's the office temperature?"`) also still needs a live run.
+> light or scene is the next real feature, see **Switch → Action Binding**
+> below.
+>
+> *2026-07-07:* two more Part 2 sub-checks closed out (see
+> `plans/sensor-readout-and-completion.md`): `GET /api/sensors` curled
+> directly — all 7 sensors present with the expected fields, matching the
+> dashboard; and a real coordinator restart on pi1 confirmed `sensor_states`
+> persistence — identical readings for every sensor before/after (only the
+> array order differed, a HashMap iteration artifact). Phase C's LLM gate
+> had actually already passed 2026-07-05 (`plans/sensor-readout-and-completion.md`'s
+> own Part 2 §4) — this doc's earlier note saying it "still needs a live
+> run" was itself stale.
+>
+> **Still open, needs Jon physically present (destructive/hardware-in-hand):**
+> - Pull a sensor's battery (or temporarily lower z2m's
+>   `availability.passive.timeout` instead of waiting ~25h) → confirm the
+>   card dims to offline with readings intact.
+> - Delete a sensor from the dashboard → confirm it actually leaves the
+>   Zigbee network (re-pairing required to bring it back, not just a
+>   vanished registry row) — the unpair-on-delete path only has a mocked
+>   connection test so far.
+>
+> ## Switch → Action Binding ✓ Shipped and live-verified (2026-07-07)
+>
+> A physical button press or dial rotation now actually does something,
+> closing the gap the 2026-07-05 entry above flagged. New `switch_bindings`
+> table: one binding per exact (device_id, action) pair — action is z2m's
+> raw string (`"button_1_press"`, `"brightness_step_up"`, etc.), not a
+> normalized enum, since different switch models expose different action
+> vocabularies (confirmed against the real paired Hue Tap Dial's z2m
+> `exposes`: 16 button press/hold/release actions across 4 buttons, 6
+> `dial_rotate_*` speed variants, plus convenient pre-summarized
+> `brightness_step_up`/`brightness_step_down` actions). Binds to a room or
+> group (live membership re-read at dispatch time, not cached on the
+> binding), with command `on`/`off`/`toggle`/`brightness_step` — the last
+> reads each target device's *current* brightness from the live snapshot
+> and nudges it by the binding's signed `step_delta`, clamped to 1..=254,
+> computed per-device since a group's members can differ. No wire message
+> change — reuses the existing room/group `dispatch_light_command` fan-out
+> verbatim (`rooms.rs`'s helper made `pub(crate)`), triggered from
+> `server.rs`'s `MeshMessage::SwitchAction` handler instead of an HTTP
+> request. `GET`/`POST /api/switch-bindings`, `DELETE
+> /api/switch-bindings/{id}`. 31 new tests (9 registry CRUD, 4 server.rs
+> end-to-end dispatch via `process_message`, 18 API validation/CRUD).
+> **Live-verified against real hardware**: bound the Office's paired Hue
+> Tap Dial's button 1 to toggle the Kitchen's lights — physical press
+> toggled the real bulbs off.
+>
+> **Dashboard UI shipped same day** — a "🔗 Bindings" toggle on each Switch
+> row in the Devices tab (`switchbindings.js`, new module) opens a small
+> panel: existing bindings for that device (action → room/group → command,
+> with a delete button each) plus an add-form. The action field pre-fills
+> from whatever action was last actually seen from that switch
+> (`devicewidgets.js`'s existing switch-flash tracking gained an
+> indefinite, not just 1.5s-flash, `lastSeenActionByDevice` map for this) —
+> press the button once to discover its exact z2m action string, then bind
+> it, no need to type it from memory. One `<select>` covers both room and
+> group targets (`"room:<id>"`/`"group:<id>"` values). Bindings list is
+> lazily fetched on first open, not on every render. Deployed and confirmed
+> serving (`/static/switchbindings.js` 200, imported correctly by
+> `devices.js`) — actual phone visual check still needed (no browser on
+> WSL2).
 >
 > **Home tab tile redesign + in-room groups backend (2026-07-06, commit
 > `7e6ef30`)** — full plan at `plans/home-ui-redesign.md`, written after

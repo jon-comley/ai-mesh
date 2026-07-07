@@ -1,4 +1,4 @@
-mod api;
+pub(crate) mod api;
 mod auth;
 mod openai;
 pub mod state;
@@ -27,6 +27,7 @@ const MODELS_JS: &str = include_str!("static/models.js");
 const ROOMS_JS: &str = include_str!("static/rooms.js");
 const DEVICES_JS: &str = include_str!("static/devices.js");
 const DEVICEWIDGETS_JS: &str = include_str!("static/devicewidgets.js");
+const SWITCHBINDINGS_JS: &str = include_str!("static/switchbindings.js");
 const DRAG_JS: &str = include_str!("static/drag.js");
 const COLORMATH_JS: &str = include_str!("static/colormath.js");
 const CONTROLS_JS: &str = include_str!("static/controls.js");
@@ -185,6 +186,15 @@ pub fn router(
         .route("/api/art/next", post(api::art::next_art))
         .route("/api/art/current", get(api::art::get_art_current))
         .route("/api/art/general", post(api::art::general_art))
+        .route(
+            "/api/switch-bindings",
+            get(api::switch_bindings::list_switch_bindings)
+                .post(api::switch_bindings::create_switch_binding),
+        )
+        .route(
+            "/api/switch-bindings/{id}",
+            delete(api::switch_bindings::delete_switch_binding),
+        )
         .layer(axum::Extension(registry))
         .layer(axum::Extension(effects))
         .with_state(dashboard)
@@ -204,6 +214,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/rooms.js", ROOMS_JS, JS),
         ("/static/devices.js", DEVICES_JS, JS),
         ("/static/devicewidgets.js", DEVICEWIDGETS_JS, JS),
+        ("/static/switchbindings.js", SWITCHBINDINGS_JS, JS),
         ("/static/drag.js", DRAG_JS, JS),
         ("/static/colormath.js", COLORMATH_JS, JS),
         ("/static/controls.js", CONTROLS_JS, JS),

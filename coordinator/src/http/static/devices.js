@@ -13,6 +13,7 @@ import {
   buildSensorCard, buildRoomSelect, formatLightStatus, applySwitchFlashIfActive,
   appendEditLink,
 } from '/static/devicewidgets.js';
+import { buildBindingsPanel } from '/static/switchbindings.js';
 
 function formatDeviceName(id) {
   return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -100,6 +101,16 @@ function buildPresenceRow(dev) {
   actions.appendChild(deleteBtn);
 
   row.appendChild(actions);
+
+  // Only a real Switch (button/dial) ever fires SwitchAction events —
+  // Blinds/HVAC share this same presence-only row shape but have nothing
+  // to bind.
+  if (dev.device_type === 'switch') {
+    const { toggle, panel } = buildBindingsPanel(dev.device_id);
+    actions.appendChild(toggle);
+    row.appendChild(panel);
+  }
+
   applySwitchFlashIfActive(dev.device_id);
   return row;
 }

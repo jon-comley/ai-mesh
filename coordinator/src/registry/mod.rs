@@ -13,6 +13,7 @@ use tracing::warn;
 mod effects;
 mod openings;
 mod scenes;
+mod switch_bindings;
 
 fn degrees_to_cardinal(deg: f32) -> &'static str {
     let d = ((deg % 360.0) + 360.0) % 360.0;
@@ -107,6 +108,26 @@ pub struct RoomGroupRecord {
     pub name: String,
     pub position: i64,
     pub device_ids: Vec<String>,
+}
+
+/// A physical switch action (button press, dial rotation — identified by
+/// z2m's raw `action` string, not a normalized enum, since different switch
+/// models expose wildly different vocabularies) bound to a room- or
+/// group-scoped light command. See `registry::switch_bindings` for CRUD and
+/// `server.rs`'s `MeshMessage::SwitchAction` handler for where it fires.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SwitchBindingRecord {
+    pub id: String,
+    pub device_id: String,
+    pub action: String,
+    /// "room" | "group"
+    pub target_kind: String,
+    pub target_id: String,
+    /// "on" | "off" | "toggle" | "brightness_step"
+    pub command: String,
+    /// Only meaningful when `command == "brightness_step"` — signed, e.g.
+    /// +25 for a rotate-right step, -25 for rotate-left.
+    pub step_delta: Option<i32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -331,6 +352,22 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             key     TEXT NOT NULL,
             value   TEXT NOT NULL,
             PRIMARY KEY (user_id, key)
+        );
+        -- Physical switch (button press / dial rotation) -> room/group light
+        -- command. One binding per exact (device_id, action) pair — action is
+        -- z2m's raw string (e.g. \"button_1_press\", \"brightness_step_up\"),
+        -- not a normalized enum, since different switch models expose wildly
+        -- different action vocabularies. See server.rs's SwitchAction handler
+        -- for where a binding actually fires.
+        CREATE TABLE IF NOT EXISTS switch_bindings (
+            id          TEXT PRIMARY KEY,
+            device_id   TEXT NOT NULL,
+            action      TEXT NOT NULL,
+            target_kind TEXT NOT NULL,
+            target_id   TEXT NOT NULL,
+            command     TEXT NOT NULL,
+            step_delta  INTEGER,
+            UNIQUE(device_id, action)
         );",
     )?;
 

@@ -22,6 +22,7 @@ pub mod prefs;
 pub mod rooms;
 pub mod scenes;
 pub mod sensors;
+pub mod switch_bindings;
 pub mod zigbee;
 
 fn gen_request_id() -> String {
