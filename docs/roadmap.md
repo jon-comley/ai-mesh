@@ -1277,6 +1277,55 @@ already shipped in Phase 11.8 (the SNZB-03P R2 motion sensors already report
 both occupancy and illuminance) rather than new infrastructure — sequenced
 last, after the basic slideshow works reliably on its own.
 
+> **2026-07-06 — v1 slice built and verified end to end, ahead of the
+> electrician.** The recess isn't booked yet, so development started early
+> on a spare Pi 4 with the TV on a stand instead of waiting — same aarch64
+> target and mesh code either way, so this isn't wasted work once it later
+> moves to the Pi Zero 2 W (see `plans/frame-tv-art-display.md`'s
+> 2026-07-06 note). Shipped: `WIRE_VERSION` 9
+> (`MeshMessage::ArtShow`/`ArtStatus`), the `capability-art` crate (fetches
+> an image, shells out to `fbi` via `sudo -n`, reports status), the `art`
+> node feature flag, and coordinator `POST /api/art/show` /
+> `GET /api/art/status`. Deliberately minimal — one image, no catalogue or
+> rotation yet. Viewer choice took two corrections against the real
+> hardware (`pi2`, 10.0.0.13): `feh` doesn't work on Lite (no X server);
+> `mpv --vo=drm` works but Debian's package drags in a 600 MB GTK/X11 stack
+> as unused dependencies, so `fbi` (a handful of small packages, writes
+> straight to `/dev/fb0`) replaced it — which itself needed a
+> `vc4-fkms-v3d`/`hdmi_force_hotplug=1` config change and running via
+> `sudo -n` (VT control needs real root) to actually work; both are now
+> automated in `scripts/install-node-linux.sh` for the next node. Live
+> end-to-end test against the running coordinator: `POST /api/art/show`
+> correctly spawned `fbi` on `pi2`, and a second call correctly killed and
+> replaced it (exactly one `fbi` process throughout, confirmed via
+> `pgrep`) — the whole coordinator → mesh → node → framebuffer chain is
+> proven, just with no TV plugged into the HDMI port yet to see it.
+>
+> **Same day — on-the-fly slideshow shipped and deployed to pi1.** Rather
+> than build the batch catalogue/ingest pipeline from plan §5 first, added
+> `POST /api/art/search {query, interval_secs?}` — searches the Met
+> Museum's Open Access API live (no local catalogue, no API key needed),
+> keeps only public-domain results with a usable image, optionally asks
+> whatever local LLM is Ready to pick and order the best subset (falls back
+> to the raw Met order if no model's ready, the call errors, or its reply
+> doesn't parse — a 20s-max nice-to-have, not a dependency), shows the
+> first result, and auto-advances through the rest on a timer (default
+> 30s/floor 5s) until superseded by a new search. `POST /api/art/next` and
+> `GET /api/art/current` round it out. No new wire message needed — next/
+> auto-advance just resends the existing `ArtShow`, so `ArtNext` stays
+> unbuilt as originally planned. Deliberately kept off the LLM's critical
+> path for anything else: curation is capped to 20s (well under
+> `dispatch_local_inference`'s shared 150s ceiling) and only runs once per
+> search, not on every rotation tick — the agent's existing one-inference-
+> per-node semaphore means a real voice/chat command could still queue
+> briefly behind it if they land on the same node at the same moment, but
+> never for long. Live-tested against the real coordinator + Met API + the
+> actually-Ready `llama3.2:1b` on pi1: searching "Leonardo da Vinci" found
+> 8 public-domain candidates, got a real LLM-curated order, displayed
+> correctly on `pi2`, and both manual `/next` and the 20s auto-advance
+> timer advanced the rotation correctly (one `fbi` process maintained
+> throughout every transition). Next: wire up the TV.
+
 **Added idea (2026-07-05):** voice/chat browsing — "show me some Monet",
 "show the collection in date order" — via a new `art_show` intent tool
 copying Phase C's `get_climate` pattern exactly (coordinator answers/acts

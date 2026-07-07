@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 8;
+pub const WIRE_VERSION: u32 = 10;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -418,6 +418,57 @@ pub struct ReaperScriptResult {
     pub message: String,
 }
 
+// ── Frame TV art-display capability types ─────────────────────────────────────
+// v1 (ArtShow/ArtStatus) was deliberately minimal (see
+// plans/frame-tv-art-display.md §10): just enough to prove the physical
+// chain (coordinator → node → TV) works. Coordinator-driven rotation
+// (search/curate/auto-advance, all via repeated ArtShow) followed the same
+// day. ArtBatch is the next step: a *general* slideshow (no specific
+// search) hands the node a whole list up front so it can cycle locally —
+// no coordinator round-trip per image, survives a coordinator restart —
+// while a specific search still overrides via plain ArtShow and the
+// coordinator reverts to general mode (re-sending ArtBatch) after an idle
+// timeout. Still no ArtMode — that needs the TV-control channel, which
+// doesn't exist yet; adding it ahead of a real consumer would be
+// speculative.
+
+/// Coordinator → art node: here's a whole set of images to cycle through
+/// *locally*, one every `interval_secs`, wrapping at the end — no further
+/// coordinator involvement needed per image. Used for the general/default
+/// slideshow (see `docs/frame-tv-setup.md`); a specific search still uses
+/// plain `ArtShow` messages, which take precedence until the coordinator
+/// decides (after an idle timeout) to send a fresh `ArtBatch` and hand
+/// control back to the node's own loop.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArtBatchRequest {
+    pub request_id: String,
+    pub image_urls: Vec<String>,
+    pub interval_secs: u64,
+}
+
+/// Coordinator → art node: fetch `image_url` and display it fullscreen,
+/// replacing whatever's currently shown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArtShowRequest {
+    pub request_id: String,
+    pub image_url: String,
+}
+
+/// Art node → coordinator: result of the most recent `ArtShow`, and whether
+/// the fullscreen viewer process is currently running at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArtStatusReport {
+    pub node_id: String,
+    pub viewer_running: bool,
+    /// The image currently on screen, if any (mirrors what was last shown —
+    /// absent right after boot, before the first ArtShow arrives).
+    pub current_url: Option<String>,
+    /// Set when the most recent ArtShow failed (download or viewer-launch
+    /// error) — the previous image (if any) is left on screen rather than
+    /// blanking the display.
+    pub error: Option<String>,
+}
+
 // ── Intent routing types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -544,6 +595,10 @@ pub enum MeshMessage {
     ReaperStatus(ReaperStatusReport),
     ReaperScript(ReaperScriptRequest),
     ReaperScriptResult(ReaperScriptResult),
+    // Frame TV art-display capability messages (see plans/frame-tv-art-display.md)
+    ArtShow(ArtShowRequest),
+    ArtStatus(ArtStatusReport),
+    ArtBatch(ArtBatchRequest),
 }
 
 /// Structured admin messages for coordinator control.

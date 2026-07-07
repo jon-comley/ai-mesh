@@ -17,6 +17,8 @@ pub fn build_capabilities(node_id: &str) -> Vec<Arc<dyn Capability + Send + Sync
         Arc::new(capability_reaper::ReaperCapability::new(node_id)),
         #[cfg(feature = "sensors")]
         Arc::new(capability_sensors::SensorsCapability::new(node_id)),
+        #[cfg(feature = "art")]
+        Arc::new(capability_art::ArtCapability::new(node_id)),
     ]
 }
 
@@ -180,6 +182,14 @@ mod tests {
         let caps = build_capabilities("node-1");
         assert!(!caps.is_empty());
         assert!(caps.iter().any(|c| c.name() == "llm"));
+    }
+
+    #[cfg(feature = "art")]
+    #[test]
+    fn build_includes_art() {
+        let caps = build_capabilities("node-1");
+        assert!(!caps.is_empty());
+        assert!(caps.iter().any(|c| c.name() == "art"));
     }
 
     #[cfg(not(feature = "llm"))]

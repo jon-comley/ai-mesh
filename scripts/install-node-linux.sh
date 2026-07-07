@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port]"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features]"
 # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
 # (Set COORDINATOR_IP in the agent's environment to override discovery for debugging.)
 set -e
@@ -10,11 +10,19 @@ ROLE="${1:-compute}"
 AGENT_USER="$2"
 MQTT_HOST="${3:-}"
 MQTT_PORT="${4:-1883}"
+NODE_FEATURES="${5:-llm}"
 
 if [ -z "$AGENT_USER" ]; then
-    echo "Usage: $0 <role> <user> [mqtt_host] [mqtt_port]"
+    echo "Usage: $0 <role> <user> [mqtt_host] [mqtt_port] [node_features]"
     exit 1
 fi
+
+has_feature() {
+    case ",${NODE_FEATURES}," in
+        *",$1,"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # Select the best model based on available GPU VRAM (AMD/Nvidia) or system RAM.
 detect_default_model() {
@@ -58,58 +66,119 @@ detect_default_model() {
     fi
 }
 
-DEFAULT_MODEL="$(detect_default_model)"
-echo ">>> Detected hardware → default model: ${DEFAULT_MODEL}"
-echo ">>> To load it after provisioning: just auto-load-model <node-name>"
-
 echo ">>> Installing system dependencies..."
 apt-get install -y -q git curl
 
-echo ">>> Installing llama-server (llama.cpp latest release)..."
-if ! LLAMA_VERSION="$(curl -fsSL --connect-timeout 5 \
-        https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
-        | grep '"tag_name"' | head -1 | cut -d'"' -f4)" \
-   || [ -z "$LLAMA_VERSION" ]; then
-    echo ">>> Warning: GitHub API unavailable. Falling back to b5581."
-    LLAMA_VERSION="b5581"
+if has_feature art; then
+    # fbi against the raw framebuffer, not feh/pqiv/mpv: a Lite install has
+    # no X server (feh/pqiv can't start), and while mpv --vo=drm does work,
+    # Debian's mpv package drags in a full GTK/X11/audio stack as unused
+    # linked dependencies (~600 MB, 265 packages — confirmed on the actual
+    # first node) for a single-purpose kiosk display. fbi needs only a
+    # handful of small deps.
+    echo ">>> Installing fbi (art-display fullscreen viewer, framebuffer)..."
+    apt-get install -y -q --no-install-recommends fbi
+
+    # This SoC's default full-KMS driver (vc4-kms-v3d) exposes no /dev/fb0
+    # at all, which fbi needs — confirmed on the actual first node. The
+    # legacy "fake KMS" overlay is still hardware-accelerated and does
+    # expose it. hdmi_force_hotplug=1 makes the Pi assume a display is
+    # present at boot even before the TV is wired up/powered on, which is
+    # also required for /dev/fb0 to appear at all.
+    CONFIG_TXT="/boot/firmware/config.txt"
+    CONFIG_CHANGED=0
+    if [ -f "$CONFIG_TXT" ]; then
+        # Tolerate leading whitespace and trailing overlay params (e.g.
+        # ",cma-128") rather than anchoring to the exact line seen on the
+        # image this was first tested against — a differently-formatted
+        # future OS image would otherwise silently skip this fix, leaving
+        # fbi non-functional with no error at all.
+        if grep -qE '^[[:space:]]*dtoverlay=vc4-kms-v3d(,|$)' "$CONFIG_TXT"; then
+            echo ">>> Switching ${CONFIG_TXT} to vc4-fkms-v3d (needed for /dev/fb0)..."
+            sed -i -E 's/^([[:space:]]*)dtoverlay=vc4-kms-v3d/\1dtoverlay=vc4-fkms-v3d/' "$CONFIG_TXT"
+            CONFIG_CHANGED=1
+        fi
+        if ! grep -qE '^[[:space:]]*hdmi_force_hotplug=1([[:space:]]|$)' "$CONFIG_TXT"; then
+            echo ">>> Adding hdmi_force_hotplug=1 to ${CONFIG_TXT}..."
+            sed -i '/^\[all\]/a hdmi_force_hotplug=1' "$CONFIG_TXT"
+            CONFIG_CHANGED=1
+        fi
+        if [ "$CONFIG_CHANGED" = "1" ]; then
+            echo ""
+            echo ">>> ################################################################"
+            echo ">>> #  DISPLAY CONFIG CHANGED — REBOOT NEEDED before /dev/fb0       #"
+            echo ">>> #  exists. Run 'sudo reboot' once, manually, before testing      #"
+            echo ">>> #  the art display.                                             #"
+            echo ">>> ################################################################"
+            echo ""
+        fi
+    fi
 fi
-echo ">>> llama.cpp release: ${LLAMA_VERSION}"
-ARCH="$(uname -m)"
-llama_url_for() {
-    if [ "$ARCH" = "x86_64" ]; then
-        echo "https://github.com/ggml-org/llama.cpp/releases/download/$1/llama-$1-bin-ubuntu-x64.tar.gz"
-    else
-        echo "https://github.com/ggml-org/llama.cpp/releases/download/$1/llama-$1-bin-ubuntu-arm64.tar.gz"
+
+DEFAULT_MODEL=""
+if has_feature llm; then
+    DEFAULT_MODEL="$(detect_default_model)"
+    echo ">>> Detected hardware → default model: ${DEFAULT_MODEL}"
+    echo ">>> To load it after provisioning: just auto-load-model <node-name>"
+
+    echo ">>> Installing llama-server (llama.cpp latest release)..."
+    if ! LLAMA_VERSION="$(curl -fsSL --connect-timeout 5 \
+            https://api.github.com/repos/ggml-org/llama.cpp/releases/latest \
+            | grep '"tag_name"' | head -1 | cut -d'"' -f4)" \
+       || [ -z "$LLAMA_VERSION" ]; then
+        echo ">>> Warning: GitHub API unavailable. Falling back to b5581."
+        LLAMA_VERSION="b5581"
     fi
-}
-LLAMA_URL="$(llama_url_for "$LLAMA_VERSION")"
-LLAMA_TMP="$(mktemp -d)"
-if ! curl -fsSL "$LLAMA_URL" -o "$LLAMA_TMP/llama.tar.gz"; then
-    # "latest" is a tag, published as soon as it's created — its release-asset
-    # upload is a separate, sometimes-lagging CI step. Seen live 2026-07-04:
-    # b9871 sat at zero uploaded assets for 20+ minutes. Fall back to the
-    # previous release by querying the releases list (not a hardcoded version
-    # — llama.cpp cuts a new tag roughly daily, so a pinned fallback would be
-    # stale within days) rather than hard-failing the whole node install.
-    echo ">>> Warning: ${LLAMA_VERSION} assets aren't uploaded yet — trying the previous release..."
-    PREV_VERSION="$(curl -fsSL --connect-timeout 5 \
-            "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=2" \
-            | grep '"tag_name"' | sed -n '2p' | cut -d'"' -f4)"
-    if [ -z "$PREV_VERSION" ]; then
-        echo ">>> ERROR: llama.cpp download failed and no previous release could be resolved."
-        exit 1
-    fi
-    LLAMA_VERSION="$PREV_VERSION"
+    echo ">>> llama.cpp release: ${LLAMA_VERSION}"
+    ARCH="$(uname -m)"
+    llama_url_for() {
+        if [ "$ARCH" = "x86_64" ]; then
+            echo "https://github.com/ggml-org/llama.cpp/releases/download/$1/llama-$1-bin-ubuntu-x64.tar.gz"
+        else
+            echo "https://github.com/ggml-org/llama.cpp/releases/download/$1/llama-$1-bin-ubuntu-arm64.tar.gz"
+        fi
+    }
     LLAMA_URL="$(llama_url_for "$LLAMA_VERSION")"
-    echo ">>> Falling back to llama.cpp release: ${LLAMA_VERSION}"
-    curl -fsSL "$LLAMA_URL" -o "$LLAMA_TMP/llama.tar.gz"
+    LLAMA_TMP="$(mktemp -d)"
+    if ! curl -fsSL "$LLAMA_URL" -o "$LLAMA_TMP/llama.tar.gz"; then
+        # "latest" is a tag, published as soon as it's created — its release-asset
+        # upload is a separate, sometimes-lagging CI step. Seen live 2026-07-04:
+        # b9871 sat at zero uploaded assets for 20+ minutes. Fall back to the
+        # previous release by querying the releases list (not a hardcoded version
+        # — llama.cpp cuts a new tag roughly daily, so a pinned fallback would be
+        # stale within days) rather than hard-failing the whole node install.
+        echo ">>> Warning: ${LLAMA_VERSION} assets aren't uploaded yet — trying the previous release..."
+        PREV_VERSION="$(curl -fsSL --connect-timeout 5 \
+                "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=2" \
+                | grep '"tag_name"' | sed -n '2p' | cut -d'"' -f4)"
+        if [ -z "$PREV_VERSION" ]; then
+            echo ">>> ERROR: llama.cpp download failed and no previous release could be resolved."
+            exit 1
+        fi
+        LLAMA_VERSION="$PREV_VERSION"
+        LLAMA_URL="$(llama_url_for "$LLAMA_VERSION")"
+        echo ">>> Falling back to llama.cpp release: ${LLAMA_VERSION}"
+        curl -fsSL "$LLAMA_URL" -o "$LLAMA_TMP/llama.tar.gz"
+    fi
+    # Extract everything — llama-server depends on several .so files in the same archive.
+    install -d /opt/llama.cpp
+    tar -xzf "$LLAMA_TMP/llama.tar.gz" -C /opt/llama.cpp --strip-components=1
+    rm -rf "$LLAMA_TMP"
+    echo ">>> llama-server ${LLAMA_VERSION} installed at /opt/llama.cpp/llama-server"
+    # Models are downloaded on first ModelLoad — no pre-cache step needed.
+else
+    echo ">>> No 'llm' feature requested — skipping llama.cpp install."
 fi
-# Extract everything — llama-server depends on several .so files in the same archive.
-install -d /opt/llama.cpp
-tar -xzf "$LLAMA_TMP/llama.tar.gz" -C /opt/llama.cpp --strip-components=1
-rm -rf "$LLAMA_TMP"
-echo ">>> llama-server ${LLAMA_VERSION} installed at /opt/llama.cpp/llama-server"
-# Models are downloaded on first ModelLoad — no pre-cache step needed.
+
+LLM_ENV_BLOCK=""
+if has_feature llm; then
+    LLM_ENV_BLOCK="Environment=LLAMA_MODEL_DIR=/home/${AGENT_USER}/.ai-mesh/models
+Environment=LLAMA_SERVER_BIN=/opt/llama.cpp/llama-server
+Environment=LD_LIBRARY_PATH=/opt/llama.cpp
+Environment=LLAMA_GPU_LAYERS=0
+Environment=LLAMA_CTX_SIZE=4096
+Environment=DEFAULT_MODEL=${DEFAULT_MODEL}"
+fi
 
 echo ">>> Installing ai-mesh-agent systemd service..."
 tee /etc/systemd/system/ai-mesh-agent.service > /dev/null <<EOF
@@ -121,12 +190,7 @@ Wants=network-online.target
 [Service]
 ExecStart=/home/${AGENT_USER}/agent
 Environment=AGENT_ROLE=${ROLE}
-Environment=LLAMA_MODEL_DIR=/home/${AGENT_USER}/.ai-mesh/models
-Environment=LLAMA_SERVER_BIN=/opt/llama.cpp/llama-server
-Environment=LD_LIBRARY_PATH=/opt/llama.cpp
-Environment=LLAMA_GPU_LAYERS=0
-Environment=LLAMA_CTX_SIZE=4096
-Environment=DEFAULT_MODEL=${DEFAULT_MODEL}
+${LLM_ENV_BLOCK}
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_HOST=${MQTT_HOST}" || true)
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_PORT=${MQTT_PORT}" || true)
 Restart=always

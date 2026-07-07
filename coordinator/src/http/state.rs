@@ -3,7 +3,8 @@ use serde::Serialize;
 use shared::MeshMessage;
 use shared::hardware::NodeRole;
 use shared::messages::{
-    LightAction, LightStateReport, NodeRecordLite, ReaperStatusReport, SensorReport,
+    ArtStatusReport, LightAction, LightStateReport, NodeRecordLite, ReaperStatusReport,
+    SensorReport,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -408,6 +409,44 @@ pub struct DashboardState {
     reaper_snapshot: Mutex<Option<ReaperStatusReport>>,
     /// Cumulative cloud-gateway usage stats (in-memory; reset on restart).
     gateway_stats: Mutex<GatewayStats>,
+    /// Last-known Frame TV art-display status. No WS broadcast yet (see
+    /// push_art_status) — v1 has no dashboard panel to consume one.
+    art_snapshot: Mutex<Option<ArtStatusReport>>,
+    /// The active art slideshow, if any — a list of images built from a
+    /// search (see `api::art::search_art`) plus which one is currently
+    /// showing. `generation` increments on every new search and lets the
+    /// background auto-advance task (also spawned by `search_art`) detect
+    /// it's been superseded and stop on its own rather than racing a newer
+    /// rotation — see `advance_art_rotation_if_current`.
+    art_rotation: Mutex<Option<ArtRotationState>>,
+    /// The general/default slideshow's cached image list — built once
+    /// (Met highlights, see `api::art::build_general_batch`) and reused on
+    /// every revert-to-general rather than re-querying the Met API each
+    /// time a specific search goes idle.
+    general_art_batch: Mutex<Option<Vec<ArtRotationItem>>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArtRotationItem {
+    pub image_url: String,
+    pub title: String,
+    pub artist: String,
+    pub date: String,
+}
+
+struct ArtRotationState {
+    query: String,
+    items: Vec<ArtRotationItem>,
+    index: usize,
+    generation: u64,
+    /// Refreshed on a new search and on a manual `/api/art/next` — an
+    /// explicit sign someone's actually engaging with this specific
+    /// rotation. Deliberately *not* refreshed by the rotation's own
+    /// auto-advance ticks, or a search would never go idle on its own no
+    /// matter how long ago it was actually asked for. The auto-advance
+    /// timer (`api::art::spawn_art_rotation_timer`) uses this to decide
+    /// when to give up and revert to the general slideshow.
+    last_engaged_at: std::time::Instant,
 }
 
 impl DashboardState {
@@ -447,6 +486,9 @@ impl DashboardState {
             pending_streams: Arc::new(Mutex::new(HashMap::new())),
             reaper_snapshot: Mutex::new(None),
             gateway_stats: Mutex::new(GatewayStats::default()),
+            art_snapshot: Mutex::new(None),
+            art_rotation: Mutex::new(None),
+            general_art_batch: Mutex::new(None),
         })
     }
 
@@ -1146,6 +1188,115 @@ impl DashboardState {
     /// Return the current REAPER snapshot for WS warm-start and REST responses.
     pub fn get_reaper_snapshot(&self) -> Option<ReaperStatusReport> {
         self.reaper_snapshot.lock().unwrap().clone()
+    }
+
+    /// Record the art node's latest status. Plain overwrite, no change-detection
+    /// or broadcast (unlike push_reaper_status) — v1 has no dashboard panel
+    /// polling/subscribing to this yet, just the REST snapshot below.
+    pub fn push_art_status(&self, report: ArtStatusReport) {
+        *self.art_snapshot.lock().unwrap() = Some(report);
+    }
+
+    /// Return the current art-display snapshot for REST responses.
+    pub fn get_art_snapshot(&self) -> Option<ArtStatusReport> {
+        self.art_snapshot.lock().unwrap().clone()
+    }
+
+    /// Replace the active slideshow with a freshly-built list (a new search
+    /// always starts at index 0) and return its generation — the caller uses
+    /// this to spawn an auto-advance task that stops itself once superseded.
+    pub fn set_art_rotation(&self, query: String, items: Vec<ArtRotationItem>) -> u64 {
+        let mut guard = self.art_rotation.lock().unwrap();
+        let generation = guard.as_ref().map_or(1, |r| r.generation + 1);
+        *guard = Some(ArtRotationState {
+            query,
+            items,
+            index: 0,
+            generation,
+            last_engaged_at: std::time::Instant::now(),
+        });
+        generation
+    }
+
+    /// The item at the current index, if a rotation exists and isn't empty.
+    pub fn art_rotation_current_item(&self) -> Option<ArtRotationItem> {
+        let guard = self.art_rotation.lock().unwrap();
+        guard.as_ref().and_then(|r| r.items.get(r.index).cloned())
+    }
+
+    /// Advance to the next item (wrapping) only if `generation` still
+    /// matches the live rotation — used by the background auto-advance
+    /// task, which should quietly stop rather than fight a newer search.
+    /// Returns `None` both when superseded and when there's nothing to show.
+    pub fn advance_art_rotation_if_current(&self, generation: u64) -> Option<ArtRotationItem> {
+        let mut guard = self.art_rotation.lock().unwrap();
+        let r = guard.as_mut()?;
+        if r.generation != generation || r.items.is_empty() {
+            return None;
+        }
+        r.index = (r.index + 1) % r.items.len();
+        r.items.get(r.index).cloned()
+    }
+
+    /// Advance to the next item (wrapping) unconditionally — for
+    /// `POST /api/art/next`, which should always affect whatever the
+    /// current live rotation is, not be scoped to a particular generation.
+    pub fn manual_advance_art_rotation(&self) -> Option<ArtRotationItem> {
+        let mut guard = self.art_rotation.lock().unwrap();
+        let r = guard.as_mut()?;
+        if r.items.is_empty() {
+            return None;
+        }
+        r.last_engaged_at = std::time::Instant::now();
+        r.index = (r.index + 1) % r.items.len();
+        r.items.get(r.index).cloned()
+    }
+
+    /// Has it been at least `idle_timeout` since anyone last searched for or
+    /// manually advanced the active specific rotation? Used by the
+    /// auto-advance timer to decide it's time to give up and revert to the
+    /// general slideshow — `None` (no rotation at all) counts as not idle,
+    /// since there's nothing to revert *from*.
+    pub fn art_rotation_idle_for(&self, idle_timeout: std::time::Duration) -> bool {
+        let guard = self.art_rotation.lock().unwrap();
+        guard
+            .as_ref()
+            .is_some_and(|r| r.last_engaged_at.elapsed() >= idle_timeout)
+    }
+
+    /// Clear the active specific rotation — called when reverting to the
+    /// general slideshow, so a stale generation's auto-advance tick (if one
+    /// is still mid-sleep) finds nothing and stops cleanly next time it
+    /// wakes, same as being superseded by a newer search.
+    pub fn clear_art_rotation(&self) {
+        *self.art_rotation.lock().unwrap() = None;
+    }
+
+    /// Cache the general-slideshow batch so reverting to it later (after a
+    /// specific search goes idle) doesn't need a fresh Met API round-trip.
+    pub fn set_general_art_batch(&self, items: Vec<ArtRotationItem>) {
+        *self.general_art_batch.lock().unwrap() = Some(items);
+    }
+
+    pub fn get_general_art_batch(&self) -> Option<Vec<ArtRotationItem>> {
+        self.general_art_batch.lock().unwrap().clone()
+    }
+
+    /// `GET /api/art/current` payload — query, position, and the current
+    /// item's metadata, or `None` if no rotation has ever been started.
+    pub fn art_rotation_status(&self) -> Option<serde_json::Value> {
+        let guard = self.art_rotation.lock().unwrap();
+        let r = guard.as_ref()?;
+        let item = r.items.get(r.index)?;
+        Some(serde_json::json!({
+            "query": r.query,
+            "index": r.index,
+            "count": r.items.len(),
+            "title": item.title,
+            "artist": item.artist,
+            "date": item.date,
+            "image_url": item.image_url,
+        }))
     }
 }
 
@@ -2523,5 +2674,90 @@ mod tests {
             Err(broadcast::error::RecvError::Closed) => {}
             other => panic!("expected RecvError::Closed, got {other:?}"),
         }
+    }
+
+    // ── art rotation: idle-timeout revert + general-batch cache ─────────────
+
+    #[test]
+    fn art_rotation_idle_for_false_immediately_after_engagement() {
+        let state = make_state();
+        state.set_art_rotation("q".into(), vec![]);
+        assert!(!state.art_rotation_idle_for(std::time::Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn art_rotation_idle_for_true_with_zero_timeout() {
+        let state = make_state();
+        state.set_art_rotation("q".into(), vec![]);
+        assert!(state.art_rotation_idle_for(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn art_rotation_idle_for_false_when_no_rotation_exists() {
+        let state = make_state();
+        assert!(!state.art_rotation_idle_for(std::time::Duration::ZERO));
+    }
+
+    #[tokio::test]
+    async fn manual_advance_resets_idle_clock() {
+        let state = make_state();
+        state.set_art_rotation(
+            "q".into(),
+            vec![
+                ArtRotationItem {
+                    image_url: "1".into(),
+                    title: "".into(),
+                    artist: "".into(),
+                    date: "".into(),
+                },
+                ArtRotationItem {
+                    image_url: "2".into(),
+                    title: "".into(),
+                    artist: "".into(),
+                    date: "".into(),
+                },
+            ],
+        );
+        let short = std::time::Duration::from_millis(40);
+        tokio::time::sleep(short * 2).await;
+        assert!(
+            state.art_rotation_idle_for(short),
+            "should read idle before any manual engagement"
+        );
+        state.manual_advance_art_rotation();
+        assert!(
+            !state.art_rotation_idle_for(short),
+            "manual advance should have reset the idle clock"
+        );
+    }
+
+    #[test]
+    fn clear_art_rotation_removes_current_item() {
+        let state = make_state();
+        state.set_art_rotation(
+            "q".into(),
+            vec![ArtRotationItem {
+                image_url: "1".into(),
+                title: "".into(),
+                artist: "".into(),
+                date: "".into(),
+            }],
+        );
+        assert!(state.art_rotation_current_item().is_some());
+        state.clear_art_rotation();
+        assert!(state.art_rotation_current_item().is_none());
+    }
+
+    #[test]
+    fn general_art_batch_cache_roundtrip() {
+        let state = make_state();
+        assert!(state.get_general_art_batch().is_none());
+        state.set_general_art_batch(vec![ArtRotationItem {
+            image_url: "1".into(),
+            title: "".into(),
+            artist: "".into(),
+            date: "".into(),
+        }]);
+        assert_eq!(state.get_general_art_batch().unwrap().len(), 1);
     }
 }

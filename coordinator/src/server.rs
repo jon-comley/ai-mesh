@@ -1136,6 +1136,15 @@ async fn process_message(
             }
             None
         }
+        MeshMessage::ArtStatus(mut report) => {
+            if let Some(id) = node_id.as_deref() {
+                report.node_id = id.to_string();
+            }
+            if let Some(dash) = dashboard {
+                dash.push_art_status(report);
+            }
+            None
+        }
         _ => None,
     }
 }

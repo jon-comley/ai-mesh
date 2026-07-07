@@ -179,6 +179,12 @@ pub fn router(
             put(api::prefs::set_preference).delete(api::prefs::delete_preference),
         )
         .route("/api/reaper/state", get(api::nodes::get_reaper_state))
+        .route("/api/art/show", post(api::art::show_art))
+        .route("/api/art/status", get(api::art::get_art_status))
+        .route("/api/art/search", post(api::art::search_art))
+        .route("/api/art/next", post(api::art::next_art))
+        .route("/api/art/current", get(api::art::get_art_current))
+        .route("/api/art/general", post(api::art::general_art))
         .layer(axum::Extension(registry))
         .layer(axum::Extension(effects))
         .with_state(dashboard)

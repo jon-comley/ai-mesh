@@ -90,6 +90,7 @@ pub enum Feature {
     Lighting,
     Reaper,
     Sensors,
+    Art,
 }
 
 impl Default for NodeCapabilities {
