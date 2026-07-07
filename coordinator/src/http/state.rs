@@ -989,6 +989,57 @@ impl DashboardState {
         self.join_feed.lock().unwrap().iter().cloned().collect()
     }
 
+    /// Immediately mark a device offline (light and/or sensor snapshot,
+    /// whichever it's actually known in — a device is never both, checking
+    /// both just avoids the caller needing to know its type). Called on a
+    /// z2m `device_leave` pairing event, which is a much stronger, faster
+    /// signal than waiting on z2m's own availability timeout (~10 min for
+    /// an active/routered device, ~25h for a battery/passive one) — a
+    /// device that's genuinely left the network shouldn't keep showing
+    /// stale "online" readings for that whole window. Preserves the last
+    /// known reading, same as a normal availability-flip-to-offline update
+    /// already does — this only changes *when* that happens, not the
+    /// semantics of what an offline device looks like.
+    pub fn mark_device_offline(&self, device_id: &str) {
+        let light_node = self
+            .light_snapshot
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .map(|r| r.node_id.clone());
+        if let Some(node_id) = light_node {
+            self.push_lighting_update(LightStateReport {
+                node_id,
+                device_id: device_id.to_string(),
+                on: false,
+                brightness: None,
+                color_xy: None,
+                color_temp: None,
+                online: false,
+            });
+        }
+
+        let sensor_node = self
+            .sensor_snapshot
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .map(|r| r.node_id.clone());
+        if let Some(node_id) = sensor_node {
+            self.push_sensor_update(SensorReport {
+                node_id,
+                device_id: device_id.to_string(),
+                temperature: None,
+                humidity: None,
+                battery: None,
+                occupancy: None,
+                contact: None,
+                illuminance: None,
+                online: false,
+            });
+        }
+    }
+
     /// Broadcast a Switch-class button press / dial rotation. Purely a
     /// transient UI indicator (a device row briefly flashes) — unlike the
     /// join feed, there's no replay buffer: a client not connected when it
@@ -2207,6 +2258,64 @@ mod tests {
             ts[1] > ts[0],
             "client dedupes by ts — must be strict: {ts:?}"
         );
+    }
+
+    // ── mark_device_offline ──────────────────────────────────────────────────
+
+    #[test]
+    fn mark_device_offline_flips_a_known_light_preserving_readings() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_lighting_update(make_light_report("bulb1", true));
+        state.mark_device_offline("bulb1");
+        let snap = state.get_light_snapshot();
+        let bulb = snap.iter().find(|l| l.device_id == "bulb1").unwrap();
+        assert!(!bulb.online);
+        // make_light_report sets brightness Some(200) — must survive.
+        assert_eq!(bulb.brightness, Some(200));
+    }
+
+    #[test]
+    fn mark_device_offline_flips_a_known_sensor_preserving_readings() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_sensor_update(make_sensor_report("sensor1", Some(21.4)));
+        state.mark_device_offline("sensor1");
+        let snap = state.get_sensor_snapshot();
+        let sensor = snap.iter().find(|s| s.device_id == "sensor1").unwrap();
+        assert!(!sensor.online);
+        assert_eq!(sensor.temperature, Some(21.4));
+    }
+
+    #[test]
+    fn mark_device_offline_is_a_noop_for_an_unknown_device() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        // Must not panic, and must not insert a phantom entry into either
+        // snapshot for a device that was never actually known.
+        state.mark_device_offline("never-seen");
+        assert!(state.get_light_snapshot().is_empty());
+        assert!(state.get_sensor_snapshot().is_empty());
+    }
+
+    #[test]
+    fn mark_device_offline_does_not_touch_an_unrelated_device() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_lighting_update(make_light_report("bulb1", true));
+        state.push_lighting_update(make_light_report("bulb2", true));
+        state.mark_device_offline("bulb1");
+        let snap = state.get_light_snapshot();
+        let bulb2 = snap.iter().find(|l| l.device_id == "bulb2").unwrap();
+        assert!(bulb2.online, "unrelated device must be untouched");
     }
 
     // ── push_switch_action ────────────────────────────────────────────────────
