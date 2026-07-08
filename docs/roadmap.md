@@ -1382,9 +1382,7 @@ last, after the basic slideshow works reliably on its own.
 > **2026-07-06 — v1 slice built and verified end to end, ahead of the
 > electrician.** The recess isn't booked yet, so development started early
 > on a spare Pi 4 with the TV on a stand instead of waiting — same aarch64
-> target and mesh code either way, so this isn't wasted work once it later
-> moves to the Pi Zero 2 W (see `plans/frame-tv-art-display.md`'s
-> 2026-07-06 note). Shipped: `WIRE_VERSION` 9
+> target and mesh code either way. Shipped: `WIRE_VERSION` 9
 > (`MeshMessage::ArtShow`/`ArtStatus`), the `capability-art` crate (fetches
 > an image, shells out to `fbi` via `sudo -n`, reports status), the `art`
 > node feature flag, and coordinator `POST /api/art/show` /
@@ -1440,6 +1438,13 @@ house, and it never leaves your house."
 Blocking on: electrician-designed recess + socket (wall has
 tanking/shower on the other side — flagged explicitly in the plan as
 needing a qualified Part P registered electrician, not a DIY job).
+
+> **2026-07-08 — hardware decision reversed: the Pi 4 stays permanently,
+> no move to a Pi Zero 2 W.** The behind-TV node is becoming the mesh's
+> audio-output workhorse too (HDMI audio to the soundbar, see
+> `plans/audio-output-integration.md`), a job the Zero can't do. See the
+> superseded notes in `plans/frame-tv-art-display.md` and
+> `docs/frame-tv-setup.md`.
 
 ---
 
