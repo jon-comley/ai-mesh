@@ -7,9 +7,14 @@ edition = "2024"
 capability-core = { path = "../core" }
 shared = { path = "../../shared" }
 async-trait = "0.1"
-tokio = { version = "1", features = ["sync", "fs", "time", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "fs", "time", "rt", "macros", "process"] }
 tracing = "0.1"
 dirs = "5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
 # Pinned to api-1-10: the real Home Assistant Voice hardware (ESPHome
 # 2025.5.1) speaks API 1.10 — the crate's uncustomized default compiles in
 # 1.14's schema and warns of "breaking changes" against an older device,

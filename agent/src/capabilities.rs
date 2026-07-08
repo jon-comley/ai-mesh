@@ -32,6 +32,8 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
         shared::Feature::Reaper,
         #[cfg(feature = "art")]
         shared::Feature::Art,
+        #[cfg(feature = "voice")]
+        shared::Feature::Voice,
     ];
 
     Ok(NodeCapabilities {
@@ -66,6 +68,13 @@ mod tests {
     fn features_includes_art_when_built_with_art_feature() {
         let caps = detect_capabilities().unwrap();
         assert!(caps.features.contains(&shared::Feature::Art));
+    }
+
+    #[cfg(feature = "voice")]
+    #[test]
+    fn features_includes_voice_when_built_with_voice_feature() {
+        let caps = detect_capabilities().unwrap();
+        assert!(caps.features.contains(&shared::Feature::Voice));
     }
 
     #[cfg(not(feature = "llm"))]

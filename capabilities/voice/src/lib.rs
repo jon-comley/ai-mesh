@@ -1,9 +1,13 @@
-//! Voice capability — crawl-phase ESPHome Native API client for the Home
-//! Assistant Voice hardware. ai-mesh plays the role Home Assistant normally
-//! would: dial out to the device, subscribe to its voice-assistant events,
-//! and (for now) just capture the raw audio clip it sends on a wake-word
-//! trigger to a file. No speech-to-text/intent/text-to-speech wiring yet —
-//! see `docs/roadmap.md` and `plans/multi-domain-home.md` Phase C.
+//! Voice capability — ESPHome Native API client for the Home Assistant
+//! Voice hardware. ai-mesh plays the role Home Assistant normally would:
+//! dial out to the device, subscribe to its voice-assistant events, capture
+//! the audio a wake-word trigger streams, transcribe it (whisper.cpp, see
+//! `stt`), and feed the transcript into the coordinator's intent pipeline
+//! as a `MeshMessage::IntentRequest` over the agent's existing mesh
+//! connection — the same `handle_intent` tool-calling path the dashboard
+//! chat and `just intent` use, so a spoken "turn off the kitchen lights"
+//! drives the real lighting tools. No TTS yet (the reply is logged, not
+//! spoken) — see `plans/voice-assistant-integration.md`.
 //!
 //! Stock ESPHome firmware, unmodified — see "Why stock firmware, not
 //! custom" in `plans/voice-assistant-integration.md`: the XMOS XU316
@@ -11,7 +15,11 @@
 //! STT/TTS/intent can never run on the ESP32-S3 either way, so there's
 //! nothing to gain from replacing it.
 
+pub mod stt;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -19,12 +27,14 @@ use capability_core::Capability;
 use esphome_client::{
     EspHomeClient,
     types::{
-        DeviceInfoRequest, EspHomeMessage, SubscribeVoiceAssistantRequest, VoiceAssistantEvent,
-        VoiceAssistantEventData, VoiceAssistantEventResponse, VoiceAssistantResponse,
+        DeviceInfoRequest, EspHomeMessage, LightCommandRequest, ListEntitiesRequest,
+        SubscribeVoiceAssistantRequest, VoiceAssistantEvent, VoiceAssistantEventData,
+        VoiceAssistantEventResponse, VoiceAssistantResponse,
     },
 };
-use shared::MeshMessage;
+use shared::{IntentRequest, IntentResponse, MeshMessage};
 use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -56,11 +66,46 @@ const VOICE_ASSISTANT_SUBSCRIBE_API_AUDIO: u32 = 1 << 2;
 // at 700-3,000 with incidental spikes to 6,000-10,000. The original guess
 // of 400 was inside the noise floor — every chunk registered as "loud"
 // and the detector never fired.
+//
+// Raised from 5000 to 8000 on 2026-07-08 (same day, first attempt): two live
+// STT captures never triggered silence detection at all (ran the full
+// MAX_CAPTURE window) — ambient noise crossed 5000 at least once every
+// 630-840ms throughout, never leaving the required 1200ms gap.
+//
+// Reverted 8000 back to 5000 later the same day: a quieter utterance peaked
+// at only 6,693 — below 8000 — so the *entire* capture was misread as
+// silence from the first chunk, cutting off after the 1200ms floor before
+// any real speech was captured (transcript came back as a Whisper
+// non-speech tag, "(air whooshing)"). Quiet real speech (6,693) and noisy-
+// room ambient spikes (up to 10,000) overlap — no single fixed threshold
+// cleanly separates them. Traded the other way instead: keep the threshold
+// low enough to always catch quiet speech, and require a longer clean gap
+// (SILENCE_DURATION 1200ms -> 2500ms) so a brief ambient spike doesn't
+// restart the clock as easily. A persistently noisy room may still hit
+// MAX_CAPTURE occasionally, but quiet speech won't get cut short anymore.
+//
+// Reverted 2500ms back to 1200ms later the same day: the halo staying lit
+// noticeably longer after speech ended was worse in practice than the
+// occasional noisy-room full-capture problem it was fixing. Back to the
+// original calibrated values (5000/1200ms) — accept that a persistently
+// noisy moment may again run the full MAX_CAPTURE window.
 const SILENCE_THRESHOLD: u16 = 5000;
 const SILENCE_DURATION: Duration = Duration::from_millis(1200);
-/// Floor before silence can end a capture — the mic opens before the user
-/// starts speaking, so an instant cutoff would capture nothing.
-const MIN_CAPTURE: Duration = Duration::from_millis(400);
+/// Loud audio inside this initial window is the tail of the wake word
+/// itself, not the user's request — measured live 2026-07-08: "…Nabu"
+/// bled ~250ms of 18k-28k peaks into the start of every capture. Counting
+/// that as speech onset meant a natural pause between wake word and
+/// question ran out the 1200ms silence clock before the user said
+/// anything (capture closed at 1.47s with the question never captured).
+const WAKE_WORD_TAIL: Duration = Duration::from_millis(500);
+/// How long to wait for the user's speech to *begin* (measured from
+/// capture start, ignoring the wake-word tail) before giving up. More
+/// generous than SILENCE_DURATION — "Okay Nabu … ⟨think⟩ … what's the
+/// temperature?" is normal usage, and closing during that think-pause was
+/// exactly the live failure above. Trimmed 4s → 2.5s after live use: 4s
+/// made a no-speech trigger feel sluggish, and 2.5s still covers a
+/// natural post-wake-word beat (the observed think-pause was ~1.5s).
+const SPEECH_START_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Outer safety net if silence detection never fires (e.g. continuous
 /// background noise).
 const MAX_CAPTURE: Duration = Duration::from_secs(15);
@@ -90,6 +135,10 @@ struct Capture {
     clip: Vec<u8>,
     started: Instant,
     last_loud_at: Instant,
+    /// Set once a loud chunk arrives *after* the wake-word tail window —
+    /// i.e. the user's actual request has begun. Until then the capture is
+    /// in "waiting for speech" mode with its more generous timeout.
+    speech_started: bool,
 }
 
 impl Capture {
@@ -99,20 +148,36 @@ impl Capture {
             clip: Vec::new(),
             started: now,
             last_loud_at: now,
+            speech_started: false,
         }
     }
 
     fn push_chunk(&mut self, pcm: &[u8]) {
-        if peak_amplitude(pcm) > SILENCE_THRESHOLD {
-            self.last_loud_at = Instant::now();
-        }
+        self.note_peak(peak_amplitude(pcm), Instant::now());
         self.clip.extend_from_slice(pcm);
     }
 
-    /// When silence should end this capture — SILENCE_DURATION past the
-    /// last loud chunk, but never before MIN_CAPTURE from the start.
+    /// Timing state update, split from `push_chunk` so tests can drive it
+    /// with synthetic instants.
+    fn note_peak(&mut self, peak: u16, now: Instant) {
+        if peak > SILENCE_THRESHOLD {
+            if now >= self.started + WAKE_WORD_TAIL {
+                self.speech_started = true;
+            }
+            self.last_loud_at = now;
+        }
+    }
+
+    /// When this capture should end for lack of sound. Before the user's
+    /// speech begins (wake-word tail excluded), that's the generous
+    /// SPEECH_START_TIMEOUT — people pause to think after the wake word.
+    /// Once speech has begun, SILENCE_DURATION past the last loud chunk.
     fn silence_deadline(&self) -> Instant {
-        (self.last_loud_at + SILENCE_DURATION).max(self.started + MIN_CAPTURE)
+        if self.speech_started {
+            self.last_loud_at + SILENCE_DURATION
+        } else {
+            self.started + SPEECH_START_TIMEOUT
+        }
     }
 
     fn hard_deadline(&self) -> Instant {
@@ -120,14 +185,36 @@ impl Capture {
     }
 }
 
+/// State shared between the capability object (which the agent's dispatch
+/// loop calls into) and the long-lived device task: the current mesh
+/// connection's sender, and the intent requests awaiting a coordinator
+/// reply. Both use std `Mutex` — every hold is a short insert/remove/clone,
+/// never across an await.
+struct VoiceShared {
+    /// Sender for the agent's *current* coordinator connection. `start()`
+    /// refreshes this on every call (main.rs re-runs start() per coordinator
+    /// reconnect — that's the hook that keeps it current), so an intent sent
+    /// after a reconnect uses the live connection, not the first one ever
+    /// seen.
+    mesh_tx: Mutex<Option<Sender<MeshMessage>>>,
+    /// In-flight intent requests: request_id → the pipeline task waiting on
+    /// the coordinator's IntentResponse. `handles()` claims exactly these.
+    pending: Mutex<HashMap<String, oneshot::Sender<IntentResponse>>>,
+}
+
 pub struct VoiceCapability {
     node_id: String,
+    shared: Arc<VoiceShared>,
 }
 
 impl VoiceCapability {
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
+            shared: Arc::new(VoiceShared {
+                mesh_tx: Mutex::new(None),
+                pending: Mutex::new(HashMap::new()),
+            }),
         }
     }
 }
@@ -138,24 +225,73 @@ impl Capability for VoiceCapability {
         "voice"
     }
 
-    fn handles(&self, _msg: &MeshMessage) -> bool {
-        false
+    fn handles(&self, msg: &MeshMessage) -> bool {
+        // Claim only IntentResponses this capability itself requested —
+        // matching on request_id keeps any future intent traffic through the
+        // agent from being swallowed here.
+        match msg {
+            MeshMessage::IntentResponse(r) => self
+                .shared
+                .pending
+                .lock()
+                .unwrap()
+                .contains_key(&r.request_id),
+            _ => false,
+        }
     }
 
-    async fn start(&self, _tx: Sender<MeshMessage>) -> Result<(), String> {
+    async fn start(&self, tx: Sender<MeshMessage>) -> Result<(), String> {
         let Some(address) = device_host() else {
             info!("voice: VOICE_DEVICE_HOST not set — running as stub");
             return Ok(());
         };
-        let node_id = self.node_id.clone();
+        // Refresh the mesh sender on *every* start() call — this runs once
+        // per coordinator reconnect, which is exactly when the previous
+        // sender goes stale.
+        *self.shared.mesh_tx.lock().unwrap() = Some(tx);
+
+        // main.rs's coordinator-reconnect loop calls every capability's
+        // start() again on each reconnect (agent <-> coordinator, not agent
+        // <-> ESPHome device). Without this guard, each coordinator reconnect
+        // would spawn another concurrent `run()` fighting the previous ones
+        // over the device's single connection slot — observed live as
+        // continuous "connection reset by peer" thrashing once the agent had
+        // reconnected to the coordinator a few times. The ESPHome connection
+        // is independent of any particular coordinator connection, so it
+        // only ever needs to start once per process.
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        let mut already_started = true;
+        STARTED.call_once(|| already_started = false);
+        if already_started {
+            return Ok(());
+        }
+
         tokio::spawn(async move {
-            run(&node_id, &address).await;
+            if let Err(e) = stt::ensure_server_running().await {
+                warn!(error = %e, "voice: failed to start whisper-server — STT will be unavailable");
+            }
+        });
+        let node_id = self.node_id.clone();
+        let shared = Arc::clone(&self.shared);
+        tokio::spawn(async move {
+            run(&node_id, &address, &shared).await;
         });
         Ok(())
     }
 
-    async fn handle(&self, _msg: MeshMessage, _tx: Sender<MeshMessage>) {
-        // handles() is always false — this capability takes no commands yet.
+    async fn handle(&self, msg: MeshMessage, _tx: Sender<MeshMessage>) {
+        if let MeshMessage::IntentResponse(resp) = msg {
+            let waiter = self.shared.pending.lock().unwrap().remove(&resp.request_id);
+            match waiter {
+                // send() failing means the pipeline task already gave up
+                // (timeout) — nothing left to notify.
+                Some(otx) => drop(otx.send(resp)),
+                None => warn!(
+                    request_id = %resp.request_id,
+                    "voice: IntentResponse arrived for an unknown request"
+                ),
+            }
+        }
     }
 }
 
@@ -166,12 +302,196 @@ pub fn device_host() -> Option<String> {
     std::env::var("VOICE_DEVICE_HOST").ok()
 }
 
-async fn run(node_id: &str, address: &str) {
+async fn run(node_id: &str, address: &str, shared: &Arc<VoiceShared>) {
     loop {
-        if let Err(e) = connect_and_listen(node_id, address).await {
+        if let Err(e) = connect_and_listen(node_id, address, shared).await {
             warn!(%address, error = %e, "voice: connection lost, retrying in 5s");
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
+/// How long the pipeline waits for the coordinator's IntentResponse before
+/// closing the device run out with an error. Measured live on pi1
+/// (2026-07-08): a *cold-cache* intent (first after model load) took 41s —
+/// 40.7s of it prefilling the ~3k-token system prompt at ~72 tok/s on the
+/// Pi's CPU; the original 30s default fired 11s early. Warm-cache
+/// follow-ups reuse llama's prompt prefix cache and finish in seconds, so
+/// 60s covers the cold case without leaving a genuinely-stuck run
+/// spinning forever. Overridable via `VOICE_INTENT_TIMEOUT_SECS`.
+fn intent_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("VOICE_INTENT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(60),
+    )
+}
+
+/// Build one device pipeline event with optional name/value data pairs.
+fn event(event_type: VoiceAssistantEvent, data: &[(&str, &str)]) -> VoiceAssistantEventResponse {
+    VoiceAssistantEventResponse {
+        event_type: event_type as i32,
+        data: data
+            .iter()
+            .map(|(name, value)| VoiceAssistantEventData {
+                name: name.to_string(),
+                value: value.to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// Events produced by a detached pipeline task, tagged with the capture
+/// generation they belong to. The connection loop writes them to the device
+/// only while that generation is still the current one — a pipeline that
+/// outlives its run (e.g. a new wake word arrived) must not reset the LED
+/// state of the newer run.
+type PipeEvent = (u64, VoiceAssistantEventResponse);
+
+/// True when a Whisper result carries no usable speech: empty, a bare
+/// non-speech annotation like "(air whooshing)" / "[BLANK_AUDIO]", or pure
+/// punctuation like ".".
+fn is_no_speech(text: &str) -> bool {
+    let t = text.trim();
+    if (t.starts_with('(') && t.ends_with(')')) || (t.starts_with('[') && t.ends_with(']')) {
+        return true;
+    }
+    t.chars().all(|c| !c.is_alphanumeric())
+}
+
+/// Close a device run from the pipeline: error event (the device's firmware
+/// whitelists `stt-no-text-recognized` away from the red error LED; any
+/// other code shows a brief red twinkle — honest "that didn't work"
+/// feedback), then RunEnd to return it to idle.
+async fn close_run_with_error(pipe_tx: &mpsc::Sender<PipeEvent>, generation: u64, code: &str) {
+    let error = event(
+        VoiceAssistantEvent::VoiceAssistantError,
+        &[("code", code), ("message", code)],
+    );
+    let run_end = event(VoiceAssistantEvent::VoiceAssistantRunEnd, &[]);
+    let _ = pipe_tx.send((generation, error)).await;
+    let _ = pipe_tx.send((generation, run_end)).await;
+}
+
+/// The post-capture pipeline, detached from the device connection loop so a
+/// new wake word never has to wait on transcription or the LLM: STT →
+/// SttEnd/IntentStart events → IntentRequest over the agent's mesh
+/// connection → IntentEnd/RunEnd. The coordinator executes any tool calls
+/// (lights, scenes, sensors) itself before replying — by the time the
+/// IntentResponse arrives here, the action has already happened; this task
+/// just reports and closes out the device run. The reply text is logged
+/// only — TTS is the next phase.
+async fn pipeline(
+    clip: Vec<u8>,
+    clip_path: Option<PathBuf>,
+    generation: u64,
+    pipe_tx: mpsc::Sender<PipeEvent>,
+    shared: Arc<VoiceShared>,
+) {
+    let transcript = match stt::transcribe(&clip).await {
+        Ok(t) => t,
+        Err(e) => {
+            // Clip file is kept for debugging failed transcriptions.
+            warn!(error = %e, "voice: STT failed");
+            close_run_with_error(&pipe_tx, generation, "stt-no-text-recognized").await;
+            return;
+        }
+    };
+    if is_no_speech(&transcript) {
+        info!(transcript = %transcript, "voice: no usable speech in capture");
+        close_run_with_error(&pipe_tx, generation, "stt-no-text-recognized").await;
+        return;
+    }
+    info!(transcript = %transcript, "voice: STT result");
+    // Transcript in hand — the clip has served its purpose. Deleting here
+    // (rather than never) keeps ~0.5MB/wake-word from accumulating on pi1's
+    // SD card; failed transcriptions above keep theirs for debugging.
+    if let Some(path) = clip_path
+        && let Err(e) = tokio::fs::remove_file(&path).await
+    {
+        warn!(path = %path.display(), error = %e, "voice: could not delete transcribed clip");
+    }
+
+    let stt_end = event(
+        VoiceAssistantEvent::VoiceAssistantSttEnd,
+        &[("text", transcript.as_str())],
+    );
+    let _ = pipe_tx.send((generation, stt_end)).await;
+    let _ = pipe_tx
+        .send((
+            generation,
+            event(VoiceAssistantEvent::VoiceAssistantIntentStart, &[]),
+        ))
+        .await;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (otx, orx) = oneshot::channel();
+    shared
+        .pending
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), otx);
+    // Clone the *current* connection's sender out of the lock; the send
+    // itself must not hold the mutex across an await.
+    let mesh_tx = shared.mesh_tx.lock().unwrap().clone();
+    let sent = match mesh_tx {
+        Some(tx) => tx
+            .send(MeshMessage::IntentRequest(IntentRequest {
+                request_id: request_id.clone(),
+                text: transcript.clone(),
+                model_name: None, // largest ready model mesh-wide, same as dashboard chat
+                context: vec![],  // stateless v1 — no cross-utterance memory yet
+                source: shared::IntentSource::Voice,
+            }))
+            .await
+            .is_ok(),
+        None => false,
+    };
+    if !sent {
+        warn!("voice: no live coordinator connection — cannot run intent");
+        shared.pending.lock().unwrap().remove(&request_id);
+        close_run_with_error(&pipe_tx, generation, "intent-failed").await;
+        return;
+    }
+
+    match tokio::time::timeout(intent_timeout(), orx).await {
+        Ok(Ok(resp)) => {
+            if let Some(err) = &resp.error {
+                warn!(request_id = %resp.request_id, error = %err, "voice: intent failed");
+                close_run_with_error(&pipe_tx, generation, "intent-failed").await;
+                return;
+            }
+            let tools: Vec<&str> = resp.tool_calls.iter().map(|t| t.tool.as_str()).collect();
+            info!(
+                request_id = %resp.request_id,
+                model = %resp.model_name,
+                total_ms = resp.total_ms,
+                tool_calls = ?tools,
+                response = %resp.text.as_deref().unwrap_or(""),
+                "voice: intent complete"
+            );
+            let _ = pipe_tx
+                .send((
+                    generation,
+                    event(VoiceAssistantEvent::VoiceAssistantIntentEnd, &[]),
+                ))
+                .await;
+            let _ = pipe_tx
+                .send((
+                    generation,
+                    event(VoiceAssistantEvent::VoiceAssistantRunEnd, &[]),
+                ))
+                .await;
+        }
+        // Timeout, or the response channel dropped. Either way remove the
+        // pending entry (a late IntentResponse then logs "unknown request"
+        // and is dropped — correct, its waiter is gone).
+        _ => {
+            warn!(request_id = %request_id, "voice: intent timed out");
+            shared.pending.lock().unwrap().remove(&request_id);
+            close_run_with_error(&pipe_tx, generation, "intent-failed").await;
+        }
     }
 }
 
@@ -193,50 +513,117 @@ async fn send_event(
         .map_err(|e| e.to_string())
 }
 
-/// Close out a capture cleanly: SttVadEnd (device animates "thinking"),
-/// then an `Error` event with code `stt-no-text-recognized`, then RunEnd
-/// (device resets to idle). The error event is the honest way to close a
-/// pipeline that ran no real STT — it's the exact code Home Assistant's
-/// own Assist pipeline reports when STT hears nothing usable, and the
-/// device's firmware explicitly whitelists it away from the error LED
-/// (`code != "stt-no-text-recognized"` in its `on_error` YAML). Once real
-/// STT lands, this becomes `SttEnd{text}` → intent → TTS events instead.
+// ── LED ring fade-out ─────────────────────────────────────────────────────
+// The firmware's own run-end handling snaps the ring to its idle state
+// (off) instantly. The stock firmware also exposes the ring as a normal
+// user-controllable light entity ("LED Ring") whose state the firmware
+// *restores* when a voice phase ends — so a soft fade is possible without
+// custom firmware: set the user light to a dim glow just before RunEnd
+// (the idle restore then lands on the glow, not on black), and fade it to
+// off over FADE_MS. The final state is off, so the ring stays a pure
+// status indicator.
+const FADE_MS: u32 = 900;
+const FADE_BRIGHTNESS: f32 = 0.4;
+const FADE_RGB: (f32, f32, f32) = (0.25, 0.5, 1.0); // soft blue, matches "listening"
+
+fn ring_glow(key: u32) -> LightCommandRequest {
+    LightCommandRequest {
+        key,
+        has_state: true,
+        state: true,
+        has_brightness: true,
+        brightness: FADE_BRIGHTNESS,
+        has_rgb: true,
+        red: FADE_RGB.0,
+        green: FADE_RGB.1,
+        blue: FADE_RGB.2,
+        has_transition_length: true,
+        transition_length: 0,
+        ..Default::default()
+    }
+}
+
+fn ring_fade_off(key: u32) -> LightCommandRequest {
+    LightCommandRequest {
+        key,
+        has_state: true,
+        state: false,
+        has_transition_length: true,
+        transition_length: FADE_MS,
+        ..Default::default()
+    }
+}
+
+/// End the device's pipeline run, fading the ring out instead of the
+/// firmware's abrupt cut when the ring's light entity is known.
+async fn end_run_with_fade(client: &mut EspHomeClient, ring: Option<u32>) -> Result<(), String> {
+    if let Some(key) = ring {
+        let _ = client.try_write(ring_glow(key)).await;
+    }
+    send_event(client, VoiceAssistantEvent::VoiceAssistantRunEnd).await?;
+    if let Some(key) = ring {
+        let _ = client.try_write(ring_fade_off(key)).await;
+    }
+    Ok(())
+}
+
+/// Close a run that produced no audio at all: SttVadEnd, the whitelisted
+/// `stt-no-text-recognized` error (the exact code Home Assistant's own
+/// Assist pipeline reports when STT hears nothing usable — the device's
+/// firmware keeps it off the red error LED via `code !=
+/// "stt-no-text-recognized"` in its `on_error` YAML), then RunEnd.
 ///
 /// (Historical note: the red "error" ring chased during bring-up was never
 /// about this sequence — it's the firmware's "no API client connected"
 /// twinkle, triggered whenever a short-lived test harness dropped the
 /// connection. See plans/voice-assistant-integration.md.)
-async fn end_capture(client: &mut EspHomeClient) -> Result<(), String> {
+async fn close_empty_run(client: &mut EspHomeClient, ring: Option<u32>) -> Result<(), String> {
     send_event(client, VoiceAssistantEvent::VoiceAssistantSttVadEnd).await?;
     client
-        .try_write(VoiceAssistantEventResponse {
-            event_type: VoiceAssistantEvent::VoiceAssistantError as i32,
-            data: vec![VoiceAssistantEventData {
-                name: "code".to_string(),
-                value: "stt-no-text-recognized".to_string(),
-            }],
-        })
+        .try_write(event(
+            VoiceAssistantEvent::VoiceAssistantError,
+            &[("code", "stt-no-text-recognized")],
+        ))
         .await
         .map_err(|e| e.to_string())?;
-    send_event(client, VoiceAssistantEvent::VoiceAssistantRunEnd).await
+    end_run_with_fade(client, ring).await
 }
 
-/// Save the finished clip (saving first, so a device write failure can't
-/// lose already-received audio) and close the pipeline out on the device.
+/// End a capture: SttVadEnd immediately (the listening halo must track when
+/// the *speaker* stopped, not when transcription finished — learned live
+/// 2026-07-08 when the halo outstayed its welcome), save the clip, then
+/// hand off to the detached [`pipeline`] task for STT → intent → run-close
+/// events. Detached so a new wake word never waits on a model.
 async fn finish_capture(
     client: &mut EspHomeClient,
     capture: Capture,
     reason: &str,
+    generation: u64,
+    pipe_tx: &mpsc::Sender<PipeEvent>,
+    shared: &Arc<VoiceShared>,
+    ring: Option<u32>,
 ) -> Result<(), String> {
     info!(bytes = capture.clip.len(), reason, "voice: capture ended");
     if capture.clip.is_empty() {
         // A trigger that produced zero audio (e.g. instant device-side
-        // cancel) — nothing worth a 0-byte file.
+        // cancel) — nothing worth a 0-byte file, and nothing to transcribe.
         info!("voice: no audio received — nothing to save");
-    } else {
-        save_clip(&capture.clip).await;
+        return close_empty_run(client, ring).await;
     }
-    end_capture(client).await
+    send_event(client, VoiceAssistantEvent::VoiceAssistantSttVadEnd).await?;
+    let mut clip = capture.clip;
+    trim_trailing_silence(&mut clip);
+    // Save first so an agent crash mid-pipeline can't lose received audio;
+    // the pipeline deletes the file once a transcript is safely extracted.
+    let clip_path = save_clip(&clip).await;
+    tokio::spawn(pipeline(
+        clip,
+        clip_path,
+        generation,
+        pipe_tx.clone(),
+        Arc::clone(shared),
+    ));
+    Ok(())
 }
 
 /// Best-effort save of a capture interrupted by connection loss — the
@@ -253,7 +640,11 @@ async fn salvage_clip(capture: Option<Capture>) {
     }
 }
 
-async fn connect_and_listen(node_id: &str, address: &str) -> Result<(), String> {
+async fn connect_and_listen(
+    node_id: &str,
+    address: &str,
+    shared: &Arc<VoiceShared>,
+) -> Result<(), String> {
     info!(%address, "voice: connecting to ESPHome device");
     let mut client = EspHomeClient::builder()
         .address(address)
@@ -280,9 +671,36 @@ async fn connect_and_listen(node_id: &str, address: &str) -> Result<(), String> 
         .map_err(|e| e.to_string())?;
 
     let mut capture: Option<Capture> = None;
+    // The ring's user-light entity key, learned from ListEntities — enables
+    // the fade-out at run end (None until discovered; fade silently skipped).
+    let mut ring_light: Option<u32> = None;
+    // Post-capture pipelines run detached (STT + the LLM can take seconds;
+    // the device loop must keep servicing wake words) and send their device
+    // events back through this channel. Each capture gets a generation
+    // number; events from a generation that's no longer current are dropped
+    // so a slow pipeline can't reset the LED state of a newer run.
+    let (pipe_tx, mut pipe_rx) = mpsc::channel::<PipeEvent>(16);
+    let mut generation: u64 = 0;
 
     loop {
         tokio::select! {
+            Some((event_generation, ev)) = pipe_rx.recv() => {
+                if event_generation == generation {
+                    // RunEnd gets the ring fade choreography instead of the
+                    // firmware's abrupt cut.
+                    if ev.event_type == VoiceAssistantEvent::VoiceAssistantRunEnd as i32 {
+                        end_run_with_fade(&mut client, ring_light).await?;
+                    } else {
+                        client.try_write(ev).await.map_err(|e| e.to_string())?;
+                    }
+                } else {
+                    debug!(
+                        event_generation,
+                        current = generation,
+                        "voice: dropping pipeline event from a superseded run"
+                    );
+                }
+            }
             read = tokio::time::timeout(IDLE_READ_TIMEOUT, client.try_read()) => {
                 let message = match read {
                     Ok(Ok(message)) => message,
@@ -319,6 +737,16 @@ async fn connect_and_listen(node_id: &str, address: &str) -> Result<(), String> 
                             .await
                             .map_err(|e| e.to_string())?;
                         info!("voice: subscribed to voice assistant events (API_AUDIO)");
+                        // Discover the ring's user-light entity for the
+                        // run-end fade (see end_run_with_fade).
+                        client
+                            .try_write(ListEntitiesRequest {})
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    }
+                    EspHomeMessage::ListEntitiesLightResponse(light) => {
+                        info!(name = %light.name, key = light.key, "voice: ring light entity found");
+                        ring_light = Some(light.key);
                     }
                     EspHomeMessage::VoiceAssistantRequest(req) if req.start => {
                         info!(
@@ -328,10 +756,18 @@ async fn connect_and_listen(node_id: &str, address: &str) -> Result<(), String> 
                         );
                         // A wake word arriving mid-capture shouldn't drop the
                         // in-flight clip unsaved — close it out, then restart.
+                        // Its pipeline still runs to completion (a spoken
+                        // command should still execute), but bumping the
+                        // generation below means its device events are
+                        // dropped — they belong to a run the device has
+                        // already left.
                         if let Some(prev) = capture.take() {
-                            finish_capture(&mut client, prev, "superseded by a new wake word")
-                                .await?;
+                            finish_capture(
+                                &mut client, prev, "superseded by a new wake word",
+                                generation, &pipe_tx, shared, ring_light,
+                            ).await?;
                         }
+                        generation += 1;
                         capture = Some(Capture::begin());
                         // port: 0 — audio arrives in-band as VoiceAssistantAudio
                         // messages below, not via a UDP port.
@@ -360,7 +796,10 @@ async fn connect_and_listen(node_id: &str, address: &str) -> Result<(), String> 
                         // out now instead of recording ambient noise until the
                         // silence/max deadline for a run it already abandoned.
                         let done = capture.take().expect("guarded by capture.is_some()");
-                        finish_capture(&mut client, done, "device requested stop").await?;
+                        finish_capture(
+                            &mut client, done, "device requested stop",
+                            generation, &pipe_tx, shared, ring_light,
+                        ).await?;
                     }
                     EspHomeMessage::VoiceAssistantAudio(audio) if capture.is_some() => {
                         let cap = capture.as_mut().expect("guarded by capture.is_some()");
@@ -368,7 +807,10 @@ async fn connect_and_listen(node_id: &str, address: &str) -> Result<(), String> 
                         debug!(bytes = audio.data.len(), total = cap.clip.len(), "voice: audio chunk");
                         if audio.end {
                             let done = capture.take().expect("guarded by capture.is_some()");
-                            finish_capture(&mut client, done, "device signalled end").await?;
+                            finish_capture(
+                                &mut client, done, "device signalled end",
+                                generation, &pipe_tx, shared, ring_light,
+                            ).await?;
                         }
                     }
                     EspHomeMessage::VoiceAssistantAudio(_) => {
@@ -388,13 +830,19 @@ async fn connect_and_listen(node_id: &str, address: &str) -> Result<(), String> 
                 capture.as_ref().map(Capture::silence_deadline).unwrap_or_else(Instant::now)
             ), if capture.is_some() => {
                 let done = capture.take().expect("guarded by capture.is_some()");
-                finish_capture(&mut client, done, "silence detected").await?;
+                finish_capture(
+                    &mut client, done, "silence detected",
+                    generation, &pipe_tx, shared, ring_light,
+                ).await?;
             }
             () = tokio::time::sleep_until(
                 capture.as_ref().map(Capture::hard_deadline).unwrap_or_else(Instant::now)
             ), if capture.is_some() => {
                 let done = capture.take().expect("guarded by capture.is_some()");
-                finish_capture(&mut client, done, "max capture window elapsed").await?;
+                finish_capture(
+                    &mut client, done, "max capture window elapsed",
+                    generation, &pipe_tx, shared, ring_light,
+                ).await?;
             }
         }
     }
@@ -413,15 +861,47 @@ fn peak_amplitude(pcm16_le: &[u8]) -> u16 {
         .unwrap_or(0)
 }
 
-/// Crawl-phase only: dump raw PCM bytes to disk so a clip can be proven to
-/// have arrived at all (`ffplay -f s16le -ar 16000 -ac 1 <file>` — ESPHome's
-/// documented default assistant audio format — should play it back).
-/// Nothing downstream consumes this yet; STT wiring is a later phase.
-async fn save_clip(data: &[u8]) {
+/// Bytes per TRIM_CHUNK_MS of 16-bit/16kHz/mono PCM, and the quiet padding
+/// kept when trimming (whisper behaves better with a little tail room).
+const TRIM_CHUNK_MS: usize = 30;
+const TRIM_CHUNK_BYTES: usize = 16_000 * 2 * TRIM_CHUNK_MS / 1000;
+const TRIM_KEEP_QUIET_CHUNKS: usize = 8; // ~240ms of tail padding
+
+/// Drop the trailing silence a capture always carries (SILENCE_DURATION of
+/// dead air by construction — the capture only ends after that much quiet).
+/// On pi1's CPU, whisper time scales with clip length, so shipping ~1.2s of
+/// silence per utterance was pure added latency (~1-2s of prefill for
+/// nothing). Keeps ~240ms of quiet tail padding; never trims a clip that's
+/// all quiet (leading audio is the wake-word tail — STT's no-speech path
+/// handles it).
+fn trim_trailing_silence(clip: &mut Vec<u8>) {
+    let chunks = clip.len() / TRIM_CHUNK_BYTES;
+    let mut quiet_tail = 0;
+    for i in (0..chunks).rev() {
+        let start = i * TRIM_CHUNK_BYTES;
+        if peak_amplitude(&clip[start..start + TRIM_CHUNK_BYTES]) > SILENCE_THRESHOLD {
+            break;
+        }
+        quiet_tail += 1;
+    }
+    if quiet_tail > TRIM_KEEP_QUIET_CHUNKS && quiet_tail < chunks {
+        let drop_chunks = quiet_tail - TRIM_KEEP_QUIET_CHUNKS;
+        clip.truncate(clip.len() - drop_chunks * TRIM_CHUNK_BYTES);
+    }
+}
+
+/// Persist raw PCM to the clip cache and return its path (None if the write
+/// failed — the pipeline still transcribes from memory in that case, there's
+/// just no file to clean up). The file exists to survive a crash between
+/// capture and transcription; the pipeline deletes it once a transcript is
+/// extracted, and keeps it for debugging when STT fails.
+/// (`ffplay -f s16le -ar 16000 -ac 1 <file>` plays one back — ESPHome's
+/// documented default assistant audio format.)
+async fn save_clip(data: &[u8]) -> Option<PathBuf> {
     let dir = cache_dir();
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         warn!(error = %e, "voice: could not create cache dir");
-        return;
+        return None;
     }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -429,8 +909,14 @@ async fn save_clip(data: &[u8]) {
         .unwrap_or(0);
     let path = dir.join(format!("clip-{ts}.raw"));
     match tokio::fs::write(&path, data).await {
-        Ok(()) => info!(path = %path.display(), bytes = data.len(), "voice: captured clip saved"),
-        Err(e) => warn!(error = %e, "voice: failed to save clip"),
+        Ok(()) => {
+            info!(path = %path.display(), bytes = data.len(), "voice: captured clip saved");
+            Some(path)
+        }
+        Err(e) => {
+            warn!(error = %e, "voice: failed to save clip");
+            None
+        }
     }
 }
 
@@ -494,6 +980,7 @@ mod tests {
         // Just under the threshold — ambient room noise, not speech.
         c.push_chunk(&pcm(&[(SILENCE_THRESHOLD - 1) as i16]));
         assert_eq!(c.last_loud_at, before);
+        assert!(!c.speech_started);
     }
 
     #[test]
@@ -506,20 +993,167 @@ mod tests {
     }
 
     #[test]
-    fn silence_deadline_never_precedes_min_capture() {
-        // A capture that never hears anything loud must still last
-        // MIN_CAPTURE — the mic opens before the user starts speaking.
+    fn no_speech_yet_waits_the_full_start_timeout() {
+        // A capture that never hears anything loud closes at the (generous)
+        // speech-start timeout, not the (tight) post-speech silence window
+        // — people pause to think after the wake word.
         let c = Capture::begin();
-        assert!(c.silence_deadline() >= c.started + MIN_CAPTURE);
+        assert_eq!(c.silence_deadline(), c.started + SPEECH_START_TIMEOUT);
         assert_eq!(c.hard_deadline(), c.started + MAX_CAPTURE);
     }
 
+    #[test]
+    fn wake_word_tail_does_not_count_as_speech_onset() {
+        // Loud audio inside the tail window is "…Nabu" itself; the capture
+        // must stay in waiting-for-speech mode (observed live: counting it
+        // closed the capture during the user's think-pause).
+        let mut c = Capture::begin();
+        c.note_peak(
+            SILENCE_THRESHOLD + 1,
+            c.started + Duration::from_millis(100),
+        );
+        assert!(!c.speech_started);
+        assert_eq!(c.silence_deadline(), c.started + SPEECH_START_TIMEOUT);
+    }
+
+    #[test]
+    fn speech_after_the_tail_switches_to_the_silence_window() {
+        let mut c = Capture::begin();
+        let onset = c.started + WAKE_WORD_TAIL + Duration::from_millis(300);
+        c.note_peak(SILENCE_THRESHOLD + 1, onset);
+        assert!(c.speech_started);
+        assert_eq!(c.silence_deadline(), onset + SILENCE_DURATION);
+    }
+
+    // ── Trailing-silence trim ────────────────────────────────────────────────
+
+    /// N chunks of constant-amplitude PCM, TRIM_CHUNK_BYTES each.
+    fn chunks_of(amplitude: i16, n: usize) -> Vec<u8> {
+        let sample = amplitude.to_le_bytes();
+        sample
+            .iter()
+            .copied()
+            .cycle()
+            .take(TRIM_CHUNK_BYTES * n)
+            .collect()
+    }
+
+    #[test]
+    fn trim_drops_long_quiet_tail_keeping_padding() {
+        // 10 loud chunks + 40 quiet ones (the SILENCE_DURATION dead air).
+        let mut clip = chunks_of(20_000, 10);
+        clip.extend(chunks_of(100, 40));
+        trim_trailing_silence(&mut clip);
+        assert_eq!(clip.len(), TRIM_CHUNK_BYTES * (10 + TRIM_KEEP_QUIET_CHUNKS));
+    }
+
+    #[test]
+    fn trim_leaves_short_tails_alone() {
+        let mut clip = chunks_of(20_000, 10);
+        clip.extend(chunks_of(100, TRIM_KEEP_QUIET_CHUNKS));
+        let before = clip.len();
+        trim_trailing_silence(&mut clip);
+        assert_eq!(clip.len(), before);
+    }
+
+    #[test]
+    fn trim_never_empties_an_all_quiet_clip() {
+        // All-quiet clips go to STT's no-speech path intact.
+        let mut clip = chunks_of(100, 40);
+        let before = clip.len();
+        trim_trailing_silence(&mut clip);
+        assert_eq!(clip.len(), before);
+    }
+
     // ── Capability plumbing ──────────────────────────────────────────────────
+
+    fn intent_response(request_id: &str) -> IntentResponse {
+        IntentResponse {
+            request_id: request_id.into(),
+            node_id: String::new(),
+            model_name: String::new(),
+            text: Some("done".into()),
+            tool_calls: vec![],
+            error: None,
+            duration_ms: 0,
+            tokens_generated: 0,
+            prompt_eval_ms: 0,
+            total_ms: 0,
+            compression_applied: false,
+            prompt_tokens_before: 0,
+            prompt_tokens_after: 0,
+        }
+    }
 
     #[test]
     fn capability_takes_no_commands() {
         let cap = VoiceCapability::new("test-node");
         assert_eq!(cap.name(), "voice");
         assert!(!cap.handles(&MeshMessage::Acknowledge));
+    }
+
+    #[test]
+    fn handles_claims_only_pending_intent_responses() {
+        let cap = VoiceCapability::new("test-node");
+        let (otx, _orx) = oneshot::channel();
+        cap.shared
+            .pending
+            .lock()
+            .unwrap()
+            .insert("req-1".into(), otx);
+        assert!(cap.handles(&MeshMessage::IntentResponse(intent_response("req-1"))));
+        // Someone else's intent traffic must not be swallowed.
+        assert!(!cap.handles(&MeshMessage::IntentResponse(intent_response("req-2"))));
+    }
+
+    #[tokio::test]
+    async fn handle_completes_the_pending_waiter() {
+        let cap = VoiceCapability::new("test-node");
+        let (otx, orx) = oneshot::channel();
+        cap.shared
+            .pending
+            .lock()
+            .unwrap()
+            .insert("req-1".into(), otx);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        cap.handle(MeshMessage::IntentResponse(intent_response("req-1")), tx)
+            .await;
+        let resp = orx.await.expect("waiter should be completed");
+        assert_eq!(resp.request_id, "req-1");
+        assert!(cap.shared.pending.lock().unwrap().is_empty());
+    }
+
+    // ── No-speech heuristic ──────────────────────────────────────────────────
+
+    #[test]
+    fn no_speech_detects_empty_and_whisper_tags() {
+        assert!(is_no_speech(""));
+        assert!(is_no_speech("   "));
+        assert!(is_no_speech("(air whooshing)"));
+        assert!(is_no_speech("[BLANK_AUDIO]"));
+        assert!(is_no_speech("."));
+    }
+
+    #[test]
+    fn no_speech_accepts_real_commands() {
+        assert!(!is_no_speech("Turn off the kitchen lights."));
+        assert!(!is_no_speech("Testing, 1, 2, 3."));
+    }
+
+    // ── Pipeline events ──────────────────────────────────────────────────────
+
+    #[test]
+    fn event_builds_name_value_pairs() {
+        let ev = event(
+            VoiceAssistantEvent::VoiceAssistantSttEnd,
+            &[("text", "turn off the lights")],
+        );
+        assert_eq!(
+            ev.event_type,
+            VoiceAssistantEvent::VoiceAssistantSttEnd as i32
+        );
+        assert_eq!(ev.data.len(), 1);
+        assert_eq!(ev.data[0].name, "text");
+        assert_eq!(ev.data[0].value, "turn off the lights");
     }
 }
