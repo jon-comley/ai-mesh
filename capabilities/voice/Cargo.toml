@@ -1,0 +1,23 @@
+[package]
+name = "capability-voice"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+capability-core = { path = "../core" }
+shared = { path = "../../shared" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync", "fs", "time", "rt", "macros"] }
+tracing = "0.1"
+dirs = "5"
+# Pinned to api-1-10: the real Home Assistant Voice hardware (ESPHome
+# 2025.5.1) speaks API 1.10 — the crate's uncustomized default compiles in
+# 1.14's schema and warns of "breaking changes" against an older device,
+# which was silently closing the connection right after DeviceInfoResponse.
+esphome-client = { version = "0.2", default-features = false, features = [
+    "api-1-10",
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = "0.3"

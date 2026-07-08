@@ -47,6 +47,17 @@ Build targets:
 
 See `docs/windows-node-setup.md` for the full Windows provisioning guide.
 
+## Build Prerequisites
+
+`capability-voice` depends on the `esphome-client` crate, whose build
+script compiles protobuf definitions and requires the system protobuf
+compiler. Any build host (including the pre-commit hook's whole-tree
+clippy + test run) needs it installed once:
+
+```bash
+sudo apt install protobuf-compiler   # provides `protoc`
+```
+
 ## Adding New Models
 
 The agent downloads GGUF models from Hugging Face on demand. To add support for a new model, you must update the `resolve_gguf` function in `capabilities/llm/src/llama.rs`.
