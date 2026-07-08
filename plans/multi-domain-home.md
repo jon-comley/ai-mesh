@@ -51,7 +51,7 @@ MQTT poll loop).
 1. **Sensor tools + context**: `"sensors"` arm in `tool_schemas_for_feature` (`get_climate { room? }` returning temp/humidity/motion/contact; answered from the coordinator's snapshot — no node round-trip since sensors are read-only); `build_sensor_context` injecting per-room lines ("Living Room: 21.4°C, 47% RH, motion 3m ago") beside the device context.
 2. **Multi-command chat** (old chat-roadmap item 7): "turn off the kitchen lights and tell me the bedroom temperature" — parse/execute multiple tool calls per turn.
 3. **Room-aware phrasing everywhere**: intent target resolution already maps room names; extend to sensors ("is the office warm?").
-4. Marker for later (not this phase): voice input via local whisper on the mesh — the "no cloud account, nothing leaves the house" story extended to speech.
+4. **Voice input, crawl phase started 2026-07-08** — see `plans/voice-assistant-integration.md`. Home Assistant Voice PE hardware talks directly to a new `capability-voice` (ai-mesh plays the role real Home Assistant normally would), no HA server involved. Proved live: wake word → real captured audio clip round-trip. STT/intent/TTS wiring (the "no cloud account, nothing leaves the house" story extended to speech) is the next phase, not yet started.
 
 ## Phase D — UI: Home becomes the home — ✓ shipped 2026-07-04
 
