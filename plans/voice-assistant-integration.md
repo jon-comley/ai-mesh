@@ -213,35 +213,243 @@ them. Not wired into any `nodes/*.env` `NODE_FEATURES` yet (tested via
 ad-hoc cross-compiled binaries copied to pi1, not the normal
 `just deploy-node` path).
 
+## STT landed — whisper.cpp on pi1, 2026-07-08
+
+Item 1 of "Next phase" (below) is done. `capabilities/voice/src/stt.rs`
+spawns `whisper-server` (whisper.cpp's own HTTP server binary — same
+subprocess+HTTP shape as `capability-llm`'s `llama-server` integration) once
+per agent process, health-checks it, and `finish_capture` now posts each
+saved clip to it (wrapped in a synthesized WAV header — whisper-server wants
+a real WAV file, not headerless PCM) and logs the transcript. Deployed via
+a new `has_feature voice` block in `scripts/install-node-linux.sh`
+(downloads the prebuilt `whisper-bin-ubuntu-arm64.tar.gz` release asset and
+`ggml-base.en.bin` from `ggerganov/whisper.cpp` on HuggingFace, same pattern
+as the existing llama.cpp block). `nodes/pi1.env` now carries
+`voice` in `NODE_FEATURES` and `VOICE_DEVICE_HOST=10.0.0.14:6053`.
+
+Not yet done: feeding the transcript into `coordinator/src/intent.rs` (item
+2), TTS (item 3), and replacing the `stt-no-text-recognized` placeholder
+event sequence (item 4) — this only proves transcription itself works.
+
+**Model**: `base.en`, chosen as an untested guess and then validated live —
+proven accurate on real captured speech (see below), no need yet to drop to
+`tiny.en` for latency.
+
+**Bug found and fixed during this deploy, unrelated to STT itself**:
+`main.rs`'s outer loop calls every capability's `start()` again on *every*
+agent↔coordinator reconnect (not just once at boot) — expected/fine for
+capabilities whose `start()` is naturally idempotent, but
+`VoiceCapability::start()` unconditionally spawned a fresh `run()` task each
+time, so each coordinator reconnect left one more concurrent connection to
+the device's single connection slot, all fighting each other. Symptom
+observed live: continuous `Stream error: Read error: Connection reset by
+peer (os error 104)` a few seconds apart, forever. Fixed with a
+`std::sync::Once` guard so `run()` (and the whisper-server spawn) only ever
+starts once per process, since the ESPHome connection has nothing to do
+with which coordinator connection happens to be current. A second,
+unrelated contributor made this harder to diagnose at first: a stray
+`/tmp/voice-listen` process from an earlier ad-hoc test session (started via
+a backgrounded SSH command that had since disconnected) was still running
+on pi1 and independently fighting the real agent for the same device
+connection — killed manually; not a code bug, just leftover test-session
+cruft.
+
+**Proved live on pi1, 2026-07-08**: after the reconnect fix, said "Okay
+Nabu, testing one two three" — wake word fired, 481,280-byte clip
+captured and saved, and the logged STT result was
+`"Testing, one, two, three."` — an exact transcript of real speech, through
+the actual capture → save → transcribe code path (not a curl bypass).
+
+**`SILENCE_THRESHOLD` raised 5000 → 8000, same day**: both live captures
+above never triggered silence detection at all — each ran the full 15s
+`MAX_CAPTURE` window instead. Replaying `push_chunk`'s exact logic against
+the two saved clips (30ms chunks, same peak-amplitude check) showed why:
+ambient noise crossed 5000 at least once every 630-840ms throughout each
+clip, never leaving the 1200ms quiet gap `SILENCE_DURATION` requires. This
+also explains clip 1's nonsense transcript ("How are you doing?" — nobody
+said that) — a classic Whisper hallucination pattern when fed a long
+stretch of mostly non-speech audio rather than real speech. Not a code
+bug: the room was simply noisier during this live test than the original
+calibration session assumed ("occasional incidental spikes to 6,000-
+10,000" turned out to mean sub-second cadence, not rare, in this session).
+Redeployed via `just deploy-node pi1`; not yet re-verified live at the new
+threshold (do that before trusting silence-based cutoff again).
+
+**Bug found and fixed in that same redeploy**: the `voice` install block's
+`VOICE_ENV_BLOCK` set `Environment=LD_LIBRARY_PATH=/opt/whisper.cpp:/opt/llama.cpp`
+at the systemd unit level, on the theory that whisper-server just needed
+its own dir added alongside llama's. In practice this broke `llama-server`
+immediately (`error loading model: make_cpu_buft_list: no CPU backend
+found`) — llama.cpp and whisper.cpp each ship a same-named `libggml-cpu.so`
+backend plugin, not binary-compatible across projects/versions, and with
+whisper.cpp's dir first in the merged path, llama-server loaded the wrong
+one. Fixed by not touching `LD_LIBRARY_PATH` at the systemd level for voice
+at all — `stt.rs`'s `ensure_server_running()` now sets
+`LD_LIBRARY_PATH=/opt/whisper.cpp` explicitly on the `whisper-server` child
+process only (via `Command::env`), leaving the agent's own inherited
+`LD_LIBRARY_PATH=/opt/llama.cpp` untouched for `llama-server`. Confirmed
+fixed live: both servers loaded cleanly on the next redeploy
+(`llama-server ready model="qwen2.5:0.5b"`,
+`whisper-server ... whisper-server ready`).
+
+Also investigated live that day: a wake-word attempt that produced no
+`VoiceAssistantRequest` at all (no capture, no error, no reconnect —
+connection stayed healthy throughout). Queried the device's own `mute`
+switch and `wake_word_sensitivity` select entity directly (same technique
+as the original bring-up's mute-switch diagnosis) rather than guess:
+`mute: false`, `wake_word_sensitivity: "Very sensitive"` — both already
+ruled out as the two known false leads from the original bring-up. No
+software anomaly found on the agent side, so this particular miss looks
+environmental (distance/volume/angle) rather than a regression — not
+conclusively resolved, flagged here rather than closed.
+
+## Intent wiring landed — voice drives the house, 2026-07-08
+
+Items 2, 4, and 6 below done in one pass. A spoken command now flows wake
+word → capture → whisper.cpp → `MeshMessage::IntentRequest` → the
+coordinator's existing `handle_intent` tool-calling pipeline (lights,
+scenes, sensors — the same machinery dashboard chat and `just intent` use)
+→ `IntentResponse` back to the agent → logged reply + correct device event
+choreography. No TTS yet: the action executes, the reply text is
+journal-only.
+
+**Key discovery**: no HTTP path was needed. The coordinator's
+`process_message` (`coordinator/src/server.rs`) already handles
+`MeshMessage::IntentRequest` from *any* connection (it's what `just intent`
+uses) and replies on the same connection. The agent's reader loop routes
+every unclaimed inbound message through `dispatch()` → `handles()`. So
+`capability-voice` just sends the request down the mesh `tx` it receives in
+`start()` and claims the matching response by `request_id` — no port, no
+auth, no new transport, works if voice ever moves off pi1.
+
+Implementation notes (all `capabilities/voice/src/lib.rs`):
+- `VoiceShared` (Arc): `mesh_tx` refreshed on **every** `start()` call
+  (start re-runs per coordinator reconnect — exactly when the old sender
+  goes stale; the `Once` guard still keeps `run()` single-instance), plus a
+  `pending` map request_id → oneshot for in-flight intents.
+- Post-capture work runs in a detached `pipeline` task (STT + LLM can take
+  seconds; the device loop must keep servicing wake words). Its device
+  events come back through an mpsc channel tagged with a **capture
+  generation** — a pipeline outliving its run (new wake word arrived) gets
+  its events dropped instead of resetting the newer run's LED state. The
+  superseded pipeline still completes its intent (a spoken command should
+  still execute).
+- Event sequence now real: `SttVadEnd` at capture end (halo off
+  immediately — the transcription-latency lesson from earlier today),
+  then `SttEnd{text}` → `IntentStart` → `IntentEnd` → `RunEnd` on success;
+  `Error{code: intent-failed}` + `RunEnd` on failure/timeout (brief red
+  twinkle = honest "that didn't work"); the whitelisted
+  `stt-no-text-recognized` close for no-usable-speech (Whisper non-speech
+  tags like "(air whooshing)" / pure punctuation are detected by
+  `is_no_speech`).
+- `VOICE_INTENT_TIMEOUT_SECS` (default 30) bounds the coordinator wait.
+- `model_name: None` → `any_ready_llm_model()` picks the largest ready
+  model mesh-wide — Beelink automatically when it's up, matching the
+  "Beelink only when needed" decision with zero voice-specific code.
+- Clip-cache eviction (item 6): clips delete after successful
+  transcription; failed ones are kept for debugging. Save-first still
+  protects against a crash mid-pipeline.
+
+**Two serious bugs found by the live bring-up, both fixed same day:**
+
+1. **Old coordinator killed every agent connection** ("kitchen lights
+   bricked" was this). `deploy-node` only ships the agent; adding
+   `Feature::Voice` to the shared enum meant the still-running old
+   coordinator failed to deserialize the agent's Capabilities frame — and
+   `server.rs` drops the whole connection on a payload parse error. The
+   agent didn't notice for up to 20 min (half-open socket + LLM nodes'
+   1200s read floor), so pi1 looked "up" while heartbeats, ModelStatus,
+   and light commands all went nowhere. Fix: `just deploy-coordinator pi1`.
+   **Lesson: any `shared/` wire-type change requires coordinator + agents
+   deployed together.** (Tolerant enum deserialization would remove this
+   failure class — candidate follow-up.)
+
+2. **Same-connection intent deadlock.** The coordinator's per-connection
+   read loop awaited `handle_intent` *inline*. A voice intent arrives on
+   pi1-agent's connection; `handle_intent` dispatches inference to that
+   same agent and waits for `ModelInferenceResult` — which arrives on the
+   very connection whose reader is blocked waiting for it. The LLM
+   finished in 42s; the response sat unread until the timeout. (Also
+   explained the "frame timestamp is stale" warnings — heartbeats queued
+   40s+ behind the blocked reader, then skew-rejected.) Fix: spawn the
+   intent work and reply via the connection's sender
+   (`coordinator/src/server.rs`, IntentRequest arm).
+
+**Capture-tuning fixes from the same session** (`lib.rs`): the wake-word
+tail (~250ms of "…Nabu" at 18k-28k peaks) no longer counts as speech
+onset, and a capture waits `SPEECH_START_TIMEOUT` (4s) for the user's
+speech to *begin* — the old fixed 1200ms window expired during a natural
+think-pause after the wake word. Once speech starts, the 1200ms
+silence-end rule applies as before. `VOICE_INTENT_TIMEOUT_SECS` default
+raised 30→60: a *cold-cache* intent prefills ~3k tokens of system prompt
+at ~72 tok/s on pi1's CPU (~41s); warm-cache follow-ups take well under
+1s of intent time.
+
+**Proved live, 2026-07-08 evening**: "Okay Nabu, what temperature is the
+kitchen?" → capture 3.0s (silence-detected) → exact transcript → intent
+complete in 688ms → response `[26.9°C]`, ~9s end-to-end including
+speaking time; repeated immediately after at 456ms intent time. The
+spoken question was answered by the house through the full mesh pipeline.
+
+**STT offloaded to the Beelink (same evening)**: transcription dominated
+the perceived wait (~4.9s of the ~6s thinking-flash — base.en on pi1's
+CPU). `VOICE_STT_REMOTE` (host:port) now sends clips to a remote
+whisper-server first with the local one as fallback (60s cooldown after a
+remote failure so an offline Beelink adds no per-utterance timeout lag).
+Beelink runs whisper-server as a **standalone NSSM service** on
+`0.0.0.0:8081` (`install-node-windows.ps1 -SttServer true`, gated by
+`STT_SERVER=true` in `nodes/beelink1.env`) — deliberately NOT an agent
+child: no voice capability runs there, and it survives agent
+deploy-restarts. It serves `small.en` (more accurate than pi1's base.en;
+the fast box can afford it). Deliberately direct HTTP, not a mesh
+`Feature::Stt` — right shape for two nodes; coordinator-routed STT is the
+eventual design if it ever needs scheduling across 3+. **Proved live**:
+end-of-speech → answer now ~2.9s (1.2 silence + 2.5 remote STT + 0.3
+groq), down from ~6s, with an exact transcript. Same session also proved
+the chat-window `VoiceExchange` WS event end-to-end. Also that evening:
+LED ring now fades out (~900ms, via the ring's user-light entity + a dim
+glow set just before RunEnd so the firmware's idle-restore lands on it),
+trailing silence is trimmed from clips before STT, and
+`SPEECH_START_TIMEOUT` settled at 2.5s.
+
+**Online AI honored for voice/CLI intents (same evening)**: the mesh
+`IntentRequest` path originally forced local inference (`None` gateway,
+"mesh intents stay local"). Now it builds the same `GatewayInvocation`
+as the dashboard chat path (`http/api/chat.rs`) from the Online AI tab's
+config — cloud when the toggle is on and configured, with `handle_intent`'s
+existing local-fallback-on-cloud-failure, and the same Gateway-tab stats
+push. Privacy stance intact: "never leaves your house" holds unless the
+user explicitly flips the Online AI toggle, which now applies to speech
+exactly as it does to typed chat.
+
 ## Next phase (not started)
 
-1. Speech-to-text engine (need to pick one — likely whisper.cpp on
-   whichever mesh node has spare compute; check `beelink-model-guide.md`
-   for what's already benchmarked there) fed the captured clip.
-2. Wire the transcript into the *existing* `coordinator/src/intent.rs`
-   chat/command pipeline — this part is mostly reuse, not new work, since
-   ai-mesh's LLM intent handling already exists for text.
+1. ~~Speech-to-text engine~~ — **done 2026-07-08**, see above.
+2. ~~Wire the transcript into `coordinator/src/intent.rs`~~ — **done
+   2026-07-08**, see "Intent wiring landed" above.
 3. Text-to-speech (Piper is the common lightweight choice) for the
    response, served over HTTP so the device can fetch it — the
    `VoiceAssistantEventResponse` TTS-end event carries a media reference
-   the device fetches directly.
-4. Replace the crawl phase's `stt-no-text-recognized` placeholder with
-   the real sequence once STT exists:
-   `stt-end` (with actual recognized text) → `intent-start`/`intent-end`
-   → `tts-start`/`tts-end` → `run-end`.
-5. Register `capability-voice` as a real agent feature (`NODE_FEATURES`)
-   on whichever node should own it — probably pi1. Networking-wise this
-   should now be simpler than first thought: `API_AUDIO` only needs a
-   normal outbound TCP connection to the device, same as everything else
-   the agent already does — no special inbound-port requirement to
-   re-verify if this ever moves to a different node.
-6. Clip-cache eviction: `~/.ai-mesh/voice-cache/` accumulates ~0.5MB per
-   wake word forever (pi1 runs on an SD card). Once STT consumes clips,
-   delete-after-transcribe (or a small ring of recent clips for
-   debugging) replaces the cache entirely.
+   the device fetches directly. The `tts-start`/`tts-end` slots in the
+   event sequence are the only placeholder left.
+4. ~~Replace the crawl phase's `stt-no-text-recognized` placeholder~~ —
+   **done 2026-07-08** (real `stt-end`/`intent-start`/`intent-end`
+   sequence; TTS events await item 3).
+5. ~~Register `capability-voice` as a real agent feature (`NODE_FEATURES`)~~
+   — **done 2026-07-08**: pi1 runs `NODE_FEATURES=llm,lighting,sensors,voice`
+   via the normal `just deploy-node pi1` path. STT (whisper.cpp) runs there
+   too by default rather than being offloaded to Beelink — simplicity over
+   speed; Beelink only enters the picture later if pi1's STT latency
+   actually turns out to be a problem in practice.
+6. ~~Clip-cache eviction~~ — **done 2026-07-08**: delete-after-transcribe
+   (failed transcriptions keep their clip for debugging).
 7. (Known, accepted) esphome-client's `try_read` auto-answers the
    device's `PingRequest` internally; if a capture-deadline `select!`
    branch wins while that write is pending, the PingResponse is dropped —
    worst case the device drops the connection and the 5s reconnect loop
    heals it. Microsecond window, self-healing, not worth restructuring
    the reader for; noted from code review 2026-07-08.
+8. Review follow-ups (2026-07-08, external review): RMS/adaptive silence
+   detection or a proper VAD (fixed peak threshold provably can't separate
+   quiet speech from noisy-room spikes — measured overlap); STT-failure
+   visibility to the coordinator (currently journal-only).

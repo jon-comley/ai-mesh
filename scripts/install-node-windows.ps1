@@ -3,7 +3,15 @@ param(
     # (Set COORDINATOR_IP in the agent service environment to override discovery for debugging.)
     [string]$Role = "compute",
 
-    [string]$AuthorizedKey = ""
+    [string]$AuthorizedKey = "",
+
+    # "true" installs whisper-server as a standalone NSSM service on
+    # 0.0.0.0:8081 (LAN-reachable) so other mesh nodes can offload
+    # speech-to-text here. Deliberately NOT an agent child process like
+    # llama-server: this node runs no voice capability (the ESPHome device
+    # belongs to pi1), and a standalone service survives agent
+    # deploy-restarts, which kill agent children every deploy.
+    [string]$SttServer = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +33,24 @@ try {
 $llamaZipUrl     = "https://github.com/ggml-org/llama.cpp/releases/download/$llamaVersion/llama-$llamaVersion-bin-win-vulkan-x64.zip"
 $llamaInstallDir = "$env:LOCALAPPDATA\Programs\llama.cpp"
 $llamaHost       = "http://127.0.0.1:8080"
+
+# whisper.cpp (only used when -SttServer true). Asset name carries no
+# version. Separate install dir from llama.cpp on purpose: each ships its
+# own incompatible ggml DLLs, and Windows loads DLLs from the exe's folder.
+try {
+    $wrelease = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest" -UseBasicParsing -TimeoutSec 5
+    $whisperVersion = $wrelease.tag_name
+} catch {
+    $whisperVersion = "v1.9.1"
+}
+$whisperZipUrl     = "https://github.com/ggml-org/whisper.cpp/releases/download/$whisperVersion/whisper-bin-x64.zip"
+$whisperInstallDir = "$env:LOCALAPPDATA\Programs\whisper.cpp"
+$whisperModelDir   = "$env:USERPROFILE\.ai-mesh\voice-models"
+# small.en, not base.en: this box transcribes ~10x faster than a Pi, so it
+# can afford the more accurate model and still answer in about a second.
+$whisperModelFile  = "ggml-small.en.bin"
+$whisperService    = "whisper-server"
+$whisperPort       = 8081
 
 
 # Select the best model based on available GPU VRAM or system RAM.
@@ -138,6 +164,77 @@ function Ensure-LlamaCpp {
     Remove-Item $zipPath -Force
 
     Write-Host ">>> llama.cpp $llamaVersion installed at $llamaInstallDir."
+}
+
+function Ensure-WhisperCpp {
+    # The zip nests everything under Release\ - point at it rather than move files.
+    $whisperExe = Join-Path $whisperInstallDir "Release\whisper-server.exe"
+    if (Test-Path $whisperExe) {
+        Write-Host ">>> whisper-server already present at $whisperExe - skipping download."
+        return
+    }
+
+    Write-Host ">>> Installing whisper.cpp $whisperVersion from ZIP..."
+    $zipPath = Join-Path $env:TEMP "whisper-win-x64.zip"
+    Invoke-WebRequest -Uri $whisperZipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 600
+    Ensure-Directory -Path $whisperInstallDir
+    Expand-Archive -Path $zipPath -DestinationPath $whisperInstallDir -Force
+    Remove-Item $zipPath -Force
+    Write-Host ">>> whisper.cpp $whisperVersion installed at $whisperInstallDir."
+}
+
+function Ensure-WhisperModel {
+    $modelPath = Join-Path $whisperModelDir $whisperModelFile
+    if (Test-Path $modelPath) {
+        Write-Host ">>> whisper model already present at $modelPath - skipping download."
+        return
+    }
+    Ensure-Directory -Path $whisperModelDir
+    $modelUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$whisperModelFile"
+    Write-Host ">>> Downloading whisper model $whisperModelFile (this may take a few minutes)..."
+    Invoke-WebRequest -Uri $modelUrl -OutFile $modelPath -UseBasicParsing -TimeoutSec 1200
+    Write-Host ">>> whisper model installed at $modelPath."
+}
+
+function Open-WhisperFirewall {
+    $ruleName = "whisper-server STT (ai-mesh)"
+    $existing = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    if ($existing) { return }
+    Write-Host ">>> Opening TCP $whisperPort inbound for remote STT..."
+    New-NetFirewallRule `
+        -DisplayName $ruleName `
+        -Direction Inbound `
+        -Protocol TCP `
+        -LocalPort $whisperPort `
+        -Action Allow `
+        -Profile Any | Out-Null
+}
+
+function Ensure-WhisperService {
+    $nssm = Get-Nssm
+    $whisperExe = Join-Path $whisperInstallDir "Release\whisper-server.exe"
+    $modelPath = Join-Path $whisperModelDir $whisperModelFile
+
+    $existing = Get-Service -Name $whisperService -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host ">>> Service '$whisperService' already registered - restarting."
+        try { & $nssm restart $whisperService 2>&1 | Out-Null } catch {}
+        return
+    }
+
+    Write-Host ">>> Registering NSSM service '$whisperService'..."
+    & $nssm install $whisperService $whisperExe
+    # 0.0.0.0: other mesh nodes call this over the LAN (that is its purpose).
+    & $nssm set $whisperService AppParameters "--model `"$modelPath`" --host 0.0.0.0 --port $whisperPort"
+    & $nssm set $whisperService AppDirectory (Join-Path $whisperInstallDir "Release")
+    & $nssm set $whisperService Start SERVICE_AUTO_START
+    & $nssm set $whisperService AppStdout (Join-Path $logDir "whisper-server.log")
+    & $nssm set $whisperService AppStderr (Join-Path $logDir "whisper-server.log")
+    & $nssm set $whisperService AppRotateFiles 1
+    & $nssm set $whisperService AppThrottle 1500
+    & $nssm set $whisperService AppRestartDelay 5000
+    & $nssm start $whisperService
+    Write-Host ">>> whisper-server service started on 0.0.0.0:$whisperPort."
 }
 
 function Ensure-Nssm {
@@ -493,5 +590,12 @@ Ensure-Nssm
 
 Ensure-AgentBinary
 Ensure-AgentService
+
+if ($SttServer -eq "true") {
+    Ensure-WhisperCpp
+    Ensure-WhisperModel
+    Open-WhisperFirewall
+    Ensure-WhisperService
+}
 
 Write-Host ">>> Provisioning complete. This node is ready as an ai-mesh $Role node."
