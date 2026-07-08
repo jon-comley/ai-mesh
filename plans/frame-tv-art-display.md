@@ -27,6 +27,18 @@ now comes *before* the electrician/recess step, not after. See the updated
 §10 for the concrete new order and §3 for a call-out of what changes when
 this eventually moves to the Pi Zero 2 W.
 
+**2026-07-08 — superseded: the Pi 4 stays permanently; §3's move to the
+Pi Zero 2 W is not happening.** Decided in
+`plans/audio-output-integration.md` ("Placement decision"): this node is
+becoming the mesh's audio-output workhorse too (HDMI audio injection to
+the soundbar/TV, per that plan's Phase 2+), on top of art mode. The Zero
+2 W can't take on that job — no reliable 1080p HDMI path and no spare
+headroom — so it's redeployed elsewhere instead (currently leaning
+towards hosting the new kitchen Bluetooth speaker; see that plan). §3
+below (mini-HDMI, heat-in-a-sealed-cavity, VideoCore IV decode limits,
+etc.) is kept as historical record of why the Zero was considered and
+ruled out physically too, not as a pending task.
+
 ---
 
 ## 1. Purchase & mounting
@@ -69,7 +81,7 @@ per-node health monitoring (`HealthUpdate`, already tracks CPU/RAM/GPU/temp)
 watch this node's temperature like any other — no new code needed, just
 keep an eye on the Health tab for the first few weeks in different seasons.
 
-## 3. Hardware: Pi Zero 2 W as the HDMI client (eventual target)
+## 3. Hardware: Pi Zero 2 W as the HDMI client (superseded 2026-07-08 — not happening, see note above)
 
 **Development is currently happening on a Pi 4 instead** (TV on a stand,
 no recess yet — see the 2026-07-06 note above). None of the software this

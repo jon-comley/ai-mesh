@@ -1,5 +1,11 @@
 # Frame TV Art Display — Pi Zero 2 W Setup
 
+**Superseded 2026-07-08 — not happening.** The Pi 4 stays behind the Frame
+TV permanently instead of migrating to a Pi Zero 2 W; see the note at the
+top of `plans/frame-tv-art-display.md` and the placement decision in
+`plans/audio-output-integration.md`. Kept as historical record — nothing
+below is a live task.
+
 Hands-on provisioning guide for the node described in
 `plans/frame-tv-art-display.md`. Read that first for the *why*; this is the
 *how*, in the same style as `docs/pi1-lighting-setup.md`.
