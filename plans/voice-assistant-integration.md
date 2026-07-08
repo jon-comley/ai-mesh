@@ -431,7 +431,10 @@ exactly as it does to typed chat.
    response, served over HTTP so the device can fetch it — the
    `VoiceAssistantEventResponse` TTS-end event carries a media reference
    the device fetches directly. The `tts-start`/`tts-end` slots in the
-   event sequence are the only placeholder left.
+   event sequence are the only placeholder left. **Now planned as Phase 1
+   of `plans/audio-output-integration.md`** (2026-07-08), which also
+   covers the soundbar/Frame-TV/BT-speaker audio ecosystem beyond the
+   puck.
 4. ~~Replace the crawl phase's `stt-no-text-recognized` placeholder~~ —
    **done 2026-07-08** (real `stt-end`/`intent-start`/`intent-end`
    sequence; TTS events await item 3).
