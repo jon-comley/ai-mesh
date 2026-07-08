@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features]"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote]"
 # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
 # (Set COORDINATOR_IP in the agent's environment to override discovery for debugging.)
 set -e
@@ -11,6 +11,8 @@ AGENT_USER="$2"
 MQTT_HOST="${3:-}"
 MQTT_PORT="${4:-1883}"
 NODE_FEATURES="${5:-llm}"
+VOICE_DEVICE_HOST="${6:-}"
+VOICE_STT_REMOTE="${7:-}"
 
 if [ -z "$AGENT_USER" ]; then
     echo "Usage: $0 <role> <user> [mqtt_host] [mqtt_port] [node_features]"
@@ -170,6 +172,65 @@ else
     echo ">>> No 'llm' feature requested — skipping llama.cpp install."
 fi
 
+VOICE_MODEL_FILE="ggml-base.en.bin"
+if has_feature voice; then
+    echo ">>> Installing whisper-server (whisper.cpp latest release)..."
+    if ! WHISPER_VERSION="$(curl -fsSL --connect-timeout 5 \
+            https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest \
+            | grep '"tag_name"' | head -1 | cut -d'"' -f4)" \
+       || [ -z "$WHISPER_VERSION" ]; then
+        echo ">>> Warning: GitHub API unavailable. Falling back to v1.9.1."
+        WHISPER_VERSION="v1.9.1"
+    fi
+    echo ">>> whisper.cpp release: ${WHISPER_VERSION}"
+    ARCH="$(uname -m)"
+    whisper_url_for() {
+        if [ "$ARCH" = "x86_64" ]; then
+            echo "https://github.com/ggml-org/whisper.cpp/releases/download/$1/whisper-bin-ubuntu-x64.tar.gz"
+        else
+            echo "https://github.com/ggml-org/whisper.cpp/releases/download/$1/whisper-bin-ubuntu-arm64.tar.gz"
+        fi
+    }
+    WHISPER_URL="$(whisper_url_for "$WHISPER_VERSION")"
+    WHISPER_TMP="$(mktemp -d)"
+    if ! curl -fsSL "$WHISPER_URL" -o "$WHISPER_TMP/whisper.tar.gz"; then
+        # Same "latest tag published before its assets finish uploading" gap as
+        # llama.cpp above — fall back to the previous release rather than hard-fail.
+        echo ">>> Warning: ${WHISPER_VERSION} assets aren't uploaded yet — trying the previous release..."
+        PREV_VERSION="$(curl -fsSL --connect-timeout 5 \
+                "https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=2" \
+                | grep '"tag_name"' | sed -n '2p' | cut -d'"' -f4)"
+        if [ -z "$PREV_VERSION" ]; then
+            echo ">>> ERROR: whisper.cpp download failed and no previous release could be resolved."
+            exit 1
+        fi
+        WHISPER_VERSION="$PREV_VERSION"
+        WHISPER_URL="$(whisper_url_for "$WHISPER_VERSION")"
+        echo ">>> Falling back to whisper.cpp release: ${WHISPER_VERSION}"
+        curl -fsSL "$WHISPER_URL" -o "$WHISPER_TMP/whisper.tar.gz"
+    fi
+    # Extract everything — whisper-server depends on several .so files in the same archive.
+    install -d /opt/whisper.cpp
+    tar -xzf "$WHISPER_TMP/whisper.tar.gz" -C /opt/whisper.cpp --strip-components=1
+    rm -rf "$WHISPER_TMP"
+    echo ">>> whisper-server ${WHISPER_VERSION} installed at /opt/whisper.cpp/whisper-server"
+
+    VOICE_MODEL_DIR="/home/${AGENT_USER}/.ai-mesh/voice-models"
+    VOICE_MODEL_PATH="${VOICE_MODEL_DIR}/${VOICE_MODEL_FILE}"
+    if [ -f "$VOICE_MODEL_PATH" ]; then
+        echo ">>> whisper model already present at ${VOICE_MODEL_PATH} — skipping download"
+    else
+        echo ">>> Downloading whisper model ${VOICE_MODEL_FILE}..."
+        sudo -u "${AGENT_USER}" install -d "$VOICE_MODEL_DIR"
+        sudo -u "${AGENT_USER}" curl -fsSL \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${VOICE_MODEL_FILE}" \
+            -o "$VOICE_MODEL_PATH"
+        echo ">>> whisper model installed at ${VOICE_MODEL_PATH}"
+    fi
+else
+    echo ">>> No 'voice' feature requested — skipping whisper.cpp install."
+fi
+
 LLM_ENV_BLOCK=""
 if has_feature llm; then
     LLM_ENV_BLOCK="Environment=LLAMA_MODEL_DIR=/home/${AGENT_USER}/.ai-mesh/models
@@ -178,6 +239,29 @@ Environment=LD_LIBRARY_PATH=/opt/llama.cpp
 Environment=LLAMA_GPU_LAYERS=0
 Environment=LLAMA_CTX_SIZE=4096
 Environment=DEFAULT_MODEL=${DEFAULT_MODEL}"
+fi
+
+VOICE_ENV_BLOCK=""
+if has_feature voice; then
+    # No LD_LIBRARY_PATH here deliberately: llama.cpp and whisper.cpp each
+    # ship a same-named, binary-incompatible ggml backend plugin
+    # (libggml-cpu.so), so merging both dirs into one process-wide
+    # LD_LIBRARY_PATH risks one server loading the other's plugin (broke
+    # llama-server live, 2026-07-08: "no CPU backend found"). capability-voice
+    # sets LD_LIBRARY_PATH=/opt/whisper.cpp itself when it spawns
+    # whisper-server, scoped to that child process only.
+    VOICE_ENV_BLOCK="Environment=VOICE_STT_SERVER_BIN=/opt/whisper.cpp/whisper-server
+Environment=VOICE_STT_MODEL=/home/${AGENT_USER}/.ai-mesh/voice-models/${VOICE_MODEL_FILE}"
+    if [ -n "$VOICE_STT_REMOTE" ]; then
+        VOICE_ENV_BLOCK="${VOICE_ENV_BLOCK}
+Environment=VOICE_STT_REMOTE=${VOICE_STT_REMOTE}"
+    fi
+    if [ -n "$VOICE_DEVICE_HOST" ]; then
+        VOICE_ENV_BLOCK="${VOICE_ENV_BLOCK}
+Environment=VOICE_DEVICE_HOST=${VOICE_DEVICE_HOST}"
+    else
+        echo ">>> Warning: 'voice' feature requested but no voice_device_host given — capability will run as a stub."
+    fi
 fi
 
 echo ">>> Installing ai-mesh-agent systemd service..."
@@ -191,6 +275,7 @@ Wants=network-online.target
 ExecStart=/home/${AGENT_USER}/agent
 Environment=AGENT_ROLE=${ROLE}
 ${LLM_ENV_BLOCK}
+${VOICE_ENV_BLOCK}
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_HOST=${MQTT_HOST}" || true)
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_PORT=${MQTT_PORT}" || true)
 Restart=always
