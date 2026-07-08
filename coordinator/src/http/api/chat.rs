@@ -33,6 +33,7 @@ pub async fn chat(
         text: body.text,
         model_name: body.model_name,
         context: body.context,
+        source: shared::IntentSource::Dashboard,
     };
 
     // Build the cloud gateway invocation when enabled + fully configured.

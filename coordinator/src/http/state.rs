@@ -65,6 +65,15 @@ pub struct SecurityEvent {
     pub detail: String,
 }
 
+/// One executed tool call inside a [`DashboardEvent::VoiceExchange`] —
+/// the chat window renders these the same way it renders typed chat's
+/// tool rows.
+#[derive(Clone, Debug, Serialize)]
+pub struct VoiceToolCall {
+    pub tool: String,
+    pub result: String,
+}
+
 /// Events broadcast to all connected dashboard WebSocket clients.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type")]
@@ -133,6 +142,22 @@ pub enum DashboardEvent {
     SwitchAction {
         device_id: String,
         action: String,
+        ts_ms: u64,
+    },
+    /// One completed voice-assistant exchange (spoken transcript in, intent
+    /// response out). Transient, broadcast-only — the chat window renders it
+    /// when its "show voice commands" preference is on; a future TTS/speaker
+    /// output sink is expected to consume the same event. Not replayed on
+    /// connect, matching typed chat's own ephemeral semantics.
+    VoiceExchange {
+        transcript: String,
+        response: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        tool_calls: Vec<VoiceToolCall>,
+        node_id: String,
+        model_name: String,
+        total_ms: u64,
         ts_ms: u64,
     },
     ErrorUpdate {
@@ -522,6 +547,35 @@ impl DashboardState {
         if self.tx.receiver_count() > 0 {
             let _ = self.tx.send(DashboardEvent::GatewayUpdate(snapshot));
         }
+    }
+
+    /// Broadcast one completed voice exchange to connected dashboards
+    /// (no-op if none). See [`DashboardEvent::VoiceExchange`].
+    pub fn push_voice_exchange(&self, transcript: String, resp: &shared::IntentResponse) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let _ = self.tx.send(DashboardEvent::VoiceExchange {
+            transcript,
+            response: resp.text.clone().unwrap_or_default(),
+            error: resp.error.clone(),
+            tool_calls: resp
+                .tool_calls
+                .iter()
+                .map(|t| VoiceToolCall {
+                    tool: t.tool.clone(),
+                    result: t.result.clone().unwrap_or_default(),
+                })
+                .collect(),
+            node_id: resp.node_id.clone(),
+            model_name: resp.model_name.clone(),
+            total_ms: resp.total_ms,
+            ts_ms,
+        });
     }
 
     /// Send `msg` to the named node's open TCP channel.

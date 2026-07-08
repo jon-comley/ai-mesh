@@ -483,12 +483,25 @@ pub struct IntentTurn {
     pub content: String,
 }
 
+/// Where an intent originated. Lets the coordinator route the *response*
+/// per source — voice exchanges are broadcast to dashboard consumers (chat
+/// window today, a TTS/speaker output sink later) while CLI/dashboard
+/// requests already return to their caller.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IntentSource {
+    Voice,
+    Cli,
+    Dashboard,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IntentRequest {
     pub request_id: String,
     pub text: String,
     pub model_name: Option<String>,
     pub context: Vec<IntentTurn>,
+    pub source: IntentSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1272,6 +1285,7 @@ mod tests {
                 role: IntentRole::User,
                 content: "hello".into(),
             }],
+            source: IntentSource::Voice,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);

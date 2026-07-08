@@ -39,6 +39,7 @@ async fn send_intent(
         text,
         model_name: model,
         context: vec![],
+        source: shared::IntentSource::Cli,
     });
 
     match send_recv(coordinator, &msg).await? {

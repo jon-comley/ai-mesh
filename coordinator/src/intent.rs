@@ -2073,6 +2073,7 @@ mod tests {
             text: "what's the temperature?".into(),
             model_name: None,
             context: vec![turn],
+            source: shared::IntentSource::Dashboard,
         }
     }
 
