@@ -3980,6 +3980,27 @@ body {
 }
 .chat-ctx-counter.chat-ctx-near-limit { color: var(--amber); }
 
+/* Voice-assistant exchanges pushed over the WS — visually distinct from
+   typed turns via a subtle accent edge; the 🎤 prefix marks the transcript. */
+.chat-voice > .chat-bubble {
+  border-left: 2px solid var(--accent, #4f8ef7);
+}
+.chat-user.chat-voice > .chat-bubble {
+  border-left: none;
+  border-right: 2px solid rgba(255, 255, 255, 0.55);
+}
+
+.chat-voice-toggle {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  cursor: pointer;
+  user-select: none;
+}
+.chat-voice-toggle input { accent-color: var(--accent, #4f8ef7); }
+
 .chat-send {
   background: var(--accent, #4f8ef7);
   color: #fff;

@@ -1,17 +1,23 @@
 import { getHostname } from '/static/models.js';
+import { setPref } from '/static/prefs.js';
 
 const MAX_CONTEXT_TURNS = 20; // 10 exchanges; oldest pair dropped when exceeded
+const VOICE_PREF_KEY = 'voice-in-chat'; // '0' = hidden; anything else = shown (default on)
 
 // Mounts a chat thread + input bar into `container`, wired to POST /api/chat.
 // Each call is an independent conversation (its own context/state and class-scoped
 // element lookups), so the same widget runs on both the Chat tab and the Reaper tab
 // without clashing IDs or sharing history. Returns a small control handle.
-export function createChatWidget(container, { placeholder = 'Ask anything or control your home…' } = {}) {
+export function createChatWidget(container, { placeholder = 'Ask anything or control your home…', voiceToggle = false } = {}) {
+  const voiceToggleHtml = voiceToggle
+    ? `<label class="chat-voice-toggle" title="Show voice-assistant exchanges in this chat"><input type="checkbox" class="chat-voice-cb"> 🎤 voice</label>`
+    : '';
   container.innerHTML = `
     <div class="chat-thread"></div>
     <div class="chat-input-bar">
       <textarea class="chat-input" rows="2" placeholder="${placeholder}"></textarea>
       <div class="chat-btn-row">
+        ${voiceToggleHtml}
         <span class="chat-ctx-counter"></span>
         <button class="chat-send">Send</button>
         <button class="chat-new">New</button>
@@ -25,6 +31,14 @@ export function createChatWidget(container, { placeholder = 'Ask anything or con
   const clearBtn   = container.querySelector('.chat-clear');
   const newBtn     = container.querySelector('.chat-new');
   const ctxCounter = container.querySelector('.chat-ctx-counter');
+  const voiceCb    = container.querySelector('.chat-voice-cb');
+
+  if (voiceCb) {
+    voiceCb.checked = localStorage.getItem(VOICE_PREF_KEY) !== '0';
+    voiceCb.addEventListener('change', () => {
+      setPref(VOICE_PREF_KEY, voiceCb.checked ? '1' : '0');
+    });
+  }
 
   let busy = false;
   let conversationContext = [];
@@ -207,12 +221,44 @@ export function createChatWidget(container, { placeholder = 'Ask anything or con
     return div;
   }
 
-  return { thread, clear, newContext };
+  // Render one voice-assistant exchange pushed over the WS: 🎤-marked
+  // user-side transcript, then the response the same way a typed reply
+  // renders (tool rows + text bubble + meta line). Display-only by design —
+  // voice turns do NOT join conversationContext, so typed follow-ups
+  // can't reference them (deliberate v1 choice; revisit with TTS).
+  function appendExchange(evt) {
+    if (localStorage.getItem(VOICE_PREF_KEY) === '0') return;
+    const userDiv = appendMsg('user', `🎤 ${evt.transcript}`);
+    userDiv.classList.add('chat-voice');
+    if (evt.error) {
+      appendMsg('assistant', `Error: ${evt.error}`).classList.add('chat-voice');
+      return;
+    }
+    for (const tc of evt.tool_calls ?? []) {
+      appendToolMsg(tc.tool, tc.result, evt.node_id, evt.model_name, 0, 0, evt.total_ms ?? 0)
+        .classList.add('chat-voice');
+    }
+    if (evt.response || !(evt.tool_calls ?? []).length) {
+      appendMsg('assistant', evt.response || '(no response)', evt.node_id, evt.model_name, 0, 0, evt.total_ms ?? 0)
+        .classList.add('chat-voice');
+    }
+  }
+
+  return { thread, clear, newContext, appendExchange };
 }
+
+// The Chat tab's live widget instance — the WS voice-exchange handler needs
+// to reach it (the Reaper tab's widget deliberately doesn't show voice).
+let chatTab = null;
 
 // Chat tab entry point (called by dashboard.js).
 export function init(panel) {
-  createChatWidget(panel);
+  chatTab = createChatWidget(panel, { voiceToggle: true });
+}
+
+// WS `VoiceExchange` events land here (see dashboard.js handlers map).
+export function handleVoiceExchange(evt) {
+  chatTab?.appendExchange(evt);
 }
 
 function metaLine(nodeId, modelName, durationMs, tokensGenerated, totalMs, prefillMs = 0, serverMs = 0) {

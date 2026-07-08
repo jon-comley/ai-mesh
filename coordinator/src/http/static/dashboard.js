@@ -93,6 +93,7 @@ const handlers = {
     devices.refresh();
   },
   SwitchAction: evt => registerSwitchAction(evt.device_id, evt.action),
+  VoiceExchange: evt => chat.handleVoiceExchange(evt),
   ErrorUpdate: evt => errors.handleErrorUpdate(evt),
   SecurityUpdate: evt => security.handleSecurityUpdate(evt),
   ReaperUpdate: evt => reaper.handleReaperUpdate(evt),
