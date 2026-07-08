@@ -65,13 +65,24 @@ const MIN_CAPTURE: Duration = Duration::from_millis(400);
 /// background noise).
 const MAX_CAPTURE: Duration = Duration::from_secs(15);
 
-/// The device pings us on its own every ~60s (observed live), so a read
-/// gap well past that means the peer is gone without a FIN/RST — power
-/// cut, WiFi drop. Without this, `try_read` parks forever, no error ever
-/// surfaces, and the reconnect loop never fires: the capability would be
-/// silently dead until an agent restart. Same failure family as the mesh
-/// TCP port-9000 incident (see `project_mesh_tcp_supervision`).
-const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(90);
+/// Without this, a peer that vanishes without a FIN/RST (power cut, WiFi
+/// drop) leaves `try_read` parked forever — no error ever surfaces, the
+/// reconnect loop never fires, and the capability is silently dead until
+/// an agent restart. Same failure family as the mesh TCP port-9000
+/// incident (see `project_mesh_tcp_supervision`).
+///
+/// 90s was the first guess (based on one earlier session where a
+/// `PingRequest` happened to arrive around then) and was wrong — live on
+/// pi1 the device went fully idle-silent for 90s+ *repeatedly* during
+/// completely normal operation, so this was tearing down and
+/// reconnecting a healthy connection every ~90s, which is almost
+/// certainly why wake-word triggers were getting missed. There's no
+/// evidence this firmware sends unprompted keepalives at all, so this is
+/// a generous backstop for a genuinely wedged connection, not a
+/// liveness check tuned to a real ping interval. A client-initiated
+/// `PingRequest` heartbeat would be the correct fix if a tighter
+/// detection window is ever needed.
+const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// One in-progress wake-word capture: the accumulated PCM plus the timing
 /// state that decides when it ends.
