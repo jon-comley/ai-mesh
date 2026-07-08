@@ -91,6 +91,7 @@ pub enum Feature {
     Reaper,
     Sensors,
     Art,
+    Voice,
 }
 
 impl Default for NodeCapabilities {
