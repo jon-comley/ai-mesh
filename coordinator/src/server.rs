@@ -332,7 +332,7 @@ where
             &tx,
             &mut node_id,
             &auth_tokens,
-            dashboard.as_deref(),
+            dashboard.as_ref(),
             auth_tag,
         )
         .await;
@@ -906,7 +906,7 @@ async fn process_message(
     tx: &mpsc::Sender<MeshMessage>,
     node_id: &mut Option<String>,
     auth_tokens: &Arc<Vec<String>>,
-    dashboard: Option<&DashboardState>,
+    dashboard: Option<&Arc<DashboardState>>,
     auth_tag: &'static str,
 ) -> Option<MeshMessage> {
     match msg {
@@ -917,7 +917,7 @@ async fn process_message(
             tx,
             node_id,
             auth_tokens,
-            dashboard,
+            dashboard.map(|d| d.as_ref()),
             auth_tag,
         ),
         MeshMessage::HardwareReport(hw) => {
@@ -1063,19 +1063,90 @@ async fn process_message(
             let reaper_online = dashboard
                 .and_then(|d| d.get_reaper_snapshot())
                 .is_some_and(|s| s.reaper_online);
-            let response = crate::intent::handle_intent(
-                req,
-                registry.clone(),
-                connections.clone(),
-                pending_inferences.clone(),
-                pending_intents.clone(),
-                device_states,
-                sensor_states,
-                reaper_online,
-                None, // mesh-originated intents stay local; the cloud gateway is dashboard-driven
-            )
-            .await;
-            Some(MeshMessage::IntentResponse(response))
+            // Spawned, NOT awaited inline: handle_intent dispatches inference
+            // to a node and waits for its ModelInferenceResult — which, when
+            // the intent came from that same node (an agent's voice
+            // capability asking for inference that lands back on itself),
+            // arrives on the very connection this read loop serves. Awaiting
+            // here deadlocks: the result sits unread in the socket while
+            // handle_intent waits for it, until the inference timeout fires.
+            // Caught live 2026-07-08 on the first voice→intent test — the
+            // LLM finished in 42s but the response never came back. (Also
+            // the source of the "frame timestamp is stale" warnings: the
+            // node's heartbeats queued behind the blocked reader for 40s+
+            // and were skew-rejected once finally read.)
+            let registry = registry.clone();
+            let connections = connections.clone();
+            let pending_inferences = pending_inferences.clone();
+            let pending_intents = pending_intents.clone();
+            let reply_tx = tx.clone();
+            let dashboard = dashboard.cloned();
+            let transcript = req.text.clone();
+            let source = req.source;
+            tokio::spawn(async move {
+                // Honor the Online AI tab for mesh-originated intents too
+                // (voice, CLI) — same construction as the dashboard chat
+                // path in http/api/chat.rs, same local fallback on cloud
+                // failure inside handle_intent.
+                let gateway = dashboard.as_ref().and_then(|state| {
+                    let cfg = crate::cloud::GatewayConfig::load(&registry.lock().unwrap());
+                    match cfg.provider() {
+                        Some(provider) if cfg.enabled => Some(crate::cloud::GatewayInvocation {
+                            provider,
+                            engine: cfg.engine,
+                            compress: cfg.compress,
+                            state: state.clone(),
+                        }),
+                        _ => {
+                            if cfg.enabled {
+                                warn!(
+                                    "online AI is enabled but not fully configured (missing API key or model); using local inference"
+                                );
+                            }
+                            None
+                        }
+                    }
+                });
+                let used_gateway = gateway.is_some();
+                let response = crate::intent::handle_intent(
+                    req,
+                    registry.clone(),
+                    connections,
+                    pending_inferences,
+                    pending_intents,
+                    device_states,
+                    sensor_states,
+                    reaper_online,
+                    gateway,
+                )
+                .await;
+                // Reflect updated cumulative stats / last-error on the
+                // Gateway tab, exactly as the dashboard chat path does.
+                if used_gateway && let Some(state) = &dashboard {
+                    let snap = crate::http::api::gateway::gateway_snapshot(
+                        &registry.lock().unwrap(),
+                        state,
+                    );
+                    state.push_gateway_update(snap);
+                }
+                // Surface spoken exchanges to dashboard consumers — the chat
+                // window today; this broadcast (and this exact spot) is the
+                // seam where a future TTS/speaker output router taps the
+                // response for audible replies.
+                if source == shared::IntentSource::Voice
+                    && let Some(state) = &dashboard
+                {
+                    state.push_voice_exchange(transcript, &response);
+                }
+                if reply_tx
+                    .send(MeshMessage::IntentResponse(response))
+                    .await
+                    .is_err()
+                {
+                    warn!("intent requester disconnected before the response was ready");
+                }
+            });
+            None
         }
         MeshMessage::SceneLoaded(report) => {
             let entry = pending_intents.lock().unwrap().remove(&report.request_id);
@@ -1084,9 +1155,12 @@ async fn process_message(
             }
             None
         }
-        MeshMessage::LightState(report) => {
-            handle_light_state(report, registry, node_id.as_deref(), dashboard)
-        }
+        MeshMessage::LightState(report) => handle_light_state(
+            report,
+            registry,
+            node_id.as_deref(),
+            dashboard.map(|d| d.as_ref()),
+        ),
         MeshMessage::SensorState(mut report) => {
             // Trust the authenticated connection's id (see LightState above).
             if let Some(id) = node_id.as_deref() {
@@ -1366,7 +1440,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1405,7 +1479,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1450,7 +1524,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1495,7 +1569,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1527,7 +1601,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1563,7 +1637,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1599,7 +1673,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1632,7 +1706,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1668,7 +1742,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1722,7 +1796,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1788,7 +1862,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1847,7 +1921,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1889,7 +1963,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1931,7 +2005,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
@@ -1972,7 +2046,7 @@ mod tests {
             &tx,
             &mut node_id,
             &tokens,
-            Some(dashboard.as_ref()),
+            Some(&dashboard),
             "no auth",
         )
         .await;
