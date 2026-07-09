@@ -1322,6 +1322,24 @@ async fn process_message(
             }
             None
         }
+        MeshMessage::BluetoothDeviceFound(info) => {
+            if let Some(dash) = dashboard {
+                dash.push_bluetooth_device_found(info);
+            }
+            None
+        }
+        MeshMessage::BluetoothPairResult(result) => {
+            info!(
+                node_id = %result.node_id,
+                mac = %result.mac,
+                success = result.success,
+                "bluetooth: pair result"
+            );
+            if let Some(dash) = dashboard {
+                dash.push_bluetooth_pair_result(result);
+            }
+            None
+        }
         MeshMessage::SwitchAction(report) => {
             // debug, not info: unlike a pairing event (rare), a dial rotation
             // can fire many times per interaction — info! here would make

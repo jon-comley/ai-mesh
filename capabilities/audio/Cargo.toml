@@ -7,7 +7,7 @@ edition = "2024"
 capability-core = { path = "../core" }
 shared = { path = "../../shared" }
 async-trait = "0.1"
-tokio = { version = "1", features = ["sync", "fs", "time", "rt", "macros", "process"] }
+tokio = { version = "1", features = ["sync", "fs", "time", "rt", "macros", "process", "io-util"] }
 tracing = "0.1"
 dirs = "5"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }

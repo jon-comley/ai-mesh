@@ -78,6 +78,8 @@ pub fn router(
         .route("/api/lights/names", get(api::lights::get_device_names))
         .route("/api/sensors", get(api::sensors::list_sensors))
         .route("/api/zigbee/permit-join", post(api::zigbee::permit_join))
+        .route("/api/bluetooth/scan/{node_id}", post(api::bluetooth::scan))
+        .route("/api/bluetooth/pair/{node_id}", post(api::bluetooth::pair))
         .route(
             "/api/lights/{device}/command",
             post(api::lights::light_command),

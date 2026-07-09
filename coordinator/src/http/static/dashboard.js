@@ -84,6 +84,8 @@ const handlers = {
   EffectUpdate: evt => effects.handleEffectUpdate(evt),
   ZigbeeStatus: evt => { rooms.handleZigbeeStatus(evt.online); health.handleZigbeeStatus(evt.online); },
   ZigbeeJoinEvent: evt => devices.handleJoinEvent(evt),
+  BluetoothDeviceFound: evt => devices.handleBluetoothDeviceFound(evt),
+  BluetoothPairResult: evt => devices.handleBluetoothPairResult(evt),
   SensorUpdate: evt => {
     rooms.notifySensors(evt.sensors);
     devices.refresh();

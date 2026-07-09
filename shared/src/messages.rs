@@ -420,6 +420,55 @@ pub struct DeviceRemoveRequest {
     pub device_id: String,
 }
 
+/// Coordinator asks a specific audio-capable node to open a live Bluetooth
+/// discovery window — unlike Zigbee's bridge-wide permit-join, this is
+/// per-node since Bluetooth capability is tied to whichever Pi has
+/// `bluetooth` in its `AUDIO_BACKENDS`. Feedback streams back as
+/// `BluetoothDeviceFound` while the window is open.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothScanRequest {
+    pub request_id: String,
+    pub seconds: u8,
+}
+
+/// One device seen (or updated) during a Bluetooth scan, forwarded by the
+/// scanning node — drives the dashboard's live device list with signal
+/// bars. Sent once per new device and again whenever `bluetoothctl`
+/// reports an updated RSSI for one already seen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothDeviceInfo {
+    pub node_id: String,
+    pub mac: String,
+    pub name: String,
+    /// dBm; `None` until BlueZ reports one for this device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rssi: Option<i32>,
+}
+
+/// Coordinator asks a node to pair, trust, and connect a specific
+/// previously-scanned MAC, and adopt it as that node's bluetooth sink.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothPairRequest {
+    pub request_id: String,
+    pub mac: String,
+}
+
+/// Node → coordinator: the outcome of a `BluetoothPairRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothPairResult {
+    pub node_id: String,
+    pub mac: String,
+    pub name: String,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The resolved PipeWire/PulseAudio sink name on success (e.g.
+    /// `bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink`) — persisted node-side and
+    /// used for playback instead of relying on the OS default sink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sink_name: Option<String>,
+}
+
 /// One z2m `bridge/event` during pairing, forwarded by the zigbee-owning
 /// node: drives the dashboard's live "joined: <model>" feed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -671,6 +720,10 @@ pub enum MeshMessage {
     PermitJoin(PermitJoinRequest),
     DeviceRemove(DeviceRemoveRequest),
     ZigbeeJoin(ZigbeeJoinEvent),
+    BluetoothScan(BluetoothScanRequest),
+    BluetoothDeviceFound(BluetoothDeviceInfo),
+    BluetoothPair(BluetoothPairRequest),
+    BluetoothPairResult(BluetoothPairResult),
     SwitchAction(SwitchActionReport),
     SceneLoad(SceneLoadRequest),
     SceneLoaded(SceneLoadedReport),

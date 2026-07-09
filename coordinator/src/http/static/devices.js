@@ -257,7 +257,212 @@ function buildAvRow(dev) {
       roomId => onPuckRoomChange(roomId)));
   }
   row.appendChild(actions);
+
+  if (dev.transport === 'bluetooth' && dev.node_id) {
+    const { button, panel } = buildBluetoothScanControls(dev.node_id);
+    actions.appendChild(button);
+    row.appendChild(panel);
+  }
+
   return row;
+}
+
+// ── Live Bluetooth scan + pair (per bluetooth-backend node) ─────────────────
+// Mirrors the Zigbee "Pair device" flow (permit-join → live join feed) but
+// per-node rather than bridge-wide, and with a device *picker* instead of
+// auto-join: BlueZ discovery surfaces every nearby device, not just the one
+// the user means, so pairing needs an explicit "use this one" click. See
+// capabilities/audio/src/bluetooth.rs for the agent-side scan/pair.
+
+// One entry per node currently showing a scan panel: node_id -> { devices:
+// Map<mac, {mac,name,rssi}>, listEl, countdown }. A node not present here
+// has no open panel — WS events for it are just ignored.
+const btScanPanels = new Map();
+
+function rssiBarCount(rssi) {
+  if (rssi == null) return 0;
+  if (rssi >= -50) return 4;
+  if (rssi >= -60) return 3;
+  if (rssi >= -70) return 2;
+  return 1;
+}
+
+function buildSignalBars(rssi) {
+  const wrap = document.createElement('span');
+  wrap.className = 'bt-signal';
+  wrap.title = rssi == null ? 'signal strength unknown' : `${rssi} dBm`;
+  const filled = rssiBarCount(rssi);
+  for (let i = 1; i <= 4; i++) {
+    const bar = document.createElement('span');
+    bar.className = `bt-signal-bar bt-signal-bar-${i}` + (i <= filled ? ' bt-signal-bar-filled' : '');
+    wrap.appendChild(bar);
+  }
+  return wrap;
+}
+
+function renderBluetoothScanList(nodeId) {
+  const state = btScanPanels.get(nodeId);
+  if (!state) return;
+  state.listEl.innerHTML = '';
+  const found = [...state.devices.values()].sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999));
+  if (found.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'bt-scan-empty';
+    empty.textContent = 'No devices seen yet…';
+    state.listEl.appendChild(empty);
+    return;
+  }
+  for (const dev of found) {
+    const row = document.createElement('div');
+    row.className = 'bt-scan-row';
+    const label = document.createElement('span');
+    label.className = 'bt-scan-name';
+    label.textContent = `${dev.name} (${dev.mac})`;
+    const useBtn = document.createElement('button');
+    useBtn.className = 'device-row-btn';
+    useBtn.textContent = dev.pairing ? 'Pairing…' : (dev.paired === false ? 'Failed — retry' : 'Use this device');
+    useBtn.disabled = !!dev.pairing;
+    if (dev.paired === false && dev.error) useBtn.title = dev.error;
+    useBtn.addEventListener('click', () => pairBluetoothDevice(nodeId, dev));
+    row.append(buildSignalBars(dev.rssi), label, useBtn);
+    state.listEl.appendChild(row);
+  }
+}
+
+function pairBluetoothDevice(nodeId, dev) {
+  const state = btScanPanels.get(nodeId);
+  if (state) {
+    const entry = state.devices.get(dev.mac);
+    if (entry) { entry.pairing = true; entry.paired = undefined; }
+    renderBluetoothScanList(nodeId);
+  }
+  api(`/bluetooth/pair/${encodeURIComponent(nodeId)}`, { method: 'POST', body: { mac: dev.mac } })
+    .then(res => {
+      if (res.ok) return;
+      const s = btScanPanels.get(nodeId);
+      const entry = s?.devices.get(dev.mac);
+      if (entry) { entry.pairing = false; entry.paired = false; }
+      renderBluetoothScanList(nodeId);
+      showToast(`Pair request failed (${res.status})`, true);
+    })
+    .catch(e => showToast(`Pair request error: ${e.message}`, true));
+}
+
+export function handleBluetoothDeviceFound(evt) {
+  const state = btScanPanels.get(evt.node_id);
+  if (!state) return; // no open panel for this node — ignore
+  const existing = state.devices.get(evt.mac);
+  state.devices.set(evt.mac, {
+    mac: evt.mac,
+    name: evt.name || existing?.name || evt.mac,
+    rssi: evt.rssi ?? existing?.rssi ?? null,
+    pairing: existing?.pairing,
+    paired: existing?.paired,
+  });
+  renderBluetoothScanList(evt.node_id);
+}
+
+export function handleBluetoothPairResult(evt) {
+  const state = btScanPanels.get(evt.node_id);
+  if (state) {
+    const entry = state.devices.get(evt.mac);
+    if (entry) { entry.pairing = false; entry.paired = evt.success; entry.error = evt.error; }
+    renderBluetoothScanList(evt.node_id);
+  }
+  if (evt.success) {
+    showToast(`Paired ${evt.name} — now used for this node's Bluetooth audio.`);
+    fetchAvDevices(true);
+  } else {
+    showToast(`Pairing ${evt.name} failed${evt.error ? ': ' + evt.error : ''}`, true);
+  }
+}
+
+// A full devices-tab re-render (`render()`, triggered by any LightingUpdate/
+// RoomsUpdate/SensorUpdate WS event — all common while a scan is sitting
+// open) throws away and rebuilds every AV row's DOM, including this panel.
+// Without reattaching, an in-flight scan's `listEl`/countdown would keep
+// writing into now-detached, invisible nodes — the visible replacement
+// panel would silently stop updating. So `btScanPanels` entries own the
+// live element references and this function re-syncs them into any state
+// already open for `nodeId` instead of assuming a fresh start.
+function tickBluetoothCountdown(nodeId) {
+  const state = btScanPanels.get(nodeId);
+  if (!state) return;
+  if (state.remaining <= 0) {
+    clearInterval(state.countdown);
+    state.countdown = null;
+    state.buttonEl.disabled = false;
+    state.buttonEl.textContent = 'Scan for Bluetooth';
+    return;
+  }
+  state.buttonEl.textContent = `Scanning… ${state.remaining}s`;
+  state.remaining -= 1;
+}
+
+function buildBluetoothScanControls(nodeId) {
+  const button = document.createElement('button');
+  button.className = 'device-row-btn';
+
+  const panel = document.createElement('div');
+  panel.className = 'bt-scan-panel';
+  const list = document.createElement('div');
+  list.className = 'bt-scan-list';
+  panel.appendChild(list);
+
+  const existing = btScanPanels.get(nodeId);
+  if (existing) {
+    // Re-render happened mid-scan: adopt the existing device list/countdown
+    // into these fresh elements instead of losing them.
+    existing.listEl = list;
+    existing.buttonEl = button;
+    existing.panelEl = panel;
+    panel.hidden = false;
+    button.disabled = existing.countdown != null;
+    button.textContent = existing.countdown != null
+      ? `Scanning… ${existing.remaining}s`
+      : 'Scan for Bluetooth';
+    renderBluetoothScanList(nodeId);
+  } else {
+    button.textContent = 'Scan for Bluetooth';
+    panel.hidden = true;
+  }
+
+  button.addEventListener('click', async () => {
+    if (btScanPanels.get(nodeId)?.countdown) return; // window already open
+    btScanPanels.set(nodeId, {
+      devices: new Map(),
+      listEl: list,
+      buttonEl: button,
+      panelEl: panel,
+      countdown: null,
+      remaining: 0,
+    });
+    panel.hidden = false;
+    renderBluetoothScanList(nodeId);
+    try {
+      const res = await api(`/bluetooth/scan/${encodeURIComponent(nodeId)}`, { method: 'POST' });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        showToast(`Scan failed (${res.status})${text ? ': ' + text : ''}`, true);
+        btScanPanels.delete(nodeId);
+        panel.hidden = true;
+        return;
+      }
+      const { seconds } = await res.json();
+      const state = btScanPanels.get(nodeId);
+      if (!state) return; // scan was abandoned before the response landed
+      state.remaining = seconds;
+      state.buttonEl.disabled = true;
+      tickBluetoothCountdown(nodeId);
+      state.countdown = setInterval(() => tickBluetoothCountdown(nodeId), 1000);
+    } catch (e) {
+      showToast(`Scan error: ${e.message}`, true);
+      btScanPanels.delete(nodeId);
+      panel.hidden = true;
+    }
+  });
+
+  return { button, panel };
 }
 
 // Cover/Climate/Switch rows: name + room-assignment + delete, no status

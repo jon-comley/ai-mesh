@@ -2524,6 +2524,51 @@ body {
 .av-room-chip-remove:hover { color: var(--red); }
 .av-role-select { font-size: 11px; }
 
+/* Live Bluetooth scan panel (per bluetooth-backend AV row) */
+.bt-scan-panel {
+  flex-basis: 100%;
+  margin-top: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.bt-scan-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+.bt-scan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.bt-scan-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bt-signal {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 12px;
+}
+.bt-signal-bar {
+  width: 3px;
+  background: var(--border);
+  border-radius: 1px;
+}
+.bt-signal-bar-1 { height: 25%; }
+.bt-signal-bar-2 { height: 50%; }
+.bt-signal-bar-3 { height: 75%; }
+.bt-signal-bar-4 { height: 100%; }
+.bt-signal-bar-filled { background: var(--accent); }
+
 .switch-bindings-panel {
   flex-basis: 100%;
   margin-top: 8px;
