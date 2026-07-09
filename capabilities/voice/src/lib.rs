@@ -16,6 +16,7 @@
 //! nothing to gain from replacing it.
 
 pub mod stt;
+pub mod tts;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -271,6 +272,11 @@ impl Capability for VoiceCapability {
                 warn!(error = %e, "voice: failed to start whisper-server — STT will be unavailable");
             }
         });
+        tokio::spawn(async move {
+            if let Err(e) = tts::ensure_servers_running().await {
+                warn!(error = %e, "voice: failed to start piper.http_server — TTS will be unavailable");
+            }
+        });
         let node_id = self.node_id.clone();
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
@@ -372,6 +378,14 @@ async fn close_run_with_error(pipe_tx: &mpsc::Sender<PipeEvent>, generation: u64
     let run_end = event(VoiceAssistantEvent::VoiceAssistantRunEnd, &[]);
     let _ = pipe_tx.send((generation, error)).await;
     let _ = pipe_tx.send((generation, run_end)).await;
+}
+
+/// Synthesize `text` and get it onto disk where the coordinator's HTTP
+/// route can serve it to the device's media_player. Errors are the
+/// caller's to log — this just chains the two steps.
+async fn speak(text: &str) -> Result<String, String> {
+    let wav = tts::synthesize(text).await?;
+    tts::save_and_get_url(&wav).await
 }
 
 /// The post-capture pipeline, detached from the device connection loop so a
@@ -477,6 +491,33 @@ async fn pipeline(
                     event(VoiceAssistantEvent::VoiceAssistantIntentEnd, &[]),
                 ))
                 .await;
+            // Speak the reply if there's text to speak — tool-call-only
+            // responses (e.g. a light command with no narrated answer)
+            // skip straight to RunEnd rather than inventing filler
+            // speech, matching the no-text-recognized precedent above.
+            let text = resp.text.as_deref().unwrap_or("").trim();
+            if !text.is_empty() {
+                let _ = pipe_tx
+                    .send((
+                        generation,
+                        event(VoiceAssistantEvent::VoiceAssistantTtsStart, &[]),
+                    ))
+                    .await;
+                match speak(text).await {
+                    Ok(url) => {
+                        let _ = pipe_tx
+                            .send((
+                                generation,
+                                event(
+                                    VoiceAssistantEvent::VoiceAssistantTtsEnd,
+                                    &[("url", url.as_str())],
+                                ),
+                            ))
+                            .await;
+                    }
+                    Err(e) => warn!(error = %e, "voice: TTS failed — replying silently"),
+                }
+            }
             let _ = pipe_tx
                 .send((
                     generation,
