@@ -42,11 +42,11 @@ Add your WSL public key to `C:\Users\<user>\.ssh\authorized_keys` so that SSH fr
 
 ## 1. Network Setup
 
-The agent connects **outbound** from the Windows machine to the coordinator on **pi1** (`192.168.1.11:9000`). Outbound connections are allowed by default, so **no inbound firewall rule or portproxy is required on the Windows node**. Just confirm the node can reach pi1:
+The agent connects **outbound** from the Windows machine to the coordinator on **pi1** (`10.0.0.10:9000`). Outbound connections are allowed by default, so **no inbound firewall rule or portproxy is required on the Windows node**. Just confirm the node can reach pi1:
 
 ```powershell
 # Run on the Windows machine
-Test-NetConnection 192.168.1.11 -Port 9000   # expect TcpTestSucceeded : True
+Test-NetConnection 10.0.0.10 -Port 9000   # expect TcpTestSucceeded : True
 ```
 
 > **Legacy:** earlier versions ran the coordinator in WSL2 on the laptop, which required a Windows firewall rule plus a `netsh` portproxy (`just update-portproxy`) to expose it on the LAN. With the coordinator on pi1 that setup is no longer needed for compute nodes.
@@ -99,7 +99,7 @@ This step **must be done locally on the Windows machine** (not over SSH) because
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp 192.168.1.11
+& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp 10.0.0.10
 ```
 
 The provision script does:
@@ -133,7 +133,7 @@ After it completes, verify the node is registered and the model is ready:
 
 ```bash
 just nodes
-# BEELINK1 | 192.168.1.14 | Compute | ... | qwen2.5:7b (Ready)
+# BEELINK1 | 10.0.0.11 | Compute | ... | qwen2.5:7b (Ready)
 
 just validate-routing
 ```
@@ -200,7 +200,7 @@ just logs-node beelink1
 
 Or check the NSSM service environment:
 ```bash
-ssh jonno@192.168.1.14 'nssm get ai-mesh-agent AppEnvironmentExtra'
+ssh jonno@10.0.0.11 'nssm get ai-mesh-agent AppEnvironmentExtra'
 # Should show LLAMA_GPU_LAYERS=99 LLAMA_FLASH_ATTN=1
 ```
 
@@ -233,8 +233,8 @@ Prevention: the agent must **not spawn child processes** during normal operation
 
 Check in order:
 1. Is the service RUNNING? `ssh user@host "sc.exe query ai-mesh-agent"`
-2. Can the Windows machine reach the coordinator on pi1? On the Windows machine: `Test-NetConnection 192.168.1.11 -Port 9000`
-3. Is the service env pointed at pi1? `COORDINATOR_IP` should be `192.168.1.11` (see "Service environment variables" below).
+2. Can the Windows machine reach the coordinator on pi1? On the Windows machine: `Test-NetConnection 10.0.0.10 -Port 9000`
+3. Is the service env pointed at pi1? `COORDINATOR_IP` should be `10.0.0.10` (see "Service environment variables" below).
 4. Are there stale registry entries obscuring the new entry? `just reset` clears them.
 5. Check the agent log: `just logs-node beelink1`
 
@@ -293,10 +293,10 @@ idempotent (llama-server and other already-present steps are skipped).
 NSSM `AppEnvironmentExtra` requires each variable as a **separate argument**, not semicolon-separated:
 ```powershell
 # CORRECT
-nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.11" "AGENT_ROLE=compute"
+nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=10.0.0.10" "AGENT_ROLE=compute"
 
 # WRONG — produces a single malformed variable
-nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=192.168.1.11;AGENT_ROLE=compute"
+nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=10.0.0.10;AGENT_ROLE=compute"
 ```
 
 Verify what NSSM has stored:
@@ -308,11 +308,11 @@ nssm get ai-mesh-agent AppEnvironmentExtra
 
 When setting env vars inline in cmd.exe, it is easy to include a trailing space:
 ```cmd
-REM WRONG — COORDINATOR_IP = "192.168.1.11 " (note trailing space)
-set COORDINATOR_IP=192.168.1.11 && agent.exe
+REM WRONG — COORDINATOR_IP = "10.0.0.10 " (note trailing space)
+set COORDINATOR_IP=10.0.0.10 && agent.exe
 
 REM RIGHT — quotes prevent trailing space
-set "COORDINATOR_IP=192.168.1.11" && agent.exe
+set "COORDINATOR_IP=10.0.0.10" && agent.exe
 ```
 
 ### AMD GPU not detected / llama-server crashes during inference
@@ -388,7 +388,7 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 1. Once the machine boots and is reachable on the network, re-copy the SSH key:
    ```bash
-   ssh-copy-id jonno@192.168.1.14
+   ssh-copy-id jonno@10.0.0.11
    ```
    If `ssh-copy-id` fails because the key isn't in `authorized_keys` yet, add it manually — open a PowerShell on the Beelink and run:
    ```powershell
@@ -396,7 +396,7 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
    ```
    Or from WSL:
    ```bash
-   cat ~/.ssh/id_ed25519.pub | ssh jonno@192.168.1.14 "powershell -Command \"Add-Content 'C:\\ProgramData\\ssh\\administrators_authorized_keys' '\$(cat)'\""
+   cat ~/.ssh/id_ed25519.pub | ssh jonno@10.0.0.11 "powershell -Command \"Add-Content 'C:\\ProgramData\\ssh\\administrators_authorized_keys' '\$(cat)'\""
    ```
 
 2. Re-add the firewall rule (CMOS reset can clear custom rules):
@@ -438,12 +438,12 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 **Diagnostics — run after any recovery:**
 ```bash
-ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
+ssh jonno@10.0.0.11 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
 ```
 
 **Check current driver version:**
 ```bash
-ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object Caption, DriverVersion, DriverDate | Format-List\""
+ssh jonno@10.0.0.11 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object Caption, DriverVersion, DriverDate | Format-List\""
 ```
 
 ---
@@ -751,22 +751,22 @@ This applies: AMD ULPS/sleep registry tweaks, Intel AX200 NIC power management f
 #    Software check: Get-Tpm should report TpmPresent=False, and no TPM-WMI Event 1025 after boot.
 
 # 2. ULPS disabled (harmless belt-and-braces, baked into boot task)
-ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
+ssh jonno@10.0.0.11 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
 # Expect: 0x0
 
 # 3. Shader deep sleep disabled
-ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v PP_SclkDeepSleepDisable"
+ssh jonno@10.0.0.11 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v PP_SclkDeepSleepDisable"
 # Expect: 0x1
 
 # 4. TdrDelay NOT set (should error — absence is correct)
-ssh jonno@192.168.1.14 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\" /v TdrDelay"
+ssh jonno@10.0.0.11 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\" /v TdrDelay"
 # Expect: ERROR (key absent)
 
 # 5. Driver version
-ssh jonno@192.168.1.14 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object DriverVersion, DriverDate | Format-List\""
+ssh jonno@10.0.0.11 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object DriverVersion, DriverDate | Format-List\""
 
 # 6. No recent unexpected shutdowns (Event ID 41)
-ssh jonno@192.168.1.14 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
+ssh jonno@10.0.0.11 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
 ```
 
 ---

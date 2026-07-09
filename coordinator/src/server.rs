@@ -143,7 +143,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(socket);
-    let (tx, mut rx) = mpsc::channel::<MeshMessage>(32);
+    let (tx, mut rx) = mpsc::channel::<MeshMessage>(128);
 
     // Auth check: if tokens are configured, the first message must be AuthToken.
     // On success, derive the per-connection HMAC key from the validated token.

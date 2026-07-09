@@ -2071,9 +2071,6 @@ To control one device, reply with ONLY this JSON (no extra text):
 To control multiple devices in one request, reply with ONLY a JSON array (no extra text):
 [{{"tool": "<name>", "args": {{ ... }}}}, {{"tool": "<name>", "args": {{ ... }}}}]
 
-Available tools:
-{schema_json}
-
 Rules:
 - The "target" field must be an exact device or group name from the known list. Never invent a target name.
 - When the user names a room (e.g. "kitchen lights", "the bedroom"), find devices tagged [RoomName]. If no group for that room exists, pick the first online device in that room.
@@ -2083,7 +2080,10 @@ Rules:
 - Never issue a command to a device shown as [OFFLINE — not responding].
 - For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists. Count devices sharing a [RoomName] tag to answer "how many". do NOT output JSON for these questions.
 - Sensor/climate questions (temperature, humidity, motion, contact, light level — e.g. "what's the office temperature?", "is anyone in the living room?", "is the office warm?") are the one exception: answer directly from the sensor readings below OR call get_climate — either is fine for a sensor-only question. But if the request COMBINES a climate question with a real action ("turn off the lights and tell me the bedroom temperature"), the climate part MUST be a get_climate call inside the JSON array — a single reply cannot mix free text with JSON tool calls.
-- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something, or asking a sensor/climate question per the rule above."#
+- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something, or asking a sensor/climate question per the rule above.
+
+Available tools:
+{schema_json}"#
     )
 }
 
