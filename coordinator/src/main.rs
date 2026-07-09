@@ -91,6 +91,24 @@ fn free_port(port: u16) {
 
     match pid {
         Some(pid) => {
+            // Only kill it if it looks like a previous instance of this same
+            // binary — never SIGTERM an unrelated process that happens to be
+            // squatting on our port.
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+            let is_self = exe
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "coordinator");
+            if !is_self {
+                warn!(
+                    port,
+                    pid,
+                    exe = ?exe,
+                    "port occupant is not a coordinator process — refusing to kill it"
+                );
+                return;
+            }
             info!(port, pid, "sending SIGTERM to port occupant");
             // Safety: kill(2) with SIGTERM is always safe to call.
             unsafe { libc::kill(pid as i32, libc::SIGTERM) };
