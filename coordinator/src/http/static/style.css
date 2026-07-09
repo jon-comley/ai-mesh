@@ -4001,6 +4001,15 @@ body {
 }
 .chat-voice-toggle input { accent-color: var(--accent, #4f8ef7); }
 
+.chat-tts-voice-select {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: var(--surface-2, #1e2430);
+  border: 1px solid var(--border, #2a3040);
+  border-radius: 0.3rem;
+  padding: 0.1rem 0.3rem;
+}
+
 .chat-send {
   background: var(--accent, #4f8ef7);
   color: #fff;
