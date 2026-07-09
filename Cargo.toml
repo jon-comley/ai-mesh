@@ -9,6 +9,7 @@ members = [
     "capabilities/zigbee",
     "capabilities/art",
     "capabilities/voice",
+    "capabilities/audio",
     "agent",
     "coordinator",
     "cli",
