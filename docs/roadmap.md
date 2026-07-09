@@ -1478,6 +1478,65 @@ discussion, from a first look at the code:
 
 ---
 
+## Backlog — Lighting subsystem review (2026-07-10)
+
+Another third-party review ("Lighting Subsystem — Deep Reappraisal") went
+through the same claim-by-claim check. Most of the proposed refactors
+(a single `LightingSnapshot` struct unifying all lighting state, a
+canonical `BulbOrder` enum, an override lifecycle enum, a lighting
+transaction log, scenes-as-deltas, effect "write contracts") were
+over-engineered — solving problems that don't demonstrably exist once
+checked against the real code (e.g. the override-reset-on-reactivation
+"problem" turned out to already be correct behavior: a scene fully
+replacing a room's effect state should replace its overrides too).
+
+Two of the bug-hunting items were real and got fixed same-day:
+
+- **Snake's boustrophedon path cached forever, never recomputed.**
+  `coordinator/src/effects/snake.rs` cached `path: Vec<usize>` after the
+  first tick and never invalidated it — worse than just stale
+  choreography: `ctx.bulbs` is already override-filtered upstream
+  (`runner.rs`'s `active_bulbs`), so toggling one manual override mid-run
+  shrinks the bulb list on the very next tick, and a stale cached index
+  could point at the wrong bulb or go out of bounds entirely (an
+  `EffectRunner` panic — and since it's a single task ticking every room
+  sequentially, one panic would have stopped every room's effects, with
+  no `catch_unwind` anywhere in `runner.rs`). Fixed: the path now
+  recomputes whenever the bulb list's identity/order changes, not just
+  once ever.
+- **Manual/voice light commands didn't exclude the device from its
+  room's active effect — only the dashboard's own JS did.**
+  `rooms.js:1679` already calls `excludeFromEffect()` on a manual
+  dashboard click, but `coordinator/src/http/api/lights.rs`'s
+  `light_command` endpoint and `intent.rs`'s `light_command` tool (the
+  actual voice/chat path) had zero effect awareness — ask the assistant
+  to change a bulb while an effect owns its room, and the effect's next
+  tick silently reverts it. Same shape of bug as the `scene_load` fix
+  from yesterday, just a different call site. Fixed: both paths now call
+  a shared `exclude_device_from_its_active_effect` (new in
+  `http/api/effects.rs`, alongside the scene-recall equivalent) so any
+  caller gets the protection, not just dashboard clicks.
+
+Genuinely open items from this review, not acted on:
+
+- **`EffectRunner` doesn't check device online/offline status at all**
+  (`runner.rs:475-497` builds each tick's bulb list from every device_id
+  in the room regardless of `LightStateReport.online`). Confirmed the gap
+  is real; didn't verify what actually happens downstream when a command
+  goes to an offline device (z2m may silently drop it, may queue it) —
+  worth checking live before deciding whether this needs a fix or is
+  already harmless in practice.
+- **No other effect shares Snake's stale-cache bug** — checked every
+  effect file; only `snake.rs` caches an ordering. Aurora and the rest
+  recompute fresh each tick. Nothing else needed the same fix.
+- **`group_light_command`** (the HTTP endpoint for a raw z2m group, not
+  an individual device) still doesn't exclude group members from an
+  active effect — scoped out of today's fix since resolving "which room
+  a group's members belong to" needs more thought than the single-device
+  case. Same bug class, smaller/rarer blast radius.
+
+---
+
 ## Backlog — Third-party review sweep (2026-07-09)
 
 Several AI-generated reviews (Copilot, Bing, Gemini) were run against the repo

@@ -217,6 +217,73 @@ pub async fn clear_room_effect(
     clear_active_effect(&registry, &state, &room_id)
 }
 
+/// Broadcast a room's current effect state (id/params/overrides, or the
+/// "no effect" shape) to the dashboard. Shared by anything that mutates
+/// effect state directly through the registry instead of through
+/// `persist_active_effect`/`clear_active_effect` — currently scene recall
+/// (`scenes.rs`) and manual/voice light commands excluding a device from
+/// its room's effect (`exclude_device_from_its_active_effect`, below).
+pub(crate) fn broadcast_active_effect_state(
+    registry: &Arc<Mutex<Registry>>,
+    dashboard: &Arc<DashboardState>,
+    room_id: &str,
+) {
+    match registry.lock().unwrap().get_active_effect(room_id) {
+        Some(a) => {
+            let overrides: Vec<String> =
+                serde_json::from_str(&a.overrides_json).unwrap_or_default();
+            let params: serde_json::Value =
+                serde_json::from_str(&a.params_json).unwrap_or(serde_json::json!({}));
+            dashboard.push_effect_update(room_id.to_string(), Some(a.effect_id), params, overrides);
+        }
+        None => {
+            dashboard.push_effect_update(room_id.to_string(), None, serde_json::json!({}), vec![])
+        }
+    }
+    dashboard.solar_sweep_notify.notify_one();
+}
+
+/// If `device_id` belongs to a room with a currently-active effect, exclude
+/// it from that effect and broadcast the update — so a manual or voice/chat
+/// light command doesn't get silently reverted by the effect's next tick.
+/// This is the same protection the dashboard's own bulb toggle already gets
+/// via `excludeFromEffect()` in `rooms.js`, but that's client-side JS only;
+/// this makes it hold for every caller (the `light_command` HTTP endpoint,
+/// the `light_command` intent tool used by voice/chat), not just dashboard
+/// clicks. A device with no room, or a room with no active effect, is a
+/// no-op — cheap enough to call unconditionally on every command.
+pub(crate) fn exclude_device_from_its_active_effect(
+    registry: &Arc<Mutex<Registry>>,
+    dashboard: Option<&Arc<DashboardState>>,
+    device_id: &str,
+) {
+    let room_id = {
+        let reg = registry.lock().unwrap();
+        reg.list_rooms()
+            .into_iter()
+            .find(|r| r.device_ids.iter().any(|d| d == device_id))
+            .map(|r| r.id)
+    };
+    let Some(room_id) = room_id else {
+        return;
+    };
+
+    let excluded = {
+        let mut reg = registry.lock().unwrap();
+        if reg.get_active_effect(&room_id).is_none() {
+            return;
+        }
+        reg.set_effect_override(&room_id, device_id, true)
+    };
+    if !matches!(excluded, Ok(Some(_))) {
+        return;
+    }
+
+    if let Some(dash) = dashboard {
+        broadcast_active_effect_state(registry, dash, &room_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,5 +697,89 @@ mod tests {
             .unwrap();
         let stored: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
         assert!(stored.is_empty(), "bulb-1 should be re-included");
+    }
+
+    // ── exclude_device_from_its_active_effect ────────────────────────────────
+
+    #[test]
+    fn exclude_device_adds_it_to_the_active_effect_overrides() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+        registry
+            .lock()
+            .unwrap()
+            .set_active_effect(&room_id, "aurora", r#"{"speed":1}"#, None, 0)
+            .unwrap();
+
+        exclude_device_from_its_active_effect(&registry, None, "bulb1");
+
+        let active = registry
+            .lock()
+            .unwrap()
+            .get_active_effect(&room_id)
+            .unwrap();
+        let overrides: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
+        assert_eq!(overrides, vec!["bulb1".to_string()]);
+    }
+
+    #[test]
+    fn exclude_device_broadcasts_the_updated_effect_state() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+        registry
+            .lock()
+            .unwrap()
+            .set_active_effect(&room_id, "aurora", r#"{"speed":1}"#, None, 0)
+            .unwrap();
+        let state = make_state(vec![], empty_connections());
+        let mut rx = state.tx.subscribe();
+
+        exclude_device_from_its_active_effect(&registry, Some(&state), "bulb1");
+
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                crate::http::state::DashboardEvent::EffectUpdate { effect_id: Some(id), overrides, .. }
+                    if id == "aurora" && overrides == &vec!["bulb1".to_string()]
+            )),
+            "expected an EffectUpdate reflecting the new override: {events:?}"
+        );
+    }
+
+    #[test]
+    fn exclude_device_is_a_noop_when_room_has_no_active_effect() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+
+        // Must not panic even though no effect is active.
+        exclude_device_from_its_active_effect(&registry, None, "bulb1");
+
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_active_effect(&room_id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn exclude_device_is_a_noop_for_a_device_with_no_room() {
+        let registry = make_registry();
+        // Must not panic for a device that isn't in any room.
+        exclude_device_from_its_active_effect(&registry, None, "orphan_bulb");
     }
 }

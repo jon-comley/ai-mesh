@@ -615,12 +615,14 @@ fn resolve_display_name(device_id: &str, device_names: &HashMap<String, String>)
 
 /// `light_command`: validate/resolve the target (device, group, or room name),
 /// refuse offline devices, and fan the command out to the lighting node.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_light_command(
     request_id: &str,
     args: serde_json::Value,
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
     device_states: &[LightStateReport],
+    dashboard: Option<&Arc<DashboardState>>,
 ) -> String {
     let Some((_, lighting_tx)) =
         connected_feature_node(shared::Feature::Lighting, registry, connections)
@@ -673,6 +675,8 @@ async fn dispatch_light_command(
                         &lighting_tx,
                         device_states,
                         &target,
+                        registry,
+                        dashboard,
                     )
                     .await
                 }
@@ -698,6 +702,12 @@ async fn dispatch_light_command(
         return "unrecognised colour — no command sent".into();
     };
     for cmd in cmds {
+        // Device-targeted only — a raw z2m group name has no single
+        // device_id an effect override applies to.
+        let device_id = match &cmd.target {
+            LightTarget::Device(id) => Some(id.clone()),
+            LightTarget::Group(_) => None,
+        };
         if lighting_tx
             .send(MeshMessage::LightCommand(cmd))
             .await
@@ -705,6 +715,15 @@ async fn dispatch_light_command(
         {
             warn!(request_id, "failed to send LightCommand to lighting node");
             return "failed to send LightCommand to lighting node".into();
+        }
+        // A command from voice/chat gets the same protection a dashboard
+        // click already has client-side (rooms.js's excludeFromEffect) — the
+        // targeted device stops getting overwritten by its room's next
+        // effect tick.
+        if let Some(id) = device_id {
+            crate::http::api::effects::exclude_device_from_its_active_effect(
+                registry, dashboard, &id,
+            );
         }
     }
     "ok".into()
@@ -724,6 +743,8 @@ async fn dispatch_light_command_fanout(
     lighting_tx: &tokio::sync::mpsc::Sender<MeshMessage>,
     device_states: &[LightStateReport],
     target_name: &str,
+    registry: &Arc<Mutex<Registry>>,
+    dashboard: Option<&Arc<DashboardState>>,
 ) -> String {
     let Some(mut cmds) = build_light_command(request_id, args) else {
         return "unrecognised colour — no command sent".into();
@@ -749,6 +770,9 @@ async fn dispatch_light_command_fanout(
             warn!(request_id, "failed to send LightCommand to lighting node");
             return "failed to send LightCommand to lighting node".into();
         }
+        crate::http::api::effects::exclude_device_from_its_active_effect(
+            registry, dashboard, device_id,
+        );
         sent += 1;
     }
     if sent == 0 {
@@ -914,7 +938,15 @@ async fn dispatch_tool(
 ) -> String {
     match tool_name {
         "light_command" => {
-            dispatch_light_command(request_id, args, registry, connections, device_states).await
+            dispatch_light_command(
+                request_id,
+                args,
+                registry,
+                connections,
+                device_states,
+                dashboard,
+            )
+            .await
         }
         "get_climate" => dispatch_get_climate(&args, registry, sensor_states),
         "scene_load" => dispatch_scene_load(&args, registry, connections, device_states, dashboard),
@@ -3236,12 +3268,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_light_command_excludes_device_from_its_active_effect() {
+        // A manual/voice command on a bulb its room's effect still owns must
+        // not get silently reverted on the effect's next tick.
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .update_heartbeat(shared::NodeIdentity {
+                id: "pi1".into(),
+                hostname: "pi1".into(),
+                ip: "10.0.0.10".into(),
+                role: shared::NodeRole::Compute,
+            });
+        registry.lock().unwrap().update_capabilities(
+            "pi1",
+            shared::NodeCapabilities {
+                features: vec![shared::Feature::Lighting],
+                ..Default::default()
+            },
+        );
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+
+        let room_id = registry.lock().unwrap().create_room("Bedroom").id;
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+        registry
+            .lock()
+            .unwrap()
+            .set_active_effect(&room_id, "aurora", r#"{"speed":1}"#, None, 0)
+            .unwrap();
+
+        let args = serde_json::json!({"target": "bulb1", "action": "on"});
+        let result = dispatch_light_command("r1", args, &registry, &connections, &[], None).await;
+        assert_eq!(result, "ok");
+
+        let active = registry
+            .lock()
+            .unwrap()
+            .get_active_effect(&room_id)
+            .unwrap();
+        let overrides: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
+        assert_eq!(overrides, vec!["bulb1".to_string()]);
+        let _ = rx.try_recv(); // drain the light command, not under test here
+    }
+
+    #[tokio::test]
     async fn dispatch_light_command_fanout_sends_to_all_online_members() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<MeshMessage>(8);
+        let registry = Arc::new(Mutex::new(Registry::new()));
         let args = serde_json::json!({"action": "on"});
         let member_ids = vec!["spot1".to_string(), "pendant1".to_string()];
-        let result =
-            dispatch_light_command_fanout("r1", &args, &member_ids, &tx, &[], "Kitchen").await;
+        let result = dispatch_light_command_fanout(
+            "r1",
+            &args,
+            &member_ids,
+            &tx,
+            &[],
+            "Kitchen",
+            &registry,
+            None,
+        )
+        .await;
         assert_eq!(result, "ok");
         let mut seen: Vec<String> = vec![];
         while let Ok(msg) = rx.try_recv() {
@@ -3261,11 +3353,21 @@ mod tests {
     #[tokio::test]
     async fn dispatch_light_command_fanout_skips_offline_devices() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<MeshMessage>(8);
+        let registry = Arc::new(Mutex::new(Registry::new()));
         let args = serde_json::json!({"action": "on"});
         let member_ids = vec!["spot1".to_string(), "pendant1".to_string()];
         let states = vec![light_state("pendant1", false)];
-        let result =
-            dispatch_light_command_fanout("r1", &args, &member_ids, &tx, &states, "Kitchen").await;
+        let result = dispatch_light_command_fanout(
+            "r1",
+            &args,
+            &member_ids,
+            &tx,
+            &states,
+            "Kitchen",
+            &registry,
+            None,
+        )
+        .await;
         assert!(result.contains("1 device(s) updated"));
         assert!(result.contains("1 offline and skipped"));
         let msg = rx.try_recv().unwrap();
@@ -3284,11 +3386,21 @@ mod tests {
     #[tokio::test]
     async fn dispatch_light_command_fanout_all_offline_sends_nothing() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<MeshMessage>(8);
+        let registry = Arc::new(Mutex::new(Registry::new()));
         let args = serde_json::json!({"action": "on"});
         let member_ids = vec!["spot1".to_string()];
         let states = vec![light_state("spot1", false)];
-        let result =
-            dispatch_light_command_fanout("r1", &args, &member_ids, &tx, &states, "Kitchen").await;
+        let result = dispatch_light_command_fanout(
+            "r1",
+            &args,
+            &member_ids,
+            &tx,
+            &states,
+            "Kitchen",
+            &registry,
+            None,
+        )
+        .await;
         assert!(result.contains("all 1 device(s)"));
         assert!(result.contains("currently offline"));
         assert!(rx.try_recv().is_err());
