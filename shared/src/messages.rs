@@ -351,6 +351,14 @@ impl DeviceType {
 pub struct DeviceEntry {
     pub id: String,
     pub device_type: DeviceType,
+    /// The device's declared z2m action vocabulary (its `action` enum's
+    /// `values` from `definition.exposes`) — every button press / dial
+    /// gesture this model can ever emit, e.g. `["on_press", "dial_rotate_
+    /// left_step", …]`. Only switches have these; empty for everything
+    /// else. Lets the dashboard offer a real pick-list for bindings
+    /// instead of making the user press buttons to discover names.
+    #[serde(default)]
+    pub actions: Vec<String>,
 }
 
 /// One sensor's latest readings, pushed by a sensors node whenever the
@@ -1330,10 +1338,12 @@ mod tests {
                 DeviceEntry {
                     id: "test_bulb".into(),
                     device_type: DeviceType::Light,
+                    actions: vec![],
                 },
                 DeviceEntry {
                     id: "hall_motion".into(),
                     device_type: DeviceType::Sensor,
+                    actions: vec![],
                 },
             ],
             groups: vec!["all".into()],

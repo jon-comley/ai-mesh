@@ -167,6 +167,7 @@ impl ZigbeeClient {
                                 .map(|d| shared::DeviceEntry {
                                     id: d.friendly_name.clone(),
                                     device_type: d.device_type,
+                                    actions: d.actions.clone(),
                                 })
                                 .collect();
                             let _ = tx_loop.send(ZigbeeEvent::DeviceListUpdated(entries));
@@ -399,6 +400,7 @@ impl ZigbeeClient {
             .map(|d| shared::DeviceEntry {
                 id: d.friendly_name,
                 device_type: d.device_type,
+                actions: d.actions,
             })
             .collect()
     }

@@ -392,8 +392,9 @@ pub struct DashboardState {
     /// Latest merged readings per sensor device (see `push_sensor_update`).
     sensor_snapshot: Mutex<HashMap<String, SensorReport>>,
     /// Presence-only inventory for Cover/Climate/Switch devices, keyed by
-    /// device id → (owning node_id, type). See `push_other_devices`.
-    other_device_snapshot: Mutex<HashMap<String, (String, shared::DeviceType)>>,
+    /// device id → (owning node_id, the entry itself — type plus the
+    /// declared action vocabulary switches carry). See `push_other_devices`.
+    other_device_snapshot: Mutex<HashMap<String, (String, shared::DeviceEntry)>>,
     /// Group friendly name → node_id that owns it.
     group_snapshot: Mutex<HashMap<String, String>>,
     room_snapshot: Mutex<Vec<RoomInfo>>,
@@ -829,7 +830,7 @@ impl DashboardState {
                     d.device_type,
                     DeviceType::Cover | DeviceType::Climate | DeviceType::Switch
                 ) {
-                    snap.insert(d.id.clone(), (node_id.to_owned(), d.device_type));
+                    snap.insert(d.id.clone(), (node_id.to_owned(), d.clone()));
                 }
             }
         }
@@ -846,11 +847,8 @@ impl DashboardState {
         self.other_device_snapshot
             .lock()
             .unwrap()
-            .iter()
-            .map(|(id, (_, device_type))| shared::DeviceEntry {
-                id: id.clone(),
-                device_type: *device_type,
-            })
+            .values()
+            .map(|(_, entry)| entry.clone())
             .collect()
     }
 
@@ -2470,6 +2468,7 @@ mod tests {
             &[shared::DeviceEntry {
                 id: "blind1".into(),
                 device_type: shared::DeviceType::Cover,
+                actions: vec![],
             }],
         );
         state.remove_device("blind1");
@@ -2564,26 +2563,32 @@ mod tests {
                 shared::DeviceEntry {
                     id: "blind1".into(),
                     device_type: shared::DeviceType::Cover,
+                    actions: vec![],
                 },
                 shared::DeviceEntry {
                     id: "trv1".into(),
                     device_type: shared::DeviceType::Climate,
+                    actions: vec![],
                 },
                 shared::DeviceEntry {
                     id: "tap_dial".into(),
                     device_type: shared::DeviceType::Switch,
+                    actions: vec![],
                 },
                 shared::DeviceEntry {
                     id: "bulb1".into(),
                     device_type: shared::DeviceType::Light,
+                    actions: vec![],
                 },
                 shared::DeviceEntry {
                     id: "temp1".into(),
                     device_type: shared::DeviceType::Sensor,
+                    actions: vec![],
                 },
                 shared::DeviceEntry {
                     id: "mystery".into(),
                     device_type: shared::DeviceType::Unknown,
+                    actions: vec![],
                 },
             ],
         );
@@ -2593,6 +2598,30 @@ mod tests {
         assert!(ids.contains("blind1"));
         assert!(ids.contains("trv1"));
         assert!(ids.contains("tap_dial"));
+    }
+
+    #[test]
+    fn push_other_devices_preserves_declared_actions() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        state.push_other_devices(
+            "pi1",
+            &[shared::DeviceEntry {
+                id: "tap_dial".into(),
+                device_type: shared::DeviceType::Switch,
+                actions: vec!["button_1_press".into(), "dial_rotate_left_step".into()],
+            }],
+        );
+        let snap = state.get_other_device_snapshot();
+        assert_eq!(
+            snap[0].actions,
+            vec![
+                "button_1_press".to_string(),
+                "dial_rotate_left_step".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -2606,6 +2635,7 @@ mod tests {
             &[shared::DeviceEntry {
                 id: "old_blind".into(),
                 device_type: shared::DeviceType::Cover,
+                actions: vec![],
             }],
         );
         state.push_other_devices(
@@ -2613,6 +2643,7 @@ mod tests {
             &[shared::DeviceEntry {
                 id: "new_blind".into(),
                 device_type: shared::DeviceType::Cover,
+                actions: vec![],
             }],
         );
         let snap = state.get_other_device_snapshot();

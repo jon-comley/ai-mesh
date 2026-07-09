@@ -332,7 +332,11 @@ export function notifyOtherDevices(devices) {
   clearByType('climate');
   clearByType('switch');
   for (const dev of devices) {
-    devicesMap.set(dev.id, { device_id: dev.id, device_type: dev.device_type });
+    devicesMap.set(dev.id, {
+      device_id: dev.id,
+      device_type: dev.device_type,
+      actions: dev.actions ?? [],
+    });
   }
   render();
 }

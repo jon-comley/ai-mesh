@@ -2368,6 +2368,7 @@ mod tests {
         shared::DeviceEntry {
             id: id.into(),
             device_type: shared::DeviceType::Light,
+            actions: vec![],
         }
     }
 
@@ -2375,6 +2376,7 @@ mod tests {
         shared::DeviceEntry {
             id: id.into(),
             device_type: shared::DeviceType::Sensor,
+            actions: vec![],
         }
     }
 

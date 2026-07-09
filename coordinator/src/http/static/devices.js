@@ -233,7 +233,7 @@ function buildPresenceRow(dev) {
   // Blinds/HVAC share this same presence-only row shape but have nothing
   // to bind.
   if (dev.device_type === 'switch') {
-    const { toggle, panel } = buildBindingsPanel(dev.device_id);
+    const { toggle, panel } = buildBindingsPanel(dev.device_id, dev.actions ?? []);
     actions.appendChild(toggle);
     row.appendChild(panel);
   }

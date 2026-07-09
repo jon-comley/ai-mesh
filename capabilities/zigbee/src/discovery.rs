@@ -8,6 +8,10 @@ pub struct DeviceInfo {
     pub ieee_address: String,
     pub friendly_name: String,
     pub device_type: DeviceType,
+    /// The device's declared `action` enum values from
+    /// `definition.exposes` — the complete button-press / dial-gesture
+    /// vocabulary this model can emit. Empty for non-switch devices.
+    pub actions: Vec<String>,
 }
 
 /// Classify a device from its z2m `definition.exposes` list.
@@ -77,6 +81,34 @@ fn classify(exposes: Option<&serde_json::Value>) -> DeviceType {
     }
 }
 
+/// Pull the declared action vocabulary out of `definition.exposes`: the
+/// expose object whose `property`/`name` is `action` is an enum whose
+/// `values` list every event string the device can emit (z2m generates it
+/// from the device's converter — it's the same list the z2m frontend
+/// shows). Missing/malformed → empty, never an error: plenty of devices
+/// simply have no actions.
+fn extract_actions(exposes: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(list) = exposes.and_then(|e| e.as_array()) else {
+        return vec![];
+    };
+    list.iter()
+        .find(|e| {
+            e.get("property")
+                .or_else(|| e.get("name"))
+                .and_then(|p| p.as_str())
+                == Some("action")
+        })
+        .and_then(|e| e.get("values"))
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Live registry of Zigbee devices, keyed by friendly_name.
 /// Updated from `zigbee2mqtt/bridge/devices` retained messages.
 #[derive(Debug, Default)]
@@ -119,11 +151,13 @@ impl DeviceRegistry {
                 .unwrap_or(&ieee)
                 .to_owned();
             let device_type = classify(entry.pointer("/definition/exposes"));
+            let actions = extract_actions(entry.pointer("/definition/exposes"));
 
             let info = DeviceInfo {
                 ieee_address: ieee,
                 friendly_name: name.clone(),
                 device_type,
+                actions,
             };
             discovered.push(info.clone());
             new_map.insert(name, info);
@@ -157,6 +191,57 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].ieee_address, "0xabc123");
         assert_eq!(found[0].friendly_name, "kitchen_bulb");
+    }
+
+    #[test]
+    fn extracts_declared_actions_from_switch_exposes() {
+        // Shape taken from a real z2m Hue Tap Dial entry: the `action`
+        // expose is an enum listing every event the device can emit.
+        let payload = r#"[
+            {"ieee_address": "0xdial", "friendly_name": "office_dial",
+             "definition": {"exposes": [
+                {"type": "enum", "name": "action", "property": "action",
+                 "values": ["button_1_press", "button_1_hold", "dial_rotate_left_step", "dial_rotate_right_step"]},
+                {"type": "numeric", "name": "battery", "property": "battery"}
+             ]}}
+        ]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].device_type, DeviceType::Switch);
+        assert_eq!(
+            found[0].actions,
+            vec![
+                "button_1_press",
+                "button_1_hold",
+                "dial_rotate_left_step",
+                "dial_rotate_right_step"
+            ]
+        );
+    }
+
+    #[test]
+    fn devices_without_action_enum_have_no_actions() {
+        let payload = r#"[
+            {"ieee_address": "0xbulb", "friendly_name": "bulb",
+             "definition": {"exposes": [{"type": "light", "features": []}]}}
+        ]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert!(found[0].actions.is_empty());
+    }
+
+    #[test]
+    fn action_enum_with_non_string_values_is_skipped_not_a_panic() {
+        let payload = r#"[
+            {"ieee_address": "0xodd", "friendly_name": "odd_switch",
+             "definition": {"exposes": [
+                {"type": "enum", "name": "action", "property": "action",
+                 "values": ["press", 42, null]}
+             ]}}
+        ]"#;
+        let reg = DeviceRegistry::new();
+        let found = reg.update_from_payload(payload.as_bytes());
+        assert_eq!(found[0].actions, vec!["press"]);
     }
 
     #[test]
