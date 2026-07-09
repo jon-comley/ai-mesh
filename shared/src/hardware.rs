@@ -79,6 +79,14 @@ pub struct NodeCapabilities {
     /// compile-time feature flags; used by the coordinator to route
     /// capability-specific messages (e.g. LightCommand) to the right node.
     pub features: Vec<Feature>,
+    /// Which audio output backends this node runs (from its
+    /// `AUDIO_BACKENDS` env, e.g. `["hdmi", "bluetooth"]`, first =
+    /// default). Empty unless the node has `Feature::Audio`. Lets the
+    /// coordinator/dashboard list each backend as a distinct
+    /// room-assignable sink without duplicating agent config.
+    /// `serde(default)` keeps older agents' payloads parseable.
+    #[serde(default)]
+    pub audio_backends: Vec<String>,
 }
 
 /// A node capability, 1:1 with the agent's compile-time Cargo features.
@@ -103,6 +111,7 @@ impl Default for NodeCapabilities {
             ane_inference: false,
             max_model_size_gb: 0.0,
             features: vec![],
+            audio_backends: vec![],
         }
     }
 }
@@ -177,11 +186,33 @@ mod tests {
             ane_inference: false,
             max_model_size_gb: 8.0,
             features: vec![Feature::Llm, Feature::Lighting],
+            audio_backends: vec![],
         };
         let json = serde_json::to_string(&caps).unwrap();
         let back: NodeCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(back, caps);
         assert_eq!(back.features, vec![Feature::Llm, Feature::Lighting]);
+    }
+
+    #[test]
+    fn node_capabilities_missing_audio_backends_defaults_empty() {
+        // Older agents don't send the field — must still parse.
+        let json = r#"{"cpu_inference":true,"gpu_inference":false,"ane_inference":false,"max_model_size_gb":1.0,"features":["audio"]}"#;
+        let back: NodeCapabilities = serde_json::from_str(json).unwrap();
+        assert!(back.audio_backends.is_empty());
+        assert_eq!(back.features, vec![Feature::Audio]);
+    }
+
+    #[test]
+    fn node_capabilities_audio_backends_roundtrip() {
+        let caps = NodeCapabilities {
+            features: vec![Feature::Audio],
+            audio_backends: vec!["hdmi".into(), "bluetooth".into()],
+            ..NodeCapabilities::default()
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: NodeCapabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.audio_backends, vec!["hdmi", "bluetooth"]);
     }
 
     #[test]

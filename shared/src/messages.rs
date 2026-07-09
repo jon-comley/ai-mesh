@@ -873,6 +873,7 @@ mod tests {
             ane_inference: false,
             max_model_size_gb: 3.69,
             features: vec![crate::Feature::Llm],
+            audio_backends: vec![],
         };
 
         let rec = NodeRecordFull {

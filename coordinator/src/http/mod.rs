@@ -184,6 +184,7 @@ pub fn router(
             "/api/preferences/{key}",
             put(api::prefs::set_preference).delete(api::prefs::delete_preference),
         )
+        .route("/api/av-devices", get(api::av::list_av_devices))
         .route("/api/reaper/state", get(api::nodes::get_reaper_state))
         .route("/api/art/show", post(api::art::show_art))
         .route("/api/art/status", get(api::art::get_art_status))

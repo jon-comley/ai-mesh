@@ -66,6 +66,133 @@ function confirmDelete(deviceId) {
   }
 }
 
+// ── Speakers & displays (AV endpoints, non-Zigbee) ───────────────────────────
+// Fed by GET /api/av-devices: each backend of each audio node is its own
+// row (pi2 can be both the HDMI chain and a Bluetooth speaker host), plus
+// the soundbar/TV appliances and the voice puck. Room assignment writes
+// the `room-audio-sink:<room name>` preference the voice pipeline resolves
+// — a different mechanism from the Zigbee devices table, same UI gesture.
+
+let avDevices = [];
+let avLastFetch = 0;
+const AV_FETCH_MIN_INTERVAL_MS = 15_000;
+
+function fetchAvDevices(force = false) {
+  const now = Date.now();
+  if (!force && now - avLastFetch < AV_FETCH_MIN_INTERVAL_MS) return;
+  avLastFetch = now;
+  api('/av-devices').then(async res => {
+    if (!res.ok) return;
+    const json = await res.json();
+    const changed = JSON.stringify(json.devices) !== JSON.stringify(avDevices);
+    avDevices = json.devices ?? [];
+    if (changed) render();
+  }).catch(() => {});
+}
+
+function roomIdForAvDevice(dev) {
+  const name = dev.rooms?.[0];
+  return name ? (model.rooms.find(r => r.name === name)?.id ?? null) : null;
+}
+
+function onAvRoomChange(dev, newRoomId) {
+  // One sink per room: assigning writes that room's pref; unassigning (or
+  // moving away) deletes the pref of every room currently pointing here.
+  const writes = [];
+  for (const roomName of dev.rooms ?? []) {
+    const target = model.rooms.find(r => r.name === roomName);
+    if (!target || target.id !== newRoomId) {
+      writes.push(api(`/preferences/${encodeURIComponent(`room-audio-sink:${roomName}`)}`,
+        { method: 'DELETE' }));
+    }
+  }
+  const newRoom = model.rooms.find(r => r.id === newRoomId);
+  if (newRoom && !(dev.rooms ?? []).includes(newRoom.name)) {
+    writes.push(api(`/preferences/${encodeURIComponent(`room-audio-sink:${newRoom.name}`)}`,
+      { method: 'PUT', body: { value: dev.id } }));
+  }
+  Promise.allSettled(writes).then(() => fetchAvDevices(true));
+}
+
+// The puck's room binding is inverted from a sink's: `av-room:puck` names
+// the room the puck sits in (the voice pipeline reads it to decide when a
+// reply should divert to that room's speaker), rather than a per-room
+// pref pointing at a device.
+function onPuckRoomChange(newRoomId) {
+  const newRoom = model.rooms.find(r => r.id === newRoomId);
+  const write = newRoom
+    ? api(`/preferences/${encodeURIComponent('av-room:puck')}`,
+        { method: 'PUT', body: { value: newRoom.name } })
+    : api(`/preferences/${encodeURIComponent('av-room:puck')}`, { method: 'DELETE' });
+  write.then(() => fetchAvDevices(true)).catch(() => {});
+}
+
+function startAvRename(nameEl, dev) {
+  const input = document.createElement('input');
+  input.value = dev.name;
+  input.className = 'room-rename-input';
+  input.name = 'av-rename';
+  input.autocomplete = 'off';
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+  let saved = false;
+  const save = () => {
+    if (saved) return;
+    saved = true;
+    const name = input.value.trim();
+    input.replaceWith(nameEl);
+    if (name && name !== dev.name) {
+      dev.name = name;
+      nameEl.textContent = name;
+      api(`/preferences/${encodeURIComponent(`av-name:${dev.id}`)}`,
+        { method: 'PUT', body: { value: name } });
+    }
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') { saved = true; input.replaceWith(nameEl); }
+  });
+  input.addEventListener('blur', save);
+}
+
+function buildAvRow(dev) {
+  const row = document.createElement('div');
+  row.className = 'light-card device-row';
+  row.dataset.avId = dev.id;
+
+  const offline = dev.online === false;
+  row.innerHTML = `
+    <div class="light-name-group">
+      <span class="light-name device-row-name">${esc(dev.name)}</span>
+      <span class="av-badge">${esc(dev.transport)}</span>
+      ${dev.hostname ? `<span class="av-host">via ${esc(dev.hostname)}</span>` : ''}
+      ${offline ? '<span class="av-offline">offline</span>' : ''}
+    </div>`;
+
+  const nameEl = row.querySelector('.device-row-name');
+  nameEl.style.cursor = 'pointer';
+  nameEl.title = 'Click to rename';
+  nameEl.addEventListener('click', () => startAvRename(nameEl, dev));
+  appendEditLink(row.querySelector('.light-name-group'), () => startAvRename(nameEl, dev));
+
+  const actions = document.createElement('div');
+  actions.className = 'device-row-actions';
+  if (dev.kind === 'sink') {
+    const select = buildRoomSelect(model.rooms, roomIdForAvDevice(dev),
+      roomId => onAvRoomChange(dev, roomId));
+    if ((dev.rooms ?? []).length > 1) {
+      select.title = `Sink for: ${dev.rooms.join(', ')}`;
+    }
+    actions.appendChild(select);
+  } else if (dev.id === 'puck') {
+    actions.appendChild(buildRoomSelect(model.rooms, roomIdForAvDevice(dev),
+      roomId => onPuckRoomChange(roomId)));
+  }
+  row.appendChild(actions);
+  return row;
+}
+
 // Cover/Climate/Switch rows: name + room-assignment + delete, no status
 // readout — none of these classes has a live-state pipeline yet (see
 // rooms.js's notifyOtherDevices), just presence.
@@ -202,7 +329,7 @@ function render() {
   const switches = [...devicesMap.values()].filter(d => d.device_type === 'switch');
 
   if (lights.length === 0 && sensors.length === 0 && blinds.length === 0
-      && hvac.length === 0 && switches.length === 0) {
+      && hvac.length === 0 && switches.length === 0 && avDevices.length === 0) {
     container.innerHTML = '<p class="placeholder">No devices paired yet.</p>';
     return;
   }
@@ -237,6 +364,15 @@ function render() {
     container.appendChild(heading);
     for (const dev of list.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
       body.appendChild(buildPresenceRow(dev));
+    }
+    container.appendChild(body);
+  }
+
+  if (avDevices.length > 0) {
+    const { heading, body } = buildCategorySection('Speakers & displays', avDevices.length);
+    container.appendChild(heading);
+    for (const dev of [...avDevices].sort((a, b) => a.name.localeCompare(b.name))) {
+      body.appendChild(buildAvRow(dev));
     }
     container.appendChild(body);
   }
@@ -332,6 +468,7 @@ function renderSensorSubcategories(body, sensors, container) {
 // RoomsUpdate — devicesMap/model.rooms are already up to date by then.
 export function refresh() {
   render();
+  fetchAvDevices();
 }
 
 // ── Pairing (bridge-wide permit-join + live join feed) ──────────────────────
