@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backend] [audio_alsa_device]"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backends] [audio_alsa_device]"
 # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
 # (Set COORDINATOR_IP in the agent's environment to override discovery for debugging.)
 set -e
@@ -14,7 +14,7 @@ NODE_FEATURES="${5:-llm}"
 VOICE_DEVICE_HOST="${6:-}"
 VOICE_STT_REMOTE="${7:-}"
 VOICE_TTS_BASE_URL="${8:-}"
-AUDIO_BACKEND="${9:-}"
+AUDIO_BACKENDS="${9:-}"
 AUDIO_ALSA_DEVICE="${10:-}"
 
 if [ -z "$AGENT_USER" ]; then
@@ -322,10 +322,10 @@ fi
 
 AUDIO_ENV_BLOCK=""
 if has_feature audio; then
-    if [ -n "$AUDIO_BACKEND" ]; then
-        AUDIO_ENV_BLOCK="Environment=AUDIO_BACKEND=${AUDIO_BACKEND}"
+    if [ -n "$AUDIO_BACKENDS" ]; then
+        AUDIO_ENV_BLOCK="Environment=AUDIO_BACKENDS=${AUDIO_BACKENDS}"
     else
-        echo ">>> Warning: 'audio' feature requested but no audio_backend given — defaulting to bluetooth (capability-audio's own default)."
+        echo ">>> Warning: 'audio' feature requested but no audio_backends given — defaulting to bluetooth (capability-audio's own default)."
     fi
     if [ -n "$AUDIO_ALSA_DEVICE" ]; then
         AUDIO_ENV_BLOCK="${AUDIO_ENV_BLOCK}

@@ -3,18 +3,25 @@
 //! `/api/voice/tts/{id}` clips the ESPHome puck fetches — see
 //! `capabilities/voice/src/tts.rs`) via whatever local audio hardware this
 //! node is physically connected to: a directly-paired Bluetooth speaker
-//! (Phase 2, the kitchen Blaupunkt/Fishman) or HDMI-out through the Frame
-//! TV to the soundbar (Phase 3, the Pi 4 behind the TV).
+//! (Phase 2, e.g. a kitchen or office room speaker) or HDMI-out through a
+//! TV to its soundbar (Phase 3).
+//!
+//! **A node can run more than one backend at once** — e.g. a Pi wired to a
+//! TV over HDMI that's also, at the same time, the Bluetooth host for a
+//! room speaker. `AUDIO_BACKENDS` is a comma-separated list of the
+//! backends this node has configured (e.g. `"hdmi,bluetooth"`); each
+//! `AudioPlayRequest` names which one it wants via `sink` (`None` uses the
+//! list's first entry as this node's default).
 //!
 //! **Unverified without hardware in hand** (see the assumptions list this
 //! shipped with): the exact playback command for either backend. Rather
 //! than hard-code a specific audio stack (PipeWire vs PulseAudio vs
 //! BlueALSA for Bluetooth; a specific ALSA HDMI device name that varies by
-//! Pi model/firmware), the actual shell command is a configurable
-//! template (`AUDIO_PLAY_CMD`, `{file}` substituted) so it can be
-//! corrected without a code change once real hardware confirms what's
-//! actually installed. The defaults below are reasonable starting guesses,
-//! not confirmed-working commands.
+//! Pi model/firmware), the actual shell command per backend is a
+//! configurable template (`AUDIO_PLAY_CMD_<BACKEND>`, `{file}`
+//! substituted) so it can be corrected without a code change once real
+//! hardware confirms what's actually installed. The built-in defaults
+//! below are reasonable starting guesses, not confirmed-working commands.
 
 use async_trait::async_trait;
 use capability_core::Capability;
@@ -22,27 +29,41 @@ use shared::MeshMessage;
 use tokio::sync::mpsc::Sender;
 use tracing::{info, warn};
 
-/// Which physical output this node drives. Purely descriptive (used in
-/// logs and to pick the default play command) — the mesh doesn't
-/// distinguish sink *kinds*, only "this node advertises Feature::Audio";
-/// which room/purpose it serves is entirely a registry-side preference
-/// (`room-audio-sink:<room>`, set via the dashboard — not yet built as UI,
-/// see the assumptions list).
-fn backend_name() -> String {
-    std::env::var("AUDIO_BACKEND").unwrap_or_else(|_| "bluetooth".into())
+/// This node's configured backends, in priority order — the first is the
+/// default used when a request doesn't name a `sink`. Purely descriptive
+/// beyond that (used in logs and to pick play commands) — the mesh
+/// doesn't distinguish sink *kinds* at the `Feature::Audio` level, only
+/// "this node advertises audio"; which room/purpose each backend serves
+/// is entirely a registry-side preference (`room-audio-sink:<room>`, see
+/// `coordinator/src/audio.rs`).
+fn configured_backends() -> Vec<String> {
+    std::env::var("AUDIO_BACKENDS")
+        .unwrap_or_else(|_| "bluetooth".into())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
-/// The actual playback command, `{file}` replaced with the downloaded
-/// clip's path. Defaults differ by backend since they need fundamentally
-/// different audio paths (PulseAudio/PipeWire's default sink for a paired
-/// Bluetooth speaker vs raw ALSA for HDMI) — **both are unverified
-/// guesses**, override via `AUDIO_PLAY_CMD` once real hardware confirms
-/// what's actually installed and named.
-fn play_cmd_template() -> String {
-    if let Ok(cmd) = std::env::var("AUDIO_PLAY_CMD") {
-        return cmd;
+fn default_backend() -> Option<String> {
+    configured_backends().into_iter().next()
+}
+
+/// The actual playback command for one backend, `{file}` replaced with the
+/// downloaded clip's path. Built-in defaults differ by backend since they
+/// need fundamentally different audio paths (PulseAudio/PipeWire's default
+/// sink for a paired Bluetooth speaker vs raw ALSA for HDMI) — **both are
+/// unverified guesses**, override via `AUDIO_PLAY_CMD_<BACKEND>` (e.g.
+/// `AUDIO_PLAY_CMD_HDMI`) once real hardware confirms what's actually
+/// installed and named. Returns `None` for a backend name this crate
+/// doesn't have a built-in default for and that has no override set —
+/// that's a node misconfiguration, not a runtime error to guess through.
+fn play_cmd_template_for(backend: &str) -> Option<String> {
+    let override_var = format!("AUDIO_PLAY_CMD_{}", backend.to_uppercase());
+    if let Ok(cmd) = std::env::var(&override_var) {
+        return Some(cmd);
     }
-    match backend_name().as_str() {
+    match backend {
         "hdmi" => {
             // ALSA device name for Pi HDMI audio varies by model/firmware
             // and which HDMI port — "default" relies on the system's own
@@ -50,14 +71,34 @@ fn play_cmd_template() -> String {
             // out of the box. AUDIO_ALSA_DEVICE overrides just the device
             // half without needing the whole command re-templated.
             let device = std::env::var("AUDIO_ALSA_DEVICE").unwrap_or_else(|_| "default".into());
-            format!("aplay -D {device} {{file}}")
+            Some(format!("aplay -D {device} {{file}}"))
         }
         // paplay targets PulseAudio/PipeWire's current default sink — for
         // a paired Bluetooth speaker to be that default, it must already
         // be trusted+connected+set-as-default via a one-time bluetoothctl
         // setup this capability does NOT perform (see assumptions).
-        _ => "paplay {file}".into(),
+        "bluetooth" => Some("paplay {file}".into()),
+        _ => None,
     }
+}
+
+/// Which backend a request should actually use: the named `sink`, or this
+/// node's default if unspecified. Errors if the node isn't configured for
+/// the requested (or default) backend at all — a clear failure instead of
+/// silently falling back to whatever happens to be first.
+fn resolve_backend(requested: Option<&str>) -> Result<String, String> {
+    let backends = configured_backends();
+    let backend = match requested {
+        Some(b) => b.to_string(),
+        None => default_backend().ok_or("node has no AUDIO_BACKENDS configured")?,
+    };
+    if !backends.iter().any(|b| b == &backend) {
+        return Err(format!(
+            "node is not configured for backend '{backend}' (has: {})",
+            backends.join(", ")
+        ));
+    }
+    Ok(backend)
 }
 
 fn download_dir() -> std::path::PathBuf {
@@ -91,8 +132,8 @@ impl Capability for AudioCapability {
     async fn start(&self, _tx: Sender<MeshMessage>) -> Result<(), String> {
         info!(
             node_id = %self.node_id,
-            backend = %backend_name(),
-            "audio: ready (backend selected via AUDIO_BACKEND)"
+            backends = %configured_backends().join(","),
+            "audio: ready (backends selected via AUDIO_BACKENDS)"
         );
         Ok(())
     }
@@ -101,13 +142,21 @@ impl Capability for AudioCapability {
         let MeshMessage::AudioPlay(req) = msg else {
             return;
         };
-        if let Err(e) = play_url(&req.url).await {
+        if let Err(e) = play_url(&req.url, req.sink.as_deref()).await {
             warn!(request_id = %req.request_id, error = %e, "audio: playback failed");
         }
     }
 }
 
-async fn play_url(url: &str) -> Result<(), String> {
+async fn play_url(url: &str, sink: Option<&str>) -> Result<(), String> {
+    let backend = resolve_backend(sink)?;
+    let template = play_cmd_template_for(&backend).ok_or_else(|| {
+        format!(
+            "no play command known for backend '{backend}' — set AUDIO_PLAY_CMD_{}",
+            backend.to_uppercase()
+        )
+    })?;
+
     let dir = download_dir();
     tokio::fs::create_dir_all(&dir)
         .await
@@ -123,15 +172,15 @@ async fn play_url(url: &str) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let result = run_play_command(&path).await;
+    let result = run_play_command(&path, &template).await;
     let _ = tokio::fs::remove_file(&path).await;
     result
 }
 
-async fn run_play_command(path: &std::path::Path) -> Result<(), String> {
-    let cmd_line = play_cmd_template().replace("{file}", &path.to_string_lossy());
+async fn run_play_command(path: &std::path::Path, template: &str) -> Result<(), String> {
+    let cmd_line = template.replace("{file}", &path.to_string_lossy());
     let mut parts = cmd_line.split_whitespace();
-    let program = parts.next().ok_or("empty AUDIO_PLAY_CMD")?;
+    let program = parts.next().ok_or("empty play command")?;
     let status = tokio::process::Command::new(program)
         .args(parts)
         .status()
@@ -149,10 +198,20 @@ async fn run_play_command(path: &std::path::Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    // AUDIO_BACKEND/AUDIO_PLAY_CMD/AUDIO_ALSA_DEVICE are process-global and
-    // these tests run in parallel by default — serialize rather than race
-    // (same fix needed in coordinator/src/http/api/voice.rs's tests today).
+    // AUDIO_BACKENDS/AUDIO_PLAY_CMD_*/AUDIO_ALSA_DEVICE are process-global
+    // and these tests run in parallel by default — serialize rather than
+    // race (same fix needed in coordinator/src/http/api/voice.rs's tests).
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn clear_audio_env() {
+        // SAFETY: caller holds ENV_LOCK for the duration of the test.
+        unsafe {
+            std::env::remove_var("AUDIO_BACKENDS");
+            std::env::remove_var("AUDIO_PLAY_CMD_HDMI");
+            std::env::remove_var("AUDIO_PLAY_CMD_BLUETOOTH");
+            std::env::remove_var("AUDIO_ALSA_DEVICE");
+        }
+    }
 
     #[test]
     fn capability_only_handles_audio_play() {
@@ -163,48 +222,121 @@ mod tests {
             cap.handles(&MeshMessage::AudioPlay(shared::AudioPlayRequest {
                 request_id: "r1".into(),
                 url: "http://example/x.wav".into(),
+                sink: None,
             }))
         );
     }
 
     #[test]
-    fn hdmi_backend_template_uses_alsa_device_env() {
+    fn single_backend_defaults_to_bluetooth() {
         let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        assert_eq!(configured_backends(), vec!["bluetooth".to_string()]);
+        assert_eq!(default_backend(), Some("bluetooth".into()));
+    }
+
+    #[test]
+    fn multiple_backends_parsed_in_order() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
         // SAFETY: caller holds ENV_LOCK for the duration of the test.
         unsafe {
-            std::env::set_var("AUDIO_BACKEND", "hdmi");
-            std::env::remove_var("AUDIO_PLAY_CMD");
+            std::env::set_var("AUDIO_BACKENDS", "hdmi, bluetooth");
+        }
+        assert_eq!(
+            configured_backends(),
+            vec!["hdmi".to_string(), "bluetooth".to_string()]
+        );
+        assert_eq!(default_backend(), Some("hdmi".into()));
+        clear_audio_env();
+    }
+
+    #[test]
+    fn hdmi_backend_template_uses_alsa_device_env() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        // SAFETY: caller holds ENV_LOCK for the duration of the test.
+        unsafe {
             std::env::set_var("AUDIO_ALSA_DEVICE", "hw:1,0");
         }
-        assert_eq!(play_cmd_template(), "aplay -D hw:1,0 {file}");
-        unsafe {
-            std::env::remove_var("AUDIO_BACKEND");
-            std::env::remove_var("AUDIO_ALSA_DEVICE");
-        }
+        assert_eq!(
+            play_cmd_template_for("hdmi"),
+            Some("aplay -D hw:1,0 {file}".into())
+        );
+        clear_audio_env();
     }
 
     #[test]
     fn bluetooth_backend_defaults_to_paplay() {
         let _guard = ENV_LOCK.blocking_lock();
-        // SAFETY: caller holds ENV_LOCK for the duration of the test.
-        unsafe {
-            std::env::remove_var("AUDIO_BACKEND");
-            std::env::remove_var("AUDIO_PLAY_CMD");
-        }
-        assert_eq!(play_cmd_template(), "paplay {file}");
+        clear_audio_env();
+        assert_eq!(
+            play_cmd_template_for("bluetooth"),
+            Some("paplay {file}".into())
+        );
     }
 
     #[test]
-    fn explicit_audio_play_cmd_overrides_backend_defaults() {
+    fn unknown_backend_with_no_override_has_no_template() {
         let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        assert_eq!(play_cmd_template_for("airplay"), None);
+    }
+
+    #[test]
+    fn per_backend_play_cmd_overrides_only_that_backend() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
         // SAFETY: caller holds ENV_LOCK for the duration of the test.
         unsafe {
-            std::env::set_var("AUDIO_PLAY_CMD", "mpv --no-video {file}");
+            std::env::set_var("AUDIO_PLAY_CMD_HDMI", "mpv --no-video {file}");
         }
-        assert_eq!(play_cmd_template(), "mpv --no-video {file}");
+        assert_eq!(
+            play_cmd_template_for("hdmi"),
+            Some("mpv --no-video {file}".into())
+        );
+        assert_eq!(
+            play_cmd_template_for("bluetooth"),
+            Some("paplay {file}".into())
+        );
+        clear_audio_env();
+    }
+
+    #[test]
+    fn resolve_backend_uses_default_when_sink_unset() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        // SAFETY: caller holds ENV_LOCK for the duration of the test.
         unsafe {
-            std::env::remove_var("AUDIO_PLAY_CMD");
+            std::env::set_var("AUDIO_BACKENDS", "hdmi,bluetooth");
         }
+        assert_eq!(resolve_backend(None), Ok("hdmi".into()));
+        clear_audio_env();
+    }
+
+    #[test]
+    fn resolve_backend_honours_explicit_sink() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        // SAFETY: caller holds ENV_LOCK for the duration of the test.
+        unsafe {
+            std::env::set_var("AUDIO_BACKENDS", "hdmi,bluetooth");
+        }
+        assert_eq!(resolve_backend(Some("bluetooth")), Ok("bluetooth".into()));
+        clear_audio_env();
+    }
+
+    #[test]
+    fn resolve_backend_rejects_unconfigured_sink() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        // SAFETY: caller holds ENV_LOCK for the duration of the test.
+        unsafe {
+            std::env::set_var("AUDIO_BACKENDS", "hdmi");
+        }
+        let err = resolve_backend(Some("bluetooth")).unwrap_err();
+        assert!(err.contains("not configured for backend 'bluetooth'"));
+        clear_audio_env();
     }
 
     #[tokio::test]
@@ -213,14 +345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("clip.wav");
         tokio::fs::write(&path, b"x").await.unwrap();
-        // SAFETY: caller holds ENV_LOCK for the duration of the test.
-        unsafe {
-            std::env::set_var("AUDIO_PLAY_CMD", "false {file}");
-        }
-        let result = run_play_command(&path).await;
-        unsafe {
-            std::env::remove_var("AUDIO_PLAY_CMD");
-        }
+        let result = run_play_command(&path, "false {file}").await;
         assert!(result.is_err());
     }
 }
