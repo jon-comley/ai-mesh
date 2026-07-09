@@ -569,18 +569,19 @@ async fn pipeline(
             // speech, matching the no-text-recognized precedent above.
             let text = resp.text.as_deref().unwrap_or("").trim();
             if !text.is_empty() {
-                // Phase 6 room routing: if the puck's room has a dedicated
-                // speaker configured, the reply goes THERE instead of the
+                // Phase 6 room routing: if the puck's room (the
+                // `av-room:puck` preference, set from the dashboard's
+                // Speakers & displays section) has a dedicated speaker
+                // configured, the reply goes THERE instead of the
                 // puck — never both (that's double-speaking the same
                 // reply). Sending TtsEnd{url} to the puck as well as
                 // routing to a room sink would make the puck's own
                 // media_player fetch and play the identical clip, since
                 // that's literally what a tts-end event does on the
                 // device side.
-                if tts::room_has_audio_sink().await {
+                if let Some(room) = tts::room_with_audio_sink().await {
                     match speak(text).await {
                         Ok(url) => {
-                            let room = std::env::var("VOICE_PUCK_ROOM").unwrap_or_default();
                             let request_id = uuid::Uuid::new_v4().to_string();
                             let (otx, orx) = oneshot::channel();
                             shared

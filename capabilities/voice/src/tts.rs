@@ -228,20 +228,23 @@ pub async fn current_voice() -> &'static str {
     }
 }
 
-/// Whether the puck's room (`VOICE_PUCK_ROOM`) has a dedicated speaker
-/// configured (`room-audio-sink:<room>` — set via the dashboard, same K/V
-/// store `tts-voice` lives in; not yet wired to any dashboard UI, see the
-/// assumptions list this shipped with). `None` for "not configured" and
-/// "couldn't check" alike — both mean the same thing to the caller: fall
-/// back to the puck's own speaker.
-pub async fn room_has_audio_sink() -> bool {
-    let Ok(room) = std::env::var("VOICE_PUCK_ROOM") else {
-        return false;
-    };
-    let Some(prefs) = fetch_prefs().await else {
-        return false;
-    };
-    prefs.contains_key(&format!("room-audio-sink:{room}"))
+/// The puck's room, if it both has one assigned AND that room has a
+/// dedicated speaker configured — the two conditions under which a spoken
+/// reply should route to the room's sink instead of the puck's own
+/// speaker. Both live in the same dashboard K/V store `tts-voice` uses:
+/// the puck's room is the `av-room:puck` preference (set from the
+/// Speakers & displays room dropdown), the room's speaker is
+/// `room-audio-sink:<room>`. `None` for "not configured" and "couldn't
+/// check" alike — both mean the same thing to the caller: fall back to
+/// the puck's own speaker.
+pub async fn room_with_audio_sink() -> Option<String> {
+    let prefs = fetch_prefs().await?;
+    let room = prefs.get("av-room:puck")?;
+    if prefs.contains_key(&format!("room-audio-sink:{room}")) {
+        Some(room.clone())
+    } else {
+        None
+    }
 }
 
 #[derive(serde::Serialize)]
