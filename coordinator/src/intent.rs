@@ -2437,10 +2437,12 @@ mod tests {
                     shared::DeviceEntry {
                         id: "office_climate".into(),
                         device_type: shared::DeviceType::Sensor,
+                        actions: vec![],
                     },
                     shared::DeviceEntry {
                         id: "hall_motion".into(),
                         device_type: shared::DeviceType::Sensor,
+                        actions: vec![],
                     },
                 ],
                 vec![],
@@ -2479,10 +2481,12 @@ mod tests {
                     shared::DeviceEntry {
                         id: "office_climate".into(),
                         device_type: shared::DeviceType::Sensor,
+                        actions: vec![],
                     },
                     shared::DeviceEntry {
                         id: "hall_motion".into(),
                         device_type: shared::DeviceType::Sensor,
+                        actions: vec![],
                     },
                 ],
                 vec![],
@@ -2513,6 +2517,7 @@ mod tests {
                 vec![shared::DeviceEntry {
                     id: "0x8c73dafffe83ef31".into(),
                     device_type: shared::DeviceType::Sensor,
+                    actions: vec![],
                 }],
                 vec![],
             );
@@ -2534,6 +2539,7 @@ mod tests {
                 vec![shared::DeviceEntry {
                     id: "office_climate".into(),
                     device_type: shared::DeviceType::Sensor,
+                    actions: vec![],
                 }],
                 vec![],
             );
@@ -2565,6 +2571,7 @@ mod tests {
                 vec![shared::DeviceEntry {
                     id: "office_climate".into(),
                     device_type: shared::DeviceType::Sensor,
+                    actions: vec![],
                 }],
                 vec![],
             );

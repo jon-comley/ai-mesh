@@ -2064,6 +2064,7 @@ mod tests {
             devices: vec![shared::DeviceEntry {
                 id: "bulb1".into(),
                 device_type: shared::DeviceType::Light,
+                actions: vec![],
             }],
             groups: vec!["all".into()],
         };

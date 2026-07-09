@@ -127,14 +127,33 @@ function buildBindingRow(binding, onRemoved) {
   return row;
 }
 
-function buildAddForm(deviceId, onAdded) {
-  const form = document.createElement('div');
-  form.className = 'switch-binding-form';
+// declaredActions is this switch model's full z2m action vocabulary (see
+// shared::DeviceEntry.actions) — every button/gesture it can ever emit,
+// not just what's fired since the dashboard loaded. When z2m has given us
+// that list, a real <select> replaces the old guess-and-press combo box
+// entirely: no need to physically press a button before you can bind it.
+function buildActionPicker(deviceId, declaredActions) {
+  if (declaredActions.length > 0) {
+    const select = document.createElement('select');
+    select.className = 'switch-binding-action-input switch-binding-action-select';
+    const seen = new Set(getSeenActions(deviceId));
+    const lastSeen = getLastSeenAction(deviceId);
+    for (const action of declaredActions) {
+      const opt = document.createElement('option');
+      opt.value = action;
+      // A ● marks actions this switch has actually fired at least once —
+      // reassurance the binding will really trigger, without hiding the
+      // rest of the (equally real) vocabulary.
+      opt.textContent = seen.has(action) ? `${action} ●` : action;
+      if (action === lastSeen) opt.selected = true;
+      select.appendChild(opt);
+    }
+    return { input: select, getValue: () => select.value };
+  }
 
-  // A combo box, not a plain dropdown: <input list> + <datalist> lets you
-  // pick from every action actually observed from this switch so far, but
-  // still type an exact string by hand if it hasn't fired yet — a fresh
-  // switch has an empty datalist until you start pressing its buttons.
+  // Fallback for a device z2m hasn't given us an action enum for (older
+  // z2m, or a device type this crate hasn't seen exposes for yet): the
+  // original combo box, built from whatever's actually fired so far.
   const listId = safeListId(deviceId);
   const actionInput = document.createElement('input');
   actionInput.type = 'text';
@@ -152,6 +171,15 @@ function buildAddForm(deviceId, onAdded) {
     opt.value = action;
     actionList.appendChild(opt);
   }
+  return { input: actionInput, extra: actionList, getValue: () => actionInput.value.trim() };
+}
+
+function buildAddForm(deviceId, declaredActions, onAdded) {
+  const form = document.createElement('div');
+  form.className = 'switch-binding-form';
+
+  const { input: actionInput, extra: actionList, getValue: getAction } =
+    buildActionPicker(deviceId, declaredActions);
 
   const targetSelect = buildTargetSelect();
 
@@ -182,7 +210,7 @@ function buildAddForm(deviceId, onAdded) {
   addBtn.className = 'device-row-btn';
   addBtn.textContent = '+ Bind';
   addBtn.addEventListener('click', async () => {
-    const action = actionInput.value.trim();
+    const action = getAction();
     if (!action) {
       showToast('Enter the switch action first (press the button once to see it above)', true);
       return;
@@ -211,7 +239,9 @@ function buildAddForm(deviceId, onAdded) {
     }
   });
 
-  form.append(actionInput, actionList, targetSelect, commandSelect, deltaInput, addBtn);
+  form.append(actionInput);
+  if (actionList) form.append(actionList);
+  form.append(targetSelect, commandSelect, deltaInput, addBtn);
   return form;
 }
 
@@ -219,7 +249,9 @@ function buildAddForm(deviceId, onAdded) {
 /// `panel` as its own block underneath. The panel lazily fetches the full
 /// binding list on first open rather than on every render (bindings change
 /// rarely; no point re-fetching on every WS event that rebuilds the row).
-export function buildBindingsPanel(deviceId) {
+/// `declaredActions` is the switch's full z2m action vocabulary (empty for
+/// devices z2m hasn't reported one for) — see `buildActionPicker`.
+export function buildBindingsPanel(deviceId, declaredActions = []) {
   const panel = document.createElement('div');
   panel.className = 'switch-bindings-panel';
   panel.hidden = true;
@@ -238,7 +270,7 @@ export function buildBindingsPanel(deviceId) {
     }
   };
 
-  panel.appendChild(buildAddForm(deviceId, renderList));
+  panel.appendChild(buildAddForm(deviceId, declaredActions, renderList));
 
   const toggle = document.createElement('button');
   toggle.className = 'device-row-btn switch-bindings-toggle';
