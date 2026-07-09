@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url]"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backend] [audio_alsa_device]"
 # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
 # (Set COORDINATOR_IP in the agent's environment to override discovery for debugging.)
 set -e
@@ -14,6 +14,8 @@ NODE_FEATURES="${5:-llm}"
 VOICE_DEVICE_HOST="${6:-}"
 VOICE_STT_REMOTE="${7:-}"
 VOICE_TTS_BASE_URL="${8:-}"
+AUDIO_BACKEND="${9:-}"
+AUDIO_ALSA_DEVICE="${10:-}"
 
 if [ -z "$AGENT_USER" ]; then
     echo "Usage: $0 <role> <user> [mqtt_host] [mqtt_port] [node_features]"
@@ -318,6 +320,19 @@ Environment=VOICE_DEVICE_HOST=${VOICE_DEVICE_HOST}"
     fi
 fi
 
+AUDIO_ENV_BLOCK=""
+if has_feature audio; then
+    if [ -n "$AUDIO_BACKEND" ]; then
+        AUDIO_ENV_BLOCK="Environment=AUDIO_BACKEND=${AUDIO_BACKEND}"
+    else
+        echo ">>> Warning: 'audio' feature requested but no audio_backend given — defaulting to bluetooth (capability-audio's own default)."
+    fi
+    if [ -n "$AUDIO_ALSA_DEVICE" ]; then
+        AUDIO_ENV_BLOCK="${AUDIO_ENV_BLOCK}
+Environment=AUDIO_ALSA_DEVICE=${AUDIO_ALSA_DEVICE}"
+    fi
+fi
+
 echo ">>> Installing ai-mesh-agent systemd service..."
 tee /etc/systemd/system/ai-mesh-agent.service > /dev/null <<EOF
 [Unit]
@@ -330,6 +345,7 @@ ExecStart=/home/${AGENT_USER}/agent
 Environment=AGENT_ROLE=${ROLE}
 ${LLM_ENV_BLOCK}
 ${VOICE_ENV_BLOCK}
+${AUDIO_ENV_BLOCK}
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_HOST=${MQTT_HOST}" || true)
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_PORT=${MQTT_PORT}" || true)
 Restart=always
