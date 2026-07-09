@@ -8,8 +8,9 @@
 //! logic; [`scenes`] and [`effects`] compose devices across domains.
 //!
 //! Every handler takes `_: Authed` (see `http/auth.rs`) — auth is part of
-//! the handler's type. The single deliberately public route is
-//! `rooms::solar_config`, justified at its registration site.
+//! the handler's type. The deliberately public routes are
+//! `rooms::solar_config` and `voice::serve_clip`, each justified at its
+//! registration site.
 
 pub mod art;
 pub mod chat;
@@ -23,6 +24,7 @@ pub mod rooms;
 pub mod scenes;
 pub mod sensors;
 pub mod switch_bindings;
+pub mod voice;
 pub mod zigbee;
 
 fn gen_request_id() -> String {

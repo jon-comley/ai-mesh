@@ -162,6 +162,11 @@ pub fn router(
         // before any token is entered; it exposes only lat/lon. Every other
         // /api/* handler must take `_: Authed` (see http/auth.rs).
         .route("/api/solar/config", get(api::rooms::solar_config))
+        // PUBLIC — no Authed: the ESPHome Voice PE puck fetches a TTS clip's
+        // media URL from a tts-end event; it has no dashboard token. The id
+        // is a bare UUID (no directory traversal possible), and clips are
+        // deleted after being served once.
+        .route("/api/voice/tts/{id}", get(api::voice::serve_clip))
         .route("/api/scenes", post(api::scenes::save_scene))
         .route("/api/scenes/reorder", post(api::scenes::reorder_scenes))
         .route("/api/scenes/{id}/recall", post(api::scenes::recall_scene))
