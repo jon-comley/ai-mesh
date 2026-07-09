@@ -10,7 +10,7 @@ use crate::http::auth::Authed;
 
 // ── Dashboard preferences ─────────────────────────────────────────────────────
 
-const PREF_USER_ID: &str = "default";
+pub(crate) const PREF_USER_ID: &str = "default";
 
 #[derive(Deserialize)]
 pub struct PrefBody {

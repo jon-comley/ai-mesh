@@ -201,6 +201,13 @@ struct VoiceShared {
     /// In-flight intent requests: request_id → the pipeline task waiting on
     /// the coordinator's IntentResponse. `handles()` claims exactly these.
     pending: Mutex<HashMap<String, oneshot::Sender<IntentResponse>>>,
+    /// In-flight room-routed announcements: request_id → the pipeline task
+    /// waiting to learn whether the coordinator actually delivered the clip
+    /// to the room's sink, so it can fall back to the puck's own speaker
+    /// when the sink turns out to be unreachable rather than losing the
+    /// reply entirely. Separate map from `pending` since the reply shape
+    /// (a bare delivered bool) differs from IntentResponse.
+    pending_announce: Mutex<HashMap<String, oneshot::Sender<bool>>>,
 }
 
 pub struct VoiceCapability {
@@ -215,6 +222,7 @@ impl VoiceCapability {
             shared: Arc::new(VoiceShared {
                 mesh_tx: Mutex::new(None),
                 pending: Mutex::new(HashMap::new()),
+                pending_announce: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -234,6 +242,18 @@ impl Capability for VoiceCapability {
             MeshMessage::IntentResponse(r) => self
                 .shared
                 .pending
+                .lock()
+                .unwrap()
+                .contains_key(&r.request_id),
+            // Coordinator-initiated synthesis (a broadcast/announcement
+            // that didn't start as a spoken request) — see
+            // coordinator/src/audio.rs's request_tts.
+            MeshMessage::TtsRequest(_) => true,
+            // Delivery result for a room-routed reply this capability
+            // itself sent — see the puck-fallback logic in `pipeline()`.
+            MeshMessage::AudioAnnounceResult(r) => self
+                .shared
+                .pending_announce
                 .lock()
                 .unwrap()
                 .contains_key(&r.request_id),
@@ -285,18 +305,64 @@ impl Capability for VoiceCapability {
         Ok(())
     }
 
-    async fn handle(&self, msg: MeshMessage, _tx: Sender<MeshMessage>) {
-        if let MeshMessage::IntentResponse(resp) = msg {
-            let waiter = self.shared.pending.lock().unwrap().remove(&resp.request_id);
-            match waiter {
-                // send() failing means the pipeline task already gave up
-                // (timeout) — nothing left to notify.
-                Some(otx) => drop(otx.send(resp)),
-                None => warn!(
-                    request_id = %resp.request_id,
-                    "voice: IntentResponse arrived for an unknown request"
-                ),
+    async fn handle(&self, msg: MeshMessage, tx: Sender<MeshMessage>) {
+        match msg {
+            MeshMessage::IntentResponse(resp) => {
+                let waiter = self.shared.pending.lock().unwrap().remove(&resp.request_id);
+                match waiter {
+                    // send() failing means the pipeline task already gave up
+                    // (timeout) — nothing left to notify.
+                    Some(otx) => drop(otx.send(resp)),
+                    None => warn!(
+                        request_id = %resp.request_id,
+                        "voice: IntentResponse arrived for an unknown request"
+                    ),
+                }
             }
+            // Coordinator wants text synthesized without a live spoken
+            // request behind it (e.g. a broadcast announcement) — see
+            // coordinator/src/audio.rs's request_tts.
+            MeshMessage::TtsRequest(req) => {
+                let response = match tts::synthesize(&req.text).await {
+                    Ok(wav) => match tts::save_and_get_url(&wav).await {
+                        Ok(url) => shared::TtsResponse {
+                            request_id: req.request_id,
+                            url: Some(url),
+                            error: None,
+                        },
+                        Err(e) => shared::TtsResponse {
+                            request_id: req.request_id,
+                            url: None,
+                            error: Some(e),
+                        },
+                    },
+                    Err(e) => shared::TtsResponse {
+                        request_id: req.request_id,
+                        url: None,
+                        error: Some(e),
+                    },
+                };
+                let _ = tx.send(MeshMessage::TtsResponse(response)).await;
+            }
+            MeshMessage::AudioAnnounceResult(result) => {
+                let waiter = self
+                    .shared
+                    .pending_announce
+                    .lock()
+                    .unwrap()
+                    .remove(&result.request_id);
+                match waiter {
+                    // send() failing means the pipeline task already gave up
+                    // (timeout) and fell back to the puck on its own —
+                    // nothing left to notify.
+                    Some(otx) => drop(otx.send(result.delivered)),
+                    None => warn!(
+                        request_id = %result.request_id,
+                        "voice: AudioAnnounceResult arrived for an unknown request"
+                    ),
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -333,6 +399,12 @@ fn intent_timeout() -> Duration {
             .unwrap_or(60),
     )
 }
+
+/// How long to wait for the coordinator's `AudioAnnounceResult` before
+/// assuming a room-routed reply didn't land and falling back to the
+/// puck. Short — this is just "is the sink node connected and did the
+/// mesh send succeed," not a synthesis or network-media round trip.
+const ANNOUNCE_RESULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Build one device pipeline event with optional name/value data pairs.
 fn event(event_type: VoiceAssistantEvent, data: &[(&str, &str)]) -> VoiceAssistantEventResponse {
@@ -497,25 +569,100 @@ async fn pipeline(
             // speech, matching the no-text-recognized precedent above.
             let text = resp.text.as_deref().unwrap_or("").trim();
             if !text.is_empty() {
-                let _ = pipe_tx
-                    .send((
-                        generation,
-                        event(VoiceAssistantEvent::VoiceAssistantTtsStart, &[]),
-                    ))
-                    .await;
-                match speak(text).await {
-                    Ok(url) => {
-                        let _ = pipe_tx
-                            .send((
-                                generation,
-                                event(
-                                    VoiceAssistantEvent::VoiceAssistantTtsEnd,
-                                    &[("url", url.as_str())],
-                                ),
-                            ))
-                            .await;
+                // Phase 6 room routing: if the puck's room has a dedicated
+                // speaker configured, the reply goes THERE instead of the
+                // puck — never both (that's double-speaking the same
+                // reply). Sending TtsEnd{url} to the puck as well as
+                // routing to a room sink would make the puck's own
+                // media_player fetch and play the identical clip, since
+                // that's literally what a tts-end event does on the
+                // device side.
+                if tts::room_has_audio_sink().await {
+                    match speak(text).await {
+                        Ok(url) => {
+                            let room = std::env::var("VOICE_PUCK_ROOM").unwrap_or_default();
+                            let request_id = uuid::Uuid::new_v4().to_string();
+                            let (otx, orx) = oneshot::channel();
+                            shared
+                                .pending_announce
+                                .lock()
+                                .unwrap()
+                                .insert(request_id.clone(), otx);
+
+                            let mesh_tx = shared.mesh_tx.lock().unwrap().clone();
+                            let sent = match mesh_tx {
+                                Some(tx) => tx
+                                    .send(MeshMessage::AudioAnnounce(
+                                        shared::AudioAnnounceRequest {
+                                            request_id: request_id.clone(),
+                                            url: url.clone(),
+                                            room: Some(room),
+                                            broadcast: false,
+                                        },
+                                    ))
+                                    .await
+                                    .is_ok(),
+                                None => false,
+                            };
+
+                            // Wait to learn whether the coordinator actually
+                            // delivered the clip — the room's sink may be
+                            // configured but currently disconnected, in
+                            // which case the reply must still reach the
+                            // user somehow rather than going nowhere.
+                            let delivered = sent
+                                && matches!(
+                                    tokio::time::timeout(ANNOUNCE_RESULT_TIMEOUT, orx).await,
+                                    Ok(Ok(true))
+                                );
+
+                            if !delivered {
+                                shared.pending_announce.lock().unwrap().remove(&request_id);
+                                warn!(
+                                    request_id,
+                                    "voice: room-routed announcement undelivered — \
+                                     falling back to the puck"
+                                );
+                                let _ = pipe_tx
+                                    .send((
+                                        generation,
+                                        event(VoiceAssistantEvent::VoiceAssistantTtsStart, &[]),
+                                    ))
+                                    .await;
+                                let _ = pipe_tx
+                                    .send((
+                                        generation,
+                                        event(
+                                            VoiceAssistantEvent::VoiceAssistantTtsEnd,
+                                            &[("url", url.as_str())],
+                                        ),
+                                    ))
+                                    .await;
+                            }
+                        }
+                        Err(e) => warn!(error = %e, "voice: TTS failed — replying silently"),
                     }
-                    Err(e) => warn!(error = %e, "voice: TTS failed — replying silently"),
+                } else {
+                    let _ = pipe_tx
+                        .send((
+                            generation,
+                            event(VoiceAssistantEvent::VoiceAssistantTtsStart, &[]),
+                        ))
+                        .await;
+                    match speak(text).await {
+                        Ok(url) => {
+                            let _ = pipe_tx
+                                .send((
+                                    generation,
+                                    event(
+                                        VoiceAssistantEvent::VoiceAssistantTtsEnd,
+                                        &[("url", url.as_str())],
+                                    ),
+                                ))
+                                .await;
+                        }
+                        Err(e) => warn!(error = %e, "voice: TTS failed — replying silently"),
+                    }
                 }
             }
             let _ = pipe_tx
@@ -1162,6 +1309,52 @@ mod tests {
         let resp = orx.await.expect("waiter should be completed");
         assert_eq!(resp.request_id, "req-1");
         assert!(cap.shared.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn handles_claims_only_pending_audio_announce_results() {
+        let cap = VoiceCapability::new("test-node");
+        let (otx, _orx) = oneshot::channel();
+        cap.shared
+            .pending_announce
+            .lock()
+            .unwrap()
+            .insert("req-1".into(), otx);
+        assert!(cap.handles(&MeshMessage::AudioAnnounceResult(
+            shared::AudioAnnounceResult {
+                request_id: "req-1".into(),
+                delivered: true,
+            }
+        )));
+        assert!(!cap.handles(&MeshMessage::AudioAnnounceResult(
+            shared::AudioAnnounceResult {
+                request_id: "req-2".into(),
+                delivered: true,
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn handle_completes_the_pending_announce_waiter() {
+        let cap = VoiceCapability::new("test-node");
+        let (otx, orx) = oneshot::channel();
+        cap.shared
+            .pending_announce
+            .lock()
+            .unwrap()
+            .insert("req-1".into(), otx);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        cap.handle(
+            MeshMessage::AudioAnnounceResult(shared::AudioAnnounceResult {
+                request_id: "req-1".into(),
+                delivered: true,
+            }),
+            tx,
+        )
+        .await;
+        let delivered = orx.await.expect("waiter should be completed");
+        assert!(delivered);
+        assert!(cap.shared.pending_announce.lock().unwrap().is_empty());
     }
 
     // ── No-speech heuristic ──────────────────────────────────────────────────

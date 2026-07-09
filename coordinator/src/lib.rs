@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod cloud;
 pub mod compress;
 pub mod coordinator;
@@ -12,5 +13,7 @@ pub mod model_lifecycle;
 pub mod registry;
 pub mod scheduler;
 pub mod server;
+pub mod soundbar;
 pub mod state;
 pub mod tls;
+pub mod tv;
