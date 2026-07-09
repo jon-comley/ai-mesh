@@ -304,28 +304,68 @@ pub fn remove_room_sink(
     }
 }
 
+/// Node reports back within this long, or it counts as a failed delivery —
+/// long enough for a cold Bluetooth reconnect, short enough that a caller
+/// waiting to decide on a puck fallback doesn't stall the reply.
+const AUDIO_PLAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Send `url` to a specific node's tracked connection, on the named
-/// `sink` (or that node's default if `None`). `false` if the node isn't
-/// currently connected — callers decide what that means for them (the
-/// voice pipeline's caller falls back to the puck; a broadcast caller
-/// just logs and continues with the other targets).
+/// `sink` (or that node's default if `None`), and wait for the node's own
+/// `AudioPlayResult` ack. `false` covers "node not connected" *and*
+/// "connected but `aplay`/`paplay` actually failed" (unpaired Bluetooth
+/// sink, wrong ALSA device, etc.) — without waiting for the real result,
+/// this would report success as soon as the message left the coordinator,
+/// which is exactly how a broken sink can silently swallow a reply instead
+/// of triggering the caller's fallback (the voice pipeline falls back to
+/// the puck; a broadcast caller just logs and continues with the other
+/// targets).
 async fn send_audio_play(
     node_id: &str,
     url: &str,
     sink: Option<&str>,
     connections: &Connections,
+    pending_intents: &PendingIntents,
 ) -> bool {
-    let tx = connections.lock().unwrap().get(node_id).cloned();
-    match tx {
-        Some(tx) => tx
-            .send(MeshMessage::AudioPlay(AudioPlayRequest {
-                request_id: gen_request_id(),
-                url: url.to_string(),
-                sink: sink.map(str::to_string),
-            }))
-            .await
-            .is_ok(),
-        None => false,
+    let Some(tx) = connections.lock().unwrap().get(node_id).cloned() else {
+        return false;
+    };
+
+    let request_id = gen_request_id();
+    let (otx, orx) = oneshot::channel();
+    pending_intents
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), otx);
+
+    if tx
+        .send(MeshMessage::AudioPlay(AudioPlayRequest {
+            request_id: request_id.clone(),
+            url: url.to_string(),
+            sink: sink.map(str::to_string),
+        }))
+        .await
+        .is_err()
+    {
+        pending_intents.lock().unwrap().remove(&request_id);
+        return false;
+    }
+
+    match tokio::time::timeout(AUDIO_PLAY_TIMEOUT, orx).await {
+        Ok(Ok(MeshMessage::AudioPlayResult(shared::AudioPlayResult {
+            success, error, ..
+        }))) => {
+            if let Some(err) = error.filter(|_| !success) {
+                warn!(node_id, error = %err, "audio: node reported playback failure");
+            }
+            success
+        }
+        Ok(Ok(_)) => false,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            pending_intents.lock().unwrap().remove(&request_id);
+            warn!(node_id, "audio: playback ack timed out");
+            false
+        }
     }
 }
 
@@ -346,6 +386,7 @@ pub async fn handle_audio_announce(
     req: shared::AudioAnnounceRequest,
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
+    pending_intents: &PendingIntents,
 ) -> bool {
     if req.broadcast {
         let targets: Vec<String> = registry
@@ -363,7 +404,7 @@ pub async fn handle_audio_announce(
             // Broadcast alerts use each node's own default backend — no
             // per-room sink selection makes sense for "reach the whole
             // house at once".
-            if send_audio_play(&node_id, &req.url, None, connections).await {
+            if send_audio_play(&node_id, &req.url, None, connections, pending_intents).await {
                 delivered = true;
             } else {
                 warn!(node_id, "audio broadcast: node not connected, skipped");
@@ -390,6 +431,7 @@ pub async fn handle_audio_announce(
         &req.url,
         room_sink.sink.as_deref(),
         connections,
+        pending_intents,
     )
     .await
     {
@@ -427,6 +469,7 @@ pub async fn broadcast_announcement(
         },
         registry,
         connections,
+        pending_intents,
     )
     .await;
     Ok(())
@@ -615,6 +658,28 @@ mod tests {
         assert!(resolve_room_sink_for("Office", SinkRole::Media, &registry).is_some());
     }
 
+    fn empty_pending_intents() -> PendingIntents {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    /// Drains one `AudioPlay` from `rx` and resolves its pending intent
+    /// with a successful `AudioPlayResult`, simulating the node's ack so
+    /// tests don't have to wait out `AUDIO_PLAY_TIMEOUT`.
+    async fn ack_next_audio_play(
+        rx: &mut tokio::sync::mpsc::Receiver<MeshMessage>,
+        pending_intents: &PendingIntents,
+    ) {
+        if let Some(MeshMessage::AudioPlay(req)) = rx.recv().await
+            && let Some(otx) = pending_intents.lock().unwrap().remove(&req.request_id)
+        {
+            let _ = otx.send(MeshMessage::AudioPlayResult(shared::AudioPlayResult {
+                request_id: req.request_id,
+                success: true,
+                error: None,
+            }));
+        }
+    }
+
     #[tokio::test]
     async fn handle_audio_announce_room_with_no_sink_is_a_quiet_noop() {
         let registry = Arc::new(Mutex::new(Registry::new()));
@@ -629,6 +694,7 @@ mod tests {
             },
             &registry,
             &connections,
+            &empty_pending_intents(),
         )
         .await;
         assert!(!delivered);
@@ -653,6 +719,7 @@ mod tests {
             },
             &registry,
             &connections,
+            &empty_pending_intents(),
         )
         .await;
         assert!(!delivered);
@@ -669,19 +736,22 @@ mod tests {
         let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         connections.lock().unwrap().insert("pi-zero-1".into(), tx);
-        let delivered = handle_audio_announce(
-            shared::AudioAnnounceRequest {
-                request_id: "r1".into(),
-                url: "http://example/clip.wav".into(),
-                room: Some("Kitchen".into()),
-                broadcast: false,
-            },
-            &registry,
-            &connections,
-        )
-        .await;
+        let pending_intents = empty_pending_intents();
+        let (delivered, _) = tokio::join!(
+            handle_audio_announce(
+                shared::AudioAnnounceRequest {
+                    request_id: "r1".into(),
+                    url: "http://example/clip.wav".into(),
+                    room: Some("Kitchen".into()),
+                    broadcast: false,
+                },
+                &registry,
+                &connections,
+                &pending_intents,
+            ),
+            ack_next_audio_play(&mut rx, &pending_intents)
+        );
         assert!(delivered);
-        assert!(matches!(rx.try_recv(), Ok(MeshMessage::AudioPlay(_))));
     }
 
     #[tokio::test]
@@ -695,22 +765,39 @@ mod tests {
         let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         connections.lock().unwrap().insert("pi2".into(), tx);
-        let delivered = handle_audio_announce(
-            shared::AudioAnnounceRequest {
-                request_id: "r1".into(),
-                url: "http://example/clip.wav".into(),
-                room: Some("Office".into()),
-                broadcast: false,
-            },
-            &registry,
-            &connections,
-        )
-        .await;
+        let pending_intents = empty_pending_intents();
+        let (delivered, sink_seen) = tokio::join!(
+            handle_audio_announce(
+                shared::AudioAnnounceRequest {
+                    request_id: "r1".into(),
+                    url: "http://example/clip.wav".into(),
+                    room: Some("Office".into()),
+                    broadcast: false,
+                },
+                &registry,
+                &connections,
+                &pending_intents,
+            ),
+            async {
+                let msg = rx.recv().await;
+                let sink = match &msg {
+                    Some(MeshMessage::AudioPlay(req)) => req.sink.clone(),
+                    other => panic!("expected AudioPlay, got {other:?}"),
+                };
+                if let Some(MeshMessage::AudioPlay(req)) = msg
+                    && let Some(otx) = pending_intents.lock().unwrap().remove(&req.request_id)
+                {
+                    let _ = otx.send(MeshMessage::AudioPlayResult(shared::AudioPlayResult {
+                        request_id: req.request_id,
+                        success: true,
+                        error: None,
+                    }));
+                }
+                sink
+            }
+        );
         assert!(delivered);
-        match rx.try_recv() {
-            Ok(MeshMessage::AudioPlay(req)) => assert_eq!(req.sink, Some("bluetooth".into())),
-            other => panic!("expected AudioPlay, got {other:?}"),
-        }
+        assert_eq!(sink_seen, Some("bluetooth".into()));
     }
 
     #[tokio::test]
@@ -743,22 +830,25 @@ mod tests {
         let (tx_b, mut rx_b) = tokio::sync::mpsc::channel(4);
         connections.lock().unwrap().insert("a".into(), tx_a);
         connections.lock().unwrap().insert("b".into(), tx_b);
+        let pending_intents = empty_pending_intents();
 
-        let delivered = handle_audio_announce(
-            shared::AudioAnnounceRequest {
-                request_id: "r1".into(),
-                url: "http://example/clip.wav".into(),
-                room: None,
-                broadcast: true,
-            },
-            &registry,
-            &connections,
-        )
-        .await;
+        let (delivered, ..) = tokio::join!(
+            handle_audio_announce(
+                shared::AudioAnnounceRequest {
+                    request_id: "r1".into(),
+                    url: "http://example/clip.wav".into(),
+                    room: None,
+                    broadcast: true,
+                },
+                &registry,
+                &connections,
+                &pending_intents,
+            ),
+            ack_next_audio_play(&mut rx_a, &pending_intents),
+            ack_next_audio_play(&mut rx_b, &pending_intents)
+        );
 
         assert!(delivered);
-        assert!(matches!(rx_a.try_recv(), Ok(MeshMessage::AudioPlay(_))));
-        assert!(matches!(rx_b.try_recv(), Ok(MeshMessage::AudioPlay(_))));
     }
 
     #[tokio::test]
@@ -774,6 +864,7 @@ mod tests {
             },
             &registry,
             &connections,
+            &empty_pending_intents(),
         )
         .await;
         assert!(!delivered);

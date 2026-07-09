@@ -141,13 +141,24 @@ impl Capability for AudioCapability {
         Ok(())
     }
 
-    async fn handle(&self, msg: MeshMessage, _tx: Sender<MeshMessage>) {
+    async fn handle(&self, msg: MeshMessage, tx: Sender<MeshMessage>) {
         let MeshMessage::AudioPlay(req) = msg else {
             return;
         };
-        if let Err(e) = play_url(&req.url, req.sink.as_deref()).await {
+        let result = play_url(&req.url, req.sink.as_deref()).await;
+        let error = if let Err(e) = &result {
             warn!(request_id = %req.request_id, error = %e, "audio: playback failed");
-        }
+            Some(e.clone())
+        } else {
+            None
+        };
+        let _ = tx
+            .send(MeshMessage::AudioPlayResult(shared::AudioPlayResult {
+                request_id: req.request_id,
+                success: result.is_ok(),
+                error,
+            }))
+            .await;
     }
 }
 
