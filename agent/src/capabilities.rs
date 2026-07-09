@@ -34,6 +34,8 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
         shared::Feature::Art,
         #[cfg(feature = "voice")]
         shared::Feature::Voice,
+        #[cfg(feature = "audio")]
+        shared::Feature::Audio,
     ];
 
     Ok(NodeCapabilities {
@@ -75,6 +77,13 @@ mod tests {
     fn features_includes_voice_when_built_with_voice_feature() {
         let caps = detect_capabilities().unwrap();
         assert!(caps.features.contains(&shared::Feature::Voice));
+    }
+
+    #[cfg(feature = "audio")]
+    #[test]
+    fn features_includes_audio_when_built_with_audio_feature() {
+        let caps = detect_capabilities().unwrap();
+        assert!(caps.features.contains(&shared::Feature::Audio));
     }
 
     #[cfg(not(feature = "llm"))]

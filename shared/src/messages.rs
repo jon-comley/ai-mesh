@@ -209,6 +209,66 @@ pub struct LightCommandRequest {
     pub command: LightAction,
 }
 
+// ── Audio output (Phase 2/3/6 of plans/audio-output-integration.md) ────────────
+
+/// Coordinator → a specific audio-capable node: fetch `url` and play it on
+/// whatever local sink that node is configured for (Bluetooth speaker or
+/// HDMI out — see `capabilities/audio`). Dumb and node-specific, mirrors
+/// `LightCommandRequest`; target resolution (which node, if any) happens
+/// coordinator-side before this is sent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudioPlayRequest {
+    pub request_id: String,
+    pub url: String,
+}
+
+/// Any agent → coordinator: "play this clip somewhere," letting the
+/// coordinator resolve *where* (it holds the room/sink registry an agent
+/// doesn't have direct access to). `room: None` with `broadcast: false` is
+/// invalid and treated as a no-op — callers must pick one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudioAnnounceRequest {
+    pub request_id: String,
+    pub url: String,
+    /// Route to this room's configured sink (registry preference
+    /// `room-audio-sink:<room>`). Ignored when `broadcast` is true.
+    pub room: Option<String>,
+    /// Send to every node advertising `Feature::Audio` at once, ignoring
+    /// `room`. The mechanism this exists for: alerts/announcements that
+    /// should reach the whole house, not one room.
+    pub broadcast: bool,
+}
+
+/// Coordinator → a voice-capable node (the one running Piper): synthesize
+/// `text` and hand back a fetchable URL, the same way the voice pipeline's
+/// own replies are produced — this is what lets a *coordinator-initiated*
+/// announcement (not one that started as a spoken request) get a voice at
+/// all. Mirrors `IntentRequest`/`IntentResponse`'s pending-request-id
+/// pattern.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TtsRequest {
+    pub request_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TtsResponse {
+    pub request_id: String,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Coordinator → the requesting node: whether an `AudioAnnounceRequest`
+/// actually reached a connected sink. Lets a caller like the voice
+/// pipeline fall back to a different sink (the puck's own speaker) when
+/// its preferred room sink turns out to be configured but unreachable,
+/// instead of the reply silently going nowhere.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudioAnnounceResult {
+    pub request_id: String,
+    pub delivered: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LightStateReport {
     pub node_id: String,
@@ -591,6 +651,12 @@ pub enum MeshMessage {
     // Intent routing
     IntentRequest(IntentRequest),
     IntentResponse(IntentResponse),
+    // Audio output (Phase 2/3/6 — plans/audio-output-integration.md)
+    AudioPlay(AudioPlayRequest),
+    AudioAnnounce(AudioAnnounceRequest),
+    AudioAnnounceResult(AudioAnnounceResult),
+    TtsRequest(TtsRequest),
+    TtsResponse(TtsResponse),
     // Phase 10 — auth: sent as the first message on every new connection
     AuthToken(String),
     // Phase 11C — coordinator pushes a new heartbeat interval to a specific node

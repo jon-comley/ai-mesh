@@ -92,6 +92,7 @@ pub enum Feature {
     Sensors,
     Art,
     Voice,
+    Audio,
 }
 
 impl Default for NodeCapabilities {
