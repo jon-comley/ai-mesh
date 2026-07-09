@@ -3,6 +3,19 @@ import { setPref } from '/static/prefs.js';
 
 const MAX_CONTEXT_TURNS = 20; // 10 exchanges; oldest pair dropped when exceeded
 const VOICE_PREF_KEY = 'voice-in-chat'; // '0' = hidden; anything else = shown (default on)
+const TTS_VOICE_PREF_KEY = 'tts-voice';
+const TTS_VOICE_DEFAULT = 'alan'; // must match capabilities/voice/src/tts.rs's DEFAULT_VOICE
+// Fetched fresh by capability-voice on every synthesis call (see tts.rs),
+// so changing this here takes effect on the puck's very next reply — no
+// restart needed. Licenses verified against each voice's MODEL_CARD on
+// huggingface.co/rhasspy/piper-voices — see plans/audio-output-integration.md.
+const TTS_VOICES = [
+  { value: 'joe', label: 'Joe (US male)' },
+  { value: 'kristin', label: 'Kristin (US female)' },
+  { value: 'ljspeech', label: 'Ljspeech (US female)' },
+  { value: 'alan', label: 'Alan (GB male)' },
+  { value: 'alba', label: 'Alba (GB female, Scottish)' },
+];
 
 // Mounts a chat thread + input bar into `container`, wired to POST /api/chat.
 // Each call is an independent conversation (its own context/state and class-scoped
@@ -10,7 +23,10 @@ const VOICE_PREF_KEY = 'voice-in-chat'; // '0' = hidden; anything else = shown (
 // without clashing IDs or sharing history. Returns a small control handle.
 export function createChatWidget(container, { placeholder = 'Ask anything or control your home…', voiceToggle = false } = {}) {
   const voiceToggleHtml = voiceToggle
-    ? `<label class="chat-voice-toggle" title="Show voice-assistant exchanges in this chat"><input type="checkbox" class="chat-voice-cb"> 🎤 voice</label>`
+    ? `<label class="chat-voice-toggle" title="Show voice-assistant exchanges in this chat"><input type="checkbox" class="chat-voice-cb"> 🎤 voice</label>
+       <select class="chat-tts-voice-select" title="Voice the puck speaks replies in">
+         ${TTS_VOICES.map(v => `<option value="${v.value}">${v.label}</option>`).join('')}
+       </select>`
     : '';
   container.innerHTML = `
     <div class="chat-thread"></div>
@@ -32,11 +48,18 @@ export function createChatWidget(container, { placeholder = 'Ask anything or con
   const newBtn     = container.querySelector('.chat-new');
   const ctxCounter = container.querySelector('.chat-ctx-counter');
   const voiceCb    = container.querySelector('.chat-voice-cb');
+  const ttsSelect  = container.querySelector('.chat-tts-voice-select');
 
   if (voiceCb) {
     voiceCb.checked = localStorage.getItem(VOICE_PREF_KEY) !== '0';
     voiceCb.addEventListener('change', () => {
       setPref(VOICE_PREF_KEY, voiceCb.checked ? '1' : '0');
+    });
+  }
+  if (ttsSelect) {
+    ttsSelect.value = localStorage.getItem(TTS_VOICE_PREF_KEY) || TTS_VOICE_DEFAULT;
+    ttsSelect.addEventListener('change', () => {
+      setPref(TTS_VOICE_PREF_KEY, ttsSelect.value);
     });
   }
 
