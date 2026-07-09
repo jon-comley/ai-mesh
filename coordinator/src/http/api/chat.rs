@@ -69,6 +69,7 @@ pub async fn chat(
         state.get_sensor_snapshot(),
         reaper_online,
         gateway,
+        Some(state.clone()),
     )
     .await;
 

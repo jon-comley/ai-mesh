@@ -1118,6 +1118,7 @@ async fn process_message(
                     sensor_states,
                     reaper_online,
                     gateway,
+                    dashboard.clone(),
                 )
                 .await;
                 // Reflect updated cumulative stats / last-error on the
@@ -1146,13 +1147,6 @@ async fn process_message(
                     warn!("intent requester disconnected before the response was ready");
                 }
             });
-            None
-        }
-        MeshMessage::SceneLoaded(report) => {
-            let entry = pending_intents.lock().unwrap().remove(&report.request_id);
-            if let Some(otx) = entry {
-                let _ = otx.send(MeshMessage::SceneLoaded(report));
-            }
             None
         }
         MeshMessage::TtsResponse(resp) => {

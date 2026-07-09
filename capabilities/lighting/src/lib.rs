@@ -5,7 +5,6 @@ use capability_core::{Capability, ToolSchema};
 use capability_zigbee::{ZigbeeClient, ZigbeeEvent, service};
 use shared::{
     DeviceEntry, DeviceListReport, LightAction, LightStateReport, LightTarget, MeshMessage,
-    SceneLoadedReport,
 };
 use tokio::sync::{OnceCell, mpsc::Sender};
 use tracing::{info, warn};
@@ -39,7 +38,6 @@ impl Capability for LightingCapability {
         matches!(
             msg,
             MeshMessage::LightCommand(_)
-                | MeshMessage::SceneLoad(_)
                 | MeshMessage::PermitJoin(_)
                 | MeshMessage::DeviceRemove(_)
         )
@@ -248,7 +246,7 @@ impl Capability for LightingCapability {
         Ok(())
     }
 
-    async fn handle(&self, msg: MeshMessage, tx: Sender<MeshMessage>) {
+    async fn handle(&self, msg: MeshMessage, _tx: Sender<MeshMessage>) {
         match msg {
             MeshMessage::LightCommand(req) => match self.zigbee.get() {
                 Some(client) => {
@@ -286,66 +284,37 @@ impl Capability for LightingCapability {
                     warn!(request_id = %req.request_id, "DeviceRemove received but MQTT not connected");
                 }
             },
-            MeshMessage::SceneLoad(req) => {
-                info!(request_id = %req.request_id, scene = %req.scene_name, "SceneLoad received (scenes not yet implemented)");
-                let report = SceneLoadedReport {
-                    request_id: req.request_id,
-                    scene_name: req.scene_name,
-                    success: false,
-                    error: Some("scenes not yet implemented".into()),
-                };
-                let _ = tx.send(MeshMessage::SceneLoaded(report)).await;
-            }
             _ => {}
         }
     }
 
     fn tools(&self) -> Vec<ToolSchema> {
-        vec![
-            ToolSchema {
-                name: "light_command".into(),
-                description: "Turn lights on/off, set brightness, colour temperature, or colour"
-                    .into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "target": {
-                            "type": "string",
-                            "description": "Room or device name, e.g. 'living_room'"
-                        },
-                        "action": {
-                            "type": "string",
-                            "enum": ["on", "off", "toggle", "brightness", "color_temp", "color"]
-                        },
-                        "value": {
-                            "type": "number",
-                            "description": "Brightness 0–255 or colour temp in Kelvin (for brightness/color_temp actions)"
-                        },
-                        "color": {
-                            "type": "string",
-                            "description": "CSS colour for the color action: hex (#FF0000) or named (red, green, blue, yellow, orange, purple, pink, cyan, white…)"
-                        }
+        vec![ToolSchema {
+            name: "light_command".into(),
+            description: "Turn lights on/off, set brightness, colour temperature, or colour".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Room or device name, e.g. 'living_room'"
                     },
-                    "required": ["target", "action"]
-                }),
-            },
-            ToolSchema {
-                name: "scene_load".into(),
-                description: "Load a named lighting scene (e.g. 'cozy', 'bright', 'movie')".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "scene": { "type": "string" },
-                        "room": {
-                            "type": "string",
-                            "description": "Optional — omit to apply everywhere"
-                        },
-                        "transition_ms": { "type": "integer" }
+                    "action": {
+                        "type": "string",
+                        "enum": ["on", "off", "toggle", "brightness", "color_temp", "color"]
                     },
-                    "required": ["scene"]
-                }),
-            },
-        ]
+                    "value": {
+                        "type": "number",
+                        "description": "Brightness 0–255 or colour temp in Kelvin (for brightness/color_temp actions)"
+                    },
+                    "color": {
+                        "type": "string",
+                        "description": "CSS colour for the color action: hex (#FF0000) or named (red, green, blue, yellow, orange, purple, pink, cyan, white…)"
+                    }
+                },
+                "required": ["target", "action"]
+            }),
+        }]
     }
 }
 
@@ -365,7 +334,7 @@ impl LightingCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::{LightAction, LightCommandRequest, LightTarget, SceneLoadRequest};
+    use shared::{LightAction, LightCommandRequest, LightTarget};
     use tokio::sync::mpsc;
 
     fn light_command() -> MeshMessage {
@@ -373,14 +342,6 @@ mod tests {
             request_id: "r1".into(),
             target: LightTarget::Group("all".into()),
             command: LightAction::On,
-        })
-    }
-
-    fn scene_load() -> MeshMessage {
-        MeshMessage::SceneLoad(SceneLoadRequest {
-            request_id: "r2".into(),
-            scene_name: "cozy".into(),
-            transition_ms: 2000,
         })
     }
 
@@ -392,11 +353,6 @@ mod tests {
     #[test]
     fn handles_light_command() {
         assert!(LightingCapability::new("test-node").handles(&light_command()));
-    }
-
-    #[test]
-    fn handles_scene_load() {
-        assert!(LightingCapability::new("test-node").handles(&scene_load()));
     }
 
     #[test]
@@ -445,11 +401,10 @@ mod tests {
     }
 
     #[test]
-    fn tools_returns_two_schemas() {
+    fn tools_returns_one_schema() {
         let tools = LightingCapability::new("test-node").tools();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "light_command");
-        assert_eq!(tools[1].name, "scene_load");
     }
 
     #[test]
@@ -459,23 +414,6 @@ mod tests {
             assert!(tool.parameters.get("type").is_some());
             assert!(tool.parameters.get("properties").is_some());
             assert!(tool.parameters.get("required").is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn scene_load_handle_sends_scene_loaded() {
-        let (tx, mut rx) = mpsc::channel(8);
-        LightingCapability::new("test-node")
-            .handle(scene_load(), tx)
-            .await;
-        let reply = rx.recv().await.expect("should receive SceneLoaded");
-        match reply {
-            MeshMessage::SceneLoaded(r) => {
-                assert_eq!(r.request_id, "r2");
-                assert_eq!(r.scene_name, "cozy");
-                assert!(!r.success);
-            }
-            _ => panic!("expected SceneLoaded"),
         }
     }
 

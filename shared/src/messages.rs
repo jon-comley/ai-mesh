@@ -305,21 +305,6 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SceneLoadRequest {
-    pub request_id: String,
-    pub scene_name: String,
-    pub transition_ms: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SceneLoadedReport {
-    pub request_id: String,
-    pub scene_name: String,
-    pub success: bool,
-    pub error: Option<String>,
-}
-
 /// Device class, classified from z2m's `definition.exposes` at discovery.
 /// Decides which capability crate handles the device and which widget the
 /// dashboard renders — never the room it lives in.
@@ -725,8 +710,6 @@ pub enum MeshMessage {
     BluetoothPair(BluetoothPairRequest),
     BluetoothPairResult(BluetoothPairResult),
     SwitchAction(SwitchActionReport),
-    SceneLoad(SceneLoadRequest),
-    SceneLoaded(SceneLoadedReport),
     // Intent routing
     IntentRequest(IntentRequest),
     IntentResponse(IntentResponse),
@@ -1260,41 +1243,6 @@ mod tests {
             color_xy: Some((0.3127, 0.3290)),
             color_temp: None,
             online: true,
-        });
-        let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
-    }
-
-    #[test]
-    fn scene_load_roundtrip() {
-        let msg = MeshMessage::SceneLoad(SceneLoadRequest {
-            request_id: "sl-1".into(),
-            scene_name: "cozy".into(),
-            transition_ms: 2000,
-        });
-        let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
-    }
-
-    #[test]
-    fn scene_loaded_roundtrip() {
-        let msg = MeshMessage::SceneLoaded(SceneLoadedReport {
-            request_id: "sl-1".into(),
-            scene_name: "cozy".into(),
-            success: true,
-            error: None,
-        });
-        let json = serde_json::to_string(&msg).unwrap();
-        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
-    }
-
-    #[test]
-    fn scene_loaded_with_error_roundtrip() {
-        let msg = MeshMessage::SceneLoaded(SceneLoadedReport {
-            request_id: "sl-2".into(),
-            scene_name: "disco".into(),
-            success: false,
-            error: Some("unknown scene".into()),
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
