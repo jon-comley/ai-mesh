@@ -227,6 +227,19 @@ pub struct AudioPlayRequest {
     pub sink: Option<String>,
 }
 
+/// Node → coordinator: whether an `AudioPlayRequest` actually played.
+/// Without this, the coordinator only knows the message reached a
+/// connected node — not whether `aplay`/`paplay` succeeded — so a
+/// misconfigured or unpaired sink reports false "delivered" and the
+/// voice pipeline's puck fallback never fires. See `coordinator::audio`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AudioPlayResult {
+    pub request_id: String,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Any agent → coordinator: "play this clip somewhere," letting the
 /// coordinator resolve *where* (it holds the room/sink registry an agent
 /// doesn't have direct access to). `room: None` with `broadcast: false` is
@@ -666,6 +679,7 @@ pub enum MeshMessage {
     IntentResponse(IntentResponse),
     // Audio output (Phase 2/3/6 — plans/audio-output-integration.md)
     AudioPlay(AudioPlayRequest),
+    AudioPlayResult(AudioPlayResult),
     AudioAnnounce(AudioAnnounceRequest),
     AudioAnnounceResult(AudioAnnounceResult),
     TtsRequest(TtsRequest),
