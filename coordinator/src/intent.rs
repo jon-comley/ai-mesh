@@ -2340,6 +2340,47 @@ mod tests {
         assert!(text.contains("coordinator schedules inference"));
     }
 
+    /// A history turn mentioning `room_name` exactly once, buried in a lot of
+    /// generic, repetitive filler text with no proper nouns of its own — the
+    /// only prior tests check that compression shrinks the token count, not
+    /// that a follow-up command like "turn it back off" still has the room
+    /// context it depends on after compression runs.
+    fn long_history_request_with_room_mention(room_name: &str) -> IntentRequest {
+        let filler = "The coordinator schedules inference requests across the mesh of nodes. \
+                      Each node advertises its capabilities and the models it currently holds \
+                      in a Ready state, and the scheduler picks one at random among those that \
+                      can serve the requested model. "
+            .repeat(6);
+        let turn = shared::IntentTurn {
+            role: shared::IntentRole::User,
+            content: format!("{filler}Please turn on the lamp in the {room_name}. {filler}"),
+        };
+        IntentRequest {
+            request_id: "test".into(),
+            text: "turn it back off".into(),
+            model_name: None,
+            context: vec![turn],
+            source: shared::IntentSource::Dashboard,
+        }
+    }
+
+    #[test]
+    fn build_history_compression_preserves_room_name_mention() {
+        // Statistical/IDF-based compression should keep a rare, high-information
+        // term (a room name) that appears once in a sea of generic filler --
+        // losing it would break a follow-up like "turn it back off" that
+        // depends on the room mentioned earlier in the conversation.
+        let req = long_history_request_with_room_mention("Conservatory");
+        let (text, compressed, before, after) =
+            build_history(&req, true, crate::compress::CompressionEngine::Statistical);
+        assert!(compressed, "history should be compressed");
+        assert!(after < before);
+        assert!(
+            text.contains("Conservatory"),
+            "compressed history must still mention the room referenced in it: {text}"
+        );
+    }
+
     #[test]
     fn build_device_context_injects_known_devices_and_groups() {
         let devices = vec!["test_bulb".to_string(), "desk_lamp".to_string()];
