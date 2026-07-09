@@ -36,7 +36,10 @@ use tracing::{info, warn};
 /// "this node advertises audio"; which room/purpose each backend serves
 /// is entirely a registry-side preference (`room-audio-sink:<room>`, see
 /// `coordinator/src/audio.rs`).
-fn configured_backends() -> Vec<String> {
+///
+/// `pub` because the agent's `detect_capabilities()` reports this same
+/// list in `NodeCapabilities.audio_backends` — one parser, no drift.
+pub fn configured_backends() -> Vec<String> {
     std::env::var("AUDIO_BACKENDS")
         .unwrap_or_else(|_| "bluetooth".into())
         .split(',')

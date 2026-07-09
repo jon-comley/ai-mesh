@@ -38,12 +38,21 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
         shared::Feature::Audio,
     ];
 
+    // Report which audio backends this node runs so the coordinator can
+    // list each as a distinct room-assignable sink. Same parser the
+    // capability itself uses (AUDIO_BACKENDS env) — no config drift.
+    #[cfg(feature = "audio")]
+    let audio_backends = capability_audio::configured_backends();
+    #[cfg(not(feature = "audio"))]
+    let audio_backends = vec![];
+
     Ok(NodeCapabilities {
         cpu_inference,
         gpu_inference,
         ane_inference,
         max_model_size_gb,
         features,
+        audio_backends,
     })
 }
 
@@ -84,6 +93,16 @@ mod tests {
     fn features_includes_audio_when_built_with_audio_feature() {
         let caps = detect_capabilities().unwrap();
         assert!(caps.features.contains(&shared::Feature::Audio));
+        // The capability defaults to bluetooth with no env set, so the
+        // reported backend list is never empty on an audio node.
+        assert!(!caps.audio_backends.is_empty());
+    }
+
+    #[cfg(not(feature = "audio"))]
+    #[test]
+    fn audio_backends_empty_without_audio_feature() {
+        let caps = detect_capabilities().unwrap();
+        assert!(caps.audio_backends.is_empty());
     }
 
     #[cfg(not(feature = "llm"))]

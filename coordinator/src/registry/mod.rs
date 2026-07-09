@@ -1906,6 +1906,7 @@ mod tests {
             ane_inference: false,
             max_model_size_gb: 8.0,
             features: vec![shared::Feature::Llm],
+            audio_backends: vec![],
         }
     }
 
@@ -2024,6 +2025,7 @@ mod tests {
             ane_inference: false,
             max_model_size_gb: 3.69,
             features: vec![shared::Feature::Llm],
+            audio_backends: vec![],
         }
     }
 

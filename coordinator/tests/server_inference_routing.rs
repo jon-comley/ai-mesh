@@ -124,6 +124,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
             ane_inference: false,
             max_model_size_gb: 8.0,
             features: vec![shared::Feature::Llm],
+            audio_backends: vec![],
         }),
     )
     .await;
