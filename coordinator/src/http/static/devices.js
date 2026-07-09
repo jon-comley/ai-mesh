@@ -90,28 +90,100 @@ function fetchAvDevices(force = false) {
   }).catch(() => {});
 }
 
+// A sink can belong to more than one room, and (separately) a room can
+// hold more than one sink — GET /api/av-devices' dev.rooms is a list of
+// { room, role } objects, "role" being which purpose that assignment
+// serves there ("any" | "reply" | "media", see coordinator's SinkRole).
+// Only the puck stays single-room (roomIdForAvDevice/onPuckRoomChange
+// below), since a physical puck really is in exactly one place.
+
 function roomIdForAvDevice(dev) {
-  const name = dev.rooms?.[0];
+  const name = dev.rooms?.[0]?.room;
   return name ? (model.rooms.find(r => r.name === name)?.id ?? null) : null;
 }
 
-function onAvRoomChange(dev, newRoomId) {
-  // One sink per room: assigning writes that room's pref; unassigning (or
-  // moving away) deletes the pref of every room currently pointing here.
-  const writes = [];
-  for (const roomName of dev.rooms ?? []) {
-    const target = model.rooms.find(r => r.name === roomName);
-    if (!target || target.id !== newRoomId) {
-      writes.push(api(`/preferences/${encodeURIComponent(`room-audio-sink:${roomName}`)}`,
-        { method: 'DELETE' }));
-    }
+function assignAvRoom(dev, roomName, role) {
+  return api(`/av-devices/${encodeURIComponent(dev.id)}/rooms/${encodeURIComponent(roomName)}`,
+    { method: 'PUT', body: { role } });
+}
+
+function unassignAvRoom(dev, roomName) {
+  return api(`/av-devices/${encodeURIComponent(dev.id)}/rooms/${encodeURIComponent(roomName)}`,
+    { method: 'DELETE' });
+}
+
+const AV_ROLE_LABELS = { any: 'any', reply: 'replies', media: 'media' };
+
+// A removable chip per current assignment, plus a room+role picker to add
+// another — re-picking a room the sink is already in just updates its
+// role (the backend upserts by node+sink, doesn't duplicate).
+function buildAvRoomAssignments(dev) {
+  const wrap = document.createElement('div');
+  wrap.className = 'av-room-assignments';
+
+  const chips = document.createElement('div');
+  chips.className = 'av-room-chips';
+  for (const assignment of dev.rooms ?? []) {
+    const chip = document.createElement('span');
+    chip.className = 'av-room-chip';
+    chip.textContent = assignment.role === 'any'
+      ? assignment.room
+      : `${assignment.room} · ${AV_ROLE_LABELS[assignment.role] ?? assignment.role}`;
+    const remove = document.createElement('button');
+    remove.className = 'av-room-chip-remove';
+    remove.textContent = '✕';
+    remove.title = `Remove from ${assignment.room}`;
+    remove.addEventListener('click', () => {
+      unassignAvRoom(dev, assignment.room).then(() => fetchAvDevices(true));
+    });
+    chip.appendChild(remove);
+    chips.appendChild(chip);
   }
-  const newRoom = model.rooms.find(r => r.id === newRoomId);
-  if (newRoom && !(dev.rooms ?? []).includes(newRoom.name)) {
-    writes.push(api(`/preferences/${encodeURIComponent(`room-audio-sink:${newRoom.name}`)}`,
-      { method: 'PUT', body: { value: dev.id } }));
+  wrap.appendChild(chips);
+
+  const roomSelect = document.createElement('select');
+  roomSelect.className = 'device-room-select';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '+ add to room…';
+  roomSelect.appendChild(placeholder);
+  for (const room of model.rooms) {
+    const o = document.createElement('option');
+    o.value = room.id;
+    o.textContent = room.name;
+    roomSelect.appendChild(o);
   }
-  Promise.allSettled(writes).then(() => fetchAvDevices(true));
+
+  const roleSelect = document.createElement('select');
+  roleSelect.className = 'device-room-select av-role-select';
+  roleSelect.hidden = true;
+  for (const [value, label] of [['any', 'Any'], ['reply', 'Replies only'], ['media', 'Media only']]) {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    roleSelect.appendChild(o);
+  }
+
+  const addBtn = document.createElement('button');
+  addBtn.className = 'device-row-btn';
+  addBtn.textContent = '+';
+  addBtn.title = 'Assign to this room';
+  addBtn.hidden = true;
+
+  roomSelect.addEventListener('change', () => {
+    const has = !!roomSelect.value;
+    roleSelect.hidden = !has;
+    addBtn.hidden = !has;
+  });
+
+  addBtn.addEventListener('click', () => {
+    const room = model.rooms.find(r => r.id === roomSelect.value);
+    if (!room) return;
+    assignAvRoom(dev, room.name, roleSelect.value).then(() => fetchAvDevices(true));
+  });
+
+  wrap.append(roomSelect, roleSelect, addBtn);
+  return wrap;
 }
 
 // The puck's room binding is inverted from a sink's: `av-room:puck` names
@@ -179,12 +251,7 @@ function buildAvRow(dev) {
   const actions = document.createElement('div');
   actions.className = 'device-row-actions';
   if (dev.kind === 'sink') {
-    const select = buildRoomSelect(model.rooms, roomIdForAvDevice(dev),
-      roomId => onAvRoomChange(dev, roomId));
-    if ((dev.rooms ?? []).length > 1) {
-      select.title = `Sink for: ${dev.rooms.join(', ')}`;
-    }
-    actions.appendChild(select);
+    actions.appendChild(buildAvRoomAssignments(dev));
   } else if (dev.id === 'puck') {
     actions.appendChild(buildRoomSelect(model.rooms, roomIdForAvDevice(dev),
       roomId => onPuckRoomChange(roomId)));

@@ -2488,6 +2488,42 @@ body {
   font-style: italic;
 }
 
+/* Multi-room sink assignment (a room can hold more than one sink) */
+.av-room-assignments {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.av-room-chips {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.av-room-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 4px 2px 8px;
+}
+.av-room-chip-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px;
+}
+.av-room-chip-remove:hover { color: var(--red); }
+.av-role-select { font-size: 11px; }
+
 .switch-bindings-panel {
   flex-basis: 100%;
   margin-top: 8px;

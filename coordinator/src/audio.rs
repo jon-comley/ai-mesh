@@ -106,30 +106,202 @@ pub async fn request_tts(
     }
 }
 
-/// The registry-stored preferred audio sink for a room, if one's been
-/// configured (`room-audio-sink:<room>` in the same K/V preferences store
-/// `tts-voice`/`voice-in-chat` already use — no new schema). `None` means
-/// "no dedicated speaker for this room," the caller's cue to fall back to
+/// What a room-assigned sink is *for*. A room can have more than one sink
+/// at once (e.g. a Bluetooth speaker for quiet spoken replies and a
+/// separate HDMI/TV chain for media) — role is how the resolver picks the
+/// right one for a given purpose instead of the first thing it finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkRole {
+    /// Handles both purposes — the historical (and still-default) meaning
+    /// of a bare assignment with no role specified.
+    Any,
+    /// Spoken voice-assistant replies.
+    Reply,
+    /// Music/media/announcements explicitly targeting this room.
+    Media,
+}
+
+impl SinkRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SinkRole::Any => "any",
+            SinkRole::Reply => "reply",
+            SinkRole::Media => "media",
+        }
+    }
+
+    pub fn parse(s: &str) -> SinkRole {
+        match s {
+            "reply" => SinkRole::Reply,
+            "media" => SinkRole::Media,
+            _ => SinkRole::Any,
+        }
+    }
+
+    /// Whether a sink tagged with this role should be used for a request
+    /// that wants `wanted`. `Any` satisfies every purpose; otherwise the
+    /// roles must match exactly.
+    fn serves(self, wanted: SinkRole) -> bool {
+        self == SinkRole::Any || self == wanted
+    }
+}
+
+/// One sink assigned to a room, parsed from a `room-audio-sink:<room>`
+/// preference entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoomSink {
+    pub node_id: String,
+    /// Which of the node's `AUDIO_BACKENDS` to use — `None` means that
+    /// node's default (first-configured) backend.
+    pub sink: Option<String>,
+    pub role: SinkRole,
+}
+
+impl RoomSink {
+    pub fn parse(entry: &str) -> Option<RoomSink> {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return None;
+        }
+        let mut parts = entry.splitn(3, ':');
+        let node_id = parts.next()?.to_string();
+        let sink = parts.next().filter(|s| !s.is_empty()).map(str::to_string);
+        let role = parts.next().map(SinkRole::parse).unwrap_or(SinkRole::Any);
+        Some(RoomSink {
+            node_id,
+            sink,
+            role,
+        })
+    }
+
+    fn render(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.node_id,
+            self.sink.as_deref().unwrap_or(""),
+            self.role.as_str()
+        )
+    }
+
+    /// The `<node_id>` or `<node_id>:<sink>` id this sink is addressed by
+    /// elsewhere (AV device ids, `AudioPlayRequest.sink`) — role isn't
+    /// part of a sink's identity, just how a room uses it.
+    pub fn device_id(&self) -> String {
+        match &self.sink {
+            Some(sink) => format!("{}:{}", self.node_id, sink),
+            None => self.node_id.clone(),
+        }
+    }
+}
+
+fn room_sink_pref_key(room: &str) -> String {
+    format!("room-audio-sink:{room}")
+}
+
+/// Parse a raw `room-audio-sink:<room>` preference value (comma-separated
+/// entries) into its sink list — the one place this format is parsed, so
+/// the dashboard's listing endpoint (`http/api/av.rs`) and the resolver
+/// that actually routes audio can never drift apart.
+pub fn parse_room_sink_list(value: &str) -> Vec<RoomSink> {
+    value.split(',').filter_map(RoomSink::parse).collect()
+}
+
+/// Every sink currently assigned to a room (`room-audio-sink:<room>`,
+/// comma-separated entries, same K/V preferences store `tts-voice`/
+/// `voice-in-chat` already use — no new schema). Empty means "no
+/// dedicated speaker for this room," the caller's cue to fall back to
 /// whatever room-independent default it already has (the puck, for the
 /// voice pipeline).
-///
-/// The preference value is `<node_id>` or `<node_id>:<sink>` — the sink
-/// suffix picks which of that node's `AUDIO_BACKENDS` to use (a node can
-/// run more than one backend at once, e.g. HDMI to a TV *and* Bluetooth to
-/// a room speaker on the same Pi — see `capabilities/audio`). No suffix
-/// means "that node's default backend."
-pub fn resolve_room_sink(
-    room: &str,
-    registry: &Arc<Mutex<Registry>>,
-) -> Option<(String, Option<String>)> {
-    let value = registry
+pub fn resolve_room_sinks(room: &str, registry: &Arc<Mutex<Registry>>) -> Vec<RoomSink> {
+    let Some(value) = registry
         .lock()
         .unwrap()
-        .get_preference(PREF_USER_ID, &format!("room-audio-sink:{room}"))?;
-    Some(match value.split_once(':') {
-        Some((node_id, sink)) => (node_id.to_string(), Some(sink.to_string())),
-        None => (value, None),
-    })
+        .get_preference(PREF_USER_ID, &room_sink_pref_key(room))
+    else {
+        return vec![];
+    };
+    parse_room_sink_list(&value)
+}
+
+/// The first room sink that serves `role` — e.g. the sink a spoken reply
+/// in this room should route to. `None` means no sink in this room
+/// handles that purpose (an `Any`-tagged sink counts for every purpose).
+pub fn resolve_room_sink_for(
+    room: &str,
+    role: SinkRole,
+    registry: &Arc<Mutex<Registry>>,
+) -> Option<RoomSink> {
+    resolve_room_sinks(room, registry)
+        .into_iter()
+        .find(|s| s.role.serves(role))
+}
+
+/// Add (or update the role of) one sink in a room's assignment list,
+/// without disturbing any other sink already assigned there — read the
+/// current list, upsert by `(node_id, sink)`, write the whole value back.
+/// Registry access is mutex-serialized so this is safe against concurrent
+/// dashboard writes to the *same* room; it is not a general CRDT, just
+/// enough for one user's dashboard.
+pub fn add_room_sink(
+    room: &str,
+    node_id: &str,
+    sink: Option<&str>,
+    role: SinkRole,
+    registry: &Arc<Mutex<Registry>>,
+) {
+    let reg = registry.lock().unwrap();
+    let mut sinks: Vec<RoomSink> = reg
+        .get_preference(PREF_USER_ID, &room_sink_pref_key(room))
+        .map(|v| parse_room_sink_list(&v))
+        .unwrap_or_default();
+    let entry = RoomSink {
+        node_id: node_id.to_string(),
+        sink: sink.map(str::to_string),
+        role,
+    };
+    match sinks
+        .iter_mut()
+        .find(|s| s.node_id == node_id && s.sink.as_deref() == sink)
+    {
+        Some(existing) => existing.role = role,
+        None => sinks.push(entry),
+    }
+    let value = sinks
+        .iter()
+        .map(RoomSink::render)
+        .collect::<Vec<_>>()
+        .join(",");
+    reg.set_preference(PREF_USER_ID, &room_sink_pref_key(room), &value);
+}
+
+/// Remove one sink from a room's assignment list, leaving any other sinks
+/// assigned there untouched. Deletes the preference entirely once the
+/// list would be empty, rather than leaving a dangling empty value.
+pub fn remove_room_sink(
+    room: &str,
+    node_id: &str,
+    sink: Option<&str>,
+    registry: &Arc<Mutex<Registry>>,
+) {
+    let reg = registry.lock().unwrap();
+    let key = room_sink_pref_key(room);
+    let remaining: Vec<RoomSink> = reg
+        .get_preference(PREF_USER_ID, &key)
+        .map(|v| parse_room_sink_list(&v))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| !(s.node_id == node_id && s.sink.as_deref() == sink))
+        .collect();
+    if remaining.is_empty() {
+        reg.delete_preference(PREF_USER_ID, &key);
+    } else {
+        let value = remaining
+            .iter()
+            .map(RoomSink::render)
+            .collect::<Vec<_>>()
+            .join(",");
+        reg.set_preference(PREF_USER_ID, &key, &value);
+    }
 }
 
 /// Send `url` to a specific node's tracked connection, on the named
@@ -204,16 +376,31 @@ pub async fn handle_audio_announce(
         warn!("AudioAnnounceRequest with neither room nor broadcast set — nothing to do");
         return false;
     };
-    let Some((node_id, sink)) = resolve_room_sink(&room, registry) else {
+    // Non-broadcast AudioAnnounce only ever originates from the voice
+    // pipeline routing a spoken reply — always the Reply-role sink, never
+    // whatever the room's Media sink happens to be.
+    let Some(room_sink) = resolve_room_sink_for(&room, SinkRole::Reply, registry) else {
         // Not a warning: most rooms simply have no dedicated speaker yet
         // (only the kitchen does, once Phase 2 hardware exists) — the
         // voice pipeline's own puck fallback is the expected outcome.
         return false;
     };
-    if send_audio_play(&node_id, &req.url, sink.as_deref(), connections).await {
+    if send_audio_play(
+        &room_sink.node_id,
+        &req.url,
+        room_sink.sink.as_deref(),
+        connections,
+    )
+    .await
+    {
         true
     } else {
-        warn!(room, node_id, "room audio sink not connected");
+        warn!(
+            room,
+            node_id = %room_sink.node_id,
+            sink = %room_sink.sink.as_deref().unwrap_or("default"),
+            "room audio sink not connected"
+        );
         false
     }
 }
@@ -262,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_room_sink_reads_the_preference() {
+    fn resolve_room_sinks_reads_the_preference() {
         let registry = Arc::new(Mutex::new(Registry::new()));
         registry.lock().unwrap().set_preference(
             PREF_USER_ID,
@@ -270,14 +457,18 @@ mod tests {
             "pi-zero-1",
         );
         assert_eq!(
-            resolve_room_sink("Kitchen", &registry),
-            Some(("pi-zero-1".into(), None))
+            resolve_room_sinks("Kitchen", &registry),
+            vec![RoomSink {
+                node_id: "pi-zero-1".into(),
+                sink: None,
+                role: SinkRole::Any,
+            }]
         );
-        assert_eq!(resolve_room_sink("Bedroom", &registry), None);
+        assert!(resolve_room_sinks("Bedroom", &registry).is_empty());
     }
 
     #[test]
-    fn resolve_room_sink_parses_an_explicit_sink_suffix() {
+    fn resolve_room_sinks_parses_an_explicit_sink_suffix() {
         let registry = Arc::new(Mutex::new(Registry::new()));
         registry.lock().unwrap().set_preference(
             PREF_USER_ID,
@@ -285,9 +476,143 @@ mod tests {
             "pi2:bluetooth",
         );
         assert_eq!(
-            resolve_room_sink("LivingRoom", &registry),
-            Some(("pi2".into(), Some("bluetooth".into())))
+            resolve_room_sinks("LivingRoom", &registry),
+            vec![RoomSink {
+                node_id: "pi2".into(),
+                sink: Some("bluetooth".into()),
+                role: SinkRole::Any,
+            }]
         );
+    }
+
+    #[test]
+    fn add_room_sink_appends_without_disturbing_existing_entries() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Reply,
+            &registry,
+        );
+        add_room_sink("Kitchen", "pi2", Some("hdmi"), SinkRole::Media, &registry);
+        let sinks = resolve_room_sinks("Kitchen", &registry);
+        assert_eq!(sinks.len(), 2, "both sinks should coexist: {sinks:?}");
+        assert!(
+            sinks
+                .iter()
+                .any(|s| s.sink.as_deref() == Some("bluetooth") && s.role == SinkRole::Reply)
+        );
+        assert!(
+            sinks
+                .iter()
+                .any(|s| s.sink.as_deref() == Some("hdmi") && s.role == SinkRole::Media)
+        );
+    }
+
+    #[test]
+    fn add_room_sink_updates_role_in_place_for_the_same_sink() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Any,
+            &registry,
+        );
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Reply,
+            &registry,
+        );
+        let sinks = resolve_room_sinks("Kitchen", &registry);
+        assert_eq!(
+            sinks.len(),
+            1,
+            "re-adding the same sink should update, not duplicate"
+        );
+        assert_eq!(sinks[0].role, SinkRole::Reply);
+    }
+
+    #[test]
+    fn remove_room_sink_leaves_other_sinks_in_the_room_intact() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Reply,
+            &registry,
+        );
+        add_room_sink("Kitchen", "pi2", Some("hdmi"), SinkRole::Media, &registry);
+        remove_room_sink("Kitchen", "pi2", Some("bluetooth"), &registry);
+        let sinks = resolve_room_sinks("Kitchen", &registry);
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].sink.as_deref(), Some("hdmi"));
+    }
+
+    #[test]
+    fn remove_room_sink_deletes_the_preference_once_empty() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Any,
+            &registry,
+        );
+        remove_room_sink("Kitchen", "pi2", Some("bluetooth"), &registry);
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_preference(PREF_USER_ID, "room-audio-sink:Kitchen")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_room_sink_for_role_is_exclusive_when_no_any_sink_exists() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Reply,
+            &registry,
+        );
+        // A Reply-only sink must not answer a Media request — that's the
+        // whole point of the split (a quiet reply speaker shouldn't also
+        // be where "play music" goes unless it's actually tagged for it).
+        assert!(resolve_room_sink_for("Kitchen", SinkRole::Reply, &registry).is_some());
+        assert!(resolve_room_sink_for("Kitchen", SinkRole::Media, &registry).is_none());
+    }
+
+    #[test]
+    fn resolve_room_sink_for_role_finds_the_matching_sink_among_several() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Reply,
+            &registry,
+        );
+        add_room_sink("Kitchen", "pi2", Some("hdmi"), SinkRole::Media, &registry);
+        let reply = resolve_room_sink_for("Kitchen", SinkRole::Reply, &registry).unwrap();
+        let media = resolve_room_sink_for("Kitchen", SinkRole::Media, &registry).unwrap();
+        assert_eq!(reply.sink.as_deref(), Some("bluetooth"));
+        assert_eq!(media.sink.as_deref(), Some("hdmi"));
+    }
+
+    #[test]
+    fn resolve_room_sink_for_any_role_serves_every_purpose() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        add_room_sink("Office", "node-x", None, SinkRole::Any, &registry);
+        assert!(resolve_room_sink_for("Office", SinkRole::Reply, &registry).is_some());
+        assert!(resolve_room_sink_for("Office", SinkRole::Media, &registry).is_some());
     }
 
     #[tokio::test]
