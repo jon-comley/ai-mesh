@@ -241,28 +241,6 @@ fn apply_scene_effect_state(
     }
 }
 
-/// Broadcast the room's current effect state (as just left by
-/// `apply_scene_effect_state`) to the dashboard.
-fn broadcast_scene_effect_state(
-    registry: &Arc<Mutex<Registry>>,
-    dashboard: &Arc<DashboardState>,
-    room_id: &str,
-) {
-    match registry.lock().unwrap().get_active_effect(room_id) {
-        Some(a) => {
-            let overrides: Vec<String> =
-                serde_json::from_str(&a.overrides_json).unwrap_or_default();
-            let params: serde_json::Value =
-                serde_json::from_str(&a.params_json).unwrap_or(serde_json::json!({}));
-            dashboard.push_effect_update(room_id.to_string(), Some(a.effect_id), params, overrides);
-        }
-        None => {
-            dashboard.push_effect_update(room_id.to_string(), None, serde_json::json!({}), vec![])
-        }
-    }
-    dashboard.solar_sweep_notify.notify_one();
-}
-
 /// Shared scene-recall logic — HTTP's `recall_scene` and the `scene_load`
 /// intent tool (`intent.rs`) both call this, so a voice/chat-triggered
 /// recall gets the same effect-cancel/reactivate handling the dashboard's
@@ -291,7 +269,7 @@ pub(crate) fn recall_scene_core(
     {
         apply_scene_effect_state(registry, room_id, scene);
         if let Some(dash) = dashboard {
-            broadcast_scene_effect_state(registry, dash, room_id);
+            super::effects::broadcast_active_effect_state(registry, dash, room_id);
         }
     }
 

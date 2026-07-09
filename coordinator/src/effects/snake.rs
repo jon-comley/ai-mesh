@@ -34,8 +34,17 @@ fn colour_to_xy(name: &str) -> (f32, f32) {
 }
 
 pub struct SnakeEffect {
-    /// Path is cached after the first tick so we pay the sort cost once.
+    /// Path is cached and reused while `path_bulb_ids` still matches the
+    /// bulb list so we pay the sort cost once per stable run, not every tick.
     path: Vec<usize>,
+    /// Device IDs `path`'s indices refer to, in `ctx.bulbs` order — `ctx.bulbs`
+    /// is already override-filtered upstream (`runner.rs`'s `active_bulbs`),
+    /// so it can shrink/grow/reorder mid-run (a manual override toggle, a
+    /// bulb added to the room, a dashboard reorder), not just once at
+    /// startup. Caching the path forever regardless of this would leave
+    /// `path`'s indices pointing at the wrong bulb, or out of bounds against
+    /// a since-shrunk `ctx.bulbs` — the latter panics on the next `tick()`.
+    path_bulb_ids: Vec<String>,
     last_color: Option<(f32, f32)>,
 }
 
@@ -43,18 +52,30 @@ impl SnakeEffect {
     pub fn new() -> Self {
         Self {
             path: Vec::new(),
+            path_bulb_ids: Vec::new(),
             last_color: None,
         }
     }
 
-    /// Build or reuse a boustrophedon traversal order over `bulbs`.
+    /// Build or reuse a boustrophedon traversal order over `bulbs`. Reuses
+    /// the cached path only when the bulb list (identity and order) is
+    /// unchanged since it was built — see `path_bulb_ids`'s doc comment.
     /// Each row goes left-to-right, next row right-to-left, and so on.
     fn path_for(&mut self, bulbs: &[BulbInRoom]) {
-        if !self.path.is_empty() {
-            return; // already built
+        if !self.path.is_empty()
+            && self.path_bulb_ids.len() == bulbs.len()
+            && self
+                .path_bulb_ids
+                .iter()
+                .zip(bulbs.iter())
+                .all(|(cached, current)| cached == &current.device_id)
+        {
+            return; // bulb list unchanged since the path was built — reuse it
         }
         let n = bulbs.len();
         if n == 0 {
+            self.path.clear();
+            self.path_bulb_ids.clear();
             return;
         }
 
@@ -90,6 +111,7 @@ impl SnakeEffect {
             left_to_right = !left_to_right;
         }
         self.path = path;
+        self.path_bulb_ids = bulbs.iter().map(|b| b.device_id.clone()).collect();
     }
 }
 
@@ -461,5 +483,72 @@ mod tests {
             .map(|&i| bulbs[i].device_id.as_str())
             .collect();
         assert_eq!(path_ids, vec!["b_nw", "b_ne", "b_se", "b_sw"]);
+    }
+
+    #[test]
+    fn path_recomputes_when_a_bulb_is_excluded_mid_run() {
+        // ctx.bulbs is already override-filtered upstream (runner.rs) — an
+        // override toggle mid-run shrinks it on the very next tick. A path
+        // cached against the old (longer) bulb list must not be reused
+        // as-is: its indices would point at the wrong bulb, or go out of
+        // bounds against the new shorter slice.
+        let all_four = vec![
+            bulb("b_nw", 0.2, 0.1),
+            bulb("b_ne", 0.8, 0.1),
+            bulb("b_se", 0.8, 0.7),
+            bulb("b_sw", 0.2, 0.7),
+        ];
+        let room = lounge();
+        let params = serde_json::json!({});
+        let mut e = SnakeEffect::new();
+
+        let ctx0 = make_ctx(&room, &all_four, &params, 0, 0);
+        e.tick(&ctx0); // builds and caches the 4-bulb path
+
+        // b_ne gets manually overridden out of the effect — the next tick
+        // only sees the remaining 3.
+        let three = vec![
+            all_four[0].clone(),
+            all_four[2].clone(),
+            all_four[3].clone(),
+        ];
+        let ctx1 = make_ctx(&room, &three, &params, 100, 0);
+        let out = e.tick(&ctx1); // must not panic on a stale, longer cached path
+
+        let commanded_ids: std::collections::HashSet<&str> =
+            out.iter().map(|c| c.device_id.as_str()).collect();
+        assert!(
+            !commanded_ids.contains("b_ne"),
+            "the excluded bulb must not receive commands: {commanded_ids:?}"
+        );
+        assert_eq!(
+            e.path.len(),
+            3,
+            "cached path must be rebuilt to match the shrunk bulb list"
+        );
+    }
+
+    #[test]
+    fn path_reuses_cache_when_bulb_list_is_unchanged() {
+        let bulbs = vec![
+            bulb("b_nw", 0.2, 0.1),
+            bulb("b_ne", 0.8, 0.1),
+            bulb("b_se", 0.8, 0.7),
+            bulb("b_sw", 0.2, 0.7),
+        ];
+        let room = lounge();
+        let params = serde_json::json!({});
+        let mut e = SnakeEffect::new();
+
+        let ctx0 = make_ctx(&room, &bulbs, &params, 0, 0);
+        e.tick(&ctx0);
+        let path_after_first_tick = e.path.clone();
+
+        let ctx1 = make_ctx(&room, &bulbs, &params, 100, 0);
+        e.tick(&ctx1);
+        assert_eq!(
+            e.path, path_after_first_tick,
+            "an unchanged bulb list must reuse the cached path, not rebuild it"
+        );
     }
 }

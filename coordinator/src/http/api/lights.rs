@@ -94,6 +94,7 @@ pub(crate) fn build_light_action(body: &LightCommandBody) -> Option<LightAction>
 
 pub async fn light_command(
     Path(device): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
     _: Authed,
     State(state): State<Arc<DashboardState>>,
     Json(body): Json<LightCommandBody>,
@@ -121,6 +122,12 @@ pub async fn light_command(
         // carry the intended value rather than snapping UI sliders back — but a
         // failed send leaves no phantom value for a later broadcast to push out.
         state.apply_command_to_snapshot(&device, &command);
+        // A manual command on a bulb its room's effect still owns would
+        // otherwise get silently reverted on the effect's next tick — this
+        // is the server-side equivalent of rooms.js's own excludeFromEffect()
+        // call on a dashboard click (see the same call in intent.rs's
+        // dispatch_light_command for the voice/chat tool's copy of this).
+        super::effects::exclude_device_from_its_active_effect(&registry, Some(&state), &device);
         StatusCode::NO_CONTENT.into_response()
     } else {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
@@ -385,6 +392,52 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn light_command_excludes_device_from_its_active_effect() {
+        // A manual command on a bulb its room's effect still owns must not
+        // get silently reverted on the effect's next tick — the server-side
+        // equivalent of rooms.js's own excludeFromEffect() on a dashboard click.
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        registry
+            .lock()
+            .unwrap()
+            .add_device_to_room(&room_id, "bulb1");
+        registry
+            .lock()
+            .unwrap()
+            .set_active_effect(&room_id, "aurora", r#"{"speed":1}"#, None, 0)
+            .unwrap();
+
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+
+        let router: Router = Router::new()
+            .route("/api/lights/{device}/command", post(light_command))
+            .layer(axum::Extension(Arc::clone(&registry)))
+            .with_state(state);
+        let status = send(
+            router,
+            "POST",
+            "/api/lights/bulb1/command?token=",
+            r#"{"action":"toggle"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let active = registry
+            .lock()
+            .unwrap()
+            .get_active_effect(&room_id)
+            .unwrap();
+        let overrides: Vec<String> = serde_json::from_str(&active.overrides_json).unwrap();
+        assert_eq!(overrides, vec!["bulb1".to_string()]);
+        let _ = rx.try_recv(); // drain the light command, not under test here
     }
 
     #[tokio::test]
