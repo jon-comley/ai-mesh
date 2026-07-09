@@ -330,17 +330,23 @@ impl Capability for VoiceCapability {
                             url: Some(url),
                             error: None,
                         },
-                        Err(e) => shared::TtsResponse {
+                        Err(e) => {
+                            warn!(request_id = %req.request_id, error = %e, "voice: TtsRequest failed to save clip");
+                            shared::TtsResponse {
+                                request_id: req.request_id,
+                                url: None,
+                                error: Some(e),
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        warn!(request_id = %req.request_id, error = %e, "voice: TtsRequest synthesis failed");
+                        shared::TtsResponse {
                             request_id: req.request_id,
                             url: None,
                             error: Some(e),
-                        },
-                    },
-                    Err(e) => shared::TtsResponse {
-                        request_id: req.request_id,
-                        url: None,
-                        error: Some(e),
-                    },
+                        }
+                    }
                 };
                 let _ = tx.send(MeshMessage::TtsResponse(response)).await;
             }

@@ -1,20 +1,33 @@
 //! AV endpoints: the unified "Speakers & displays" inventory behind the
-//! dashboard's AV section (Phase A of `plans/av-devices-ui.md`).
+//! dashboard's AV section (Phase A of `plans/av-devices-ui.md`), plus
+//! room-assignment mutation for sinks (a room can hold more than one at
+//! once — see `crate::audio::RoomSink`/`SinkRole`).
 //!
-//! Read-only — one GET that flattens every audio-capable endpoint the
-//! coordinator knows about into a uniform list, whatever its transport:
-//! each backend of each `Feature::Audio` node (`pi2:hdmi`,
+//! Listing is read-only: one GET that flattens every audio-capable
+//! endpoint the coordinator knows about into a uniform list, whatever its
+//! transport — each backend of each `Feature::Audio` node (`pi2:hdmi`,
 //! `pi2:bluetooth`, …), the configured LAN appliances (soundbar / TV,
 //! present only when their `-ip` preference is set), and the voice puck
-//! (inferred from a `Feature::Voice` node). Writes go through the
-//! existing preferences API — room assignment is
-//! `room-audio-sink:<room>` = `<node_id>:<backend>` and renames are
-//! `av-name:<device_id>` — so no new mutation surface is added here.
+//! (inferred from a `Feature::Voice` node).
+//!
+//! Room assignment for sinks goes through `PUT`/`DELETE
+//! /api/av-devices/{id}/rooms/{room}` (this module, backed by
+//! `crate::audio::add_room_sink`/`remove_room_sink` so multiple devices
+//! can share a room without clobbering each other). The puck's room and
+//! device renames still ride the plain preferences API
+//! (`av-room:puck`, `av-name:<id>`) — both are genuinely single-valued,
+//! no room-list semantics needed.
 
-use axum::{Extension, Json, extract::State, response::IntoResponse};
-use serde::Serialize;
+use axum::{
+    Extension, Json,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
+use crate::audio::{RoomSink, SinkRole, add_room_sink, remove_room_sink};
 use crate::http::auth::Authed;
 use crate::http::state::DashboardState;
 use crate::registry::Registry;
@@ -22,14 +35,23 @@ use crate::registry::Registry;
 use crate::http::api::prefs::PREF_USER_ID;
 
 #[derive(Serialize)]
+pub struct RoomAssignment {
+    pub room: String,
+    /// "any" | "reply" | "media" — see `crate::audio::SinkRole`.
+    pub role: String,
+}
+
+#[derive(Serialize)]
 pub struct AvDevice {
     /// Stable id: `<node_id>:<backend>` for node sinks, `appliance:<x>`
     /// for LAN appliances, `puck` for the voice puck. This exact string
-    /// is what `room-audio-sink:<room>` preferences store.
+    /// (split back into node_id/backend) is what the room-assignment
+    /// endpoints below address.
     pub id: String,
     pub name: String,
-    /// "sink" (playable via AudioPlay) or "appliance" (controlled, not a
-    /// playback target the mesh can push clips to).
+    /// "sink" (playable via AudioPlay, room-assignable through this
+    /// module's endpoints) or "appliance" (controlled, not a playback
+    /// target — not room-assignable here).
     pub kind: &'static str,
     /// zigbee-equivalent of DeviceType for badging: "hdmi", "bluetooth",
     /// "wifi", …
@@ -39,23 +61,27 @@ pub struct AvDevice {
     pub hostname: Option<String>,
     /// None = unknown (appliances aren't probed), Some = live mesh state.
     pub online: Option<bool>,
-    /// Room names whose `room-audio-sink` preference points at this
-    /// device. Plural because two rooms may share one sink.
-    pub rooms: Vec<String>,
+    /// Every room this sink is assigned to, with the role it serves
+    /// there. Plural on both axes: one sink can serve several rooms, and
+    /// (separately) one room can have several sinks — see
+    /// `crate::audio::RoomSink`.
+    pub rooms: Vec<RoomAssignment>,
 }
 
-/// Room-name → (node, sink) pairs parsed from `room-audio-sink:*`
-/// preferences — mirrors `crate::audio::resolve_room_sink`'s parsing.
-fn room_sink_prefs(prefs: &[(String, String)]) -> Vec<(String, String, Option<String>)> {
+/// `(room name, parsed sink)` for every `room-audio-sink:*` preference —
+/// reuses `crate::audio`'s own entry format so the list view and the
+/// resolver that actually routes audio never drift apart.
+fn all_room_sinks(prefs: &[(String, String)]) -> Vec<(String, RoomSink)> {
     prefs
         .iter()
         .filter_map(|(k, v)| {
             let room = k.strip_prefix("room-audio-sink:")?;
-            let (node, sink) = match v.split_once(':') {
-                Some((n, s)) => (n.to_string(), Some(s.to_string())),
-                None => (v.clone(), None),
-            };
-            Some((room.to_string(), node, sink))
+            Some((room, v))
+        })
+        .flat_map(|(room, value)| {
+            crate::audio::parse_room_sink_list(value)
+                .into_iter()
+                .map(move |sink| (room.to_string(), sink))
         })
         .collect()
 }
@@ -66,6 +92,16 @@ fn custom_name(prefs: &[(String, String)], id: &str) -> Option<String> {
         .iter()
         .find(|(k, _)| *k == key)
         .map(|(_, v)| v.clone())
+}
+
+/// Split an AV device id into `(node_id, backend)` — the inverse of
+/// `RoomSink::device_id()`. `"pi2:bluetooth"` → `("pi2", Some("bluetooth"))`,
+/// `"pi2"` → `("pi2", None)`.
+fn split_device_id(id: &str) -> (String, Option<String>) {
+    match id.split_once(':') {
+        Some((node_id, sink)) => (node_id.to_string(), Some(sink.to_string())),
+        None => (id.to_string(), None),
+    }
 }
 
 pub async fn list_av_devices(
@@ -83,7 +119,7 @@ pub async fn list_av_devices(
     };
     let connected: std::collections::HashSet<String> =
         state.connections.lock().unwrap().keys().cloned().collect();
-    let room_sinks = room_sink_prefs(&prefs);
+    let room_sinks = all_room_sinks(&prefs);
 
     let mut devices: Vec<AvDevice> = Vec::new();
 
@@ -110,16 +146,19 @@ pub async fn list_av_devices(
             };
             let rooms = room_sinks
                 .iter()
-                .filter(|(_, n, s)| {
-                    n == &node.id
-                        && match s {
-                            Some(s) => s == backend,
-                            // A bare node-id preference means "that
-                            // node's default backend".
+                .filter(|(_, s)| {
+                    s.node_id == node.id
+                        && match &s.sink {
+                            Some(sink) => sink == backend,
+                            // A bare node-id entry means "that node's
+                            // default backend".
                             None => Some(backend) == default_backend.as_ref(),
                         }
                 })
-                .map(|(room, _, _)| room.clone())
+                .map(|(room, s)| RoomAssignment {
+                    room: room.clone(),
+                    role: s.role.as_str().to_string(),
+                })
                 .collect();
             let default_name = if backend.is_empty() {
                 format!("{} audio", node.hostname)
@@ -166,12 +205,18 @@ pub async fn list_av_devices(
     // `av-room:puck` names the room the puck physically sits in — the
     // voice pipeline reads the same key to decide whether a spoken reply
     // should divert to that room's speaker (see capability-voice's
-    // `room_with_audio_sink`).
+    // `room_with_audio_sink`). Genuinely single-valued (a physical puck
+    // sits in one room), unlike the multi-room-sink model above.
     if let Some(voice_node) = voice_nodes.first() {
         let rooms = prefs
             .iter()
             .find(|(k, _)| k == "av-room:puck")
-            .map(|(_, v)| vec![v.clone()])
+            .map(|(_, v)| {
+                vec![RoomAssignment {
+                    room: v.clone(),
+                    role: SinkRole::Any.as_str().to_string(),
+                }]
+            })
             .unwrap_or_default();
         devices.push(AvDevice {
             id: "puck".into(),
@@ -188,6 +233,45 @@ pub async fn list_av_devices(
     Json(serde_json::json!({ "devices": devices })).into_response()
 }
 
+#[derive(Deserialize, Default)]
+pub struct AssignRoomBody {
+    /// "any" | "reply" | "media" — defaults to "any" (serves every
+    /// purpose) when omitted, matching a plain drag-onto-a-room gesture
+    /// with no purpose specified.
+    #[serde(default)]
+    role: Option<String>,
+}
+
+/// Add (or retag the role of) this sink in `room`, without disturbing any
+/// other sink already assigned there.
+pub async fn assign_room(
+    Path((id, room)): Path<(String, String)>,
+    _: Authed,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    Json(body): Json<AssignRoomBody>,
+) -> impl IntoResponse {
+    let (node_id, sink) = split_device_id(&id);
+    let role = body
+        .role
+        .as_deref()
+        .map(SinkRole::parse)
+        .unwrap_or(SinkRole::Any);
+    add_room_sink(&room, &node_id, sink.as_deref(), role, &registry);
+    StatusCode::OK
+}
+
+/// Remove this sink from `room`, leaving any other sink assigned there
+/// untouched.
+pub async fn unassign_room(
+    Path((id, room)): Path<(String, String)>,
+    _: Authed,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+) -> impl IntoResponse {
+    let (node_id, sink) = split_device_id(&id);
+    remove_room_sink(&room, &node_id, sink.as_deref(), &registry);
+    StatusCode::OK
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,18 +279,30 @@ mod tests {
     use axum::Router;
     use axum::body::to_bytes;
     use axum::http::Request;
-    use axum::routing::get;
+    use axum::routing::{get, put};
     use tower::ServiceExt;
+
+    fn av_router(
+        registry: Arc<Mutex<Registry>>,
+        connections: crate::http::state::NodeConnections,
+    ) -> Router {
+        let state = make_state(vec!["tok".into()], connections);
+        // Same path shape registered for real in http/mod.rs.
+        Router::new()
+            .route("/api/av-devices", get(list_av_devices))
+            .route(
+                "/api/av-devices/{id}/rooms/{room}",
+                put(assign_room).delete(unassign_room),
+            )
+            .layer(Extension(registry))
+            .with_state(state)
+    }
 
     async fn get_devices(
         registry: Arc<Mutex<Registry>>,
         connections: crate::http::state::NodeConnections,
     ) -> serde_json::Value {
-        let state = make_state(vec!["tok".into()], connections);
-        let router = Router::new()
-            .route("/api/av-devices", get(list_av_devices))
-            .layer(Extension(registry))
-            .with_state(state);
+        let router = av_router(registry, connections);
         let resp = router
             .oneshot(
                 Request::builder()
@@ -264,7 +360,11 @@ mod tests {
         seed_audio_node(&registry, "pi2", &["hdmi", "bluetooth"]);
         {
             let reg = registry.lock().unwrap();
-            reg.set_preference(PREF_USER_ID, "room-audio-sink:Kitchen", "pi2:bluetooth");
+            reg.set_preference(
+                PREF_USER_ID,
+                "room-audio-sink:Kitchen",
+                "pi2:bluetooth:reply",
+            );
             // Bare node id → that node's default (first) backend.
             reg.set_preference(PREF_USER_ID, "room-audio-sink:Lounge", "pi2");
             reg.set_preference(PREF_USER_ID, "av-name:pi2:bluetooth", "Fishman amp");
@@ -273,9 +373,41 @@ mod tests {
         let devices = json["devices"].as_array().unwrap();
         let hdmi = devices.iter().find(|d| d["id"] == "pi2:hdmi").unwrap();
         let bt = devices.iter().find(|d| d["id"] == "pi2:bluetooth").unwrap();
-        assert_eq!(bt["rooms"], serde_json::json!(["Kitchen"]));
+        assert_eq!(
+            bt["rooms"],
+            serde_json::json!([{"room": "Kitchen", "role": "reply"}])
+        );
         assert_eq!(bt["name"], "Fishman amp");
-        assert_eq!(hdmi["rooms"], serde_json::json!(["Lounge"]));
+        assert_eq!(
+            hdmi["rooms"],
+            serde_json::json!([{"room": "Lounge", "role": "any"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_room_can_hold_more_than_one_sink() {
+        let registry = make_registry();
+        seed_audio_node(&registry, "pi2", &["hdmi", "bluetooth"]);
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Reply,
+            &registry,
+        );
+        add_room_sink("Kitchen", "pi2", Some("hdmi"), SinkRole::Media, &registry);
+        let json = get_devices(registry, empty_connections()).await;
+        let devices = json["devices"].as_array().unwrap();
+        let hdmi = devices.iter().find(|d| d["id"] == "pi2:hdmi").unwrap();
+        let bt = devices.iter().find(|d| d["id"] == "pi2:bluetooth").unwrap();
+        assert_eq!(
+            bt["rooms"],
+            serde_json::json!([{"room": "Kitchen", "role": "reply"}])
+        );
+        assert_eq!(
+            hdmi["rooms"],
+            serde_json::json!([{"room": "Kitchen", "role": "media"}])
+        );
     }
 
     #[tokio::test]
@@ -327,7 +459,10 @@ mod tests {
         let json = get_devices(registry, empty_connections()).await;
         let devices = json["devices"].as_array().unwrap();
         let puck = devices.iter().find(|d| d["id"] == "puck").unwrap();
-        assert_eq!(puck["rooms"], serde_json::json!(["Kitchen"]));
+        assert_eq!(
+            puck["rooms"],
+            serde_json::json!([{"room": "Kitchen", "role": "any"}])
+        );
     }
 
     #[tokio::test]
@@ -339,5 +474,68 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0]["id"], "old-pi");
         assert_eq!(devices[0]["transport"], "audio");
+    }
+
+    #[tokio::test]
+    async fn assign_room_endpoint_adds_without_clobbering_a_sibling_backend() {
+        let registry = make_registry();
+        seed_audio_node(&registry, "pi2", &["hdmi", "bluetooth"]);
+        let router = av_router(registry.clone(), empty_connections());
+        for (path, role) in [
+            (
+                "/api/av-devices/pi2:bluetooth/rooms/Kitchen?token=tok",
+                "reply",
+            ),
+            ("/api/av-devices/pi2:hdmi/rooms/Kitchen?token=tok", "media"),
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(format!(r#"{{"role":"{role}"}}"#)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let sinks = crate::audio::resolve_room_sinks("Kitchen", &registry);
+        assert_eq!(
+            sinks.len(),
+            2,
+            "both backends should be assigned: {sinks:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unassign_room_endpoint_removes_only_that_sink() {
+        let registry = make_registry();
+        seed_audio_node(&registry, "pi2", &["hdmi", "bluetooth"]);
+        add_room_sink(
+            "Kitchen",
+            "pi2",
+            Some("bluetooth"),
+            SinkRole::Reply,
+            &registry,
+        );
+        add_room_sink("Kitchen", "pi2", Some("hdmi"), SinkRole::Media, &registry);
+        let router = av_router(registry.clone(), empty_connections());
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/av-devices/pi2:bluetooth/rooms/Kitchen?token=tok")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sinks = crate::audio::resolve_room_sinks("Kitchen", &registry);
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].sink.as_deref(), Some("hdmi"));
     }
 }

@@ -157,9 +157,20 @@ if appliances multiply.
   dropdown, read by the voice pipeline on every reply.
 - Singletons: is one soundbar / one TV an acceptable assumption for the
   UI's first cut, or model multiples from day one?
-- Does "drop into a room" *replace* the room's sink or *append* to a
-  fallback chain? (Backend currently: one sink per room, puck fallback is
-  implicit.) The room-card chip in step 2 should probably show the
-  implicit fallback so the behaviour isn't a surprise.
+- ~~Does "drop into a room" *replace* the room's sink or *append*?~~
+  **Resolved 2026-07-09: append, with roles.** A room can hold several
+  sinks at once (e.g. pi2's Bluetooth output tagged `reply`, pi2's HDMI
+  output tagged `media`, in the same Kitchen). `room-audio-sink:<room>`
+  is now a comma-separated list of `node:sink:role` entries
+  (`crate::audio::RoomSink`/`SinkRole`), with `add_room_sink`/
+  `remove_room_sink` upserting one entry without touching the rest of the
+  room's list. The dashboard row for a sink shows removable chips per
+  assignment plus a room+role picker to add another. `resolve_room_sink_for`
+  picks the first sink tagged for the wanted purpose (`Any`-tagged sinks
+  serve every purpose) — the voice pipeline's spoken-reply routing asks
+  for `Reply` specifically, never whatever the room's `Media` sink
+  happens to be. No fallback-chain UI yet (the puck-fallback-on-
+  undelivered mechanism is unchanged, just now resolves against the
+  Reply-role sink instead of "whatever's there").
 - Naming: "Speakers & displays"? "Audio & video"? "Outputs"? The section
   name shapes the mental model.
