@@ -1,19 +1,17 @@
-use crate::http::state::{PendingInferences, PendingIntents};
+use crate::http::state::{DashboardState, PendingInferences, PendingIntents};
 use crate::inference::dispatch_local_inference;
 use crate::registry::Registry;
 use crate::server::Connections;
 use shared::{
     ChatTurn, IntentRequest, IntentResponse, LightAction, LightCommandRequest, LightStateReport,
-    LightTarget, MeshMessage, ReaperCommandRequest, ReaperScriptRequest, SceneLoadRequest,
-    SensorReport, ToolCallRecord, WIRE_VERSION,
+    LightTarget, MeshMessage, ReaperCommandRequest, ReaperScriptRequest, SensorReport,
+    ToolCallRecord, WIRE_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
 use tracing::{info, warn};
-
-const TOOL_RESPONSE_TIMEOUT_SECS: u64 = 10;
 
 /// Tool schemas offered to the model: the union of schemas for every feature
 /// at least one connected node advertises, deduped by tool name.
@@ -132,6 +130,7 @@ pub async fn handle_intent(
     sensor_states: Vec<SensorReport>,
     reaper_online: bool,
     gateway: Option<crate::cloud::GatewayInvocation>,
+    dashboard: Option<Arc<DashboardState>>,
 ) -> IntentResponse {
     let started = std::time::Instant::now();
     let fail = |msg: String| IntentResponse {
@@ -345,6 +344,7 @@ pub async fn handle_intent(
                     &pending_intents,
                     &device_states,
                     &sensor_states,
+                    dashboard.as_ref(),
                 )
                 .await
             };
@@ -760,57 +760,80 @@ async fn dispatch_light_command_fanout(
     }
 }
 
-/// `scene_load`: forward to the lighting node and await its SceneLoaded reply.
-async fn dispatch_scene_load(
-    request_id: &str,
+/// `scene_load`: recall a named scene through the real scene system
+/// (`crate::http::api::scenes::recall_scene_core`) — the same fan-out,
+/// device availability tracking, and effect-cancel/reactivate handling the
+/// dashboard's own recall button gets. Resolved coordinator-side (registry
+/// lookup by name + direct mesh dispatch); no agent round-trip, so there's
+/// nothing to time out on.
+fn dispatch_scene_load(
     args: &serde_json::Value,
     registry: &Arc<Mutex<Registry>>,
     connections: &Connections,
-    pending_intents: &PendingIntents,
+    device_states: &[LightStateReport],
+    dashboard: Option<&Arc<DashboardState>>,
 ) -> String {
-    let Some((_, lighting_tx)) =
-        connected_feature_node(shared::Feature::Lighting, registry, connections)
-    else {
-        return "no lighting node connected".into();
-    };
     let scene_name = args
         .get("scene")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let transition_ms = args
+        .unwrap_or("")
+        .trim();
+    if scene_name.is_empty() {
+        return "scene_load requires a non-empty 'scene' name".into();
+    }
+    let room_filter = args
+        .get("room")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let transition_secs = args
         .get("transition_ms")
         .and_then(|v| v.as_u64())
-        .unwrap_or(1000) as u32;
+        .map(|ms| ms as f32 / 1000.0);
 
-    let (otx, orx) = oneshot::channel();
-    pending_intents
-        .lock()
-        .unwrap()
-        .insert(request_id.to_string(), otx);
-
-    let req = SceneLoadRequest {
-        request_id: request_id.to_string(),
-        scene_name,
-        transition_ms,
-    };
-    if lighting_tx.send(MeshMessage::SceneLoad(req)).await.is_err() {
-        pending_intents.lock().unwrap().remove(request_id);
-        return "failed to send SceneLoad to lighting node".into();
+    let reg = registry.lock().unwrap();
+    let room_id_filter = room_filter.and_then(|room_name| {
+        reg.list_rooms()
+            .into_iter()
+            .find(|r| r.name.eq_ignore_ascii_case(room_name))
+            .map(|r| r.id)
+    });
+    if let Some(room) = room_filter
+        && room_id_filter.is_none()
+    {
+        return format!("no room named '{room}'");
     }
+    let scene = reg.list_scenes().into_iter().find(|s| {
+        s.name.eq_ignore_ascii_case(scene_name)
+            && room_id_filter
+                .as_deref()
+                .is_none_or(|rid| s.room_id.as_deref() == Some(rid))
+    });
+    drop(reg);
 
-    match timeout(Duration::from_secs(TOOL_RESPONSE_TIMEOUT_SECS), orx).await {
-        Ok(Ok(MeshMessage::SceneLoaded(report))) => {
-            if report.success {
-                format!("scene '{}' loaded", report.scene_name)
-            } else {
-                report.error.unwrap_or_else(|| "scene load failed".into())
-            }
-        }
-        _ => {
-            pending_intents.lock().unwrap().remove(request_id);
-            format!("scene load timed out after {TOOL_RESPONSE_TIMEOUT_SECS}s")
-        }
+    let Some(scene) = scene else {
+        return match room_filter {
+            Some(room) => format!("no scene named '{scene_name}' in {room}"),
+            None => format!("no scene named '{scene_name}'"),
+        };
+    };
+
+    let any_unavailable = crate::http::api::scenes::recall_scene_core(
+        &scene,
+        None,
+        transition_secs,
+        registry,
+        connections,
+        device_states,
+        dashboard,
+    );
+    if any_unavailable {
+        format!(
+            "scene '{}' recalled, but some devices were offline",
+            scene.name
+        )
+    } else {
+        format!("scene '{}' recalled", scene.name)
     }
 }
 
@@ -887,15 +910,14 @@ async fn dispatch_tool(
     pending_intents: &PendingIntents,
     device_states: &[LightStateReport],
     sensor_states: &[SensorReport],
+    dashboard: Option<&Arc<DashboardState>>,
 ) -> String {
     match tool_name {
         "light_command" => {
             dispatch_light_command(request_id, args, registry, connections, device_states).await
         }
         "get_climate" => dispatch_get_climate(&args, registry, sensor_states),
-        "scene_load" => {
-            dispatch_scene_load(request_id, &args, registry, connections, pending_intents).await
-        }
+        "scene_load" => dispatch_scene_load(&args, registry, connections, device_states, dashboard),
         "play_announcement" => {
             let text = args["text"].as_str().unwrap_or("").trim().to_string();
             if text.is_empty() {
@@ -2700,6 +2722,7 @@ mod tests {
             &pending_intents,
             &[],
             &[],
+            None,
         )
         .await;
         assert!(result.contains("requires a key"));
@@ -2719,6 +2742,7 @@ mod tests {
             &pending_intents,
             &[],
             &[],
+            None,
         )
         .await;
         assert!(result.contains("no TV configured"));
@@ -2738,6 +2762,7 @@ mod tests {
             &pending_intents,
             &[],
             &[],
+            None,
         )
         .await;
         assert!(result.contains("SmartThings"));
@@ -2757,6 +2782,7 @@ mod tests {
             &pending_intents,
             &[],
             &[],
+            None,
         )
         .await;
         assert!(result.contains("requires a numeric value"));
@@ -2776,6 +2802,7 @@ mod tests {
             &pending_intents,
             &[],
             &[],
+            None,
         )
         .await;
         assert!(result.contains("no soundbar configured"));
@@ -2795,9 +2822,176 @@ mod tests {
             &pending_intents,
             &[],
             &[],
+            None,
         )
         .await;
         assert!(result.contains("requires non-empty text"));
+    }
+
+    #[test]
+    fn dispatch_scene_load_recalls_a_scene_by_name() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let room_id = registry.lock().unwrap().create_room("Bedroom").id;
+        registry.lock().unwrap().save_scene(
+            "Cozy",
+            Some(&room_id),
+            vec![crate::registry::DeviceSnapshot {
+                device_id: "bulb1".into(),
+                node_id: "pi1".into(),
+                on: true,
+                brightness: Some(120),
+                color_xy: None,
+                color_temp: None,
+            }],
+            None,
+            None,
+        );
+        let device_states = vec![LightStateReport {
+            node_id: "pi1".into(),
+            device_id: "bulb1".into(),
+            on: false,
+            brightness: None,
+            color_xy: None,
+            color_temp: None,
+            online: true,
+        }];
+
+        let result = dispatch_scene_load(
+            &serde_json::json!({"scene": "cozy"}),
+            &registry,
+            &connections,
+            &device_states,
+            None,
+        );
+        assert_eq!(result, "scene 'Cozy' recalled");
+    }
+
+    #[test]
+    fn dispatch_scene_load_reports_unknown_scene() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_scene_load(
+            &serde_json::json!({"scene": "nonexistent"}),
+            &registry,
+            &connections,
+            &[],
+            None,
+        );
+        assert_eq!(result, "no scene named 'nonexistent'");
+    }
+
+    #[test]
+    fn dispatch_scene_load_requires_a_scene_name() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let result =
+            dispatch_scene_load(&serde_json::json!({}), &registry, &connections, &[], None);
+        assert!(result.contains("non-empty 'scene' name"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_scene_load_filters_by_room_when_names_collide() {
+        // Two rooms each have a scene named "Cozy" — the room argument must
+        // pick the right one, not just the first match.
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let mut rx = {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            connections.lock().unwrap().insert("pi1".into(), tx);
+            rx
+        };
+        let kitchen_id = registry.lock().unwrap().create_room("Kitchen").id;
+        let bedroom_id = registry.lock().unwrap().create_room("Bedroom").id;
+        registry.lock().unwrap().save_scene(
+            "Cozy",
+            Some(&kitchen_id),
+            vec![crate::registry::DeviceSnapshot {
+                device_id: "kitchen_bulb".into(),
+                node_id: "pi1".into(),
+                on: true,
+                brightness: Some(80),
+                color_xy: None,
+                color_temp: None,
+            }],
+            None,
+            None,
+        );
+        registry.lock().unwrap().save_scene(
+            "Cozy",
+            Some(&bedroom_id),
+            vec![crate::registry::DeviceSnapshot {
+                device_id: "bedroom_bulb".into(),
+                node_id: "pi1".into(),
+                on: true,
+                brightness: Some(40),
+                color_xy: None,
+                color_temp: None,
+            }],
+            None,
+            None,
+        );
+        let device_states = vec![
+            LightStateReport {
+                node_id: "pi1".into(),
+                device_id: "kitchen_bulb".into(),
+                on: false,
+                brightness: None,
+                color_xy: None,
+                color_temp: None,
+                online: true,
+            },
+            LightStateReport {
+                node_id: "pi1".into(),
+                device_id: "bedroom_bulb".into(),
+                on: false,
+                brightness: None,
+                color_xy: None,
+                color_temp: None,
+                online: true,
+            },
+        ];
+
+        let result = dispatch_scene_load(
+            &serde_json::json!({"scene": "cozy", "room": "Bedroom"}),
+            &registry,
+            &connections,
+            &device_states,
+            None,
+        );
+        assert_eq!(result, "scene 'Cozy' recalled");
+
+        // The actual commands sent must target the bedroom's bulb, not the
+        // kitchen's — proof the right scene (not just the first name match)
+        // was the one recalled.
+        let msgs: Vec<MeshMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(!msgs.is_empty(), "expected at least one light command");
+        for m in &msgs {
+            if let MeshMessage::LightCommand(req) = m {
+                assert!(
+                    matches!(&req.target, LightTarget::Device(d) if d == "bedroom_bulb"),
+                    "every command must target bedroom_bulb, got {:?}",
+                    req.target
+                );
+            }
+        }
+        let _ = kitchen_id; // only used to seed the decoy scene above
+    }
+
+    #[test]
+    fn dispatch_scene_load_reports_unknown_room() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_scene_load(
+            &serde_json::json!({"scene": "cozy", "room": "Nonexistent"}),
+            &registry,
+            &connections,
+            &[],
+            None,
+        );
+        assert_eq!(result, "no room named 'Nonexistent'");
     }
 
     #[tokio::test]
@@ -2814,6 +3008,7 @@ mod tests {
             &pending_intents,
             &[],
             &[],
+            None,
         )
         .await;
         assert!(result.contains("announcement failed"));

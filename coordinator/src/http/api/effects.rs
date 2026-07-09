@@ -102,7 +102,12 @@ fn merge_with_defaults(
     serde_json::Value::Object(merged)
 }
 
-fn persist_active_effect(
+/// Reactivate `effect_id` with `params` for `room_id` and broadcast the
+/// update. Shared by `set_room_effect` (a validated dashboard request) and
+/// scene recall (`scenes.rs`) reactivating a scene's captured effect —
+/// already-known-good params from when the scene was saved, so recall
+/// doesn't re-validate against the schema.
+pub(crate) fn persist_active_effect(
     registry: &Arc<Mutex<Registry>>,
     state: &Arc<DashboardState>,
     room_id: &str,
@@ -178,6 +183,30 @@ pub(crate) async fn patch_effect_override(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Clear the active effect for a room and broadcast the update. Shared by
+/// `clear_room_effect` and scene recall (`scenes.rs`) — cancelling a
+/// running effect before applying a scene's snapshot so the effect can't
+/// fight the recalled state on its next tick.
+pub(crate) fn clear_active_effect(
+    registry: &Arc<Mutex<Registry>>,
+    state: &Arc<DashboardState>,
+    room_id: &str,
+) -> axum::response::Response {
+    {
+        let mut reg = registry.lock().unwrap();
+        if !reg.room_exists(room_id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        if let Err(e) = reg.disable_active_effect(room_id) {
+            tracing::warn!(error = %e, "disable_active_effect failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+    state.push_effect_update(room_id.to_string(), None, serde_json::json!({}), vec![]);
+    state.solar_sweep_notify.notify_one();
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// DELETE /api/rooms/{id}/effect — clear the active effect.
 pub async fn clear_room_effect(
     Path(room_id): Path<String>,
@@ -185,19 +214,7 @@ pub async fn clear_room_effect(
     _: Authed,
     State(state): State<Arc<DashboardState>>,
 ) -> impl IntoResponse {
-    {
-        let mut reg = registry.lock().unwrap();
-        if !reg.room_exists(&room_id) {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        if let Err(e) = reg.disable_active_effect(&room_id) {
-            tracing::warn!(error = %e, "disable_active_effect failed");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    }
-    state.push_effect_update(room_id.clone(), None, serde_json::json!({}), vec![]);
-    state.solar_sweep_notify.notify_one();
-    StatusCode::NO_CONTENT.into_response()
+    clear_active_effect(&registry, &state, &room_id)
 }
 
 #[cfg(test)]

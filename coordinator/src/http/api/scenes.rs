@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::http::state::{DashboardState, SceneInfo};
 use crate::registry::{DeviceSnapshot, Registry};
+use crate::server::Connections;
 
 use super::gen_request_id;
 use super::lights::{brightness_action, color_temp_action, color_xy_action};
@@ -206,42 +207,110 @@ pub struct RecallBody {
     device_id: Option<String>,
 }
 
-pub async fn recall_scene(
-    Path(scene_id): Path<String>,
-    Extension(registry): Extension<Arc<Mutex<Registry>>>,
-    _: Authed,
-    State(state): State<Arc<DashboardState>>,
-    req: axum::extract::Request,
-) -> impl IntoResponse {
-    let body: RecallBody = {
-        let bytes = axum::body::to_bytes(req.into_body(), 4096)
-            .await
-            .unwrap_or_default();
-        if bytes.is_empty() {
-            RecallBody::default()
-        } else {
-            serde_json::from_slice::<RecallBody>(&bytes).unwrap_or_default()
+/// Cancel or reactivate the room's active effect to match `scene`, purely in
+/// the registry — the part that must always happen regardless of whether a
+/// `DashboardState` is attached to broadcast it. A scene with no captured
+/// effect just cancels whatever's currently running; one saved while an
+/// effect was active reactivates that effect (the scene's own `states` then
+/// only re-applies the handful of devices that were manually overridden out
+/// of it at save time — see `save_scene`).
+fn apply_scene_effect_state(
+    registry: &Arc<Mutex<Registry>>,
+    room_id: &str,
+    scene: &crate::registry::SceneRecord,
+) {
+    let mut reg = registry.lock().unwrap();
+    match (&scene.effect_id, &scene.effect_params_json) {
+        (Some(effect_id), Some(params_json)) => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            if reg
+                .set_active_effect(room_id, effect_id, params_json, None, now_ms)
+                .is_ok()
+            {
+                for snap in &scene.states {
+                    let _ = reg.set_effect_override(room_id, &snap.device_id, true);
+                }
+            }
         }
-    };
-    let transition_secs = body.transition_secs;
-    let scene = registry.lock().unwrap().get_scene(&scene_id);
-    let Some(scene) = scene else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+        _ => {
+            let _ = reg.disable_active_effect(room_id);
+        }
+    }
+}
+
+/// Broadcast the room's current effect state (as just left by
+/// `apply_scene_effect_state`) to the dashboard.
+fn broadcast_scene_effect_state(
+    registry: &Arc<Mutex<Registry>>,
+    dashboard: &Arc<DashboardState>,
+    room_id: &str,
+) {
+    match registry.lock().unwrap().get_active_effect(room_id) {
+        Some(a) => {
+            let overrides: Vec<String> =
+                serde_json::from_str(&a.overrides_json).unwrap_or_default();
+            let params: serde_json::Value =
+                serde_json::from_str(&a.params_json).unwrap_or(serde_json::json!({}));
+            dashboard.push_effect_update(room_id.to_string(), Some(a.effect_id), params, overrides);
+        }
+        None => {
+            dashboard.push_effect_update(room_id.to_string(), None, serde_json::json!({}), vec![])
+        }
+    }
+    dashboard.solar_sweep_notify.notify_one();
+}
+
+/// Shared scene-recall logic — HTTP's `recall_scene` and the `scene_load`
+/// intent tool (`intent.rs`) both call this, so a voice/chat-triggered
+/// recall gets the same effect-cancel/reactivate handling the dashboard's
+/// click path already had client-side (`scenes.js`'s `recallScene`)
+/// instead of that safety being a JS-only convention every future caller
+/// has to reimplement correctly. `device_states` supplies the current
+/// device→node routing (the same source `DashboardState::get_node_for_device`
+/// itself reads, just passed in — the `scene_load` intent tool already has
+/// this snapshot without needing a live `DashboardState` reference for it).
+/// Returns whether any device was unreachable.
+pub(crate) fn recall_scene_core(
+    scene: &crate::registry::SceneRecord,
+    device_id_filter: Option<&str>,
+    transition_secs: Option<f32>,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    device_states: &[LightStateReport],
+    dashboard: Option<&Arc<DashboardState>>,
+) -> bool {
+    // A single-device resume (pausing/resuming one paused light out of an
+    // active scene) is a narrower operation than a full scene switch and
+    // leaves the room's effect alone — matches the existing dashboard
+    // behavior, where only whole-room recall cancels/reactivates effects.
+    if device_id_filter.is_none()
+        && let Some(room_id) = &scene.room_id
+    {
+        apply_scene_effect_state(registry, room_id, scene);
+        if let Some(dash) = dashboard {
+            broadcast_scene_effect_state(registry, dash, room_id);
+        }
+    }
+
+    let node_for_device: std::collections::HashMap<&str, &str> = device_states
+        .iter()
+        .map(|r| (r.device_id.as_str(), r.node_id.as_str()))
+        .collect();
+
     let mut any_unavailable = false;
     for snap in &scene.states {
         // Single-device recall (resume one paused light) skips all other devices.
-        if let Some(only) = &body.device_id
-            && &snap.device_id != only
+        if let Some(only) = device_id_filter
+            && snap.device_id != only
         {
             continue;
         }
-        let node_id = match state.get_node_for_device(&snap.device_id) {
-            Some(n) => n,
-            None => {
-                any_unavailable = true;
-                continue;
-            }
+        let Some(&node_id) = node_for_device.get(snap.device_id.as_str()) else {
+            any_unavailable = true;
+            continue;
         };
         // Actions come from the lights-domain constructors so the transition
         // dispatch is shared with the HTTP command path, not re-derived here.
@@ -252,7 +321,13 @@ pub async fn recall_scene(
                     target: LightTarget::Device(snap.device_id.clone()),
                     command,
                 };
-                if !state.send_to_node(&node_id, MeshMessage::LightCommand(cmd)) {
+                let sent = connections
+                    .lock()
+                    .unwrap()
+                    .get(node_id)
+                    .cloned()
+                    .is_some_and(|tx| tx.try_send(MeshMessage::LightCommand(cmd)).is_ok());
+                if !sent {
                     any_unavailable = true;
                 }
             };
@@ -272,16 +347,52 @@ pub async fn recall_scene(
         }
 
         // Update the dashboard snapshot so the UI sees the state from the scene.
-        state.push_lighting_update(LightStateReport {
-            node_id: node_id.clone(),
-            device_id: snap.device_id.clone(),
-            on: snap.on,
-            brightness: snap.brightness,
-            color_xy: snap.color_xy,
-            color_temp: snap.color_temp,
-            online: true,
-        });
+        if let Some(dash) = dashboard {
+            dash.push_lighting_update(LightStateReport {
+                node_id: node_id.to_string(),
+                device_id: snap.device_id.clone(),
+                on: snap.on,
+                brightness: snap.brightness,
+                color_xy: snap.color_xy,
+                color_temp: snap.color_temp,
+                online: true,
+            });
+        }
     }
+    any_unavailable
+}
+
+pub async fn recall_scene(
+    Path(scene_id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    req: axum::extract::Request,
+) -> impl IntoResponse {
+    let body: RecallBody = {
+        let bytes = axum::body::to_bytes(req.into_body(), 4096)
+            .await
+            .unwrap_or_default();
+        if bytes.is_empty() {
+            RecallBody::default()
+        } else {
+            serde_json::from_slice::<RecallBody>(&bytes).unwrap_or_default()
+        }
+    };
+    let scene = registry.lock().unwrap().get_scene(&scene_id);
+    let Some(scene) = scene else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let device_states = state.get_light_snapshot();
+    let any_unavailable = recall_scene_core(
+        &scene,
+        body.device_id.as_deref(),
+        body.transition_secs,
+        &registry,
+        &state.connections,
+        &device_states,
+        Some(&state),
+    );
     if any_unavailable {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
     } else {
@@ -731,6 +842,156 @@ mod tests {
         // Expect ColorTemp, Brightness, On — 3 commands
         let msgs: Vec<MeshMessage> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(msgs.len(), 3, "should fan out 3 commands: {msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn recall_scene_cancels_a_running_effect_with_no_captured_effect() {
+        // A room-scoped scene with no effect_id recalled while an effect is
+        // running must stop that effect server-side — previously this was
+        // only ever done by scenes.js's client-side recallScene(), so a
+        // caller that skips the JS (voice/chat's scene_load tool, the CLI)
+        // would leave the effect running to fight the recalled state on its
+        // next tick.
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(16);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        registry
+            .lock()
+            .unwrap()
+            .set_active_effect(&room_id, "aurora", r#"{"speed":1}"#, None, 0)
+            .unwrap();
+        let scene_id = registry
+            .lock()
+            .unwrap()
+            .save_scene(
+                "Night",
+                Some(&room_id),
+                vec![crate::registry::DeviceSnapshot {
+                    device_id: "bulb1".into(),
+                    node_id: "pi1".into(),
+                    on: false,
+                    brightness: None,
+                    color_xy: None,
+                    color_temp: None,
+                }],
+                None,
+                None,
+            )
+            .id;
+        // The scene was saved with no active effect, so it carries none —
+        // recalling it must cancel the effect still running in the room.
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_active_effect(&room_id)
+                .is_some()
+        );
+
+        let mut evt_rx = state.tx.subscribe();
+        let status = send(
+            scenes_router(state, Arc::clone(&registry)),
+            "POST",
+            &format!("/api/scenes/{scene_id}/recall?token="),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .get_active_effect(&room_id)
+                .is_none(),
+            "effect should be disabled by recall"
+        );
+        let events: Vec<_> = std::iter::from_fn(|| evt_rx.try_recv().ok()).collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                crate::http::state::DashboardEvent::EffectUpdate {
+                    effect_id: None,
+                    ..
+                }
+            )),
+            "expected an EffectUpdate clearing the effect: {events:?}"
+        );
+        let _ = rx.try_recv(); // drain the light command, not under test here
+    }
+
+    #[tokio::test]
+    async fn recall_scene_reactivates_its_captured_effect() {
+        // A scene saved while an effect was running carries that effect —
+        // recalling it must reactivate the effect (not just replay the
+        // handful of manually-overridden bulbs it also stored).
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(16);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "bulb1", "pi1");
+
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Bedroom");
+        let scene_id = registry
+            .lock()
+            .unwrap()
+            .save_scene(
+                "Aurora night",
+                Some(&room_id),
+                vec![crate::registry::DeviceSnapshot {
+                    device_id: "bulb1".into(),
+                    node_id: "pi1".into(),
+                    on: true,
+                    brightness: Some(120),
+                    color_xy: None,
+                    color_temp: None,
+                }],
+                Some(("aurora", r#"{"speed":2}"#)),
+                None,
+            )
+            .id;
+
+        let mut evt_rx = state.tx.subscribe();
+        let status = send(
+            scenes_router(state, Arc::clone(&registry)),
+            "POST",
+            &format!("/api/scenes/{scene_id}/recall?token="),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let active = registry.lock().unwrap().get_active_effect(&room_id);
+        assert_eq!(
+            active.as_ref().map(|a| a.effect_id.as_str()),
+            Some("aurora")
+        );
+        assert_eq!(
+            active.as_ref().map(|a| a.params_json.as_str()),
+            Some(r#"{"speed":2}"#)
+        );
+        let overrides: Vec<String> =
+            serde_json::from_str(&active.unwrap().overrides_json).unwrap_or_default();
+        assert_eq!(
+            overrides,
+            vec!["bulb1".to_string()],
+            "the scene's own snapshot devices must be excluded from the reactivated effect"
+        );
+        let events: Vec<_> = std::iter::from_fn(|| evt_rx.try_recv().ok()).collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                crate::http::state::DashboardEvent::EffectUpdate { effect_id: Some(id), .. } if id == "aurora"
+            )),
+            "expected an EffectUpdate reactivating aurora: {events:?}"
+        );
+        let _ = rx.try_recv(); // drain the light command, not under test here
     }
 
     #[tokio::test]

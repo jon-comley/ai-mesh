@@ -59,9 +59,9 @@ fn connected_feature_node(
 /// Ask whichever connected node is running Piper to synthesize `text`,
 /// and return the fetchable clip URL it hands back. Mirrors the
 /// IntentRequest/IntentResponse request/reply shape via the same
-/// `pending_intents` map `server.rs` already uses for SceneLoaded and
-/// IntentResponse — `TtsResponse` is just another reply type through the
-/// same pending-request-id mechanism.
+/// `pending_intents` map `server.rs` already uses for IntentResponse —
+/// `TtsResponse` is just another reply type through the same
+/// pending-request-id mechanism.
 pub async fn request_tts(
     text: &str,
     registry: &Arc<Mutex<Registry>>,

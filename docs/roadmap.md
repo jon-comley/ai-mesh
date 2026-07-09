@@ -1478,6 +1478,79 @@ discussion, from a first look at the code:
 
 ---
 
+## Backlog — Third-party review sweep (2026-07-09)
+
+Several AI-generated reviews (Copilot, Bing, Gemini) were run against the repo
+in one session and checked claim-by-claim against the actual code — most
+turned out to already be solved, based on a stale/earlier snapshot, or
+architecturally misinformed (see the audit tables in that session's
+conversation for the full per-claim verdicts). The items below are the
+genuine, still-open findings worth keeping — not urgent enough to act on
+immediately, but real. Confirmed-real bugs from the same sweep were fixed
+same-day: the audio playback ack-loop (`AudioPlayResult`), `free_port()`
+process-ownership check, the dead `scene_load` intent tool now wired to the
+real scene system with server-side effect-cancel/reactivate, and the
+Frame TV art-display fullscreen/User-Agent fixes.
+
+- **Agent reconnect has no backoff** — fixed 5s retry on every disconnect
+  (`agent/src/main.rs`), flagged repeatedly across reviews. Real, but
+  changes reconnect/failure semantics on a live mesh — wants deliberate
+  design + testing, not a drive-by fix.
+- **No cross-field effect-parameter validation** — JSON-Schema validation
+  is already centralized and works (`coordinator/src/http/api/effects.rs`),
+  but nothing validates relationships between fields (e.g. Snake's `length`
+  vs. the room's actual bulb count). Runtime already clamps gracefully
+  (no crash), so this is a UX gap, not a reliability one.
+- **`EffectRunner` is one task, ticking rooms sequentially** — a slow
+  effect's tick can delay other rooms' ticks in the same pass. No
+  per-room/per-effect task concurrency exists. Real, but a genuine
+  architecture change to a system driving physical lights — needs testing
+  against real hardware before changing.
+- **Cadence-drift EWMA is observability-only by design** — logs a warning,
+  never corrects. Confirmed intentional (module doc says so explicitly),
+  not an oversight — revisit only if drift becomes an actual nuisance.
+- **Registry is 100% raw `rusqlite` SQL, no typed query builder** — ~30+
+  call sites across 5 files. Real, but a large mechanical migration
+  (Diesel/sqlx) that needs a deliberate decision, not urgent.
+- **`Connections` map is `Mutex<HashMap>`, not `DashMap`** — true, but no
+  evidence of actual lock contention at this mesh's scale (a handful of
+  nodes). Low value; skip unless real contention shows up.
+- **mDNS discovery falls back to `127.0.0.1:9000` silently** when
+  `COORDINATOR_IP` is unset and discovery times out. Risky for a
+  multi-node cluster in theory, but pi1's own co-located agent currently
+  relies on exactly this fallback — changing it needs care so it doesn't
+  break that setup.
+- **NSSM `STOP_PENDING` on Windows nodes** — documented manual
+  `taskkill` workaround only, no watchdog/auto-recovery. Can't build or
+  test this without hands-on access to a Windows box.
+- **Cloud gateway has no per-provider latency/success-rate metrics** in
+  the dashboard — the underlying error handling/fallback-to-local logic
+  itself is already solid and well-tested (`coordinator/src/cloud.rs`);
+  this would just be a nice-to-have observability panel.
+- **Coordinator state file has no version field** — low urgency: it's
+  parsed key-by-key (`coordinator/src/state.rs`), so unknown/missing keys
+  are already forward/backward compatible without one. Would only help
+  external tooling detect drift.
+- **No health metrics**: queue depth per room, per-command-type latency,
+  reconnect attempts per node — none of this instrumentation exists
+  today. New work, not a bug fix; worth doing only if a real metrics
+  dashboard is wanted.
+- **Traceability gap**: light commands sent via the dashboard's direct
+  click path don't carry a `request_id` through to a device-side ack,
+  unlike the TTS/audio-play/scene-recall/intent paths, which all thread
+  one through the `pending_intents` mechanism.
+- **Windows Fast Startup cold-boot issue** — still open, separate from
+  the fTPM/Pluton crash-storm fix (which resolved a different symptom).
+  See `handover.md` item 29.
+- **Bluetooth pairing's `bluetoothctl` output-string matching** — the
+  exact `pair`/`trust`/`connect` success/failure strings are BlueZ
+  version-dependent and were written without hardware to verify against
+  (flagged explicitly in `capabilities/audio/src/bluetooth.rs`'s own doc
+  comment). Confirm live against the actual Fishman amp pairing before
+  fully trusting it.
+
+---
+
 ## Phase 12 — Distributed Execution
 
 - Multi-node inference
