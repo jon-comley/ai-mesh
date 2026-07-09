@@ -144,6 +144,25 @@ pub enum DashboardEvent {
         action: String,
         ts_ms: u64,
     },
+    /// One device seen (or RSSI-updated) during a live Bluetooth scan —
+    /// transient, drives the dashboard's live scan list. Not replayed on
+    /// connect: a scan is tied to the dashboard session that started it.
+    BluetoothDeviceFound {
+        node_id: String,
+        mac: String,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rssi: Option<i32>,
+    },
+    /// The outcome of a dashboard-initiated pair request.
+    BluetoothPairResult {
+        node_id: String,
+        mac: String,
+        name: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// One completed voice-assistant exchange (spoken transcript in, intent
     /// response out). Transient, broadcast-only — the chat window renders it
     /// when its "show voice commands" preference is on; a future TTS/speaker
@@ -1157,6 +1176,35 @@ impl DashboardState {
             device_id,
             action,
             ts_ms,
+        });
+    }
+
+    /// Broadcast one device seen (or RSSI-updated) during a live Bluetooth
+    /// scan. Transient like `push_switch_action` — no replay buffer, a
+    /// scan is tied to whichever dashboard session started it.
+    pub fn push_bluetooth_device_found(&self, info: shared::BluetoothDeviceInfo) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let _ = self.tx.send(DashboardEvent::BluetoothDeviceFound {
+            node_id: info.node_id,
+            mac: info.mac,
+            name: info.name,
+            rssi: info.rssi,
+        });
+    }
+
+    /// Broadcast the outcome of a dashboard-initiated Bluetooth pair.
+    pub fn push_bluetooth_pair_result(&self, result: shared::BluetoothPairResult) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let _ = self.tx.send(DashboardEvent::BluetoothPairResult {
+            node_id: result.node_id,
+            mac: result.mac,
+            name: result.name,
+            success: result.success,
+            error: result.error,
         });
     }
 

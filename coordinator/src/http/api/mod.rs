@@ -14,6 +14,7 @@
 
 pub mod art;
 pub mod av;
+pub mod bluetooth;
 pub mod chat;
 pub mod effects;
 pub mod gateway;

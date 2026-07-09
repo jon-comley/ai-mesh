@@ -23,6 +23,8 @@
 //! hardware confirms what's actually installed. The built-in defaults
 //! below are reasonable starting guesses, not confirmed-working commands.
 
+mod bluetooth;
+
 use async_trait::async_trait;
 use capability_core::Capability;
 use shared::MeshMessage;
@@ -76,13 +78,44 @@ fn play_cmd_template_for(backend: &str) -> Option<String> {
             let device = std::env::var("AUDIO_ALSA_DEVICE").unwrap_or_else(|_| "default".into());
             Some(format!("aplay -D {device} {{file}}"))
         }
-        // paplay targets PulseAudio/PipeWire's current default sink — for
-        // a paired Bluetooth speaker to be that default, it must already
-        // be trusted+connected+set-as-default via a one-time bluetoothctl
-        // setup this capability does NOT perform (see assumptions).
-        "bluetooth" => Some("paplay {file}".into()),
+        // Target the specific sink resolved by the dashboard's "Scan for
+        // Bluetooth" pairing flow (see `bluetooth.rs`), not PipeWire's
+        // *default* sink — a node can be paired to a device that never
+        // became the OS default, or the default can drift after a reboot
+        // or a second device gets paired system-wide. Falls back to
+        // "paplay {file}" against the default sink only if nothing has
+        // been paired through the dashboard yet.
+        "bluetooth" => match paired_bluetooth_sink() {
+            Some(sink) => Some(format!("paplay --device={sink} {{file}}")),
+            None => Some("paplay {file}".into()),
+        },
         _ => None,
     }
+}
+
+fn bluetooth_sink_state_path() -> std::path::PathBuf {
+    download_dir().join("bluetooth_sink.txt")
+}
+
+/// Persists the PipeWire/Pulse sink name resolved by a successful
+/// `bluetooth::pair()` so subsequent playback targets it explicitly
+/// instead of relying on the OS default sink. Node-local only — survives
+/// this node's own restarts, not migrated between nodes.
+fn persist_bluetooth_sink(sink: &str) {
+    let path = bluetooth_sink_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, sink) {
+        warn!(error = %e, "audio: failed to persist paired bluetooth sink");
+    }
+}
+
+fn paired_bluetooth_sink() -> Option<String> {
+    std::fs::read_to_string(bluetooth_sink_state_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Which backend a request should actually use: the named `sink`, or this
@@ -129,7 +162,17 @@ impl Capability for AudioCapability {
     }
 
     fn handles(&self, msg: &MeshMessage) -> bool {
-        matches!(msg, MeshMessage::AudioPlay(_))
+        match msg {
+            MeshMessage::AudioPlay(_) => true,
+            // Only a node actually configured for bluetooth playback should
+            // touch bluetoothctl — otherwise an HDMI-only node would spawn
+            // it and start driving whatever Bluetooth radio it happens to
+            // have, which nobody asked for.
+            MeshMessage::BluetoothScan(_) | MeshMessage::BluetoothPair(_) => {
+                configured_backends().iter().any(|b| b == "bluetooth")
+            }
+            _ => false,
+        }
     }
 
     async fn start(&self, _tx: Sender<MeshMessage>) -> Result<(), String> {
@@ -142,23 +185,69 @@ impl Capability for AudioCapability {
     }
 
     async fn handle(&self, msg: MeshMessage, tx: Sender<MeshMessage>) {
-        let MeshMessage::AudioPlay(req) = msg else {
-            return;
-        };
-        let result = play_url(&req.url, req.sink.as_deref()).await;
-        let error = if let Err(e) = &result {
-            warn!(request_id = %req.request_id, error = %e, "audio: playback failed");
-            Some(e.clone())
-        } else {
-            None
-        };
-        let _ = tx
-            .send(MeshMessage::AudioPlayResult(shared::AudioPlayResult {
-                request_id: req.request_id,
-                success: result.is_ok(),
-                error,
-            }))
-            .await;
+        match msg {
+            MeshMessage::AudioPlay(req) => {
+                let result = play_url(&req.url, req.sink.as_deref()).await;
+                let error = if let Err(e) = &result {
+                    warn!(request_id = %req.request_id, error = %e, "audio: playback failed");
+                    Some(e.clone())
+                } else {
+                    None
+                };
+                let _ = tx
+                    .send(MeshMessage::AudioPlayResult(shared::AudioPlayResult {
+                        request_id: req.request_id,
+                        success: result.is_ok(),
+                        error,
+                    }))
+                    .await;
+            }
+            MeshMessage::BluetoothScan(req) => {
+                let node_id = self.node_id.clone();
+                let result = bluetooth::scan(req.seconds, |dev| {
+                    let _ = tx.try_send(MeshMessage::BluetoothDeviceFound(
+                        shared::BluetoothDeviceInfo {
+                            node_id: node_id.clone(),
+                            mac: dev.mac,
+                            name: dev.name,
+                            rssi: dev.rssi,
+                        },
+                    ));
+                })
+                .await;
+                if let Err(e) = result {
+                    warn!(request_id = %req.request_id, error = %e, "bluetooth: scan failed");
+                }
+            }
+            MeshMessage::BluetoothPair(req) => {
+                let outcome = bluetooth::pair(&req.mac).await;
+                let (success, name, error, sink_name) = match outcome {
+                    Ok(o) => {
+                        if let Some(sink) = &o.sink_name {
+                            persist_bluetooth_sink(sink);
+                        }
+                        (true, o.name, None, o.sink_name)
+                    }
+                    Err(e) => {
+                        warn!(mac = %req.mac, error = %e, "bluetooth: pairing failed");
+                        (false, req.mac.clone(), Some(e), None)
+                    }
+                };
+                let _ = tx
+                    .send(MeshMessage::BluetoothPairResult(
+                        shared::BluetoothPairResult {
+                            node_id: self.node_id.clone(),
+                            mac: req.mac,
+                            name,
+                            success,
+                            error,
+                            sink_name,
+                        },
+                    ))
+                    .await;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -224,11 +313,28 @@ mod tests {
             std::env::remove_var("AUDIO_PLAY_CMD_HDMI");
             std::env::remove_var("AUDIO_PLAY_CMD_BLUETOOTH");
             std::env::remove_var("AUDIO_ALSA_DEVICE");
+            std::env::remove_var("AUDIO_CACHE_DIR");
         }
     }
 
+    /// Points `AUDIO_CACHE_DIR` (and so `bluetooth_sink_state_path()`) at a
+    /// fresh tempdir so sink-persistence tests can't see a real paired
+    /// device's leftover state file, or leak state into other tests.
+    fn isolated_cache_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: caller holds ENV_LOCK for the duration of the test.
+        unsafe {
+            std::env::set_var("AUDIO_CACHE_DIR", dir.path());
+        }
+        dir
+    }
+
     #[test]
-    fn capability_only_handles_audio_play() {
+    fn capability_handles_audio_play_and_bluetooth_messages_when_bluetooth_configured() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        // configured_backends() defaults to "bluetooth" when AUDIO_BACKENDS
+        // is unset, which handles() now consults.
         let cap = AudioCapability::new("test-node");
         assert_eq!(cap.name(), "audio");
         assert!(!cap.handles(&MeshMessage::Acknowledge));
@@ -239,6 +345,43 @@ mod tests {
                 sink: None,
             }))
         );
+        assert!(
+            cap.handles(&MeshMessage::BluetoothScan(shared::BluetoothScanRequest {
+                request_id: "r2".into(),
+                seconds: 30,
+            }))
+        );
+        assert!(
+            cap.handles(&MeshMessage::BluetoothPair(shared::BluetoothPairRequest {
+                request_id: "r3".into(),
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+            }))
+        );
+        clear_audio_env();
+    }
+
+    #[test]
+    fn capability_ignores_bluetooth_messages_on_an_hdmi_only_node() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        // SAFETY: caller holds ENV_LOCK for the duration of the test.
+        unsafe {
+            std::env::set_var("AUDIO_BACKENDS", "hdmi");
+        }
+        let cap = AudioCapability::new("test-node");
+        assert!(
+            !cap.handles(&MeshMessage::BluetoothScan(shared::BluetoothScanRequest {
+                request_id: "r1".into(),
+                seconds: 30,
+            }))
+        );
+        assert!(
+            !cap.handles(&MeshMessage::BluetoothPair(shared::BluetoothPairRequest {
+                request_id: "r2".into(),
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+            }))
+        );
+        clear_audio_env();
     }
 
     #[test]
@@ -281,13 +424,43 @@ mod tests {
     }
 
     #[test]
-    fn bluetooth_backend_defaults_to_paplay() {
+    fn bluetooth_backend_defaults_to_paplay_when_nothing_paired() {
         let _guard = ENV_LOCK.blocking_lock();
         clear_audio_env();
+        let _dir = isolated_cache_dir();
         assert_eq!(
             play_cmd_template_for("bluetooth"),
             Some("paplay {file}".into())
         );
+    }
+
+    #[test]
+    fn bluetooth_backend_targets_the_paired_sink_once_persisted() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        let _dir = isolated_cache_dir();
+        persist_bluetooth_sink("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink");
+        assert_eq!(
+            play_cmd_template_for("bluetooth"),
+            Some("paplay --device=bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink {file}".into())
+        );
+    }
+
+    #[test]
+    fn per_backend_override_still_wins_over_a_persisted_sink() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        let _dir = isolated_cache_dir();
+        persist_bluetooth_sink("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink");
+        // SAFETY: caller holds ENV_LOCK for the duration of the test.
+        unsafe {
+            std::env::set_var("AUDIO_PLAY_CMD_BLUETOOTH", "mpv {file}");
+        }
+        assert_eq!(
+            play_cmd_template_for("bluetooth"),
+            Some("mpv {file}".into())
+        );
+        clear_audio_env();
     }
 
     #[test]
