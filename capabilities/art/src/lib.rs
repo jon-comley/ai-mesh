@@ -264,6 +264,11 @@ impl ArtCapability {
     fn http_client() -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
             .timeout(DOWNLOAD_TIMEOUT)
+            // Some hosts (Wikimedia Commons confirmed live) reject reqwest's
+            // default User-Agent with a 403 — a descriptive one identifying
+            // this as a personal, non-commercial project satisfies their
+            // API etiquette policy and fixes the block.
+            .user_agent("ai-mesh-frame-tv/1.0 (personal home project; non-commercial)")
             .build()
             .map_err(|e| format!("could not build HTTP client: {e}"))
     }

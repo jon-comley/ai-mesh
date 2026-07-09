@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backends] [audio_alsa_device]"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backends] [audio_alsa_device] [art_matte_percent] [art_frame_thickness]"
 # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
 # (Set COORDINATOR_IP in the agent's environment to override discovery for debugging.)
 set -e
@@ -16,6 +16,8 @@ VOICE_STT_REMOTE="${7:-}"
 VOICE_TTS_BASE_URL="${8:-}"
 AUDIO_BACKENDS="${9:-}"
 AUDIO_ALSA_DEVICE="${10:-}"
+ART_MATTE_PERCENT="${11:-}"
+ART_FRAME_THICKNESS="${12:-}"
 
 if [ -z "$AGENT_USER" ]; then
     echo "Usage: $0 <role> <user> [mqtt_host] [mqtt_port] [node_features]"
@@ -333,6 +335,20 @@ Environment=AUDIO_ALSA_DEVICE=${AUDIO_ALSA_DEVICE}"
     fi
 fi
 
+# ART_MATTE_PERCENT=0 (and ART_FRAME_THICKNESS=0) gives a true edge-to-edge
+# fullscreen image instead of capability-art's default museum-mat border —
+# see compose_matte() in capabilities/art/src/lib.rs.
+ART_ENV_BLOCK=""
+if has_feature art; then
+    if [ -n "$ART_MATTE_PERCENT" ]; then
+        ART_ENV_BLOCK="Environment=ART_MATTE_PERCENT=${ART_MATTE_PERCENT}"
+    fi
+    if [ -n "$ART_FRAME_THICKNESS" ]; then
+        ART_ENV_BLOCK="${ART_ENV_BLOCK}
+Environment=ART_FRAME_THICKNESS=${ART_FRAME_THICKNESS}"
+    fi
+fi
+
 echo ">>> Installing ai-mesh-agent systemd service..."
 tee /etc/systemd/system/ai-mesh-agent.service > /dev/null <<EOF
 [Unit]
@@ -346,6 +362,7 @@ Environment=AGENT_ROLE=${ROLE}
 ${LLM_ENV_BLOCK}
 ${VOICE_ENV_BLOCK}
 ${AUDIO_ENV_BLOCK}
+${ART_ENV_BLOCK}
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_HOST=${MQTT_HOST}" || true)
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_PORT=${MQTT_PORT}" || true)
 Restart=always
