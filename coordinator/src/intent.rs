@@ -25,6 +25,7 @@ fn collect_tool_schemas(registry: &Arc<Mutex<Registry>>) -> Vec<serde_json::Valu
         shared::Feature::Lighting,
         shared::Feature::Reaper,
         shared::Feature::Sensors,
+        shared::Feature::Audio,
     ] {
         if !reg.nodes_with_feature(feature).is_empty() {
             for schema in tool_schemas_for_feature(feature) {
@@ -32,6 +33,34 @@ fn collect_tool_schemas(registry: &Arc<Mutex<Registry>>) -> Vec<serde_json::Valu
                 if seen.insert(name) {
                     schemas.push(schema);
                 }
+            }
+        }
+    }
+    // The soundbar is a direct LAN device, not a mesh node — no feature
+    // ever advertises it. Gate on the same 'soundbar-ip' preference
+    // `soundbar.rs` itself reads, so the tools only appear once the
+    // device is actually configured.
+    if reg
+        .get_preference(crate::http::api::prefs::PREF_USER_ID, "soundbar-ip")
+        .is_some()
+    {
+        for schema in soundbar_tool_schemas() {
+            let name = schema["name"].as_str().unwrap_or("").to_string();
+            if seen.insert(name) {
+                schemas.push(schema);
+            }
+        }
+    }
+    // Same pattern for the TV — a direct LAN device gated on its own
+    // configured-IP preference rather than a mesh Feature.
+    if reg
+        .get_preference(crate::http::api::prefs::PREF_USER_ID, "tv-ip")
+        .is_some()
+    {
+        for schema in tv_tool_schemas() {
+            let name = schema["name"].as_str().unwrap_or("").to_string();
+            if seen.insert(name) {
+                schemas.push(schema);
             }
         }
     }
@@ -867,6 +896,64 @@ async fn dispatch_tool(
         "scene_load" => {
             dispatch_scene_load(request_id, &args, registry, connections, pending_intents).await
         }
+        "play_announcement" => {
+            let text = args["text"].as_str().unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                return "play_announcement requires non-empty text".into();
+            }
+            match crate::audio::broadcast_announcement(
+                &text,
+                registry,
+                connections,
+                pending_intents,
+            )
+            .await
+            {
+                Ok(()) => "announcement sent".into(),
+                Err(e) => format!("announcement failed: {e}"),
+            }
+        }
+        "soundbar_volume" => {
+            let action = args["action"].as_str().unwrap_or("");
+            match action {
+                "get" => match crate::soundbar::get_volume(registry).await {
+                    Ok(v) => format!("soundbar volume is {v}"),
+                    Err(e) => e,
+                },
+                "set" => {
+                    let Some(value) = args["value"].as_u64() else {
+                        return "soundbar_volume action=set requires a numeric value".into();
+                    };
+                    match crate::soundbar::set_volume(value.min(100) as u8, registry).await {
+                        Ok(msg) => msg,
+                        Err(e) => e,
+                    }
+                }
+                _ => "soundbar_volume requires action 'get' or 'set'".into(),
+            }
+        }
+        "soundbar_mute" => {
+            let mute = args["mute"].as_bool().unwrap_or(false);
+            match crate::soundbar::set_mute(mute, registry).await {
+                Ok(msg) => msg,
+                Err(e) => e,
+            }
+        }
+        "tv_key" => {
+            let key = args["key"].as_str().unwrap_or("");
+            if key.is_empty() {
+                return "tv_key requires a key".into();
+            }
+            match crate::tv::send_key(key, registry).await {
+                Ok(msg) => msg,
+                Err(e) => e,
+            }
+        }
+        "tv_wake" => match crate::tv::wake(registry).await {
+            Ok(msg) => msg,
+            Err(e) => e,
+        },
+        "tv_audio_output" => crate::tv::audio_output_unsupported(),
         "reaper_transport" | "reaper_action" => {
             dispatch_reaper_command(
                 request_id,
@@ -1630,6 +1717,88 @@ pub fn try_parse_tool_calls(output: &str) -> Option<Vec<serde_json::Value>> {
     if calls.is_empty() { None } else { Some(calls) }
 }
 
+/// Schemas for the soundbar tools — not gated by `Feature` like
+/// `tool_schemas_for_feature` since no mesh node advertises the soundbar
+/// (see `collect_tool_schemas`'s caller-side gate on the 'soundbar-ip'
+/// preference instead).
+fn soundbar_tool_schemas() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "soundbar_volume",
+            "description": "Get or set the soundbar's volume.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["get", "set"]
+                    },
+                    "value": {
+                        "type": "integer",
+                        "description": "Volume 0-100. Required when action=set."
+                    }
+                },
+                "required": ["action"]
+            }
+        }),
+        serde_json::json!({
+            "name": "soundbar_mute",
+            "description": "Mute or unmute the soundbar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mute": { "type": "boolean" }
+                },
+                "required": ["mute"]
+            }
+        }),
+    ]
+}
+
+/// Schemas for the TV tools — same not-a-mesh-Feature gating rationale as
+/// `soundbar_tool_schemas`.
+fn tv_tool_schemas() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "tv_key",
+            "description": "Send a remote-control key press to the TV (power, volume, navigation).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "enum": crate::tv::KNOWN_KEYS,
+                    }
+                },
+                "required": ["key"]
+            }
+        }),
+        serde_json::json!({
+            "name": "tv_wake",
+            "description": "Wake the TV from standby over the network (only works if the TV is wired via Ethernet and Wake-on-LAN is enabled on it).",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        serde_json::json!({
+            "name": "tv_audio_output",
+            "description": "Switch the TV's audio output between the soundbar and the Bluetooth speaker. NOTE: not actually supported locally — calling this always returns an explanatory error, kept as a tool so the model can honestly report why it can't do this rather than guessing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["soundbar", "bluetooth_speaker"]
+                    }
+                },
+                "required": ["target"]
+            }
+        }),
+    ]
+}
+
 fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> {
     match feature {
         shared::Feature::Lighting => vec![
@@ -1866,6 +2035,20 @@ fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> 
                     }
                 },
                 "required": []
+            }
+        })],
+        shared::Feature::Audio => vec![serde_json::json!({
+            "name": "play_announcement",
+            "description": "Speak a short announcement out loud on every connected speaker (e.g. 'someone's at the door', 'the wash cycle is done'). Not for normal conversational replies — only use when the user explicitly asks to announce or broadcast something.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The words to speak"
+                    }
+                },
+                "required": ["text"]
             }
         })],
         _ => vec![],
@@ -2427,6 +2610,206 @@ mod tests {
         );
         let schemas = collect_tool_schemas(&registry);
         assert!(schemas.iter().any(|s| s["name"] == "get_climate"));
+    }
+
+    #[test]
+    fn collect_tool_schemas_includes_audio_feature_when_connected() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .update_heartbeat(shared::NodeIdentity {
+                id: "pi-zero-1".into(),
+                hostname: "pi-zero-1".into(),
+                ip: "10.0.0.17".into(),
+                role: shared::NodeRole::Compute,
+            });
+        registry.lock().unwrap().update_capabilities(
+            "pi-zero-1",
+            shared::NodeCapabilities {
+                features: vec![shared::Feature::Audio],
+                ..Default::default()
+            },
+        );
+        let schemas = collect_tool_schemas(&registry);
+        assert!(schemas.iter().any(|s| s["name"] == "play_announcement"));
+    }
+
+    #[test]
+    fn collect_tool_schemas_omits_soundbar_tools_when_unconfigured() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let schemas = collect_tool_schemas(&registry);
+        assert!(!schemas.iter().any(|s| s["name"] == "soundbar_volume"));
+        assert!(!schemas.iter().any(|s| s["name"] == "soundbar_mute"));
+    }
+
+    #[test]
+    fn collect_tool_schemas_includes_soundbar_tools_when_ip_configured() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        registry.lock().unwrap().set_preference(
+            crate::http::api::prefs::PREF_USER_ID,
+            "soundbar-ip",
+            "10.0.0.20",
+        );
+        let schemas = collect_tool_schemas(&registry);
+        assert!(schemas.iter().any(|s| s["name"] == "soundbar_volume"));
+        assert!(schemas.iter().any(|s| s["name"] == "soundbar_mute"));
+    }
+
+    #[test]
+    fn collect_tool_schemas_omits_tv_tools_when_unconfigured() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let schemas = collect_tool_schemas(&registry);
+        assert!(!schemas.iter().any(|s| s["name"] == "tv_key"));
+        assert!(!schemas.iter().any(|s| s["name"] == "tv_wake"));
+        assert!(!schemas.iter().any(|s| s["name"] == "tv_audio_output"));
+    }
+
+    #[test]
+    fn collect_tool_schemas_includes_tv_tools_when_ip_configured() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        registry.lock().unwrap().set_preference(
+            crate::http::api::prefs::PREF_USER_ID,
+            "tv-ip",
+            "10.0.0.21",
+        );
+        let schemas = collect_tool_schemas(&registry);
+        assert!(schemas.iter().any(|s| s["name"] == "tv_key"));
+        assert!(schemas.iter().any(|s| s["name"] == "tv_wake"));
+        assert!(schemas.iter().any(|s| s["name"] == "tv_audio_output"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_tv_key_requires_key() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "tv_key",
+            serde_json::json!({}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+        )
+        .await;
+        assert!(result.contains("requires a key"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_tv_key_without_configured_tv_errors() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "tv_key",
+            serde_json::json!({"key": "KEY_VOLUP"}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+        )
+        .await;
+        assert!(result.contains("no TV configured"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_tv_audio_output_always_reports_unsupported() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "tv_audio_output",
+            serde_json::json!({"target": "soundbar"}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+        )
+        .await;
+        assert!(result.contains("SmartThings"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_soundbar_volume_set_requires_value() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "soundbar_volume",
+            serde_json::json!({"action": "set"}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+        )
+        .await;
+        assert!(result.contains("requires a numeric value"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_soundbar_mute_without_configured_soundbar_errors() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "soundbar_mute",
+            serde_json::json!({"mute": true}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+        )
+        .await;
+        assert!(result.contains("no soundbar configured"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_play_announcement_requires_nonempty_text() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "play_announcement",
+            serde_json::json!({"text": "  "}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+        )
+        .await;
+        assert!(result.contains("requires non-empty text"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_play_announcement_fails_without_voice_node() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "play_announcement",
+            serde_json::json!({"text": "someone is at the door"}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+        )
+        .await;
+        assert!(result.contains("announcement failed"));
     }
 
     #[test]

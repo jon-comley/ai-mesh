@@ -193,39 +193,55 @@ async fn wait_for_health(name: &str, port: u16) -> Result<(), String> {
     ))
 }
 
-#[derive(serde::Deserialize)]
-struct PrefsResponse {
-    #[serde(rename = "tts-voice")]
-    tts_voice: Option<String>,
-}
-
-/// The live-selected voice, fetched fresh from the dashboard's
-/// preferences store on every call so a change takes effect on the very
-/// next reply — no mesh message, no restart, no polling loop. Falls back
-/// to the default on any failure (network, missing key, unknown name):
-/// a broken preferences fetch must never block a voice reply.
-pub async fn current_voice() -> &'static str {
+/// Fetches the dashboard's whole preferences map fresh on every call — no
+/// caching, so a change on the dashboard takes effect on the very next
+/// reply. `None` on any failure (network, auth, bad JSON): callers must
+/// treat a broken fetch as "no preferences set," never as an error to
+/// propagate — a preferences outage must not block a voice reply.
+async fn fetch_prefs() -> Option<std::collections::HashMap<String, String>> {
     let token = std::env::var("MESH_AUTH_TOKEN").unwrap_or_default();
     let url = format!("{}/api/preferences?token={token}", dashboard_base_url());
-    let fetched = reqwest::Client::new()
+    reqwest::Client::new()
         .get(&url)
         .timeout(Duration::from_secs(2))
         .send()
         .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
         .ok()
-        .and_then(|r| r.error_for_status().ok());
-    let Some(resp) = fetched else {
+}
+
+/// The live-selected voice — see `fetch_prefs`' doc for the "why fetch
+/// every time" reasoning.
+pub async fn current_voice() -> &'static str {
+    let Some(prefs) = fetch_prefs().await else {
         return DEFAULT_VOICE;
     };
-    let Ok(prefs) = resp.json::<PrefsResponse>().await else {
-        return DEFAULT_VOICE;
-    };
-    match prefs.tts_voice.as_deref() {
+    match prefs.get("tts-voice").map(String::as_str) {
         Some(name) if VOICES.iter().any(|&(n, _, _)| n == name) => {
             VOICES.iter().find(|&&(n, _, _)| n == name).unwrap().0
         }
         _ => DEFAULT_VOICE,
     }
+}
+
+/// Whether the puck's room (`VOICE_PUCK_ROOM`) has a dedicated speaker
+/// configured (`room-audio-sink:<room>` — set via the dashboard, same K/V
+/// store `tts-voice` lives in; not yet wired to any dashboard UI, see the
+/// assumptions list this shipped with). `None` for "not configured" and
+/// "couldn't check" alike — both mean the same thing to the caller: fall
+/// back to the puck's own speaker.
+pub async fn room_has_audio_sink() -> bool {
+    let Ok(room) = std::env::var("VOICE_PUCK_ROOM") else {
+        return false;
+    };
+    let Some(prefs) = fetch_prefs().await else {
+        return false;
+    };
+    prefs.contains_key(&format!("room-audio-sink:{room}"))
 }
 
 #[derive(serde::Serialize)]

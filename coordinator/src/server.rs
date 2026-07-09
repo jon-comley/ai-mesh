@@ -1155,6 +1155,38 @@ async fn process_message(
             }
             None
         }
+        MeshMessage::TtsResponse(resp) => {
+            let entry = pending_intents.lock().unwrap().remove(&resp.request_id);
+            if let Some(otx) = entry {
+                let _ = otx.send(MeshMessage::TtsResponse(resp));
+            }
+            None
+        }
+        MeshMessage::AudioAnnounce(req) => {
+            let registry = registry.clone();
+            let connections = connections.clone();
+            let request_id = req.request_id.clone();
+            let reply_tx = tx.clone();
+            // Spawned like the IntentRequest arm above: fanning a broadcast
+            // out to every audio node (or waiting on one room's connection)
+            // must not block this connection's read loop. Reports delivery
+            // back to the requester (AudioAnnounceResult) so the voice
+            // pipeline's room routing can fall back to the puck instead of
+            // the reply silently going nowhere when the sink is unreachable.
+            tokio::spawn(async move {
+                let delivered =
+                    crate::audio::handle_audio_announce(req, &registry, &connections).await;
+                let _ = reply_tx
+                    .send(MeshMessage::AudioAnnounceResult(
+                        shared::AudioAnnounceResult {
+                            request_id,
+                            delivered,
+                        },
+                    ))
+                    .await;
+            });
+            None
+        }
         MeshMessage::LightState(report) => handle_light_state(
             report,
             registry,

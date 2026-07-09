@@ -1840,6 +1840,19 @@ impl Registry {
             .unwrap_or_default()
     }
 
+    /// Single-key lookup — `get_all_preferences` filtered to one row, for
+    /// call sites that only want one value (e.g. `tts-voice`,
+    /// `room-audio-sink:<room>`) without pulling the whole map.
+    pub fn get_preference(&self, user_id: &str, key: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT value FROM dashboard_preferences WHERE user_id = ?1 AND key = ?2",
+                rusqlite::params![user_id, key],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
     pub fn set_preference(&self, user_id: &str, key: &str, value: &str) {
         let _ = self.conn.execute(
             "INSERT INTO dashboard_preferences (user_id, key, value) VALUES (?1, ?2, ?3)
