@@ -1534,6 +1534,15 @@ Genuinely open items from this review, not acted on:
   active effect — scoped out of today's fix since resolving "which room
   a group's members belong to" needs more thought than the single-device
   case. Same bug class, smaller/rarer blast radius.
+- **`dispatch_light_command`/`dispatch_tool`/`handle_intent` are growing a
+  long, repeated parameter list** (`registry`, `connections`,
+  `pending_intents`, `device_states`, `sensor_states`, `dashboard`, ...),
+  already needing `#[allow(clippy::too_many_arguments)]`. Bundling these
+  into one `IntentExecutionContext`-style struct would be reasonable, but
+  premature today — nothing is actually painful yet, just long signatures.
+  Trigger for actually doing it: the next time a *new* piece of
+  coordinator state needs threading through this same call chain, bundle
+  instead of adding parameter #7.
 
 ---
 
