@@ -381,7 +381,7 @@ deploy-node node:
             scp_dots ">>> Uploading install script" \
                 scp {{ssh_opts}} -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
             ssh {{ssh_opts}} -t ${NODE_USER}@${NODE_HOST} \
-                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh '${NODE_ROLE}' '${NODE_USER}' '${MQTT_HOST:-}' '${MQTT_PORT:-1883}' '${NODE_FEATURES:-llm}' '${VOICE_DEVICE_HOST:-}' '${VOICE_STT_REMOTE:-}' '${VOICE_TTS_BASE_URL:-}'"
+                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh '${NODE_ROLE}' '${NODE_USER}' '${MQTT_HOST:-}' '${MQTT_PORT:-1883}' '${NODE_FEATURES:-llm}' '${VOICE_DEVICE_HOST:-}' '${VOICE_STT_REMOTE:-}' '${VOICE_TTS_BASE_URL:-}' '${AUDIO_BACKEND:-}' '${AUDIO_ALSA_DEVICE:-}'"
         fi
         ;;
 
