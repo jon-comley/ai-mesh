@@ -142,6 +142,33 @@ hardware involved.
 Success: "Okay Nabu, what temperature is the kitchen?" is *answered out
 loud* by the puck.
 
+**Implemented 2026-07-09 — 5 voices, switchable live from the
+dashboard**, not a single fixed pick. `capability-voice`'s
+`tts.rs` spawns one persistent `piper.http_server` per voice (Piper
+moved to `OHF-Voice/piper1-gpl`, pip-only, no prebuilt binary — a first
+for this repo; still just a subprocess, so its GPL-3.0 doesn't reach our
+code) so switching is genuinely instant — every voice is always warm.
+The active voice is a dashboard preference (`tts-voice`, same
+`prefs.js`/`/api/preferences` mechanism as the "voice-in-chat" checkbox),
+fetched fresh on every synthesis call — no restart needed to switch.
+
+Licenses verified directly against each voice's `MODEL_CARD` on
+`huggingface.co/rhasspy/piper-voices` (not assumed):
+
+| Voice | Accent/gender | License | Commercial use |
+|---|---|---|---|
+| `joe` | US male | CC0 | ✔ cleared, no restriction |
+| `kristin` | US female | public domain | ✔ cleared, no restriction |
+| `ljspeech` | US female | public domain | ✔ cleared, no restriction |
+| `alba` | GB female (Scottish) | CC BY 4.0 | ✔ cleared, attribution required |
+| `alan` | GB male | "All Rights Reserved" (Mycroft AI) | ✘ not cleared — no license grant at all; accepted here only as low-risk for personal, non-commercial use |
+
+Not currently operationally relevant (personal home project), but
+recorded in case this code or the models are ever shared/reused
+elsewhere. `en_US-hfc_female` (CC BY-NC-SA 4.0) was considered and
+dropped for the same reason as `alan` — non-commercial-only — since
+`alba` already covers a female GB voice with a cleaner license.
+
 ### Phase 2 — local Bluetooth speakers (capability-bluetooth-audio)
 
 The kitchen Blaupunkt BL2621. Simpler than Phase 3's HDMI work and

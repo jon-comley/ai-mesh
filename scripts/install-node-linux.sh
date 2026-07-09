@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote]"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url]"
 # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
 # (Set COORDINATOR_IP in the agent's environment to override discovery for debugging.)
 set -e
@@ -13,6 +13,7 @@ MQTT_PORT="${4:-1883}"
 NODE_FEATURES="${5:-llm}"
 VOICE_DEVICE_HOST="${6:-}"
 VOICE_STT_REMOTE="${7:-}"
+VOICE_TTS_BASE_URL="${8:-}"
 
 if [ -z "$AGENT_USER" ]; then
     echo "Usage: $0 <role> <user> [mqtt_host] [mqtt_port] [node_features]"
@@ -227,8 +228,50 @@ if has_feature voice; then
             -o "$VOICE_MODEL_PATH"
         echo ">>> whisper model installed at ${VOICE_MODEL_PATH}"
     fi
+
+    # Piper TTS. Unlike whisper.cpp/llama.cpp, Piper's actively-maintained
+    # fork (OHF-Voice/piper1-gpl) ships only as a pip package — no
+    # standalone binary — so this installs into a venv rather than
+    # downloading a release tarball. Still just a subprocess we talk HTTP
+    # to (see capabilities/voice/src/tts.rs), so its GPL-3.0 license
+    # doesn't reach ai-mesh's own code.
+    echo ">>> Installing Piper TTS (python venv)..."
+    apt-get install -y -q python3-venv
+    PIPER_DIR="/opt/piper"
+    if [ ! -x "${PIPER_DIR}/bin/python3" ]; then
+        install -d "$PIPER_DIR"
+        python3 -m venv "$PIPER_DIR"
+        "${PIPER_DIR}/bin/pip" install --quiet --upgrade pip
+        # flask: piper.http_server imports it directly but piper-tts
+        # doesn't declare it as a dependency — confirmed live 2026-07-09
+        # (ModuleNotFoundError on first real deploy without it).
+        "${PIPER_DIR}/bin/pip" install --quiet piper-tts flask
+        echo ">>> Piper TTS installed at ${PIPER_DIR}"
+    else
+        echo ">>> Piper TTS venv already present at ${PIPER_DIR} — skipping"
+    fi
+
+    # 5 voices, always warm (see tts.rs) so switching between them from the
+    # dashboard is instant — no reload delay. Licenses verified per-voice
+    # against each MODEL_CARD on huggingface.co/rhasspy/piper-voices; see
+    # plans/audio-output-integration.md for the full table.
+    TTS_MODEL_DIR="/home/${AGENT_USER}/.ai-mesh/tts-models"
+    sudo -u "${AGENT_USER}" install -d "$TTS_MODEL_DIR"
+    for TTS_VOICE in en_US-joe-medium en_US-kristin-medium en_US-ljspeech-medium en_GB-alan-medium en_GB-alba-medium; do
+        TTS_LANG="$(echo "$TTS_VOICE" | cut -d- -f1)"
+        TTS_NAME="$(echo "$TTS_VOICE" | cut -d- -f2)"
+        TTS_BASE_URL="https://huggingface.co/rhasspy/piper-voices/resolve/main/${TTS_LANG%_*}/${TTS_LANG}/${TTS_NAME}/medium/${TTS_VOICE}"
+        if [ -f "${TTS_MODEL_DIR}/${TTS_VOICE}.onnx" ]; then
+            echo ">>> Piper voice ${TTS_VOICE} already present — skipping"
+            continue
+        fi
+        echo ">>> Downloading Piper voice ${TTS_VOICE}..."
+        sudo -u "${AGENT_USER}" curl -fsSL "${TTS_BASE_URL}.onnx" -o "${TTS_MODEL_DIR}/${TTS_VOICE}.onnx"
+        sudo -u "${AGENT_USER}" curl -fsSL "${TTS_BASE_URL}.onnx.json" -o "${TTS_MODEL_DIR}/${TTS_VOICE}.onnx.json"
+        echo ">>> Piper voice ${TTS_VOICE} installed"
+    done
 else
-    echo ">>> No 'voice' feature requested — skipping whisper.cpp install."
+    echo ">>> No 'voice' feature requested — skipping whisper.cpp/Piper install."
 fi
 
 LLM_ENV_BLOCK=""
@@ -251,10 +294,21 @@ if has_feature voice; then
     # sets LD_LIBRARY_PATH=/opt/whisper.cpp itself when it spawns
     # whisper-server, scoped to that child process only.
     VOICE_ENV_BLOCK="Environment=VOICE_STT_SERVER_BIN=/opt/whisper.cpp/whisper-server
-Environment=VOICE_STT_MODEL=/home/${AGENT_USER}/.ai-mesh/voice-models/${VOICE_MODEL_FILE}"
+Environment=VOICE_STT_MODEL=/home/${AGENT_USER}/.ai-mesh/voice-models/${VOICE_MODEL_FILE}
+Environment=VOICE_TTS_VENV=/opt/piper
+Environment=VOICE_TTS_MODEL_DIR=/home/${AGENT_USER}/.ai-mesh/tts-models"
     if [ -n "$VOICE_STT_REMOTE" ]; then
         VOICE_ENV_BLOCK="${VOICE_ENV_BLOCK}
 Environment=VOICE_STT_REMOTE=${VOICE_STT_REMOTE}"
+    fi
+    if [ -n "$VOICE_TTS_BASE_URL" ]; then
+        # Must be pi1's real LAN address, never 127.0.0.1 — this URL is
+        # handed to the ESPHome device (a different physical machine) to
+        # fetch a TTS clip from. See the comment on tts_media_base_url()
+        # in capabilities/voice/src/tts.rs for how this was confirmed
+        # live (silent failure: the device just couldn't reach loopback).
+        VOICE_ENV_BLOCK="${VOICE_ENV_BLOCK}
+Environment=VOICE_TTS_BASE_URL=${VOICE_TTS_BASE_URL}"
     fi
     if [ -n "$VOICE_DEVICE_HOST" ]; then
         VOICE_ENV_BLOCK="${VOICE_ENV_BLOCK}
