@@ -151,9 +151,10 @@ if appliances multiply.
 
 ### Open questions for review
 
-- Should the **puck** be room-assignable in the UI (it's currently
-  `VOICE_PUCK_ROOM`, an env var on pi1 — moving that into a preference
-  would make it UI-editable, one less env knob)?
+- ~~Should the **puck** be room-assignable in the UI?~~ **Resolved
+  2026-07-09: yes.** `VOICE_PUCK_ROOM` (env, never deployed) was replaced
+  by the `av-room:puck` preference — set from the puck row's room
+  dropdown, read by the voice pipeline on every reply.
 - Singletons: is one soundbar / one TV an acceptable assumption for the
   UI's first cut, or model multiples from day one?
 - Does "drop into a room" *replace* the room's sink or *append* to a
