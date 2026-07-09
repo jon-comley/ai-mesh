@@ -362,7 +362,7 @@ deploy-node node:
         else
             NODE_ARCH=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "")
             if [ -z "$NODE_ARCH" ]; then
-                echo ">>> ERROR: cannot reach ${NODE_NAME} (${NODE_USER}@${NODE_HOST}) over SSH to detect its arch."
+                echo ">>> ERROR: cannot reach {{node}} (${NODE_USER}@${NODE_HOST}) over SSH to detect its arch."
                 echo ">>>        Is the node powered on and reachable? Aborting rather than guessing the arch."
                 exit 1
             fi
