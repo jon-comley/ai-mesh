@@ -220,6 +220,11 @@ pub struct LightCommandRequest {
 pub struct AudioPlayRequest {
     pub request_id: String,
     pub url: String,
+    /// Which of the node's configured backends to play through — a node
+    /// can run more than one at once (e.g. HDMI to a TV *and* Bluetooth to
+    /// a room speaker on the same Pi), so this disambiguates. `None` uses
+    /// that node's default (its first configured `AUDIO_BACKENDS` entry).
+    pub sink: Option<String>,
 }
 
 /// Any agent → coordinator: "play this clip somewhere," letting the

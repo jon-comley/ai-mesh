@@ -112,24 +112,44 @@ pub async fn request_tts(
 /// "no dedicated speaker for this room," the caller's cue to fall back to
 /// whatever room-independent default it already has (the puck, for the
 /// voice pipeline).
-pub fn resolve_room_sink(room: &str, registry: &Arc<Mutex<Registry>>) -> Option<String> {
-    registry
+///
+/// The preference value is `<node_id>` or `<node_id>:<sink>` — the sink
+/// suffix picks which of that node's `AUDIO_BACKENDS` to use (a node can
+/// run more than one backend at once, e.g. HDMI to a TV *and* Bluetooth to
+/// a room speaker on the same Pi — see `capabilities/audio`). No suffix
+/// means "that node's default backend."
+pub fn resolve_room_sink(
+    room: &str,
+    registry: &Arc<Mutex<Registry>>,
+) -> Option<(String, Option<String>)> {
+    let value = registry
         .lock()
         .unwrap()
-        .get_preference(PREF_USER_ID, &format!("room-audio-sink:{room}"))
+        .get_preference(PREF_USER_ID, &format!("room-audio-sink:{room}"))?;
+    Some(match value.split_once(':') {
+        Some((node_id, sink)) => (node_id.to_string(), Some(sink.to_string())),
+        None => (value, None),
+    })
 }
 
-/// Send `url` to a specific node's tracked connection. `false` if the
-/// node isn't currently connected — callers decide what that means for
-/// them (the voice pipeline's caller falls back to the puck; a broadcast
-/// caller just logs and continues with the other targets).
-async fn send_audio_play(node_id: &str, url: &str, connections: &Connections) -> bool {
+/// Send `url` to a specific node's tracked connection, on the named
+/// `sink` (or that node's default if `None`). `false` if the node isn't
+/// currently connected — callers decide what that means for them (the
+/// voice pipeline's caller falls back to the puck; a broadcast caller
+/// just logs and continues with the other targets).
+async fn send_audio_play(
+    node_id: &str,
+    url: &str,
+    sink: Option<&str>,
+    connections: &Connections,
+) -> bool {
     let tx = connections.lock().unwrap().get(node_id).cloned();
     match tx {
         Some(tx) => tx
             .send(MeshMessage::AudioPlay(AudioPlayRequest {
                 request_id: gen_request_id(),
                 url: url.to_string(),
+                sink: sink.map(str::to_string),
             }))
             .await
             .is_ok(),
@@ -168,7 +188,10 @@ pub async fn handle_audio_announce(
         }
         let mut delivered = false;
         for node_id in targets {
-            if send_audio_play(&node_id, &req.url, connections).await {
+            // Broadcast alerts use each node's own default backend — no
+            // per-room sink selection makes sense for "reach the whole
+            // house at once".
+            if send_audio_play(&node_id, &req.url, None, connections).await {
                 delivered = true;
             } else {
                 warn!(node_id, "audio broadcast: node not connected, skipped");
@@ -181,13 +204,13 @@ pub async fn handle_audio_announce(
         warn!("AudioAnnounceRequest with neither room nor broadcast set — nothing to do");
         return false;
     };
-    let Some(node_id) = resolve_room_sink(&room, registry) else {
+    let Some((node_id, sink)) = resolve_room_sink(&room, registry) else {
         // Not a warning: most rooms simply have no dedicated speaker yet
         // (only the kitchen does, once Phase 2 hardware exists) — the
         // voice pipeline's own puck fallback is the expected outcome.
         return false;
     };
-    if send_audio_play(&node_id, &req.url, connections).await {
+    if send_audio_play(&node_id, &req.url, sink.as_deref(), connections).await {
         true
     } else {
         warn!(room, node_id, "room audio sink not connected");
@@ -248,9 +271,23 @@ mod tests {
         );
         assert_eq!(
             resolve_room_sink("Kitchen", &registry),
-            Some("pi-zero-1".into())
+            Some(("pi-zero-1".into(), None))
         );
         assert_eq!(resolve_room_sink("Bedroom", &registry), None);
+    }
+
+    #[test]
+    fn resolve_room_sink_parses_an_explicit_sink_suffix() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        registry.lock().unwrap().set_preference(
+            PREF_USER_ID,
+            "room-audio-sink:LivingRoom",
+            "pi2:bluetooth",
+        );
+        assert_eq!(
+            resolve_room_sink("LivingRoom", &registry),
+            Some(("pi2".into(), Some("bluetooth".into())))
+        );
     }
 
     #[tokio::test]
@@ -320,6 +357,35 @@ mod tests {
         .await;
         assert!(delivered);
         assert!(matches!(rx.try_recv(), Ok(MeshMessage::AudioPlay(_))));
+    }
+
+    #[tokio::test]
+    async fn handle_audio_announce_room_sink_with_explicit_backend_is_forwarded() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        registry.lock().unwrap().set_preference(
+            PREF_USER_ID,
+            "room-audio-sink:Office",
+            "pi2:bluetooth",
+        );
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        connections.lock().unwrap().insert("pi2".into(), tx);
+        let delivered = handle_audio_announce(
+            shared::AudioAnnounceRequest {
+                request_id: "r1".into(),
+                url: "http://example/clip.wav".into(),
+                room: Some("Office".into()),
+                broadcast: false,
+            },
+            &registry,
+            &connections,
+        )
+        .await;
+        assert!(delivered);
+        match rx.try_recv() {
+            Ok(MeshMessage::AudioPlay(req)) => assert_eq!(req.sink, Some("bluetooth".into())),
+            other => panic!("expected AudioPlay, got {other:?}"),
+        }
     }
 
     #[tokio::test]
