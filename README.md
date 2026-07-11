@@ -126,6 +126,9 @@ Each agent includes `MESH_AUTH_TOKEN` in its startup `AuthToken` frame (connecti
 ### HMAC message integrity (Phase 10.5)
 Every wire message after the initial `AuthToken` handshake is wrapped in a `SignedFrame` (HMAC-SHA256). The signing key is derived from `MESH_AUTH_TOKEN` via HKDF-SHA256 — no new credentials needed. The coordinator rejects frames with a wrong signature, stale timestamp (>30s skew), or no `SignedFrame` wrapper at all after auth. This closes the residual window where a rogue process that obtained a valid token could inject arbitrary messages. Use `just chaos` to adversarially verify the full security stack.
 
+### mDNS discovery is unauthenticated
+**Before running the mesh on any shared or guest LAN:** the coordinator advertises `_ai-mesh._tcp.local.` on the local network with no auth check on who can discover and connect to it. Any device on the same LAN can find the coordinator and attempt to join — the `MESH_AUTH_TOKEN`/TLS/HMAC protections above still gate what a connecting node can *do*, but not whether it can find and reach the coordinator in the first place. Safe on a trusted home LAN; do not expose the mesh on a shared or untrusted network until a join token closes this gap (planned, Phase 10, `MESH_TOKEN` env var).
+
 ### Coordinator state file
 On startup the coordinator writes `/var/lib/ai-mesh/coordinator.state` (0600, shell-sourceable KEY=VALUE) containing the current fingerprint and auth token. All justfile recipes source this file — no log-grepping, no race conditions.
 

@@ -262,6 +262,9 @@ pub async fn get_device_names(
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
     _: Authed,
 ) -> impl IntoResponse {
+    // Empty map is expected for any device paired before auto-naming shipped
+    // and never manually renamed — see plans/device-auto-naming.md. Not a bug;
+    // callers already fall back to device_id (intent.rs::resolve_display_name).
     let names = registry.lock().unwrap().get_all_device_names();
     Json(names).into_response()
 }
