@@ -1612,12 +1612,14 @@ Frame TV art-display fullscreen/User-Agent fixes.
 - **Windows Fast Startup cold-boot issue** — still open, separate from
   the fTPM/Pluton crash-storm fix (which resolved a different symptom).
   See `handover.md` item 29.
-- **Bluetooth pairing's `bluetoothctl` output-string matching** — the
-  exact `pair`/`trust`/`connect` success/failure strings are BlueZ
-  version-dependent and were written without hardware to verify against
-  (flagged explicitly in `capabilities/audio/src/bluetooth.rs`'s own doc
-  comment). Confirm live against the actual Fishman amp pairing before
-  fully trusting it.
+- ~~**Bluetooth pairing's `bluetoothctl` output-string matching**~~ **Resolved
+  2026-07-10/11.** Superseded by the live Bluetooth pairing-hardening work
+  (`81ad610` and follow-ups): every string-matching path (`connect`/`pair`/
+  `trust` outcomes, ANSI-stripped `Connected: yes/no`, prompt-redraw
+  handling) is now confirmed live against BlueZ 5.x on pi2 with the real
+  Fishman Loudbox amp — see `capabilities/audio/src/bluetooth.rs`'s module
+  doc comment and its per-function "confirmed live" notes. Re-checked
+  2026-07-12: pi2 is still running BlueZ 5.82, matching what was verified.
 
 ---
 
