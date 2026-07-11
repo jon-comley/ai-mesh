@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 10;
+pub const WIRE_VERSION: u32 = 11;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -649,6 +649,28 @@ pub struct ReaperScriptResult {
     pub message: String,
 }
 
+// ── Music capability types (Spotify — plans/spotify-music.md) ─────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MusicCommandRequest {
+    pub request_id: String,
+    /// "play" | "pause" | "resume" | "next" | "previous" | "seek"
+    /// | "volume" | "shuffle" | "status"
+    pub action: String,
+    /// Sparse extras, mirrors `ReaperCommandRequest.params`:
+    /// query, entity_type, seconds, percent, on.
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MusicCommandResult {
+    pub request_id: String,
+    pub ok: bool,
+    /// A finished human-readable sentence — relayed verbatim to chat and
+    /// voice TTS with no second LLM turn to rewrite it.
+    pub message: String,
+}
+
 // ── Frame TV art-display capability types ─────────────────────────────────────
 // v1 (ArtShow/ArtStatus) was deliberately minimal (see
 // plans/frame-tv-art-display.md §10): just enough to prove the physical
@@ -872,6 +894,9 @@ pub enum MeshMessage {
     ArtShow(ArtShowRequest),
     ArtStatus(ArtStatusReport),
     ArtBatch(ArtBatchRequest),
+    // Music capability messages (Spotify — plans/spotify-music.md)
+    MusicCommand(MusicCommandRequest),
+    MusicCommandResult(MusicCommandResult),
 }
 
 /// Structured admin messages for coordinator control.
@@ -994,6 +1019,32 @@ mod tests {
         let decoded: NodeRecordFull = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn test_music_command_roundtrip() {
+        let cmd = MusicCommandRequest {
+            request_id: "req-1".into(),
+            action: "play".into(),
+            params: serde_json::json!({"query": "Hey Jude", "entity_type": "track"}),
+        };
+        let msg = MeshMessage::MusicCommand(cmd.clone());
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: MeshMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, MeshMessage::MusicCommand(cmd));
+    }
+
+    #[test]
+    fn test_music_command_result_roundtrip() {
+        let result = MusicCommandResult {
+            request_id: "req-1".into(),
+            ok: true,
+            message: "Now playing 'Hey Jude' by The Beatles".into(),
+        };
+        let msg = MeshMessage::MusicCommandResult(result.clone());
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: MeshMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, MeshMessage::MusicCommandResult(result));
     }
 
     #[test]

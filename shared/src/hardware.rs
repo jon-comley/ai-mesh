@@ -101,6 +101,7 @@ pub enum Feature {
     Art,
     Voice,
     Audio,
+    Music,
 }
 
 impl Default for NodeCapabilities {

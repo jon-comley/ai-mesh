@@ -10,6 +10,7 @@ members = [
     "capabilities/art",
     "capabilities/voice",
     "capabilities/audio",
+    "capabilities/music",
     "agent",
     "coordinator",
     "cli",

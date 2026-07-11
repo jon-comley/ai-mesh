@@ -53,6 +53,7 @@ dependencies = [
  "capability-core",
  "capability-lighting",
  "capability-llm",
+ "capability-music",
  "capability-reaper",
  "capability-sensors",
  "capability-voice",
@@ -438,6 +439,18 @@ dependencies = [
  "libc",
  "reqwest",
  "serde",
+ "serde_json",
+ "shared",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "capability-music"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "capability-core",
  "serde_json",
  "shared",
  "tokio",

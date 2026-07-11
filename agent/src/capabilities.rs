@@ -36,6 +36,8 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
         shared::Feature::Voice,
         #[cfg(feature = "audio")]
         shared::Feature::Audio,
+        #[cfg(feature = "music")]
+        shared::Feature::Music,
     ];
 
     // Report which audio backends this node runs so the coordinator can
@@ -86,6 +88,13 @@ mod tests {
     fn features_includes_voice_when_built_with_voice_feature() {
         let caps = detect_capabilities().unwrap();
         assert!(caps.features.contains(&shared::Feature::Voice));
+    }
+
+    #[cfg(feature = "music")]
+    #[test]
+    fn features_includes_music_when_built_with_music_feature() {
+        let caps = detect_capabilities().unwrap();
+        assert!(caps.features.contains(&shared::Feature::Music));
     }
 
     #[cfg(feature = "audio")]

@@ -12,6 +12,7 @@ sensors  = ["dep:capability-sensors"]
 art      = ["dep:capability-art"]
 voice    = ["dep:capability-voice"]
 audio    = ["dep:capability-audio"]
+music    = ["dep:capability-music"]
 
 [dependencies]
 shared = { path = "../shared" }
@@ -23,6 +24,7 @@ capability-sensors  = { path = "../capabilities/sensors", optional = true }
 capability-art      = { path = "../capabilities/art", optional = true }
 capability-voice    = { path = "../capabilities/voice", optional = true }
 capability-audio    = { path = "../capabilities/audio", optional = true }
+capability-music    = { path = "../capabilities/music", optional = true }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
