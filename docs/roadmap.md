@@ -2,6 +2,34 @@
 
 ---
 
+## Music / Spotify — code-complete, NOT yet live-tested (2026-07-12)
+
+All build phases of `plans/spotify-music.md` are implemented and committed
+(wire types + capability skeleton → coordinator `music_control` routing →
+Spotify Web API control plane + OAuth tooling → librespot playback engine →
+`just test-music` smoke recipe → snapcast multi-room transport). Unit tests,
+clippy, and the aarch64 cross-builds (agent + librespot 0.6.0) are green.
+
+**⚠ Nothing has run live yet — deployment is blocked on Phase 0: awaiting
+Spotify Premium membership** (playback control is Premium-only; the developer
+app + both OAuth logins come after signup — walkthrough in `docs/music.md`).
+
+Rollout once membership exists:
+1. `just deploy-coordinator pi1` + `just deploy-node pi2` — together (WIRE_VERSION 10→11; pi2 also gets snapserver installed)
+2. `just test-music` — routing asserts pass, playback warns
+3. `just spotify-auth` → `just spotify-push-creds pi2`
+4. `just deploy-librespot pi2` → `just spotify-login pi2`
+5. `just test-music` — fully green, audio from the pi2 Bluetooth amp
+
+Deploy-time verification items (assumed from docs, never exercised):
+librespot's blocking open of the snapserver FIFO, snapserver `mode=create`
+perms under the agent user, snapclient honoring `PULSE_SINK`. Fallback for
+A/B debugging: commit `f057990` still has the pre-snapcast direct-pacat
+pipeline. Deferred by design: the `music_control` `rooms` param until a
+second room speaker exists (`plans/spotify-music.md` Phase 6).
+
+---
+
 ## Infra note — the mesh router network migration (2026-06-25)
 
 Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x` → `10.0.0.x` (pi1 `10.0.0.10`, beelink1 `10.0.0.11`, SLZB-06 `10.0.0.12`). `nodes/*.env`, `justfile`, `README.md`, and `handover.md` updated. Follow-ups: set the mesh router DHCP reservations (leases still dynamic); re-verify beelink BIOS Pluton/fTPM golden state (crash storm regressed during the move — `docs/windows-node-setup.md`). beelink also needed Smart App Control disabled to run the self-built agent after its earlier Windows reinstall.

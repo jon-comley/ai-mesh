@@ -77,9 +77,21 @@ All in `coordinator/src/intent.rs` unless noted:
 - `just test-music` smoke recipe cloned from `test-reaper` (justfile:2175): "pause the music" → tool==music_control; "what's playing?" → status result non-empty AND `text` set; "play blackbird by the beatles" → result starts "Now playing".
 - `docs/music.md`: Phase 0 walkthrough + troubleshooting (no device = librespot down; 403 = not Premium; silent audio = stale BT sink).
 
-## Phase 6 — Multi-room (future, design honored but NOT built now)
+## Phase 6 — Multi-room transport (built 2026-07-11; rooms param deferred)
 
-Swap the supervisor's pacat stage for a snapserver FIFO (`/tmp/snapfifo`); snapclient per room (any cheap Pi + speaker just joins); `music_control` gains a `rooms` param toggling snapclients via Snapcast's JSON-RPC; map rooms via the existing `room-audio-sink:<room>` prefs. Isolated to `player.rs`'s output stage + one schema field — that's why we chose the pipe backend.
+**Built**: the pacat stage is gone. librespot writes PCM into a FIFO
+(`~/.ai-mesh/spotify-fifo`); snapserver (own unit `ai-mesh-snapserver`,
+runs as the agent user, installed/configured by `install-node-linux.sh`)
+fans it out sample-synced; the agent supervises a local snapclient
+(`--hostID ai-mesh`, `PULSE_SINK` = paired Bluetooth sink, re-resolved per
+restart) playing the stream. librespot and snapclient are supervised
+independently — a session drop doesn't tear down the audio path and vice
+versa. Adding a room = install snapclient on that node, point it at pi2.
+
+**Deferred until a second speaker exists**: the `music_control` `rooms`
+param (per-room on/off via snapserver's JSON-RPC on 1705, mapped through
+the `room-audio-sink:<room>` prefs) — untestable with one room, and the
+room-mapping convention should be decided against real hardware.
 
 ---
 
