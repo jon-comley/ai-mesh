@@ -6,8 +6,16 @@ Design and phases: `plans/spotify-music.md`.
 
 How it works: the coordinator's `music_control` tool routes commands to the
 music node (pi2), whose agent drives the Spotify Web API — search, playback
-control, status. Audio comes out of a `librespot` Spotify Connect player on
-the same node, into the paired Bluetooth speaker.
+control, status. Audio comes from a `librespot` Spotify Connect player whose
+raw PCM feeds **snapserver** (multi-room transport, sample-synced); the
+agent supervises a local **snapclient** that plays the stream into the
+paired Bluetooth speaker. Snapcast adds a fixed ~1 s buffer — irrelevant for
+music, and it's what makes rooms play in sync.
+
+**Adding a room later**: put a speaker on any Linux box, install
+`snapclient`, point it at pi2 (`snapclient --host <pi2-ip>`) — it joins the
+synced stream immediately. Per-room on/off via the `music_control` `rooms`
+param is deferred until a second speaker actually exists.
 
 ## One-time setup
 
@@ -81,7 +89,7 @@ other.
 | "playback control needs Spotify Premium" | The account is on the free tier |
 | "Spotify authorisation failed" | Refresh token revoked — re-run steps 3–4 |
 | "the music player didn't answer in time" | pi2's agent is down or the mesh link dropped — check `just nodes` |
-| Command works but no sound | Stale/vanished Bluetooth sink — playback silently falls back to the default sink; re-pair via the dashboard, the supervisor picks the sink up on next restart |
+| Command works but no sound | Check the chain in order: `systemctl status ai-mesh-snapserver` on pi2 (reads the FIFO), then the agent journal for snapclient restarts, then the Bluetooth sink — a stale/vanished sink silently falls back to the default sink; re-pair via the dashboard, the supervisor picks it up on next snapclient restart |
 | "no music node connected" | pi2 offline, or its agent built without the `music` feature |
 
 Two independent credential stores, one more time: the Web API refresh token

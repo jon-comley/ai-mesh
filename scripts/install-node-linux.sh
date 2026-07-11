@@ -428,12 +428,64 @@ if has_feature music; then
         MUSIC_ENV_BLOCK="${MUSIC_ENV_BLOCK}
 Environment=SPOTIFY_DEVICE_NAME=${SPOTIFY_DEVICE_NAME}"
     fi
-    # pacat needs the user-session PipeWire socket, same as the audio block
-    # above; only add XDG_RUNTIME_DIR here if audio didn't already.
+    # snapclient needs the user-session PipeWire socket, same as the audio
+    # block above; only add XDG_RUNTIME_DIR here if audio didn't already.
     if ! has_feature audio; then
         AGENT_UID="$(id -u "${AGENT_USER}")"
         MUSIC_ENV_BLOCK="${MUSIC_ENV_BLOCK}
 Environment=XDG_RUNTIME_DIR=/run/user/${AGENT_UID}"
+    fi
+
+    # Multi-room transport: librespot writes PCM into a FIFO, snapserver
+    # fans it out sample-synced, snapclients play it (this node's snapclient
+    # is supervised by the agent so it tracks the live paired sink; another
+    # room later = another snapclient pointed at this snapserver).
+    echo ">>> Installing snapcast (multi-room music transport)..."
+    apt-get install -y -q --no-install-recommends snapserver snapclient
+
+    # Stock units stand down: snapserver is replaced by our own unit running
+    # as the agent user (it must read the agent-owned FIFO), and snapclient
+    # is spawned by the agent itself (PULSE_SINK from the live paired sink).
+    systemctl disable --now snapserver 2>/dev/null || true
+    systemctl disable --now snapclient 2>/dev/null || true
+
+    SNAPCONF=/etc/ai-mesh-snapserver.conf
+    SNAPCONF_NEW="$(mktemp)"
+    cat > "$SNAPCONF_NEW" <<SNAPEOF
+# Managed by install-node-linux.sh — snapserver reads librespot's PCM FIFO.
+# The FIFO path must match capability-music's fifo_path() (player.rs).
+[stream]
+source = pipe:///home/${AGENT_USER}/.ai-mesh/spotify-fifo?name=Spotify&mode=create&sampleformat=44100:16:2
+SNAPEOF
+    SNAP_CHANGED=false
+    if ! cmp -s "$SNAPCONF_NEW" "$SNAPCONF" 2>/dev/null; then
+        cp "$SNAPCONF_NEW" "$SNAPCONF"
+        SNAP_CHANGED=true
+    fi
+    rm -f "$SNAPCONF_NEW"
+
+    tee /etc/systemd/system/ai-mesh-snapserver.service > /dev/null <<SNAPUNIT
+[Unit]
+Description=ai-mesh snapserver (multi-room music transport)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/snapserver --config ${SNAPCONF}
+User=${AGENT_USER}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SNAPUNIT
+    systemctl daemon-reload
+    systemctl enable ai-mesh-snapserver
+    if [ "$SNAP_CHANGED" = true ]; then
+        echo ">>> snapserver config changed — restarting ai-mesh-snapserver."
+        systemctl restart ai-mesh-snapserver
+    else
+        # enable+start only if not already running — never interrupts a live stream.
+        systemctl start ai-mesh-snapserver 2>/dev/null || true
     fi
 fi
 
