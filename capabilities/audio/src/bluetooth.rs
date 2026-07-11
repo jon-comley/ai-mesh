@@ -51,12 +51,25 @@ pub struct FoundDevice {
     pub rssi: Option<i32>,
 }
 
+/// Volume a freshly-paired device is set to immediately after pairing.
+/// There's no way to query a sink's actual current volume back from pactl
+/// over the mesh today, so without this the dashboard's volume slider
+/// would just be guessing — setting one explicitly at pair time means the
+/// coordinator (and so the dashboard) genuinely *knows* the real value
+/// instead.
+const DEFAULT_INITIAL_VOLUME_PCT: u8 = 20;
+
 pub struct PairOutcome {
     pub name: String,
     /// Resolved PipeWire/PulseAudio sink name, if `pactl` found one for
     /// this MAC within `SINK_POLL_TIMEOUT`. `None` doesn't necessarily mean
     /// the pair failed — playback falls back to the OS default sink.
     pub sink_name: Option<String>,
+    /// `Some(DEFAULT_INITIAL_VOLUME_PCT)` if the post-pair volume-set
+    /// succeeded, `None` if it couldn't be attempted (no sink resolved) or
+    /// failed — in which case the volume genuinely stays unknown until the
+    /// user sets one from the dashboard.
+    pub volume_pct: Option<u8>,
 }
 
 fn spawn_bluetoothctl() -> Result<Child, String> {
@@ -444,7 +457,26 @@ pub async fn pair(mac: &str) -> Result<PairOutcome, String> {
 
     let name = resolve_name(mac).await.unwrap_or_else(|| mac.to_string());
     let sink_name = resolve_sink_name(mac).await;
-    Ok(PairOutcome { name, sink_name })
+
+    // Establish a known volume baseline right away — best-effort: a failed
+    // set here doesn't fail the pair itself (see DEFAULT_INITIAL_VOLUME_PCT's
+    // doc comment for why this matters).
+    let volume_pct = match &sink_name {
+        Some(sink) => match set_volume(sink, DEFAULT_INITIAL_VOLUME_PCT).await {
+            Ok(()) => Some(DEFAULT_INITIAL_VOLUME_PCT),
+            Err(e) => {
+                warn!(mac, error = %e, "bluetooth: failed to set initial volume after pairing");
+                None
+            }
+        },
+        None => None,
+    };
+
+    Ok(PairOutcome {
+        name,
+        sink_name,
+        volume_pct,
+    })
 }
 
 /// Attempts to reconnect an already-paired, already-trusted device — used
@@ -532,6 +564,37 @@ pub async fn is_connected(mac: &str) -> bool {
         warn!(mac, output = %output.trim(), "bluetooth: info check failed while polling status");
     }
     connected.unwrap_or(false)
+}
+
+/// Sets `sink`'s playback volume via `pactl` — `pct` is the caller's
+/// responsibility to have already clamped to 0-100 (the coordinator's HTTP
+/// layer does this before the request is ever sent).
+pub async fn set_volume(sink: &str, pct: u8) -> Result<(), String> {
+    let status = Command::new("pactl")
+        .args(["set-sink-volume", sink, &format!("{pct}%")])
+        .status()
+        .await
+        .map_err(|e| format!("failed to run pactl: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("pactl set-sink-volume exited with {status}"))
+    }
+}
+
+/// Mutes/unmutes `sink` via `pactl`.
+pub async fn set_mute(sink: &str, muted: bool) -> Result<(), String> {
+    let flag = if muted { "1" } else { "0" };
+    let status = Command::new("pactl")
+        .args(["set-sink-mute", sink, flag])
+        .status()
+        .await
+        .map_err(|e| format!("failed to run pactl: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("pactl set-sink-mute exited with {status}"))
+    }
 }
 
 #[cfg(test)]

@@ -14,8 +14,8 @@ use axum::{
 };
 use serde::Deserialize;
 use shared::{
-    BluetoothClearCacheRequest, BluetoothPairRequest, BluetoothScanRequest, BluetoothUnpairRequest,
-    MeshMessage,
+    BluetoothClearCacheRequest, BluetoothMuteRequest, BluetoothPairRequest, BluetoothScanRequest,
+    BluetoothUnpairRequest, BluetoothVolumeRequest, MeshMessage,
 };
 use std::sync::Arc;
 
@@ -155,6 +155,64 @@ pub async fn unpair(
     }
 }
 
+#[derive(Deserialize)]
+pub struct VolumeBody {
+    volume_pct: u8,
+}
+
+/// POST /api/bluetooth/volume/{node_id} — set the volume of that node's
+/// currently-paired Bluetooth sink. Feedback streams to the dashboard as a
+/// `BluetoothVolumeResult` WS event. `volume_pct` is clamped to 0-100 here
+/// rather than trusted from the caller — the node applies it verbatim via
+/// `pactl set-sink-volume`, which has no upper bound of its own.
+pub async fn volume(
+    Path(node_id): Path<String>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<VolumeBody>,
+) -> impl IntoResponse {
+    let sent = state.send_to_node(
+        &node_id,
+        MeshMessage::BluetoothVolume(BluetoothVolumeRequest {
+            request_id: gen_request_id(),
+            volume_pct: body.volume_pct.min(100),
+        }),
+    );
+    if sent {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "node not reachable").into_response()
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MuteBody {
+    muted: bool,
+}
+
+/// POST /api/bluetooth/mute/{node_id} — mute/unmute that node's
+/// currently-paired Bluetooth sink. Feedback streams to the dashboard as a
+/// `BluetoothMuteResult` WS event.
+pub async fn mute(
+    Path(node_id): Path<String>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<MuteBody>,
+) -> impl IntoResponse {
+    let sent = state.send_to_node(
+        &node_id,
+        MeshMessage::BluetoothMute(BluetoothMuteRequest {
+            request_id: gen_request_id(),
+            muted: body.muted,
+        }),
+    );
+    if sent {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "node not reachable").into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +227,8 @@ mod tests {
             .route("/api/bluetooth/pair/{node_id}", post(pair))
             .route("/api/bluetooth/clear-cache/{node_id}", post(clear_cache))
             .route("/api/bluetooth/unpair/{node_id}", post(unpair))
+            .route("/api/bluetooth/volume/{node_id}", post(volume))
+            .route("/api/bluetooth/mute/{node_id}", post(mute))
             .with_state(state)
     }
 
@@ -339,6 +399,74 @@ mod tests {
             "POST",
             "/api/bluetooth/unpair/pi2",
             r#"{"mac":"AA:BB:CC:DD:EE:FF"}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn volume_sends_the_clamped_percentage_to_the_named_node() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi2".into(), tx);
+        let state = make_state(vec![], connections);
+
+        let status = send(
+            bluetooth_router(state),
+            "POST",
+            "/api/bluetooth/volume/pi2",
+            r#"{"volume_pct":250}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        match rx.try_recv().unwrap() {
+            MeshMessage::BluetoothVolume(req) => assert_eq!(req.volume_pct, 100),
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn volume_503_when_node_not_connected() {
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            bluetooth_router(state),
+            "POST",
+            "/api/bluetooth/volume/pi2",
+            r#"{"volume_pct":50}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn mute_sends_the_flag_to_the_named_node() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi2".into(), tx);
+        let state = make_state(vec![], connections);
+
+        let status = send(
+            bluetooth_router(state),
+            "POST",
+            "/api/bluetooth/mute/pi2",
+            r#"{"muted":true}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        match rx.try_recv().unwrap() {
+            MeshMessage::BluetoothMute(req) => assert!(req.muted),
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mute_503_when_node_not_connected() {
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            bluetooth_router(state),
+            "POST",
+            "/api/bluetooth/mute/pi2",
+            r#"{"muted":true}"#,
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);

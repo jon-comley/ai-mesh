@@ -25,6 +25,8 @@
 
 mod bluetooth;
 
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use capability_core::Capability;
 use shared::MeshMessage;
@@ -121,24 +123,23 @@ struct PairedDevice {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sink_name: Option<String>,
+    /// The volume this node's sink was last successfully set to (0-100).
+    /// Set at pair time (`bluetooth::DEFAULT_INITIAL_VOLUME_PCT`) and kept
+    /// current by `persist_paired_volume` on every successful
+    /// `BluetoothVolumeRequest` — there's no way to query a sink's actual
+    /// volume back from pactl, so this persisted value is the only source
+    /// of truth for "what did we last set it to." `None` only for a device
+    /// paired before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    volume_pct: Option<u8>,
 }
 
-/// Persists the outcome of a successful `bluetooth::pair()` so subsequent
-/// playback targets the resolved sink explicitly instead of relying on the
-/// OS default, and so the device survives an agent restart for unpair/status
-/// purposes. Node-local only — survives this node's own restarts, not
-/// migrated between nodes.
-fn persist_paired_device(mac: &str, name: &str, sink_name: Option<&str>) {
+fn write_paired_device(device: &PairedDevice) {
     let path = bluetooth_sink_state_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let device = PairedDevice {
-        mac: mac.to_string(),
-        name: name.to_string(),
-        sink_name: sink_name.map(str::to_string),
-    };
-    match serde_json::to_string(&device) {
+    match serde_json::to_string(device) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&path, json) {
                 warn!(error = %e, "audio: failed to persist paired bluetooth device");
@@ -148,9 +149,47 @@ fn persist_paired_device(mac: &str, name: &str, sink_name: Option<&str>) {
     }
 }
 
+/// Persists the outcome of a successful `bluetooth::pair()` so subsequent
+/// playback targets the resolved sink explicitly instead of relying on the
+/// OS default, and so the device survives an agent restart for unpair/status
+/// purposes. Node-local only — survives this node's own restarts, not
+/// migrated between nodes.
+fn persist_paired_device(mac: &str, name: &str, sink_name: Option<&str>, volume_pct: Option<u8>) {
+    write_paired_device(&PairedDevice {
+        mac: mac.to_string(),
+        name: name.to_string(),
+        sink_name: sink_name.map(str::to_string),
+        volume_pct,
+    });
+}
+
+/// Updates just the volume field of the currently-persisted paired device
+/// (if any), leaving mac/name/sink_name untouched — called after a
+/// successful `BluetoothVolumeRequest` so a later status/pair-result
+/// report, or a restarted agent, still knows the last volume actually
+/// applied. No-op if nothing is currently persisted as paired.
+fn persist_paired_volume(pct: u8) {
+    if let Some(mut device) = paired_device() {
+        device.volume_pct = Some(pct);
+        write_paired_device(&device);
+    }
+}
+
 fn paired_device() -> Option<PairedDevice> {
     let text = std::fs::read_to_string(bluetooth_sink_state_path()).ok()?;
-    serde_json::from_str(&text).ok()
+    match serde_json::from_str(&text) {
+        Ok(device) => Some(device),
+        Err(e) => {
+            // A missing file (nothing ever paired) is normal and handled
+            // above via `.ok()?` — this is the file existing but not
+            // parsing, which means real corruption, not "unpaired". Worth
+            // a trail: silently treating this the same as "unpaired" would
+            // otherwise erase a MAC/sink_name the caller might actually
+            // need to debug why playback/status suddenly went quiet.
+            warn!(error = %e, "audio: persisted paired-device file is corrupt — treating as unpaired");
+            None
+        }
+    }
 }
 
 /// Removes the persisted paired-device state — called after a successful
@@ -188,14 +227,27 @@ fn download_dir() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("ai-mesh-audio"))
 }
 
+/// Sender for the agent's *current* coordinator connection, shared with the
+/// background `bluetooth_status_loop`. `start()` refreshes this on every
+/// call (`main.rs` re-runs `start()` on every coordinator reconnect) so a
+/// status update pushed after a reconnect uses the live connection, not the
+/// first one the loop ever captured.
+struct AudioShared {
+    mesh_tx: Mutex<Option<Sender<MeshMessage>>>,
+}
+
 pub struct AudioCapability {
     node_id: String,
+    shared: Arc<AudioShared>,
 }
 
 impl AudioCapability {
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
+            shared: Arc::new(AudioShared {
+                mesh_tx: Mutex::new(None),
+            }),
         }
     }
 }
@@ -216,7 +268,10 @@ impl Capability for AudioCapability {
             MeshMessage::BluetoothScan(_)
             | MeshMessage::BluetoothPair(_)
             | MeshMessage::BluetoothClearCache(_)
-            | MeshMessage::BluetoothUnpair(_) => {
+            | MeshMessage::BluetoothUnpair(_)
+            | MeshMessage::BluetoothStatusRequest
+            | MeshMessage::BluetoothVolume(_)
+            | MeshMessage::BluetoothMute(_) => {
                 configured_backends().iter().any(|b| b == "bluetooth")
             }
             _ => false,
@@ -229,9 +284,26 @@ impl Capability for AudioCapability {
             backends = %configured_backends().join(","),
             "audio: ready (backends selected via AUDIO_BACKENDS)"
         );
+        *self.shared.mesh_tx.lock().unwrap() = Some(tx);
+
         if configured_backends().iter().any(|b| b == "bluetooth") {
-            let node_id = self.node_id.clone();
-            tokio::spawn(bluetooth_status_loop(node_id, tx));
+            // main.rs's coordinator-reconnect loop calls every capability's
+            // start() again on each reconnect. Without this guard, each
+            // reconnect would spawn another concurrent bluetooth_status_loop
+            // racing the previous ones over the same bluetoothctl calls —
+            // the exact class of bug voice's `run()` guard exists to
+            // prevent (see its doc comment). The loop only ever needs to
+            // start once per process; it reads the live sender out of
+            // `shared.mesh_tx` on every send instead of closing over a tx
+            // tied to whichever connection happened to start it.
+            static STARTED: std::sync::Once = std::sync::Once::new();
+            let mut already_started = true;
+            STARTED.call_once(|| already_started = false);
+            if !already_started {
+                let node_id = self.node_id.clone();
+                let shared = Arc::clone(&self.shared);
+                tokio::spawn(bluetooth_status_loop(node_id, shared));
+            }
         }
         Ok(())
     }
@@ -291,14 +363,19 @@ impl Capability for AudioCapability {
             }
             MeshMessage::BluetoothPair(req) => {
                 let outcome = bluetooth::pair(&req.mac).await;
-                let (success, name, error, sink_name) = match outcome {
+                let (success, name, error, sink_name, volume_pct) = match outcome {
                     Ok(o) => {
-                        persist_paired_device(&req.mac, &o.name, o.sink_name.as_deref());
-                        (true, o.name, None, o.sink_name)
+                        persist_paired_device(
+                            &req.mac,
+                            &o.name,
+                            o.sink_name.as_deref(),
+                            o.volume_pct,
+                        );
+                        (true, o.name, None, o.sink_name, o.volume_pct)
                     }
                     Err(e) => {
                         warn!(mac = %req.mac, error = %e, "bluetooth: pairing failed");
-                        (false, req.mac.clone(), Some(e), None)
+                        (false, req.mac.clone(), Some(e), None, None)
                     }
                 };
                 let _ = tx
@@ -310,6 +387,7 @@ impl Capability for AudioCapability {
                             success,
                             error,
                             sink_name,
+                            volume_pct,
                         },
                     ))
                     .await;
@@ -333,6 +411,96 @@ impl Capability for AudioCapability {
                         shared::BluetoothUnpairResult {
                             node_id: self.node_id.clone(),
                             mac: req.mac,
+                            success,
+                            error,
+                        },
+                    ))
+                    .await;
+            }
+            MeshMessage::BluetoothStatusRequest => {
+                // Coordinator asked for the current status right now — reply
+                // unconditionally, unlike bluetooth_status_loop's own
+                // change-gated push (see BluetoothStatusRequest's doc
+                // comment for why: a coordinator restart loses its
+                // in-memory status without this).
+                if let Some(device) = paired_device() {
+                    let connected = bluetooth::is_connected(&device.mac).await;
+                    let _ = tx
+                        .send(MeshMessage::BluetoothStatusUpdate(
+                            shared::BluetoothStatusUpdate {
+                                node_id: self.node_id.clone(),
+                                mac: device.mac,
+                                name: device.name,
+                                connected,
+                            },
+                        ))
+                        .await;
+                }
+            }
+            MeshMessage::BluetoothVolume(req) => {
+                let device = paired_device();
+                let (success, error, volume_pct) = match device
+                    .as_ref()
+                    .and_then(|d| d.sink_name.as_deref())
+                {
+                    Some(sink) => match bluetooth::set_volume(sink, req.volume_pct).await {
+                        Ok(()) => {
+                            persist_paired_volume(req.volume_pct);
+                            (true, None, Some(req.volume_pct))
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "bluetooth: set volume failed");
+                            (false, Some(e), None)
+                        }
+                    },
+                    None => {
+                        warn!(
+                            mac = %device.as_ref().map(|d| d.mac.as_str()).unwrap_or("none paired"),
+                            "bluetooth: volume request but no sink resolved for this node's paired device"
+                        );
+                        (
+                            false,
+                            Some("no Bluetooth sink resolved for this node's paired device".into()),
+                            None,
+                        )
+                    }
+                };
+                let _ = tx
+                    .send(MeshMessage::BluetoothVolumeResult(
+                        shared::BluetoothVolumeResult {
+                            node_id: self.node_id.clone(),
+                            success,
+                            error,
+                            volume_pct,
+                        },
+                    ))
+                    .await;
+            }
+            MeshMessage::BluetoothMute(req) => {
+                let device = paired_device();
+                let (success, error) = match device.as_ref().and_then(|d| d.sink_name.as_deref()) {
+                    Some(sink) => match bluetooth::set_mute(sink, req.muted).await {
+                        Ok(()) => (true, None),
+                        Err(e) => {
+                            warn!(error = %e, "bluetooth: set mute failed");
+                            (false, Some(e))
+                        }
+                    },
+                    None => {
+                        warn!(
+                            mac = %device.as_ref().map(|d| d.mac.as_str()).unwrap_or("none paired"),
+                            "bluetooth: mute request but no sink resolved for this node's paired device"
+                        );
+                        (
+                            false,
+                            Some("no Bluetooth sink resolved for this node's paired device".into()),
+                        )
+                    }
+                };
+                let _ = tx
+                    .send(MeshMessage::BluetoothMuteResult(
+                        shared::BluetoothMuteResult {
+                            node_id: self.node_id.clone(),
                             success,
                             error,
                         },
@@ -382,13 +550,17 @@ const BLUETOOTH_RECONNECT_COOLDOWN: std::time::Duration = std::time::Duration::f
 /// range/disconnected"; both surface as `connected: false`, worded
 /// honestly on the dashboard rather than guessing which.
 ///
-/// Known limitation: this runs once for the agent process's lifetime
-/// (`start()` is spawned outside the reconnect loop, per
-/// `capability_core::Capability`'s contract), so a coordinator restart that
-/// loses its in-memory paired-status map won't be told the current state
-/// again until it next actually changes — acceptable for a proposed sketch,
-/// not fixed here.
-async fn bluetooth_status_loop(node_id: String, tx: Sender<MeshMessage>) {
+/// Runs once for the agent process's lifetime — `start()` only spawns it on
+/// the first call (see its `std::sync::Once` guard) since a coordinator
+/// reconnect doesn't mean the paired device changed. It reads the live
+/// coordinator sender out of `shared.mesh_tx` on every send rather than
+/// closing over the sender from whichever `start()` call happened to spawn
+/// it, so a status push after a reconnect still reaches the coordinator.
+///
+/// Known limitation: a coordinator restart that loses its in-memory
+/// paired-status map won't be told the current state again until it next
+/// actually changes — acceptable for a proposed sketch, not fixed here.
+async fn bluetooth_status_loop(node_id: String, shared: Arc<AudioShared>) {
     let mut last_connected: Option<bool> = None;
     let mut last_mac: Option<String> = None;
     let mut reconnect_after = tokio::time::Instant::now();
@@ -421,16 +593,23 @@ async fn bluetooth_status_loop(node_id: String, tx: Sender<MeshMessage>) {
 
                 if last_connected != Some(connected) {
                     last_connected = Some(connected);
-                    let _ = tx
-                        .send(MeshMessage::BluetoothStatusUpdate(
-                            shared::BluetoothStatusUpdate {
-                                node_id: node_id.clone(),
-                                mac: device.mac,
-                                name: device.name,
-                                connected,
-                            },
-                        ))
-                        .await;
+                    // Clone the *current* connection's sender out of the
+                    // lock; the send itself must not hold the mutex across
+                    // an await (same rationale as capability-voice's
+                    // identical pattern).
+                    let mesh_tx = shared.mesh_tx.lock().unwrap().clone();
+                    if let Some(mesh_tx) = mesh_tx {
+                        let _ = mesh_tx
+                            .send(MeshMessage::BluetoothStatusUpdate(
+                                shared::BluetoothStatusUpdate {
+                                    node_id: node_id.clone(),
+                                    mac: device.mac,
+                                    name: device.name,
+                                    connected,
+                                },
+                            ))
+                            .await;
+                    }
                 }
             }
             None => {
@@ -444,6 +623,32 @@ async fn bluetooth_status_loop(node_id: String, tx: Sender<MeshMessage>) {
 
 async fn play_url(url: &str, sink: Option<&str>) -> Result<(), String> {
     let backend = resolve_backend(sink)?;
+    // `paplay --device=<name>` does NOT error when <name> doesn't exist in
+    // PipeWire's sink list — confirmed live 2026-07-11: a disconnected
+    // Bluetooth speaker drops its sink node entirely, yet `paplay
+    // --device=<stale-name>` silently played through the Pi's own onboard
+    // default sink and exited 0. That false "success" broke the entire
+    // room-routed voice-reply fallback chain (capability-voice's
+    // room_with_audio_sink → AudioAnnounce → AudioPlayResult.success):
+    // the coordinator believed the reply reached the kitchen speaker, so
+    // it never told the voice pipeline to fall back to the puck, and the
+    // reply was never heard anywhere. Checking the actual BlueZ connection
+    // state first — the same live signal `bluetooth_status_loop` already
+    // tracks — makes AudioPlayResult.success mean what callers assume it
+    // means.
+    if backend == "bluetooth" {
+        let device = paired_device()
+            .ok_or("bluetooth backend selected but no device is currently paired")?;
+        if !bluetooth::is_connected(&device.mac).await {
+            return Err(format!(
+                "bluetooth device '{}' ({}, sink {}) is not connected — refusing to play \
+                 (playback would silently go to this node's default sink instead)",
+                device.name,
+                device.mac,
+                device.sink_name.as_deref().unwrap_or("unresolved")
+            ));
+        }
+    }
     let template = play_cmd_template_for(&backend).ok_or_else(|| {
         format!(
             "no play command known for backend '{backend}' — set AUDIO_PLAY_CMD_{}",
@@ -555,6 +760,19 @@ mod tests {
                 mac: "AA:BB:CC:DD:EE:FF".into(),
             }
         )));
+        assert!(cap.handles(&MeshMessage::BluetoothStatusRequest));
+        assert!(cap.handles(&MeshMessage::BluetoothVolume(
+            shared::BluetoothVolumeRequest {
+                request_id: "r5".into(),
+                volume_pct: 50,
+            }
+        )));
+        assert!(
+            cap.handles(&MeshMessage::BluetoothMute(shared::BluetoothMuteRequest {
+                request_id: "r6".into(),
+                muted: true,
+            }))
+        );
         clear_audio_env();
     }
 
@@ -585,6 +803,140 @@ mod tests {
                 mac: "AA:BB:CC:DD:EE:FF".into(),
             }
         )));
+        assert!(!cap.handles(&MeshMessage::BluetoothStatusRequest));
+        assert!(!cap.handles(&MeshMessage::BluetoothVolume(
+            shared::BluetoothVolumeRequest {
+                request_id: "r4".into(),
+                volume_pct: 50,
+            }
+        )));
+        assert!(
+            !cap.handles(&MeshMessage::BluetoothMute(shared::BluetoothMuteRequest {
+                request_id: "r5".into(),
+                muted: true,
+            }))
+        );
+        clear_audio_env();
+    }
+
+    #[tokio::test]
+    async fn status_request_replies_with_nothing_when_no_device_paired() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        let cap = AudioCapability::new("test-node");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        cap.handle(MeshMessage::BluetoothStatusRequest, tx).await;
+        assert!(rx.try_recv().is_err());
+        clear_audio_env();
+    }
+
+    #[tokio::test]
+    async fn status_request_replies_with_current_status_when_a_device_is_paired() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        persist_paired_device("AA:BB:CC:DD:EE:FF", "Fishman PA", None, None);
+        let cap = AudioCapability::new("test-node");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        cap.handle(MeshMessage::BluetoothStatusRequest, tx).await;
+        match rx.try_recv() {
+            Ok(MeshMessage::BluetoothStatusUpdate(update)) => {
+                assert_eq!(update.mac, "AA:BB:CC:DD:EE:FF");
+                assert_eq!(update.name, "Fishman PA");
+                // No real bluetoothctl in this test environment, so
+                // is_connected() reports false — the point of this test is
+                // that a reply is sent unconditionally, not the value.
+                assert!(!update.connected);
+            }
+            other => panic!("expected BluetoothStatusUpdate, got {other:?}"),
+        }
+        clear_audio_env();
+    }
+
+    #[tokio::test]
+    async fn volume_request_fails_when_no_device_paired() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        let cap = AudioCapability::new("test-node");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        cap.handle(
+            MeshMessage::BluetoothVolume(shared::BluetoothVolumeRequest {
+                request_id: "r1".into(),
+                volume_pct: 50,
+            }),
+            tx,
+        )
+        .await;
+        match rx.try_recv() {
+            Ok(MeshMessage::BluetoothVolumeResult(result)) => {
+                assert!(!result.success);
+                assert!(result.error.is_some());
+            }
+            other => panic!("expected BluetoothVolumeResult, got {other:?}"),
+        }
+        clear_audio_env();
+    }
+
+    #[tokio::test]
+    async fn volume_request_attempts_pactl_when_a_device_is_paired() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        // No real pactl sink in this test environment — the point of this
+        // test is that a sink resolves and pactl is actually invoked (it
+        // will fail here, but not with the "no sink resolved" error above).
+        persist_paired_device(
+            "AA:BB:CC:DD:EE:FF",
+            "Fishman PA",
+            Some("bluez_sink.test"),
+            None,
+        );
+        let cap = AudioCapability::new("test-node");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        cap.handle(
+            MeshMessage::BluetoothVolume(shared::BluetoothVolumeRequest {
+                request_id: "r2".into(),
+                volume_pct: 50,
+            }),
+            tx,
+        )
+        .await;
+        match rx.try_recv() {
+            Ok(MeshMessage::BluetoothVolumeResult(result)) => {
+                assert_ne!(
+                    result.error.as_deref(),
+                    Some("no Bluetooth sink resolved for this node's paired device")
+                );
+            }
+            other => panic!("expected BluetoothVolumeResult, got {other:?}"),
+        }
+        clear_audio_env();
+    }
+
+    #[tokio::test]
+    async fn mute_request_fails_when_no_device_paired() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        let cap = AudioCapability::new("test-node");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        cap.handle(
+            MeshMessage::BluetoothMute(shared::BluetoothMuteRequest {
+                request_id: "r3".into(),
+                muted: true,
+            }),
+            tx,
+        )
+        .await;
+        match rx.try_recv() {
+            Ok(MeshMessage::BluetoothMuteResult(result)) => {
+                assert!(!result.success);
+                assert!(result.error.is_some());
+            }
+            other => panic!("expected BluetoothMuteResult, got {other:?}"),
+        }
         clear_audio_env();
     }
 
@@ -647,6 +999,7 @@ mod tests {
             "AA:BB:CC:DD:EE:FF",
             "Fishman PA",
             Some("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink"),
+            None,
         );
         assert_eq!(
             play_cmd_template_for("bluetooth"),
@@ -663,6 +1016,7 @@ mod tests {
             "AA:BB:CC:DD:EE:FF",
             "Fishman PA",
             Some("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink"),
+            None,
         );
         // SAFETY: caller holds ENV_LOCK for the duration of the test.
         unsafe {
@@ -685,6 +1039,7 @@ mod tests {
             "AA:BB:CC:DD:EE:FF",
             "Fishman PA",
             Some("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink"),
+            None,
         );
         let device = paired_device().unwrap();
         assert_eq!(device.mac, "AA:BB:CC:DD:EE:FF");
@@ -696,11 +1051,48 @@ mod tests {
     }
 
     #[test]
+    fn paired_device_treats_a_corrupt_file_as_unpaired() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        std::fs::write(bluetooth_sink_state_path(), b"not valid json").unwrap();
+        assert!(paired_device().is_none());
+    }
+
+    #[test]
+    fn persist_paired_volume_updates_only_the_volume_field() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        persist_paired_device(
+            "AA:BB:CC:DD:EE:FF",
+            "Fishman PA",
+            Some("bluez_sink.test"),
+            Some(20),
+        );
+        persist_paired_volume(45);
+        let device = paired_device().unwrap();
+        assert_eq!(device.mac, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(device.name, "Fishman PA");
+        assert_eq!(device.sink_name.as_deref(), Some("bluez_sink.test"));
+        assert_eq!(device.volume_pct, Some(45));
+    }
+
+    #[test]
+    fn persist_paired_volume_is_a_noop_when_nothing_paired() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        persist_paired_volume(45);
+        assert!(paired_device().is_none());
+    }
+
+    #[test]
     fn clear_paired_device_removes_persisted_state() {
         let _guard = ENV_LOCK.blocking_lock();
         clear_audio_env();
         let _dir = isolated_state_dir();
-        persist_paired_device("AA:BB:CC:DD:EE:FF", "Fishman PA", None);
+        persist_paired_device("AA:BB:CC:DD:EE:FF", "Fishman PA", None, None);
         assert!(paired_device().is_some());
         clear_paired_device();
         assert!(paired_device().is_none());
@@ -766,6 +1158,43 @@ mod tests {
         }
         let err = resolve_backend(Some("bluetooth")).unwrap_err();
         assert!(err.contains("not configured for backend 'bluetooth'"));
+        clear_audio_env();
+    }
+
+    #[tokio::test]
+    async fn play_url_refuses_a_disconnected_bluetooth_sink() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        // No real bluetoothctl in this test environment, so is_connected()
+        // reports false — exactly the real-world "device is off" case this
+        // guard exists for (see play_url's doc comment: confirmed live
+        // 2026-07-11, paplay silently "succeeded" against a stale sink).
+        persist_paired_device(
+            "AA:BB:CC:DD:EE:FF",
+            "Fishman PA",
+            Some("bluez_sink.test"),
+            None,
+        );
+        let err = play_url("http://example/clip.wav", Some("bluetooth"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("not connected"), "unexpected error: {err}");
+        clear_audio_env();
+    }
+
+    #[tokio::test]
+    async fn play_url_refuses_bluetooth_when_nothing_paired() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        let err = play_url("http://example/clip.wav", Some("bluetooth"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("no device is currently paired"),
+            "unexpected error: {err}"
+        );
         clear_audio_env();
     }
 

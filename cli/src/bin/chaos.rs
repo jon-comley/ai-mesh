@@ -12,7 +12,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::ring::default_provider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as TlsError, SignatureScheme};
-use shared::frame::{derive_hmac_key, now_secs, SignedFrame};
+use shared::frame::{derive_hmac_key, now_secs, SignedFrame, MAX_FRAME_SKEW_SECS};
 use shared::hardware::{HeartbeatPayload, NodeIdentity, NodeRole};
 use shared::tls::cert_fingerprint;
 use shared::MeshMessage;
@@ -184,39 +184,52 @@ async fn expect_rejection(stream: &mut TlsStream<TcpStream>) -> bool {
 }
 
 /// Expect a valid signed Acknowledge reply (sanity check scenario).
+///
+/// Loops past any `BluetoothStatusRequest` frames first — the coordinator
+/// sends one to a node's first heartbeat after a (re)connect (see
+/// `handle_heartbeat` in coordinator/src/server.rs), and this scenario's
+/// "chaos-test" node id has never been seen before, so it always looks
+/// capabilities-unknown and gets one ahead of the real Acknowledge. Without
+/// this, reading only the first frame off the wire picks up the resync
+/// request instead and misreports it as "coordinator rejected a valid
+/// request" — it's an unrelated fire-and-forget push, not a reply to this
+/// scenario's heartbeat.
 async fn expect_acknowledge(stream: &mut TlsStream<TcpStream>, key: &[u8; 32]) -> bool {
-    match timeout(Duration::from_secs(5), try_read_lv(stream)).await {
-        Err(_) => {
-            println!("      (no reply within 5s)");
-            false
-        }
-        Ok(None) => {
-            println!("      (connection closed unexpectedly)");
-            false
-        }
-        Ok(Some(bytes)) => match serde_json::from_slice::<SignedFrame>(&bytes) {
-            Err(e) => {
-                println!("      (reply is not a SignedFrame: {e})");
-                false
+    loop {
+        match timeout(Duration::from_secs(5), try_read_lv(stream)).await {
+            Err(_) => {
+                println!("      (no reply within 5s)");
+                return false;
             }
-            Ok(frame) => match frame.verify(key) {
+            Ok(None) => {
+                println!("      (connection closed unexpectedly)");
+                return false;
+            }
+            Ok(Some(bytes)) => match serde_json::from_slice::<SignedFrame>(&bytes) {
                 Err(e) => {
-                    println!("      (reply HMAC invalid: {e})");
-                    false
+                    println!("      (reply is not a SignedFrame: {e})");
+                    return false;
                 }
-                Ok(payload) => match serde_json::from_slice::<MeshMessage>(payload) {
-                    Ok(MeshMessage::Acknowledge) => true,
-                    Ok(other) => {
-                        println!("      (unexpected reply: {other:?})");
-                        false
-                    }
+                Ok(frame) => match frame.verify(key) {
                     Err(e) => {
-                        println!("      (inner parse error: {e})");
-                        false
+                        println!("      (reply HMAC invalid: {e})");
+                        return false;
                     }
+                    Ok(payload) => match serde_json::from_slice::<MeshMessage>(payload) {
+                        Ok(MeshMessage::Acknowledge) => return true,
+                        Ok(MeshMessage::BluetoothStatusRequest) => continue,
+                        Ok(other) => {
+                            println!("      (unexpected reply: {other:?})");
+                            return false;
+                        }
+                        Err(e) => {
+                            println!("      (inner parse error: {e})");
+                            return false;
+                        }
+                    },
                 },
             },
-        },
+        }
     }
 }
 
@@ -302,8 +315,20 @@ async fn scenario_bad_hmac(coordinator: &str, token: &str) -> bool {
     expect_rejection(&mut stream).await
 }
 
-/// Valid AuthToken, then a SignedFrame with a timestamp 60 seconds in the past.
-/// Coordinator should reject: stale frame (max skew is 30s).
+/// Valid AuthToken, then a SignedFrame with a timestamp beyond
+/// `MAX_FRAME_SKEW_SECS` in the past. Coordinator should reject: stale frame.
+///
+/// This margin used to be a hardcoded 60s, back when the coordinator's own
+/// skew window was 30s. The 2026-07-11 mesh-hardening fix widened that
+/// window to 120s (a node whose Wi-Fi shares a radio with heavy Bluetooth
+/// activity can see multi-second delivery delays — see
+/// `shared::frame::MAX_FRAME_SKEW_SECS`'s doc comment), which made this
+/// scenario's fixed 60s offset fall *inside* the new window: the frame
+/// verified as merely delayed rather than stale, so the coordinator
+/// accepted it and replied — chaos read that reply as "attack frame
+/// accepted" and failed the scenario. Deriving the margin from the same
+/// constant the coordinator enforces means this can't drift out of sync
+/// with it again.
 async fn scenario_stale_timestamp(coordinator: &str, token: &str) -> bool {
     let Ok(mut stream) = tls_connect(coordinator).await else {
         println!("      (TLS connect failed)");
@@ -312,7 +337,7 @@ async fn scenario_stale_timestamp(coordinator: &str, token: &str) -> bool {
     let key = derive_hmac_key(token);
     let auth = serde_json::to_vec(&MeshMessage::AuthToken(token.into())).unwrap();
     let _ = write_lv(&mut stream, &auth).await;
-    let stale_ts = now_secs().saturating_sub(60);
+    let stale_ts = now_secs().saturating_sub(MAX_FRAME_SKEW_SECS + 30);
     let payload = serde_json::to_vec(&dummy_heartbeat(token)).unwrap();
     let frame = SignedFrame::sign_at(&key, stale_ts, payload);
     let frame_bytes = serde_json::to_vec(&frame).unwrap();
@@ -440,8 +465,8 @@ async fn main() {
             false,
         ),
         (
-            "Valid AuthToken → SignedFrame with stale timestamp (ts − 60s)",
-            "Coordinator must reject frames older than 30 seconds.",
+            "Valid AuthToken → SignedFrame with stale timestamp (beyond MAX_FRAME_SKEW_SECS)",
+            "Coordinator must reject frames older than its configured max skew.",
             false,
         ),
         (

@@ -538,7 +538,7 @@ fn handle_heartbeat(
     let this_hostname = identity.hostname.clone();
     let is_first_heartbeat = node_id.is_none();
     *node_id = Some(this_id.clone());
-    let nodes = {
+    let (nodes, request_bluetooth_resync) = {
         let mut reg = registry.lock().unwrap();
         reg.update_heartbeat(identity.clone());
         if is_first_heartbeat {
@@ -547,9 +547,26 @@ fn handle_heartbeat(
             // scheduler doesn't route to a server that isn't running.
             reg.clear_node_models(&this_id);
         }
-        reg.list_nodes()
+        // Ask an audio-capable node to resync its bluetooth status on every
+        // (re)connect — see BluetoothStatusRequest's doc comment for why
+        // (a coordinator restart otherwise loses it silently). Capabilities
+        // are persisted from the last session (registry/mod.rs's `nodes`
+        // table), so this is usually already known even on the very first
+        // heartbeat after a coordinator restart; a node never seen before
+        // has no persisted capabilities yet, so it defaults to asking
+        // rather than assuming "not audio" and staying silent forever.
+        let request_bluetooth_resync = is_first_heartbeat
+            && reg
+                .get(&this_id)
+                .and_then(|n| n.capabilities.as_ref())
+                .map(|c| !c.audio_backends.is_empty())
+                .unwrap_or(true);
+        (reg.list_nodes(), request_bluetooth_resync)
     };
     connections.lock().unwrap().insert(identity.id, tx.clone());
+    if request_bluetooth_resync && tx.try_send(MeshMessage::BluetoothStatusRequest).is_err() {
+        warn!(node_id = %this_id, "failed to queue bluetooth status resync request");
+    }
     if let Some(dash) = dashboard {
         if is_first_heartbeat {
             dash.push_security(SecurityEvent {
@@ -1351,6 +1368,7 @@ async fn process_message(
                             mac: result.mac.clone(),
                             name: result.name.clone(),
                             connected: true,
+                            volume_pct: result.volume_pct,
                         },
                     );
                 }
@@ -1389,6 +1407,33 @@ async fn process_message(
             }
             None
         }
+        MeshMessage::BluetoothVolumeResult(result) => {
+            info!(
+                node_id = %result.node_id,
+                success = result.success,
+                error = ?result.error,
+                "bluetooth: volume result"
+            );
+            if let Some(dash) = dashboard {
+                if let Some(pct) = result.volume_pct {
+                    dash.set_bluetooth_volume(&result.node_id, pct);
+                }
+                dash.push_bluetooth_volume_result(result);
+            }
+            None
+        }
+        MeshMessage::BluetoothMuteResult(result) => {
+            info!(
+                node_id = %result.node_id,
+                success = result.success,
+                error = ?result.error,
+                "bluetooth: mute result"
+            );
+            if let Some(dash) = dashboard {
+                dash.push_bluetooth_mute_result(result);
+            }
+            None
+        }
         MeshMessage::BluetoothStatusUpdate(update) => {
             info!(
                 node_id = %update.node_id,
@@ -1397,12 +1442,19 @@ async fn process_message(
                 "bluetooth: status update"
             );
             if let Some(dash) = dashboard {
+                // A status update only ever knows mac/name/connected — carry
+                // over whatever volume was already known (from a pair or a
+                // prior volume-set) rather than blowing it away with None.
+                let volume_pct = dash
+                    .bluetooth_paired_status(&update.node_id)
+                    .and_then(|s| s.volume_pct);
                 dash.set_bluetooth_paired(
                     &update.node_id,
                     crate::http::state::BluetoothPairedStatus {
                         mac: update.mac.clone(),
                         name: update.name.clone(),
                         connected: update.connected,
+                        volume_pct,
                     },
                 );
                 dash.push_bluetooth_status_update(update);
@@ -1621,6 +1673,55 @@ mod tests {
             MeshMessage::ModelInferenceChunk(c) => assert_eq!(c.delta, "tok"),
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    // ── BluetoothStatusUpdate preserves the known volume ────────────────────
+
+    #[tokio::test]
+    async fn bluetooth_status_update_preserves_previously_known_volume() {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        // Establish a known volume the way a real pair does.
+        dashboard.set_bluetooth_paired(
+            "pi2",
+            crate::http::state::BluetoothPairedStatus {
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+                name: "Fishman PA".into(),
+                connected: true,
+                volume_pct: Some(20),
+            },
+        );
+        let mut node_id = Some("pi2".to_string());
+
+        // A mere connect/disconnect status update only ever reports
+        // mac/name/connected — it must not blow away the volume it doesn't
+        // know about.
+        process_message(
+            MeshMessage::BluetoothStatusUpdate(shared::BluetoothStatusUpdate {
+                node_id: "pi2".into(),
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+                name: "Fishman PA".into(),
+                connected: false,
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(&dashboard),
+            "no auth",
+        )
+        .await;
+
+        let status = dashboard.bluetooth_paired_status("pi2").unwrap();
+        assert!(!status.connected, "connected state should have updated");
+        assert_eq!(
+            status.volume_pct,
+            Some(20),
+            "volume should survive a status-only update"
+        );
     }
 
     // ── ZigbeeJoin device_leave → mark_device_offline ───────────────────────
@@ -2203,8 +2304,18 @@ mod tests {
 
         // Some messages generate no reply — use a short timeout instead of blocking forever.
         let read_reply = async {
-            let buf = read_bounded_frame(&mut stream).await.ok()?;
-            serde_json::from_slice(&buf).ok()
+            loop {
+                let buf = read_bounded_frame(&mut stream).await.ok()?;
+                let msg: MeshMessage = serde_json::from_slice(&buf).ok()?;
+                // BluetoothStatusRequest is an unrelated fire-and-forget push
+                // the coordinator sends on a node's first heartbeat (see
+                // handle_heartbeat) — not a reply to whatever request this
+                // caller actually sent. Skip past it and keep waiting for
+                // the real reply.
+                if !matches!(msg, MeshMessage::BluetoothStatusRequest) {
+                    return Some(msg);
+                }
+            }
         };
 
         tokio::time::timeout(std::time::Duration::from_millis(200), read_reply)
@@ -2249,7 +2360,10 @@ mod tests {
         )
         .await;
 
-        assert!(ack.is_none(), "heartbeat should produce no reply");
+        // handle_heartbeat acks every heartbeat (agent's read-timeout logic
+        // relies on hearing back at least once per interval) — see the
+        // Some(MeshMessage::Acknowledge) it returns.
+        assert_eq!(ack, Some(MeshMessage::Acknowledge));
 
         let reg = registry.lock().unwrap();
         assert!(reg.get("node1").is_some());
@@ -2289,10 +2403,8 @@ mod tests {
         )
         .await;
 
-        assert!(
-            ack.is_none(),
-            "expected no reply for fire-and-forget message"
-        );
+        // handle_heartbeat acks every heartbeat — see Some(Acknowledge) there.
+        assert_eq!(ack, Some(MeshMessage::Acknowledge));
         assert!(registry.lock().unwrap().get("health-node").is_some());
     }
 
@@ -2455,10 +2567,20 @@ mod tests {
 
         // Some messages generate no reply — use a short timeout instead of blocking forever.
         let read_reply = async {
-            let buf = read_bounded_frame(&mut stream).await.ok()?;
-            let frame: SignedFrame = serde_json::from_slice(&buf).ok()?;
-            let payload = frame.verify(&key).ok()?;
-            serde_json::from_slice(payload).ok()
+            loop {
+                let buf = read_bounded_frame(&mut stream).await.ok()?;
+                let frame: SignedFrame = serde_json::from_slice(&buf).ok()?;
+                let payload = frame.verify(&key).ok()?;
+                let msg: MeshMessage = serde_json::from_slice(payload).ok()?;
+                // BluetoothStatusRequest is an unrelated fire-and-forget push
+                // the coordinator sends on a node's first heartbeat (see
+                // handle_heartbeat) — not a reply to whatever request this
+                // caller actually sent. Skip past it and keep waiting for
+                // the real reply.
+                if !matches!(msg, MeshMessage::BluetoothStatusRequest) {
+                    return Some(msg);
+                }
+            }
         };
 
         tokio::time::timeout(std::time::Duration::from_millis(200), read_reply)
@@ -2582,10 +2704,8 @@ mod tests {
             }),
         )
         .await;
-        assert!(
-            ack.is_none(),
-            "expected no reply for fire-and-forget message"
-        );
+        // handle_heartbeat acks every heartbeat — see Some(Acknowledge) there.
+        assert_eq!(ack, Some(MeshMessage::Acknowledge));
         assert!(registry.lock().unwrap().get("legit-node").is_some());
     }
 
@@ -2709,10 +2829,8 @@ mod tests {
             }),
         )
         .await;
-        assert!(
-            ack.is_none(),
-            "expected no reply for fire-and-forget message"
-        );
+        // handle_heartbeat acks every heartbeat — see Some(Acknowledge) there.
+        assert_eq!(ack, Some(MeshMessage::Acknowledge));
         assert!(registry.lock().unwrap().get("old-token-node").is_some());
 
         // Node already updated to the new token — should also be accepted.
@@ -2737,7 +2855,8 @@ mod tests {
             }),
         )
         .await;
-        assert!(ack2.is_none(), "heartbeat should produce no reply");
+        // handle_heartbeat acks every heartbeat — see Some(Acknowledge) there.
+        assert_eq!(ack2, Some(MeshMessage::Acknowledge));
         assert!(registry.lock().unwrap().get("new-token-node").is_some());
     }
 }

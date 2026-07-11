@@ -312,16 +312,7 @@ impl EffectRunner {
                 // puts it back before the next tick — so this should not happen.
                 return Err("effect already taken (concurrent tick?)".into());
             };
-            // Filter out bulbs the user has manually overridden.
-            let active_bulbs: Vec<BulbInRoom> = if inst.overrides.is_empty() {
-                bulbs.clone()
-            } else {
-                bulbs
-                    .iter()
-                    .filter(|b| !inst.overrides.contains(&b.device_id))
-                    .cloned()
-                    .collect()
-            };
+            let active_bulbs = active_bulbs(&bulbs, &inst.overrides);
             let handoff = inst.handoff_pending;
             inst.handoff_pending = false;
             (
@@ -484,6 +475,7 @@ impl EffectRunner {
                     brightness: r.brightness,
                     color_xy: r.color_xy,
                     color_temp: r.color_temp,
+                    online: r.online,
                 })
                 .unwrap_or_default();
             bulbs.push(BulbInRoom {
@@ -706,6 +698,26 @@ fn update_drift_state(io: DriftInputs<'_>) -> Option<DriftReport> {
     }
 }
 
+/// Bulbs an effect should actually target this tick: excludes any the user
+/// has manually overridden, and any currently offline. A command sent to an
+/// offline Zigbee device fails delivery over the radio (confirmed: z2m
+/// doesn't queue it for a mains-powered, non-sleepy bulb), so computing and
+/// dispatching one is wasted work, and worse, `dispatch()` would still
+/// optimistically record it as the bulb's `LastEmittedState` — making the
+/// dedup gate believe a now-offline bulb already has the effect's latest
+/// state, and so possibly skip re-sending the correct one once it comes
+/// back online.
+fn active_bulbs(
+    bulbs: &[BulbInRoom],
+    overrides: &std::collections::HashSet<String>,
+) -> Vec<BulbInRoom> {
+    bulbs
+        .iter()
+        .filter(|b| b.current.online && !overrides.contains(&b.device_id))
+        .cloned()
+        .collect()
+}
+
 fn should_dispatch(les: &Option<LastEmittedState>, action: &LightAction) -> bool {
     let Some(les) = les else {
         return true;
@@ -806,6 +818,44 @@ mod tests {
             color,
             ts_ms: 0,
         }
+    }
+
+    fn bulb(device_id: &str, online: bool) -> BulbInRoom {
+        BulbInRoom {
+            device_id: device_id.to_string(),
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            fixture_type: FixtureType::Unknown,
+            current: BulbCurrentState {
+                online,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn active_bulbs_excludes_offline_devices() {
+        let bulbs = vec![bulb("online-a", true), bulb("offline-b", false)];
+        let result = active_bulbs(&bulbs, &Default::default());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].device_id, "online-a");
+    }
+
+    #[test]
+    fn active_bulbs_excludes_manually_overridden_devices() {
+        let bulbs = vec![bulb("a", true), bulb("b", true)];
+        let overrides: std::collections::HashSet<String> = ["b".to_string()].into_iter().collect();
+        let result = active_bulbs(&bulbs, &overrides);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].device_id, "a");
+    }
+
+    #[test]
+    fn active_bulbs_keeps_online_non_overridden_devices() {
+        let bulbs = vec![bulb("a", true), bulb("b", true)];
+        let result = active_bulbs(&bulbs, &Default::default());
+        assert_eq!(result.len(), 2);
     }
 
     #[test]
