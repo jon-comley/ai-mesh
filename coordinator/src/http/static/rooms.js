@@ -432,6 +432,17 @@ function inferZigbeeStatus() {
   zigbeeOnline = true;
 }
 
+// The Home tab's room-card Bluetooth badge reads devices.js' getAvDevices()
+// live at render time, but nothing about a pair/unpair/status change
+// otherwise touches this module — unlike Zigbee-domain updates (Lighting/
+// Sensor/RoomsUpdate), which already trigger a re-render via notifyDevices
+// etc. dashboard.js subscribes this to devices.onAvDevicesChanged() once at
+// startup, so it fires whenever the underlying AV device list actually
+// changes, not just when a Bluetooth-specific WS event happens to arrive.
+export function refreshAvBadges() {
+  render();
+}
+
 export function notifySolar(azimuth, elevation) {
   // Forward to the layout panel (compass + sun-arc display). The dashboard
   // does not run its own solar calculation any more — the runner pushes

@@ -13,6 +13,11 @@ import * as reaper from '/static/reaper.js';
 import * as gateway from '/static/gateway.js';
 import { registerSwitchAction } from '/static/devicewidgets.js';
 
+// Keeps the Home tab's room-card Bluetooth badge in sync with the AV
+// device list any time it actually changes (pair/unpair/status-update, or
+// a plain periodic refresh) — see devices.js' onAvDevicesChanged doc comment.
+devices.onAvDevicesChanged(() => rooms.refreshAvBadges());
+
 // ── Service worker ──────────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/service-worker.js').catch(err =>
