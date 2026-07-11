@@ -1,8 +1,9 @@
 use capability_core::Capability;
 use shared::MeshMessage;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
-use tracing::warn;
+use tracing::{Instrument, warn};
 
 /// Build the capability list for this node from compile-time feature flags.
 /// Called once before the reconnect loop; capabilities survive reconnects via Arc.
@@ -26,16 +27,73 @@ pub fn build_capabilities(node_id: &str) -> Vec<Arc<dyn Capability + Send + Sync
     ]
 }
 
+/// Each capability's dispatch slot, paired with a lock that serializes calls
+/// to *that* capability's `handle()` — never blocks a different capability,
+/// never blocks the reader loop itself (see `dispatch`'s doc comment).
+struct Slot {
+    cap: Arc<dyn Capability + Send + Sync>,
+    lock: Mutex<()>,
+}
+
+/// Built once from `build_capabilities()` and shared (via `Arc`) across
+/// every reconnect — a capability's in-flight lock reflects a real ongoing
+/// operation (e.g. a `bluetoothctl` command still running) that doesn't
+/// reset just because the mesh connection dropped and reconnected.
+pub struct DispatchTable {
+    slots: Vec<Slot>,
+}
+
+impl DispatchTable {
+    pub fn new(caps: Vec<Arc<dyn Capability + Send + Sync>>) -> Arc<Self> {
+        Arc::new(Self {
+            slots: caps
+                .into_iter()
+                .map(|cap| Slot {
+                    cap,
+                    lock: Mutex::new(()),
+                })
+                .collect(),
+        })
+    }
+}
+
 /// Route one inbound message to the first capability that claims it.
 /// Unhandled messages are logged and dropped.
-pub async fn dispatch(
-    msg: MeshMessage,
-    caps: &[Arc<dyn Capability + Send + Sync>],
-    tx: Sender<MeshMessage>,
-) {
-    for cap in caps {
-        if cap.handles(&msg) {
-            cap.handle(msg, tx).await;
+///
+/// Callers should `tokio::spawn` this rather than awaiting it inline in a
+/// message-reading loop: a slow `handle()` call (a Bluetooth scan/pair can
+/// run tens of seconds — see `capabilities/audio/src/bluetooth.rs`) would
+/// otherwise stall the reader loop and delay every other inbound mesh
+/// message, for every capability, until it finished — confirmed as a real
+/// risk 2026-07-11 once `PAIR_STEP_TIMEOUT` grew and `clear_cache` started
+/// iterating potentially many cached devices. The per-capability lock in
+/// `DispatchTable` keeps this safe to spawn freely: two messages for the
+/// *same* capability still serialize (critical for Bluetooth — concurrent
+/// `bluetoothctl` invocations for one adapter is exactly the kind of race
+/// that caused hours of live debugging tonight), while messages for
+/// *different* capabilities, or the reader loop reading the next frame,
+/// never wait on each other.
+pub async fn dispatch(msg: MeshMessage, table: Arc<DispatchTable>, tx: Sender<MeshMessage>) {
+    for slot in &table.slots {
+        if slot.cap.handles(&msg) {
+            // Now that dispatch runs as its own spawned task rather than
+            // inline in the reader loop, a plain `warn!`/`info!` inside a
+            // capability's `handle()` no longer has any surrounding
+            // context tying it to which inbound message triggered it —
+            // this span puts the capability name on every log line
+            // underneath it for free. `.instrument()`, not `.enter()`:
+            // this block awaits (the lock, then `handle()` itself), and a
+            // span guard held across an `.await` can bleed into whatever
+            // else happens to run on the same executor thread meanwhile —
+            // `.instrument()` is the sound way to attach a span to a
+            // future that spans multiple await points.
+            let span = tracing::info_span!("dispatch", cap = slot.cap.name());
+            async {
+                let _guard = slot.lock.lock().await;
+                slot.cap.handle(msg, tx).await;
+            }
+            .instrument(span)
+            .await;
             return;
         }
     }
@@ -134,11 +192,11 @@ mod tests {
     async fn routes_to_matching_capability() {
         let cap_a = TestCapability::new("a", |m| matches!(m, MeshMessage::ModelLoad(_)));
         let cap_b = TestCapability::new("b", |m| matches!(m, MeshMessage::Heartbeat(_)));
-        let caps = make_caps(Arc::clone(&cap_a), Arc::clone(&cap_b));
+        let table = DispatchTable::new(make_caps(Arc::clone(&cap_a), Arc::clone(&cap_b)));
         let (tx, _rx) = mpsc::channel(8);
 
-        dispatch(model_load(), &caps, tx.clone()).await;
-        dispatch(heartbeat(), &caps, tx.clone()).await;
+        dispatch(model_load(), Arc::clone(&table), tx.clone()).await;
+        dispatch(heartbeat(), Arc::clone(&table), tx.clone()).await;
 
         assert_eq!(cap_a.handled.lock().await.len(), 1);
         assert_eq!(cap_b.handled.lock().await.len(), 1);
@@ -148,11 +206,11 @@ mod tests {
     async fn does_not_cross_route() {
         let cap_a = TestCapability::new("a", |m| matches!(m, MeshMessage::ModelLoad(_)));
         let cap_b = TestCapability::new("b", |m| matches!(m, MeshMessage::Heartbeat(_)));
-        let caps = make_caps(Arc::clone(&cap_a), Arc::clone(&cap_b));
+        let table = DispatchTable::new(make_caps(Arc::clone(&cap_a), Arc::clone(&cap_b)));
         let (tx, _rx) = mpsc::channel(8);
 
         // send a heartbeat — cap_a should not receive it
-        dispatch(heartbeat(), &caps, tx.clone()).await;
+        dispatch(heartbeat(), Arc::clone(&table), tx.clone()).await;
         assert_eq!(cap_a.handled.lock().await.len(), 0);
         assert_eq!(cap_b.handled.lock().await.len(), 1);
     }
@@ -162,20 +220,74 @@ mod tests {
         // both caps claim to handle everything — only the first should fire
         let cap_a = TestCapability::new("a", |_| true);
         let cap_b = TestCapability::new("b", |_| true);
-        let caps = make_caps(Arc::clone(&cap_a), Arc::clone(&cap_b));
+        let table = DispatchTable::new(make_caps(Arc::clone(&cap_a), Arc::clone(&cap_b)));
         let (tx, _rx) = mpsc::channel(8);
 
-        dispatch(model_load(), &caps, tx.clone()).await;
+        dispatch(model_load(), Arc::clone(&table), tx.clone()).await;
 
         assert_eq!(cap_a.handled.lock().await.len(), 1);
         assert_eq!(cap_b.handled.lock().await.len(), 0);
     }
 
+    /// Records "start"/"end" for each `handle()` call, with a delay between
+    /// them — lets a test observe whether two concurrent calls interleave
+    /// (a race) or strictly alternate (properly serialized).
+    struct SlowCapability {
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl SlowCapability {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                log: Arc::new(Mutex::new(vec![])),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Capability for SlowCapability {
+        fn name(&self) -> &'static str {
+            "slow"
+        }
+        fn handles(&self, _msg: &MeshMessage) -> bool {
+            true
+        }
+        async fn start(&self, _tx: Sender<MeshMessage>) -> Result<(), String> {
+            Ok(())
+        }
+        async fn handle(&self, _msg: MeshMessage, _tx: Sender<MeshMessage>) {
+            self.log.lock().await.push("start");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.log.lock().await.push("end");
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_dispatches_to_the_same_capability_are_serialized() {
+        let cap = SlowCapability::new();
+        let table = DispatchTable::new(vec![Arc::clone(&cap) as Arc<dyn Capability + Send + Sync>]);
+        let (tx, _rx) = mpsc::channel(8);
+
+        // Two dispatches racing for the same capability, exactly the
+        // scenario the per-capability lock exists to protect (e.g. two
+        // Bluetooth requests landing close together must not both run
+        // `bluetoothctl` at once).
+        tokio::join!(
+            dispatch(model_load(), Arc::clone(&table), tx.clone()),
+            dispatch(heartbeat(), Arc::clone(&table), tx.clone())
+        );
+
+        // Interleaved ("start", "start", "end", "end") would mean both
+        // handle() calls ran concurrently — a real regression. Serialized
+        // is the only correct outcome: ["start", "end", "start", "end"].
+        assert_eq!(*cap.log.lock().await, vec!["start", "end", "start", "end"]);
+    }
+
     #[tokio::test]
     async fn empty_caps_does_not_panic() {
-        let caps: Vec<Arc<dyn Capability + Send + Sync>> = vec![];
+        let table = DispatchTable::new(vec![]);
         let (tx, _rx) = mpsc::channel(8);
-        dispatch(heartbeat(), &caps, tx).await; // should log + return cleanly
+        dispatch(heartbeat(), table, tx).await; // should log + return cleanly
     }
 
     // ── build_capabilities tests ──────────────────────────────────────────────
