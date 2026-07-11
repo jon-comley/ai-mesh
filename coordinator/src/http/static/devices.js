@@ -259,12 +259,89 @@ function buildAvRow(dev) {
   row.appendChild(actions);
 
   if (dev.transport === 'bluetooth' && dev.node_id) {
+    if (dev.bluetooth_paired) {
+      actions.appendChild(buildPairedBluetoothStatus(dev.node_id, dev.bluetooth_paired, dev.rooms));
+    }
     const { button, panel } = buildBluetoothScanControls(dev.node_id);
     actions.appendChild(button);
     row.appendChild(panel);
   }
 
   return row;
+}
+
+// Fed by GET /api/av-devices' `bluetooth_paired` field, so it's already
+// current on page load — this replaces the old ephemeral-only scan-panel
+// state (lost on refresh) with the coordinator's persisted view: paired,
+// currently connected, or paired-but-unavailable. A live `BluetoothStatusUpdate`
+// WS event (see handleBluetoothStatusUpdate below) just re-fetches this
+// same list rather than tracking status separately.
+export function getAvDevices() {
+  return avDevices;
+}
+
+function buildPairedBluetoothStatus(nodeId, paired, rooms) {
+  const wrap = document.createElement('div');
+  wrap.className = 'bt-paired-status';
+
+  const dot = document.createElement('span');
+  dot.className = 'bt-paired-dot' + (paired.connected ? ' bt-paired-connected' : ' bt-paired-unavailable');
+  dot.textContent = paired.connected ? '●' : '○';
+  wrap.appendChild(dot);
+
+  const label = document.createElement('span');
+  label.className = 'bt-paired-name';
+  // Which room this speaker serves is what actually matters day-to-day
+  // (the device's own name is already in the row header above) — the
+  // "unassigned" fallback flags that pairing and room assignment are two
+  // separate steps (see buildAvRoomAssignments' dropdown) rather than
+  // silently omitting the room.
+  const roomPart = rooms?.length ? rooms.map(r => r.room).join(', ') : 'unassigned to a room';
+  // BlueZ can't tell "powered off" apart from "out of range/disconnected" —
+  // "off / out of range" names both possibilities honestly rather than
+  // guessing which, and reads as normal/expected rather than an error
+  // (unlike "unavailable", which sounded broken for a simply-switched-off
+  // speaker).
+  label.textContent = `${roomPart} — ${paired.connected ? 'in use' : 'off / out of range'}`;
+  wrap.appendChild(label);
+
+  const unpairBtn = document.createElement('button');
+  unpairBtn.className = 'device-row-btn bt-unpair-btn';
+  unpairBtn.textContent = 'Unpair';
+  unpairBtn.title = `Disconnect and forget ${paired.name} on this node`;
+  unpairBtn.addEventListener('click', () => {
+    if (!confirm(`Unpair "${paired.name}"? This disconnects it and forgets it on this node.`)) return;
+    unpairBluetoothDevice(nodeId, paired.mac);
+  });
+  wrap.appendChild(unpairBtn);
+
+  return wrap;
+}
+
+function unpairBluetoothDevice(nodeId, mac) {
+  api(`/bluetooth/unpair/${encodeURIComponent(nodeId)}`, { method: 'POST', body: { mac } })
+    .then(res => {
+      if (res.ok) return;
+      showToast(`Unpair failed (${res.status})`, true);
+    })
+    .catch(e => showToast(`Unpair error: ${e.message}`, true));
+}
+
+export function handleBluetoothUnpairResult(evt) {
+  if (evt.success) {
+    showToast("Unpaired — no longer used for this node's Bluetooth audio.");
+    fetchAvDevices(true);
+  } else {
+    showToast(`Unpair failed${evt.error ? ': ' + evt.error : ''}`, true);
+  }
+}
+
+// The coordinator already folded this update into its paired-status map
+// (see DashboardState::set_bluetooth_paired) before broadcasting it, so a
+// plain re-fetch of /api/av-devices is enough to pick up the new
+// connected/unavailable state — no separate tracking needed here.
+export function handleBluetoothStatusUpdate(_evt) {
+  fetchAvDevices(true);
 }
 
 // ── Live Bluetooth scan + pair (per bluetooth-backend node) ─────────────────
@@ -300,6 +377,17 @@ function buildSignalBars(rssi) {
   return wrap;
 }
 
+// The device currently paired on `nodeId`, per the coordinator's persisted
+// view (GET /api/av-devices' `bluetooth_paired`) — `scan()` seeds its
+// results from BlueZ's own cache, which includes whatever's already
+// connected, so the paired device reappears here every time. Without this
+// check its row would always default to "Use this device" regardless of
+// already being paired and working.
+function pairedMacForNode(nodeId) {
+  return getAvDevices().find(d => d.node_id === nodeId && d.transport === 'bluetooth')
+    ?.bluetooth_paired?.mac;
+}
+
 function renderBluetoothScanList(nodeId) {
   const state = btScanPanels.get(nodeId);
   if (!state) return;
@@ -312,6 +400,7 @@ function renderBluetoothScanList(nodeId) {
     state.listEl.appendChild(empty);
     return;
   }
+  const pairedMac = pairedMacForNode(nodeId);
   for (const dev of found) {
     const row = document.createElement('div');
     row.className = 'bt-scan-row';
@@ -320,10 +409,19 @@ function renderBluetoothScanList(nodeId) {
     label.textContent = `${dev.name} (${dev.mac})`;
     const useBtn = document.createElement('button');
     useBtn.className = 'device-row-btn';
-    useBtn.textContent = dev.pairing ? 'Pairing…' : (dev.paired === false ? 'Failed — retry' : 'Use this device');
-    useBtn.disabled = !!dev.pairing;
-    if (dev.paired === false && dev.error) useBtn.title = dev.error;
-    useBtn.addEventListener('click', () => pairBluetoothDevice(nodeId, dev));
+    if (dev.mac === pairedMac) {
+      useBtn.textContent = 'Unpair';
+      useBtn.title = `Disconnect and forget ${dev.name} on this node`;
+      useBtn.addEventListener('click', () => {
+        if (!confirm(`Unpair "${dev.name}"? This disconnects it and forgets it on this node.`)) return;
+        unpairBluetoothDevice(nodeId, dev.mac);
+      });
+    } else {
+      useBtn.textContent = dev.pairing ? 'Pairing…' : (dev.paired === false ? 'Failed — retry' : 'Use this device');
+      useBtn.disabled = !!dev.pairing;
+      if (dev.paired === false && dev.error) useBtn.title = dev.error;
+      useBtn.addEventListener('click', () => pairBluetoothDevice(nodeId, dev));
+    }
     row.append(buildSignalBars(dev.rssi), label, useBtn);
     state.listEl.appendChild(row);
   }

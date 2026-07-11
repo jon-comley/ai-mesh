@@ -395,6 +395,8 @@ dependencies = [
  "capability-core",
  "dirs",
  "reqwest",
+ "serde",
+ "serde_json",
  "shared",
  "tempfile",
  "tokio",

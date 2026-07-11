@@ -13,7 +13,10 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use shared::{BluetoothClearCacheRequest, BluetoothPairRequest, BluetoothScanRequest, MeshMessage};
+use shared::{
+    BluetoothClearCacheRequest, BluetoothPairRequest, BluetoothScanRequest, BluetoothUnpairRequest,
+    MeshMessage,
+};
 use std::sync::Arc;
 
 use super::gen_request_id;
@@ -123,6 +126,35 @@ pub async fn clear_cache(
     }
 }
 
+#[derive(Deserialize)]
+pub struct UnpairBody {
+    mac: String,
+}
+
+/// POST /api/bluetooth/unpair/{node_id} — disconnect and forget one
+/// specific paired device, including the one currently in use (unlike
+/// `clear_cache`, which explicitly skips it). Feedback streams to the
+/// dashboard as a `BluetoothUnpairResult` WS event.
+pub async fn unpair(
+    Path(node_id): Path<String>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<UnpairBody>,
+) -> impl IntoResponse {
+    let sent = state.send_to_node(
+        &node_id,
+        MeshMessage::BluetoothUnpair(BluetoothUnpairRequest {
+            request_id: gen_request_id(),
+            mac: body.mac,
+        }),
+    );
+    if sent {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "node not reachable").into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +168,7 @@ mod tests {
             .route("/api/bluetooth/scan/{node_id}", post(scan))
             .route("/api/bluetooth/pair/{node_id}", post(pair))
             .route("/api/bluetooth/clear-cache/{node_id}", post(clear_cache))
+            .route("/api/bluetooth/unpair/{node_id}", post(unpair))
             .with_state(state)
     }
 
@@ -272,6 +305,40 @@ mod tests {
             "POST",
             "/api/bluetooth/clear-cache/pi2",
             "",
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn unpair_sends_the_mac_to_the_named_node() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi2".into(), tx);
+        let state = make_state(vec![], connections);
+
+        let status = send(
+            bluetooth_router(state),
+            "POST",
+            "/api/bluetooth/unpair/pi2",
+            r#"{"mac":"AA:BB:CC:DD:EE:FF"}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        match rx.try_recv().unwrap() {
+            MeshMessage::BluetoothUnpair(req) => assert_eq!(req.mac, "AA:BB:CC:DD:EE:FF"),
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unpair_503_when_node_not_connected() {
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            bluetooth_router(state),
+            "POST",
+            "/api/bluetooth/unpair/pi2",
+            r#"{"mac":"AA:BB:CC:DD:EE:FF"}"#,
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);

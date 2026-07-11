@@ -27,6 +27,8 @@ While testing the device-auto-naming feature (`plans/device-auto-naming.md`), de
 
 Related: `plans/device-auto-naming.md`'s live re-validation step is blocked on this — the auto-naming fix (keying on `definition.model` SKU, not the nonexistent `model_id`) hasn't been confirmed against a real re-pair yet.
 
+**Attempted 2026-07-12, still blocked on step 1:** SLZB-06 physically moved next to pi1 and cabled into `eth0`, but the `eth0` static-IP step (plan item 1) was never actually done — `ping 10.0.0.12` from both pi1 and OmniLink1 returned `Destination Host Unreachable`. `zigbee2mqtt/bridge/state` still reported `online`, which turned out to be a stale TCP session from before the move, not evidence the radio was reachable. Ran the touchlink scan twice (`zigbee2mqtt/bridge/request/touchlink/scan` via `mosquitto_sub`/`mosquitto_pub` against the broker on `10.0.0.10`) — both times it returned nothing, consistent with the radio being unreachable rather than a touchlink/hardware problem (this same scan succeeded cleanly on 2026-07-07 per the note above, before the SLZB-06 was moved). Next time: actually complete step 1 (`sudo ip addr add 10.0.0.19/24 dev eth0` or similar on pi1, confirm the ping succeeds) and restart `zigbee2mqtt` to drop the stale socket before attempting the scan again.
+
 ---
 
 ## Code Audit — Findings to Action (2026-06-02)
@@ -1616,6 +1618,170 @@ Frame TV art-display fullscreen/User-Agent fixes.
   (flagged explicitly in `capabilities/audio/src/bluetooth.rs`'s own doc
   comment). Confirm live against the actual Fishman amp pairing before
   fully trusting it.
+
+---
+
+## Bluetooth Device Management — Per-Device Unpair, Live Status & Room Indicators ✓ Shipped 2026-07-11
+
+Discussed after the Fishman amp pairing hardening (`81ad610`). Today
+Bluetooth pairing is one-shot and ephemeral: `capabilities/audio/src/bluetooth.rs`'s
+`pair()`/`clear_cache()` are the only backend actions, and the dashboard's
+"Use this device" flow (`coordinator/src/http/static/devices.js`) tracks
+paired/pairing/failed state in an in-memory `Map` that's lost on refresh.
+There's no per-device unpair (only a blanket "Clear cache" that skips
+whatever's currently connected), no persisted connected/off status, and no
+way to see which room has a Bluetooth device without opening the Devices tab.
+
+Design sketch:
+
+- **Per-device unpair.** New `unpair(mac)` in `bluetooth.rs`: `bluetoothctl
+  disconnect <mac>` then `bluetoothctl remove <mac>` (mirrors the
+  "never touch the currently-connected device" guard `clear_cache()`
+  already has, but inverted — unpair explicitly targets the one MAC the
+  user picks). New wire types `BluetoothUnpairRequest { request_id, mac }`
+  / `BluetoothUnpairResult { node_id, mac, success, error }` alongside the
+  existing pair/scan/clear-cache messages in `shared/src/messages.rs`, a
+  `POST /api/bluetooth/unpair/{node_id}` coordinator endpoint
+  (`coordinator/src/http/api/bluetooth.rs`), and an "Unpair" button next to
+  the paired-device row in `devices.js`.
+- **Persisted paired-device state, not just a sink name.** Extend
+  `~/.ai-mesh/bluetooth_sink.txt` (written/read in `capabilities/audio/src/lib.rs`)
+  to a small JSON blob — `{mac, name, sink_name}` — so a paired device
+  survives an agent restart and unpair can confirm it's clearing the right
+  one.
+- **Live status, not just a one-time pair result.** The agent periodically
+  (e.g. every 30s, reusing the existing per-capability dispatch lock so it
+  never races a live pair/scan — a lighter D-Bus `PropertiesChanged`
+  subscription is worth evaluating at implementation time instead of
+  polling, but polling is the simple default for the sketch) runs
+  `bluetoothctl info <mac>` on the currently-paired device and pushes a
+  status update to the coordinator **only when the connected/not-connected
+  state changes** — not a constant heartbeat — relayed to the dashboard as a
+  WS `DashboardEvent` the same way `BluetoothPairResult` is today, and the
+  dashboard just holds the last-pushed state rather than expecting a steady
+  stream. The dashboard swaps its in-memory-only `btScanPanels` state for a
+  persisted row: "● Paired — in use" when connected, "○ Paired —
+  unavailable" when not. Known limitation to document (not solve): BlueZ
+  doesn't distinguish "powered off" from "out of range/disconnected" — both
+  surface as the same "unavailable" state, worded honestly rather than
+  guessing which.
+- **Room card indicator.** Bluetooth speakers live in the AV-device model
+  (`/api/av-devices`, room-assigned via `PUT /api/av-devices/{id}/rooms/{room}`),
+  not the Zigbee `room_devices` join table `rooms.js` reads from today, so
+  `renderRoomCard` needs the AV device list cross-referenced by room name
+  (mirroring the `.av-badge` transport-badge pattern already in
+  `devices.js`) to add a small badge — e.g. "🔊 Fishman amp" — to the
+  existing `.room-notable-badge` row, reflecting the same in-use/unavailable
+  status as the Devices tab.
+- **Non-goal: no room-level disable.** There is no "disable this room"
+  feature today and this work must not invent one. A Bluetooth device being
+  off/unavailable affects only its own badge/row — it never disables the
+  room card, its lights, or its controls. Room view (the floorplan/layout
+  view in `layout.js`, opened via each room card's ⊞ button), moving devices
+  within it, and editing room parameters (orientation/dimensions/etc.) all
+  stay fully available regardless of any Bluetooth device's status.
+
+**Live-use fixes, same day:** the scan panel's per-device button ignored the
+new persisted paired state — `scan()` seeds from BlueZ's cache (includes
+whatever's already connected, per `bluetooth.rs`'s own doc comment), so the
+Fishman amp kept reappearing in the scan list with a default "Use this
+device" button even while paired and working. Fixed: the scan list now
+checks the current `bluetooth_paired` mac and renders "Unpair" instead for
+that row. Also switched the paired-status label from the device's own name
+(redundant — already in the row header) to the room(s) it's assigned to, or
+"unassigned to a room" — surfacing that pairing and room assignment are two
+separate steps.
+
+Also found and fixed a real bug in `is_connected()`: `bluetoothctl info`
+colorizes its yes/no values even in one-shot output (confirmed live —
+`resolve_name()` already strips ANSI from this exact same output), so the
+unstripped `"Connected: yes"` string match silently never matched, making
+every genuinely-connected device report as disconnected ~30s after pairing.
+`clear_cache()` had the identical latent bug — worse there, since it could
+have wrongly un-cached the device someone's actively using. Fixed both via
+one shared, ANSI-aware `extract_connected_field` helper.
+
+Separately, the "unavailable" wording for a not-currently-connected device
+read as an error/malfunction rather than the normal, expected state of a
+speaker that's simply switched off — changed to "off / out of range" in
+both the Devices tab's paired-status row and the room-card badge, which
+names the same BlueZ ambiguity (can't tell powered-off from
+out-of-range) without sounding broken.
+
+**Follow-ups queued, not yet built:**
+- **Full Bluetooth playback control** — volume up/down and mute, not just
+  pair/unpair. No wire messages or `bluetooth.rs` functions for this exist
+  yet (today's surface is scan/pair/unpair/clear-cache only); would need a
+  `BluetoothVolumeRequest`-style message and a `pactl set-sink-volume`/
+  `set-sink-mute` call against the resolved sink name.
+- **Nudge room assignment right after a successful pair** — the Zigbee
+  light-pairing flow already does this (`pairFeedRoomPrompt` in
+  `devices.js`: "Paired: X ✓ — assign to room: [dropdown]"). Bluetooth
+  pairing has no equivalent, which is exactly why a freshly-paired speaker
+  shows no room-card badge and no room in its paired-status label until
+  someone separately uses the AV row's "+ add to room" dropdown — not a
+  bug, but a real gap in prompting for the second step.
+- **Room card mic icon** — the notable-badge row now shows a 🔊 badge for
+  an assigned Bluetooth speaker; the voice puck (`/api/av-devices`' `puck`
+  entry, room-bound via the `av-room:puck` preference) has no equivalent
+  icon yet. Same mechanism, just needs its own badge alongside the speaker
+  one in `renderRoomCard`.
+- **Coordinator-restart resync** — concrete fix for the documented
+  blind-spot (a coordinator restart loses `bluetooth_status` until the next
+  actual connect/disconnect): have the coordinator ask every connected
+  audio-capable node to report its current paired-device status once, right
+  after that node's connection is (re-)established, instead of waiting
+  passively for the next change. Small — one new request/response message
+  pair, no change to the existing push-on-change semantics.
+
+---
+
+## Per-Node Comms Peripherals View (Proposed 2026-07-12)
+
+Today the dashboard's Bluetooth/HDMI controls only exist on the AV-device
+rows for whichever node has `Feature::Audio` (pi2). The ask: every node's
+comms peripherals — Bluetooth, Wi-Fi, HDMI — visible and manageable the same
+way, not just the one node that happens to run audio today. Needs a design
+pass before building: what's the inventory model for a peripheral that
+isn't a playback sink (e.g. a node's Wi-Fi link quality, or an HDMI output
+with no audio capability), whether this lives in the existing Devices tab's
+AV section or becomes its own per-node panel, and how much of
+`buildAvRoomAssignments`/`buildBluetoothScanControls` generalizes versus
+needs a parallel per-peripheral-type implementation.
+
+---
+
+## Text-to-Speech Node Placement (Proposed 2026-07-12)
+
+TTS currently runs wherever it's invoked rather than being steered to the
+fastest available node. Move it to run on whichever node has the most
+headroom (mirroring `coordinator/src/scheduler.rs`'s existing model-inference
+node-selection logic) instead of a fixed/default placement. Needs the actual
+current placement mechanism identified first (voice pipeline config,
+`capability-voice`) before deciding whether this reuses the scheduler as-is
+or needs its own lighter-weight selection.
+
+---
+
+## Static vs Portable Device Placement Toggle (Proposed 2026-07-12)
+
+Idea: a single-click toggle per device — "static" (fixed in place, can be
+positioned on the room floor plan in `layout.js`) vs "portable" (moves
+around, coordinates in a room don't make sense to set). Portable devices
+would be excluded from the floor-plan placement UI entirely rather than
+showing a meaningless fixed position. Needs a `RoomRecord`/device-position
+schema decision (new column? reuse of the existing light-position table
+with a null position meaning "portable"?) before implementation.
+
+---
+
+## CI (Proposed 2026-07-12)
+
+Flagged as wanted "when ready" — no scope decided yet (what runs: clippy +
+test suite already enforced locally by the pre-commit hook; GitHub Actions
+vs. something else; whether it gates pushes to `main` given this is a
+solo/direct-to-main repo). Revisit and scope properly when actually picked
+up rather than guessing here.
 
 ---
 

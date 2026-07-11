@@ -66,6 +66,14 @@ pub struct AvDevice {
     /// (separately) one room can have several sinks — see
     /// `crate::audio::RoomSink`.
     pub rooms: Vec<RoomAssignment>,
+    /// The currently-paired Bluetooth device on this node (bluetooth-
+    /// transport rows only) and whether it's actually connected right now.
+    /// `None` for every other transport, and for a bluetooth row nothing's
+    /// been paired on yet. Source of truth for both the Devices tab's
+    /// paired-device row and the Home tab's room-card badge — see
+    /// `DashboardState::bluetooth_paired_status`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bluetooth_paired: Option<crate::http::state::BluetoothPairedStatus>,
 }
 
 /// `(room name, parsed sink)` for every `room-audio-sink:*` preference —
@@ -165,6 +173,9 @@ pub async fn list_av_devices(
             } else {
                 format!("{} · {}", node.hostname, backend)
             };
+            let bluetooth_paired = (backend == "bluetooth")
+                .then(|| state.bluetooth_paired_status(&node.id))
+                .flatten();
             devices.push(AvDevice {
                 name: custom_name(&prefs, &id).unwrap_or(default_name),
                 id,
@@ -178,6 +189,7 @@ pub async fn list_av_devices(
                 hostname: Some(node.hostname.clone()),
                 online: Some(connected.contains(&node.id)),
                 rooms,
+                bluetooth_paired,
             });
         }
     }
@@ -196,6 +208,7 @@ pub async fn list_av_devices(
                 hostname: None,
                 online: None,
                 rooms: vec![],
+                bluetooth_paired: None,
             });
         }
     }
@@ -227,6 +240,7 @@ pub async fn list_av_devices(
             hostname: Some(voice_node.hostname.clone()),
             online: Some(connected.contains(&voice_node.id)),
             rooms,
+            bluetooth_paired: None,
         });
     }
 

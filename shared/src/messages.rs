@@ -483,6 +483,40 @@ pub struct BluetoothClearCacheResult {
     pub error: Option<String>,
 }
 
+/// Coordinator asks a node to disconnect and forget one specific paired
+/// Bluetooth device. Unlike `BluetoothClearCacheRequest` (which forgets
+/// every non-connected cached device), this targets exactly the MAC the
+/// user picks — including the one currently in use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothUnpairRequest {
+    pub request_id: String,
+    pub mac: String,
+}
+
+/// Node → coordinator: the outcome of a `BluetoothUnpairRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothUnpairResult {
+    pub node_id: String,
+    pub mac: String,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Node → coordinator: a live connected/unavailable change for this node's
+/// currently-paired Bluetooth device — pushed only when the state actually
+/// changes, not a heartbeat (see `capabilities/audio/src/bluetooth.rs`'s
+/// periodic `bluetoothctl info <mac>` check). BlueZ can't distinguish
+/// "powered off" from "out of range/disconnected", so `connected: false`
+/// honestly covers both rather than guessing which.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothStatusUpdate {
+    pub node_id: String,
+    pub mac: String,
+    pub name: String,
+    pub connected: bool,
+}
+
 /// One z2m `bridge/event` during pairing, forwarded by the zigbee-owning
 /// node: drives the dashboard's live "joined: <model>" feed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -741,6 +775,9 @@ pub enum MeshMessage {
     BluetoothScanError(BluetoothScanError),
     BluetoothClearCache(BluetoothClearCacheRequest),
     BluetoothClearCacheResult(BluetoothClearCacheResult),
+    BluetoothUnpair(BluetoothUnpairRequest),
+    BluetoothUnpairResult(BluetoothUnpairResult),
+    BluetoothStatusUpdate(BluetoothStatusUpdate),
     SwitchAction(SwitchActionReport),
     // Intent routing
     IntentRequest(IntentRequest),

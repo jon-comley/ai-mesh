@@ -111,25 +111,56 @@ fn bluetooth_sink_state_path() -> std::path::PathBuf {
     base.join("bluetooth_sink.txt")
 }
 
-/// Persists the PipeWire/Pulse sink name resolved by a successful
-/// `bluetooth::pair()` so subsequent playback targets it explicitly
-/// instead of relying on the OS default sink. Node-local only — survives
-/// this node's own restarts, not migrated between nodes.
-fn persist_bluetooth_sink(sink: &str) {
+/// The currently-paired Bluetooth device, persisted as JSON rather than a
+/// bare sink name — `mac`/`name` are needed so a restarted agent can still
+/// confirm which device an unpair request is targeting and which MAC the
+/// status-polling loop (`bluetooth_status_loop`) should check.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PairedDevice {
+    mac: String,
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sink_name: Option<String>,
+}
+
+/// Persists the outcome of a successful `bluetooth::pair()` so subsequent
+/// playback targets the resolved sink explicitly instead of relying on the
+/// OS default, and so the device survives an agent restart for unpair/status
+/// purposes. Node-local only — survives this node's own restarts, not
+/// migrated between nodes.
+fn persist_paired_device(mac: &str, name: &str, sink_name: Option<&str>) {
     let path = bluetooth_sink_state_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&path, sink) {
-        warn!(error = %e, "audio: failed to persist paired bluetooth sink");
+    let device = PairedDevice {
+        mac: mac.to_string(),
+        name: name.to_string(),
+        sink_name: sink_name.map(str::to_string),
+    };
+    match serde_json::to_string(&device) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                warn!(error = %e, "audio: failed to persist paired bluetooth device");
+            }
+        }
+        Err(e) => warn!(error = %e, "audio: failed to serialize paired bluetooth device"),
     }
 }
 
+fn paired_device() -> Option<PairedDevice> {
+    let text = std::fs::read_to_string(bluetooth_sink_state_path()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Removes the persisted paired-device state — called after a successful
+/// unpair of the currently-paired MAC so a stale sink/status isn't reused.
+fn clear_paired_device() {
+    let _ = std::fs::remove_file(bluetooth_sink_state_path());
+}
+
 fn paired_bluetooth_sink() -> Option<String> {
-    std::fs::read_to_string(bluetooth_sink_state_path())
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    paired_device().and_then(|d| d.sink_name)
 }
 
 /// Which backend a request should actually use: the named `sink`, or this
@@ -184,19 +215,24 @@ impl Capability for AudioCapability {
             // have, which nobody asked for.
             MeshMessage::BluetoothScan(_)
             | MeshMessage::BluetoothPair(_)
-            | MeshMessage::BluetoothClearCache(_) => {
+            | MeshMessage::BluetoothClearCache(_)
+            | MeshMessage::BluetoothUnpair(_) => {
                 configured_backends().iter().any(|b| b == "bluetooth")
             }
             _ => false,
         }
     }
 
-    async fn start(&self, _tx: Sender<MeshMessage>) -> Result<(), String> {
+    async fn start(&self, tx: Sender<MeshMessage>) -> Result<(), String> {
         info!(
             node_id = %self.node_id,
             backends = %configured_backends().join(","),
             "audio: ready (backends selected via AUDIO_BACKENDS)"
         );
+        if configured_backends().iter().any(|b| b == "bluetooth") {
+            let node_id = self.node_id.clone();
+            tokio::spawn(bluetooth_status_loop(node_id, tx));
+        }
         Ok(())
     }
 
@@ -257,9 +293,7 @@ impl Capability for AudioCapability {
                 let outcome = bluetooth::pair(&req.mac).await;
                 let (success, name, error, sink_name) = match outcome {
                     Ok(o) => {
-                        if let Some(sink) = &o.sink_name {
-                            persist_bluetooth_sink(sink);
-                        }
+                        persist_paired_device(&req.mac, &o.name, o.sink_name.as_deref());
                         (true, o.name, None, o.sink_name)
                     }
                     Err(e) => {
@@ -276,6 +310,31 @@ impl Capability for AudioCapability {
                             success,
                             error,
                             sink_name,
+                        },
+                    ))
+                    .await;
+            }
+            MeshMessage::BluetoothUnpair(req) => {
+                let result = bluetooth::unpair(&req.mac).await;
+                let (success, error) = match result {
+                    Ok(()) => {
+                        if paired_device().is_some_and(|d| d.mac == req.mac) {
+                            clear_paired_device();
+                        }
+                        (true, None)
+                    }
+                    Err(e) => {
+                        warn!(mac = %req.mac, error = %e, "bluetooth: unpair failed");
+                        (false, Some(e))
+                    }
+                };
+                let _ = tx
+                    .send(MeshMessage::BluetoothUnpairResult(
+                        shared::BluetoothUnpairResult {
+                            node_id: self.node_id.clone(),
+                            mac: req.mac,
+                            success,
+                            error,
                         },
                     ))
                     .await;
@@ -300,6 +359,47 @@ impl Capability for AudioCapability {
             }
             _ => {}
         }
+    }
+}
+
+const BLUETOOTH_STATUS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Periodically checks whether this node's currently-paired Bluetooth
+/// device is actually connected, pushing a `BluetoothStatusUpdate` only
+/// when that state changes — not a heartbeat. BlueZ can't distinguish
+/// "powered off" from "out of range/disconnected"; both surface as
+/// `connected: false`, worded honestly on the dashboard rather than
+/// guessing which.
+///
+/// Known limitation: this runs once for the agent process's lifetime
+/// (`start()` is spawned outside the reconnect loop, per
+/// `capability_core::Capability`'s contract), so a coordinator restart that
+/// loses its in-memory paired-status map won't be told the current state
+/// again until it next actually changes — acceptable for a proposed sketch,
+/// not fixed here.
+async fn bluetooth_status_loop(node_id: String, tx: Sender<MeshMessage>) {
+    let mut last_connected: Option<bool> = None;
+    loop {
+        match paired_device() {
+            Some(device) => {
+                let connected = bluetooth::is_connected(&device.mac).await;
+                if last_connected != Some(connected) {
+                    last_connected = Some(connected);
+                    let _ = tx
+                        .send(MeshMessage::BluetoothStatusUpdate(
+                            shared::BluetoothStatusUpdate {
+                                node_id: node_id.clone(),
+                                mac: device.mac,
+                                name: device.name,
+                                connected,
+                            },
+                        ))
+                        .await;
+                }
+            }
+            None => last_connected = None,
+        }
+        tokio::time::sleep(BLUETOOTH_STATUS_POLL_INTERVAL).await;
     }
 }
 
@@ -410,6 +510,12 @@ mod tests {
                 mac: "AA:BB:CC:DD:EE:FF".into(),
             }))
         );
+        assert!(cap.handles(&MeshMessage::BluetoothUnpair(
+            shared::BluetoothUnpairRequest {
+                request_id: "r4".into(),
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+            }
+        )));
         clear_audio_env();
     }
 
@@ -434,6 +540,12 @@ mod tests {
                 mac: "AA:BB:CC:DD:EE:FF".into(),
             }))
         );
+        assert!(!cap.handles(&MeshMessage::BluetoothUnpair(
+            shared::BluetoothUnpairRequest {
+                request_id: "r3".into(),
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+            }
+        )));
         clear_audio_env();
     }
 
@@ -492,7 +604,11 @@ mod tests {
         let _guard = ENV_LOCK.blocking_lock();
         clear_audio_env();
         let _dir = isolated_state_dir();
-        persist_bluetooth_sink("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink");
+        persist_paired_device(
+            "AA:BB:CC:DD:EE:FF",
+            "Fishman PA",
+            Some("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink"),
+        );
         assert_eq!(
             play_cmd_template_for("bluetooth"),
             Some("paplay --device=bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink {file}".into())
@@ -504,7 +620,11 @@ mod tests {
         let _guard = ENV_LOCK.blocking_lock();
         clear_audio_env();
         let _dir = isolated_state_dir();
-        persist_bluetooth_sink("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink");
+        persist_paired_device(
+            "AA:BB:CC:DD:EE:FF",
+            "Fishman PA",
+            Some("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink"),
+        );
         // SAFETY: caller holds ENV_LOCK for the duration of the test.
         unsafe {
             std::env::set_var("AUDIO_PLAY_CMD_BLUETOOTH", "mpv {file}");
@@ -514,6 +634,37 @@ mod tests {
             Some("mpv {file}".into())
         );
         clear_audio_env();
+    }
+
+    #[test]
+    fn paired_device_round_trips_through_json() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        assert!(paired_device().is_none());
+        persist_paired_device(
+            "AA:BB:CC:DD:EE:FF",
+            "Fishman PA",
+            Some("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink"),
+        );
+        let device = paired_device().unwrap();
+        assert_eq!(device.mac, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(device.name, "Fishman PA");
+        assert_eq!(
+            device.sink_name.as_deref(),
+            Some("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink")
+        );
+    }
+
+    #[test]
+    fn clear_paired_device_removes_persisted_state() {
+        let _guard = ENV_LOCK.blocking_lock();
+        clear_audio_env();
+        let _dir = isolated_state_dir();
+        persist_paired_device("AA:BB:CC:DD:EE:FF", "Fishman PA", None);
+        assert!(paired_device().is_some());
+        clear_paired_device();
+        assert!(paired_device().is_none());
     }
 
     #[test]
