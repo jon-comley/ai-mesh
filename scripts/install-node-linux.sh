@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backends] [audio_alsa_device] [art_matte_percent] [art_frame_thickness]"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backends] [audio_alsa_device] [art_matte_percent] [art_frame_thickness] [spotify_device_name]"
 # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
 # (Set COORDINATOR_IP in the agent's environment to override discovery for debugging.)
 set -e
@@ -18,6 +18,7 @@ AUDIO_BACKENDS="${9:-}"
 AUDIO_ALSA_DEVICE="${10:-}"
 ART_MATTE_PERCENT="${11:-}"
 ART_FRAME_THICKNESS="${12:-}"
+SPOTIFY_DEVICE_NAME="${13:-}"
 
 if [ -z "$AGENT_USER" ]; then
     echo "Usage: $0 <role> <user> [mqtt_host] [mqtt_port] [node_features]"
@@ -415,6 +416,27 @@ Environment=ART_FRAME_THICKNESS=${ART_FRAME_THICKNESS}"
     fi
 fi
 
+# Spotify secrets (SPOTIFY_CLIENT_ID/SECRET/REFRESH_TOKEN) are deliberately
+# NOT here — they ship as a systemd drop-in via `just spotify-push-creds`,
+# which survives installer re-runs (this script rewrites only the main unit
+# file; daemon-reload merges drop-ins back in). Same pattern as
+# MESH_AUTH_TOKEN in _push-node-env.
+MUSIC_ENV_BLOCK=""
+if has_feature music; then
+    MUSIC_ENV_BLOCK="Environment=SPOTIFY_LIBRESPOT_BIN=/home/${AGENT_USER}/librespot"
+    if [ -n "$SPOTIFY_DEVICE_NAME" ]; then
+        MUSIC_ENV_BLOCK="${MUSIC_ENV_BLOCK}
+Environment=SPOTIFY_DEVICE_NAME=${SPOTIFY_DEVICE_NAME}"
+    fi
+    # pacat needs the user-session PipeWire socket, same as the audio block
+    # above; only add XDG_RUNTIME_DIR here if audio didn't already.
+    if ! has_feature audio; then
+        AGENT_UID="$(id -u "${AGENT_USER}")"
+        MUSIC_ENV_BLOCK="${MUSIC_ENV_BLOCK}
+Environment=XDG_RUNTIME_DIR=/run/user/${AGENT_UID}"
+    fi
+fi
+
 echo ">>> Installing ai-mesh-agent systemd service..."
 tee /etc/systemd/system/ai-mesh-agent.service > /dev/null <<EOF
 [Unit]
@@ -429,6 +451,7 @@ ${LLM_ENV_BLOCK}
 ${VOICE_ENV_BLOCK}
 ${AUDIO_ENV_BLOCK}
 ${ART_ENV_BLOCK}
+${MUSIC_ENV_BLOCK}
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_HOST=${MQTT_HOST}" || true)
 $([ -n "${MQTT_HOST}" ] && echo "Environment=MQTT_PORT=${MQTT_PORT}" || true)
 Restart=always

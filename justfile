@@ -381,7 +381,7 @@ deploy-node node:
             scp_dots ">>> Uploading install script" \
                 scp {{ssh_opts}} -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
             ssh {{ssh_opts}} -t ${NODE_USER}@${NODE_HOST} \
-                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh '${NODE_ROLE}' '${NODE_USER}' '${MQTT_HOST:-}' '${MQTT_PORT:-1883}' '${NODE_FEATURES:-llm}' '${VOICE_DEVICE_HOST:-}' '${VOICE_STT_REMOTE:-}' '${VOICE_TTS_BASE_URL:-}' '${AUDIO_BACKENDS:-}' '${AUDIO_ALSA_DEVICE:-}' '${ART_MATTE_PERCENT:-}' '${ART_FRAME_THICKNESS:-}'"
+                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh '${NODE_ROLE}' '${NODE_USER}' '${MQTT_HOST:-}' '${MQTT_PORT:-1883}' '${NODE_FEATURES:-llm}' '${VOICE_DEVICE_HOST:-}' '${VOICE_STT_REMOTE:-}' '${VOICE_TTS_BASE_URL:-}' '${AUDIO_BACKENDS:-}' '${AUDIO_ALSA_DEVICE:-}' '${ART_MATTE_PERCENT:-}' '${ART_FRAME_THICKNESS:-}' '${SPOTIFY_DEVICE_NAME:-}'"
         fi
         ;;
 
@@ -675,6 +675,59 @@ _push-node-env node fp token:
         \""
         ;;
     esac
+
+# ── Music / Spotify (plans/spotify-music.md) ─────────────────────────────────
+
+# One-time interactive Spotify OAuth: prints an authorize URL to open in any
+# browser (WSL2 has none), accepts the pasted redirect URL, and writes
+# ~/.config/ai-mesh/spotify.env for spotify-push-creds. Pass credentials via
+# env or type them at the prompts:
+#   SPOTIFY_CLIENT_ID=... SPOTIFY_CLIENT_SECRET=... just spotify-auth
+spotify-auth:
+    cargo run -p capability-music --bin spotify-auth
+
+# Push the Spotify Web API credentials from ~/.config/ai-mesh/spotify.env to
+# a node as a systemd drop-in and restart its agent. Secrets never enter the
+# committed nodes/*.env files — same pattern as MESH_AUTH_TOKEN in
+# _push-node-env, and drop-ins survive deploy-node installer re-runs.
+# Usage: just spotify-push-creds pi2
+spotify-push-creds node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    CREDS_FILE="$HOME/.config/ai-mesh/spotify.env"
+    if [ ! -f "$CREDS_FILE" ]; then
+        echo ">>> ERROR: $CREDS_FILE not found — run 'just spotify-auth' first."
+        exit 1
+    fi
+    source "$CREDS_FILE"
+    if [ -z "${SPOTIFY_CLIENT_ID}" ] || [ -z "${SPOTIFY_CLIENT_SECRET}" ] || [ -z "${SPOTIFY_REFRESH_TOKEN}" ]; then
+        echo ">>> ERROR: $CREDS_FILE is incomplete — re-run 'just spotify-auth'."
+        exit 1
+    fi
+    if [ "$NODE_OS" != "linux" ]; then
+        echo ">>> ERROR: spotify-push-creds only supports linux nodes (got NODE_OS=$NODE_OS)."
+        exit 1
+    fi
+    echo ">>> Pushing Spotify credentials to {{node}}..."
+    if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
+        sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d
+        printf '[Service]\nEnvironment=SPOTIFY_CLIENT_ID=%s\nEnvironment=SPOTIFY_CLIENT_SECRET=%s\nEnvironment=SPOTIFY_REFRESH_TOKEN=%s\n' \
+            "${SPOTIFY_CLIENT_ID}" "${SPOTIFY_CLIENT_SECRET}" "${SPOTIFY_REFRESH_TOKEN}" \
+            | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/spotify.conf > /dev/null
+        sudo systemctl daemon-reload
+        sudo systemctl restart ai-mesh-agent
+    else
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "
+            sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d 2>/dev/null || true
+            printf '[Service]\nEnvironment=SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}\nEnvironment=SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}\nEnvironment=SPOTIFY_REFRESH_TOKEN=${SPOTIFY_REFRESH_TOKEN}\n' \
+                | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/spotify.conf > /dev/null
+            sudo systemctl daemon-reload
+            timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true
+            sudo systemctl start ai-mesh-agent
+        "
+    fi
+    echo ">>> {{node}}: Spotify credentials installed, agent restarted."
 
 # Push the coordinator TLS fingerprint to a node's agent service and restart it.
 # Reads the fingerprint from /tmp/mesh-coordinator.log automatically.
