@@ -407,10 +407,21 @@ fn intent_timeout() -> Duration {
 }
 
 /// How long to wait for the coordinator's `AudioAnnounceResult` before
-/// assuming a room-routed reply didn't land and falling back to the
-/// puck. Short — this is just "is the sink node connected and did the
-/// mesh send succeed," not a synthesis or network-media round trip.
-const ANNOUNCE_RESULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// assuming a room-routed reply didn't land and falling back to the puck.
+///
+/// This is NOT a lightweight dispatch ack — the coordinator's
+/// `send_audio_play` deliberately waits for the sink node's genuine
+/// `AudioPlayResult`, which `play_url()` only sends after the clip has
+/// actually finished playing (it awaits the `paplay`/`aplay` process's
+/// exit), specifically so a silently-broken sink still triggers the puck
+/// fallback instead of swallowing the reply. Confirmed live 2026-07-12: a
+/// longer reply's real, successful `AudioAnnounceResult` (`delivered:
+/// true`) arrived ~10s after the wake word, well past the previous 5s
+/// value here — the fallback fired first every time, then the late real
+/// result had nowhere to go (`no capability handles: AudioAnnounceResult`).
+/// Must stay comfortably above `coordinator::audio::AUDIO_PLAY_TIMEOUT`
+/// (the inner wait this one wraps) or the outer timeout always wins.
+const ANNOUNCE_RESULT_TIMEOUT: Duration = Duration::from_secs(50);
 
 /// Build one device pipeline event with optional name/value data pairs.
 fn event(event_type: VoiceAssistantEvent, data: &[(&str, &str)]) -> VoiceAssistantEventResponse {

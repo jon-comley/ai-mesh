@@ -447,6 +447,26 @@ pub async fn pair(mac: &str) -> Result<PairOutcome, String> {
     Ok(PairOutcome { name, sink_name })
 }
 
+/// Attempts to reconnect an already-paired, already-trusted device — used
+/// by the background status loop (`bluetooth_status_loop` in `lib.rs`)
+/// when it finds the currently-paired device disconnected. Deliberately
+/// just the connect step, not `pair()`'s full pair/trust-fallback dance:
+/// retrying an explicit `pair` on top of a device that's merely out of
+/// range or momentarily off is exactly the kind of repeated attempt that
+/// wedges some hardware's Bluetooth module (confirmed live with the
+/// Fishman Loudbox — only a full mains power-cycle recovers it). One
+/// connect attempt, profile-targeted the same way `pair()` is (see its
+/// doc comment for why a bare connect hangs) — the caller is responsible
+/// for not calling this too often.
+pub async fn reconnect(mac: &str) -> Result<(), String> {
+    let (ok, output) = run_oneshot(&["connect", mac, A2DP_SINK_UUID], PAIR_STEP_TIMEOUT).await;
+    if connect_succeeded(ok, &output) {
+        Ok(())
+    } else {
+        Err(connect_failure_reason(&output))
+    }
+}
+
 /// Forgets every cached device bluetoothd knows about (`bluetoothctl
 /// remove <mac>`) except whichever one is currently connected — needed
 /// because `scan()` seeds its results from that same cache (see its doc

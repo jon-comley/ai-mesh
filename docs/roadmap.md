@@ -1708,6 +1708,35 @@ both the Devices tab's paired-status row and the room-card badge, which
 names the same BlueZ ambiguity (can't tell powered-off from
 out-of-range) without sounding broken.
 
+Also found, live: the status loop only ever *read* connection state — it
+never attempted to reconnect anything, so "switch the amp on" never
+resulted in it coming back without a manual re-pair from the dashboard.
+Added `bluetooth::reconnect(mac)` (one profile-targeted connect attempt,
+deliberately not the full `pair()`/trust-fallback dance) and wired it into
+`bluetooth_status_loop`, gated by a 2-minute cooldown per device
+(`BLUETOOTH_RECONNECT_COOLDOWN`). The cooldown is the important part, not
+an afterthought: this hardware's Bluetooth module wedges after repeated
+failed connection attempts and needs a full mains power-cycle to recover
+(confirmed live with the Fishman Loudbox), so a tight retry loop would
+actively make outages worse. The first attempt after a disconnect is never
+delayed; only retries back off.
+
+**Found live, 2026-07-12: room-routed replies silently fell back to the
+puck even on a fully successful delivery.** Diagnosed against pi1's own
+logs rather than guessing — BlueZ (`Connected: yes`), the PipeWire sink,
+and the room-audio-sink routing config were all genuinely correct; a
+direct `paplay` to the resolved sink also worked. The actual bug:
+`capability-voice`'s `ANNOUNCE_RESULT_TIMEOUT` (5s) wraps
+`coordinator::audio::AUDIO_PLAY_TIMEOUT` (10s), and both were sized as if
+waiting for a quick dispatch ack — but the node's real `AudioPlayResult`
+only sends after the clip's *entire playback* finishes (`play_url()`
+awaits the `paplay` process's exit), which routinely exceeds 5-10s for a
+real spoken reply. The log caught it directly: a genuinely successful,
+`delivered: true` result arrived ~10.6s after the reply started — 4+
+seconds after the 5s timeout had already given up and triggered the
+puck fallback, so the late real result was dropped
+(`no capability handles: AudioAnnounceResult`). Widened both to 45s/50s.
+
 **Follow-ups queued, not yet built:**
 - **Full Bluetooth playback control** — volume up/down and mute, not just
   pair/unpair. No wire messages or `bluetooth.rs` functions for this exist
