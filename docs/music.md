@@ -60,8 +60,6 @@ agent. Drop-ins survive `just deploy-node pi2` re-runs.
 
 ### 5. The playback device (librespot)
 
-*(Recipes land with Phase 4 of the plan.)*
-
 ```
 just build-librespot
 just deploy-librespot pi2
