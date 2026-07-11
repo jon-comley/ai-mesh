@@ -2275,6 +2275,114 @@ setup-reaper-daemon:
     echo ""
     echo "After that, 'just test-record' and the chat reaper_script tool can run Lua in REAPER."
 
+# Music smoke test (plans/spotify-music.md Phase 5): asserts the LLM routes
+# music requests to music_control and that status answers get spoken text.
+# Routing checks hard-fail; live-playback checks degrade to warnings so the
+# recipe is useful before Spotify credentials/librespot are set up.
+# Usage: just test-music
+test-music:
+    #!/usr/bin/env bash
+    set -e
+
+    STATE="$HOME/.config/ai-mesh/coordinator.state"
+    if [ ! -f "$STATE" ]; then
+        echo "✗ coordinator state not found — run: just start-cluster"
+        exit 1
+    fi
+    source "$STATE"
+
+    COORD_URL="http://{{coordinator_ip}}:9001"
+    PASS=0
+    FAIL=0
+
+    ok()   { echo "  ✓ $*"; PASS=$((PASS+1)); }
+    fail() { echo "  ✗ $*"; FAIL=$((FAIL+1)); }
+
+    chat() {
+        curl -s -X POST "${COORD_URL}/api/chat?token=${MESH_AUTH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"$1\", \"context\": []}"
+    }
+    tool_of()   { python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('tool_calls',[]); print(c[0]['tool'] if c else '')" 2>/dev/null; }
+    action_of() { python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('tool_calls',[]); print(c[0].get('args',{}).get('action','') if c else '')" 2>/dev/null; }
+    result_of() { python3 -c "import sys,json; d=json.load(sys.stdin); c=d.get('tool_calls',[]); print(c[0]['result'] if c else '')" 2>/dev/null; }
+    text_of()   { python3 -c "import sys,json; print(json.load(sys.stdin).get('text') or '')" 2>/dev/null; }
+
+    echo ""
+    echo "=== Music smoke test ==="
+    echo ""
+
+    # 0. Coordinator reachable — otherwise every step below fails cryptically.
+    if ! curl -s -o /dev/null --max-time 5 "${COORD_URL}/"; then
+        echo "✗ coordinator not reachable at ${COORD_URL} — is it running? (just nodes)"
+        exit 1
+    fi
+
+    # 1. Command routing: pause must become a music_control call.
+    echo "[1/4] Pause command routes to music_control..."
+    RESP=$(chat "pause the music")
+    TOOL=$(echo "$RESP" | tool_of)
+    RESULT=$(echo "$RESP" | result_of)
+    if [ "$TOOL" = "music_control" ]; then
+        ok "LLM called music_control → ${RESULT}"
+    else
+        fail "expected music_control (tool not offered? coordinator + pi2 must both be redeployed with the music feature), got: $(echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP")"
+    fi
+    TEXT=$(echo "$RESP" | text_of)
+    if [ -z "$TEXT" ]; then
+        ok "command reply stays silent (no spoken text)"
+    else
+        fail "command reply set text='${TEXT}' (commands should be silent like lights)"
+    fi
+
+    # 2. Question routing: status must be a tool call with spoken text, not
+    #    a free-text guess (the puck speaks only the text field).
+    echo "[2/4] 'what's playing?' becomes action=status with spoken text..."
+    RESP=$(chat "what's playing?")
+    TOOL=$(echo "$RESP" | tool_of)
+    ACTION=$(echo "$RESP" | action_of)
+    RESULT=$(echo "$RESP" | result_of)
+    TEXT=$(echo "$RESP" | text_of)
+    if [ "$TOOL" = "music_control" ] && [ "$ACTION" = "status" ]; then
+        ok "LLM called music_control(status)"
+    else
+        fail "expected music_control(status), got tool='${TOOL}' action='${ACTION}'"
+    fi
+    if [ -n "$RESULT" ]; then
+        ok "status result: ${RESULT}"
+    else
+        fail "status result is empty"
+    fi
+    if [ -n "$TEXT" ]; then
+        ok "spoken text set for the puck: ${TEXT}"
+    else
+        fail "IntentResponse.text unset — the puck would stay silent on 'what's playing?'"
+    fi
+
+    # 3. Live playback (degrades to a warning until Spotify setup is done).
+    echo "[3/4] Play a named track (live playback check)..."
+    RESP=$(chat "play blackbird by the beatles")
+    TOOL=$(echo "$RESP" | tool_of)
+    RESULT=$(echo "$RESP" | result_of)
+    if [ "$TOOL" = "music_control" ]; then
+        ok "LLM called music_control → ${RESULT}"
+    else
+        fail "expected music_control, got tool='${TOOL}'"
+    fi
+    case "$RESULT" in
+        "Now playing"*) ok "playback started: ${RESULT}" ;;
+        *) echo "  ⚠ playback not live yet: '${RESULT}' (fine before spotify-push-creds / spotify-login — see docs/music.md)" ;;
+    esac
+
+    # 4. Leave the house quiet if step 3 actually started something.
+    echo "[4/4] Pause after test..."
+    RESP=$(chat "pause the music")
+    ok "pause sent → $(echo "$RESP" | result_of)"
+
+    echo ""
+    echo "=== ${PASS} passed, ${FAIL} failed ==="
+    [ "$FAIL" -eq 0 ]
+
 # Usage: just test-reaper
 test-reaper:
     #!/usr/bin/env bash
