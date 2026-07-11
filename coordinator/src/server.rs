@@ -282,15 +282,23 @@ where
                         Ok(m) => m,
                         Err(e) => return Err(ServerError::Json(e)),
                     },
+                    Err(FrameVerifyError::Stale { ts, now, max_skew }) => {
+                        // Length-prefixed framing means this frame's bytes are
+                        // still fully consumed above — skipping it can't desync
+                        // the stream. A stale timestamp is just delayed delivery
+                        // (e.g. a node whose Wi-Fi shares a radio with heavy
+                        // Bluetooth activity), not evidence of a compromised
+                        // connection, so don't end the whole session over one
+                        // late frame — verified live 2026-07-10, where doing so
+                        // killed the connection mid-Bluetooth-pairing.
+                        warn!(
+                            ts,
+                            now, max_skew, "dropping stale frame — keeping connection open"
+                        );
+                        continue;
+                    }
                     Err(e) => {
-                        if matches!(e, FrameVerifyError::Stale { .. }) {
-                            warn!(
-                                "dropping frame: {} — check that node clock is NTP-synced",
-                                e
-                            );
-                        } else {
-                            warn!("dropping frame: {}", e);
-                        }
+                        warn!("dropping frame: {}", e);
                         return Ok(());
                     }
                 },
@@ -1317,6 +1325,12 @@ async fn process_message(
             None
         }
         MeshMessage::BluetoothDeviceFound(info) => {
+            info!(
+                node_id = %info.node_id,
+                mac = %info.mac,
+                name = %info.name,
+                "bluetooth: device found, forwarding to dashboard"
+            );
             if let Some(dash) = dashboard {
                 dash.push_bluetooth_device_found(info);
             }
@@ -1331,6 +1345,22 @@ async fn process_message(
             );
             if let Some(dash) = dashboard {
                 dash.push_bluetooth_pair_result(result);
+            }
+            None
+        }
+        MeshMessage::BluetoothScanError(err) => {
+            warn!(node_id = %err.node_id, error = %err.error, "bluetooth: scan failed");
+            None
+        }
+        MeshMessage::BluetoothClearCacheResult(result) => {
+            info!(
+                node_id = %result.node_id,
+                cleared = ?result.cleared,
+                error = ?result.error,
+                "bluetooth: clear cache result"
+            );
+            if let Some(dash) = dashboard {
+                dash.push_bluetooth_clear_cache_result(result);
             }
             None
         }

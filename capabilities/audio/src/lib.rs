@@ -93,8 +93,22 @@ fn play_cmd_template_for(backend: &str) -> Option<String> {
     }
 }
 
+/// `~/.ai-mesh/bluetooth_sink.txt` (override: `AUDIO_STATE_DIR`) — NOT
+/// `download_dir()` (which defaults to `std::env::temp_dir()`, wiped on
+/// reboot). This needs to actually survive a reboot: confirmed live
+/// 2026-07-10/11 pairing a Bluetooth amp, where losing this file after a
+/// restart meant playback silently fell back to the default sink instead
+/// of the paired speaker. Mirrors the node-id persistence convention in
+/// `agent::identity::generate_node_id`.
 fn bluetooth_sink_state_path() -> std::path::PathBuf {
-    download_dir().join("bluetooth_sink.txt")
+    let base = std::env::var("AUDIO_STATE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".ai-mesh")
+        });
+    base.join("bluetooth_sink.txt")
 }
 
 /// Persists the PipeWire/Pulse sink name resolved by a successful
@@ -168,7 +182,9 @@ impl Capability for AudioCapability {
             // touch bluetoothctl — otherwise an HDMI-only node would spawn
             // it and start driving whatever Bluetooth radio it happens to
             // have, which nobody asked for.
-            MeshMessage::BluetoothScan(_) | MeshMessage::BluetoothPair(_) => {
+            MeshMessage::BluetoothScan(_)
+            | MeshMessage::BluetoothPair(_)
+            | MeshMessage::BluetoothClearCache(_) => {
                 configured_backends().iter().any(|b| b == "bluetooth")
             }
             _ => false,
@@ -205,18 +221,36 @@ impl Capability for AudioCapability {
             MeshMessage::BluetoothScan(req) => {
                 let node_id = self.node_id.clone();
                 let result = bluetooth::scan(req.seconds, |dev| {
-                    let _ = tx.try_send(MeshMessage::BluetoothDeviceFound(
+                    let mac = dev.mac.clone();
+                    let name = dev.name.clone();
+                    let rssi = dev.rssi;
+                    match tx.try_send(MeshMessage::BluetoothDeviceFound(
                         shared::BluetoothDeviceInfo {
                             node_id: node_id.clone(),
                             mac: dev.mac,
                             name: dev.name,
                             rssi: dev.rssi,
                         },
-                    ));
+                    )) {
+                        Ok(()) => {
+                            tracing::info!(%mac, %name, ?rssi, "bluetooth: device found, queued to coordinator")
+                        }
+                        Err(e) => {
+                            warn!(%mac, %name, error = %e, "bluetooth: device found but failed to queue to coordinator")
+                        }
+                    }
                 })
                 .await;
                 if let Err(e) = result {
                     warn!(request_id = %req.request_id, error = %e, "bluetooth: scan failed");
+                    let _ = tx
+                        .send(MeshMessage::BluetoothScanError(
+                            shared::BluetoothScanError {
+                                node_id: node_id.clone(),
+                                error: e,
+                            },
+                        ))
+                        .await;
                 }
             }
             MeshMessage::BluetoothPair(req) => {
@@ -242,6 +276,24 @@ impl Capability for AudioCapability {
                             success,
                             error,
                             sink_name,
+                        },
+                    ))
+                    .await;
+            }
+            MeshMessage::BluetoothClearCache(req) => {
+                let (cleared, error) = match bluetooth::clear_cache().await {
+                    Ok(n) => (Some(n), None),
+                    Err(e) => {
+                        warn!(request_id = %req.request_id, error = %e, "bluetooth: clear cache failed");
+                        (None, Some(e))
+                    }
+                };
+                let _ = tx
+                    .send(MeshMessage::BluetoothClearCacheResult(
+                        shared::BluetoothClearCacheResult {
+                            node_id: self.node_id.clone(),
+                            cleared,
+                            error,
                         },
                     ))
                     .await;
@@ -314,17 +366,18 @@ mod tests {
             std::env::remove_var("AUDIO_PLAY_CMD_BLUETOOTH");
             std::env::remove_var("AUDIO_ALSA_DEVICE");
             std::env::remove_var("AUDIO_CACHE_DIR");
+            std::env::remove_var("AUDIO_STATE_DIR");
         }
     }
 
-    /// Points `AUDIO_CACHE_DIR` (and so `bluetooth_sink_state_path()`) at a
+    /// Points `AUDIO_STATE_DIR` (and so `bluetooth_sink_state_path()`) at a
     /// fresh tempdir so sink-persistence tests can't see a real paired
     /// device's leftover state file, or leak state into other tests.
-    fn isolated_cache_dir() -> tempfile::TempDir {
+    fn isolated_state_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: caller holds ENV_LOCK for the duration of the test.
         unsafe {
-            std::env::set_var("AUDIO_CACHE_DIR", dir.path());
+            std::env::set_var("AUDIO_STATE_DIR", dir.path());
         }
         dir
     }
@@ -427,7 +480,7 @@ mod tests {
     fn bluetooth_backend_defaults_to_paplay_when_nothing_paired() {
         let _guard = ENV_LOCK.blocking_lock();
         clear_audio_env();
-        let _dir = isolated_cache_dir();
+        let _dir = isolated_state_dir();
         assert_eq!(
             play_cmd_template_for("bluetooth"),
             Some("paplay {file}".into())
@@ -438,7 +491,7 @@ mod tests {
     fn bluetooth_backend_targets_the_paired_sink_once_persisted() {
         let _guard = ENV_LOCK.blocking_lock();
         clear_audio_env();
-        let _dir = isolated_cache_dir();
+        let _dir = isolated_state_dir();
         persist_bluetooth_sink("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink");
         assert_eq!(
             play_cmd_template_for("bluetooth"),
@@ -450,7 +503,7 @@ mod tests {
     fn per_backend_override_still_wins_over_a_persisted_sink() {
         let _guard = ENV_LOCK.blocking_lock();
         clear_audio_env();
-        let _dir = isolated_cache_dir();
+        let _dir = isolated_state_dir();
         persist_bluetooth_sink("bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink");
         // SAFETY: caller holds ENV_LOCK for the duration of the test.
         unsafe {

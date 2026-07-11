@@ -8,29 +8,37 @@
 //! dependency, no cross-compile toolchain risk, consistent with how this
 //! codebase already shells out to `ss`, `aplay`/`paplay`, `pactl` elsewhere.
 //!
-//! **Unverified without hardware in hand**: the exact success/failure
-//! strings `bluetoothctl` prints for `pair`/`trust`/`connect` are BlueZ
-//! version-dependent and were not confirmed against a real device before
-//! this shipped. `pair()`'s step-matching is deliberately permissive
-//! (case-insensitive substring match, "already exists" treated as success)
-//! to tolerate minor wording differences, but a genuinely different BlueZ
-//! version may need `PAIR_STEP_TIMEOUT` or the match strings adjusted once
-//! tested live.
+//! Verified live 2026-07-10 against BlueZ 5.x on Debian trixie (pi2) with
+//! a Fishman Loudbox amp: `scan()` streams an interactive session (events
+//! arrive prompt-redraw-prefixed — see `after_prompt_redraw`), while
+//! `pair()` uses one-shot `bluetoothctl <cmd>` invocations and their exit
+//! codes, because the interactive session's outcome lines (e.g. "Pairing
+//! successful") carry no device MAC and aren't reliably distinguishable
+//! from unrelated event noise.
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::{Duration, Instant, timeout};
 use tracing::warn;
 
-/// How long to wait for a `bluetoothctl pair`/`connect` step to report
-/// success or failure before giving up — a first-time pairing handshake
-/// can take a few seconds, but this shouldn't hang the request forever.
-const PAIR_STEP_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long to allow each one-shot `bluetoothctl` step (`pair`, `trust`,
+/// `connect`) to run. Must exceed BlueZ's own internal connect timeout —
+/// measured live at ~30s (a failing `connect` against the Fishman Loudbox
+/// took 30.3s to report `br-connection-unknown`). Cutting our own timeout
+/// shorter than that doesn't speed anything up: killing the `bluetoothctl`
+/// CLI process doesn't cancel the in-flight D-Bus call to bluetoothd, so
+/// bluetoothd can still complete the connect a few seconds after we've
+/// already given up and reported failure to the dashboard — the device
+/// briefly shows `Connected: yes` with nobody home to run `trust`/resolve
+/// the sink, then it idles out and drops again with no audio ever sent.
+const PAIR_STEP_TIMEOUT: Duration = Duration::from_secs(40);
 
-/// `trust` has no reliably-documented confirmation line across BlueZ
-/// versions — fire it and wait this long before moving on, rather than
-/// blocking on output matching that may never arrive.
-const TRUST_SETTLE: Duration = Duration::from_millis(500);
+/// `power on`'s confirmation text isn't reliably documented across BlueZ
+/// versions either — fire it and wait this long before issuing `scan`/
+/// `pair`, same rationale as `TRUST_SETTLE`. Needed because the adapter
+/// can start (or come back after a reboot) powered off or rfkill-blocked,
+/// which otherwise makes `scan on`/`pair` fail silently.
+const POWER_ON_SETTLE: Duration = Duration::from_millis(500);
 
 /// How long to keep polling `pactl` for the newly-connected sink to show
 /// up — PipeWire/Pulse registers it shortly after BlueZ reports the
@@ -92,45 +100,124 @@ fn is_mac(s: &str) -> bool {
 enum ParsedLine {
     NewOrChanged { mac: String, name: String },
     Rssi { mac: String, rssi: i32 },
+    DiscoveryFailed(String),
     None,
 }
 
+/// `bluetoothctl` redraws its prompt in place even when piped, so a
+/// `\n`-terminated line arrives as
+/// `[bluetoothctl]> \r<blanking spaces>\r[NEW] Device …` — the real event
+/// content is only the text after the last carriage return. Lines without
+/// `\r` pass through unchanged. (Confirmed against live output on pi2;
+/// whole-line prefix matching never fired because of this.)
+fn after_prompt_redraw(stripped: &str) -> &str {
+    stripped
+        .rsplit('\r')
+        .map(str::trim)
+        .find(|seg| !seg.is_empty())
+        .unwrap_or("")
+}
+
+/// BlueZ prints RSSI either as a plain decimal (`RSSI: -52`) or, on newer
+/// versions, as hex with the decimal in parens (`RSSI: 0xffffffcd (-51)`).
+fn parse_rssi(value: &str) -> Option<i32> {
+    let value = value.trim();
+    if let (Some(open), Some(close)) = (value.find('('), value.rfind(')'))
+        && open < close
+    {
+        return value[open + 1..close].trim().parse().ok();
+    }
+    value.parse().ok()
+}
+
 /// Parses one line of `bluetoothctl` scan output. Recognises:
-/// `[NEW] Device AA:BB:CC:DD:EE:FF Some Name` and
-/// `[CHG] Device AA:BB:CC:DD:EE:FF RSSI: -52`.
+/// `[NEW] Device AA:BB:CC:DD:EE:FF Some Name` (first appearance, name
+/// attached), `[CHG] Device AA:BB:CC:DD:EE:FF RSSI: …` (signal update),
+/// `[CHG] Device AA:BB:CC:DD:EE:FF Name: …` (late name resolution — BLE
+/// devices often appear MAC-only first), and lines indicating the adapter
+/// couldn't even start discovery (powered off/rfkill-blocked) — without
+/// that last one, such a failure looks identical to "no devices in range".
+/// Other `[CHG]` fields (`Class:`, `Icon:`, `UUIDs:`, `ManufacturerData…`)
+/// are metadata, never a device name.
 fn parse_scan_line(line: &str) -> ParsedLine {
-    let line = strip_ansi(line);
-    let line = line.trim();
-    for prefix in ["[NEW] Device ", "[CHG] Device "] {
-        let Some(rest) = line.strip_prefix(prefix) else {
-            continue;
-        };
+    let stripped = strip_ansi(line);
+    let lower = stripped.to_lowercase();
+    if lower.contains("failed to start discovery")
+        || lower.contains("no default controller available")
+    {
+        return ParsedLine::DiscoveryFailed(stripped.trim().to_string());
+    }
+    let line = after_prompt_redraw(&stripped);
+    if let Some(rest) = line.strip_prefix("[NEW] Device ") {
+        let mut parts = rest.splitn(2, ' ');
+        let mac = parts.next().unwrap_or("").to_string();
+        let name = parts.next().unwrap_or("").trim();
+        if is_mac(&mac) && !name.is_empty() {
+            return ParsedLine::NewOrChanged {
+                mac,
+                name: name.to_string(),
+            };
+        }
+    } else if let Some(rest) = line.strip_prefix("[CHG] Device ") {
         let mut parts = rest.splitn(2, ' ');
         let mac = parts.next().unwrap_or("").to_string();
         let remainder = parts.next().unwrap_or("").trim();
-        if !is_mac(&mac) || remainder.is_empty() {
-            continue;
-        }
-        if let Some(rssi_str) = remainder.strip_prefix("RSSI: ") {
-            if let Ok(rssi) = rssi_str.trim().parse::<i32>() {
-                return ParsedLine::Rssi { mac, rssi };
+        if is_mac(&mac) && !remainder.is_empty() {
+            if let Some(value) = remainder.strip_prefix("RSSI: ") {
+                if let Some(rssi) = parse_rssi(value) {
+                    return ParsedLine::Rssi { mac, rssi };
+                }
+            } else if let Some(name) = remainder.strip_prefix("Name: ") {
+                let name = name.trim();
+                if !name.is_empty() {
+                    return ParsedLine::NewOrChanged {
+                        mac,
+                        name: name.to_string(),
+                    };
+                }
             }
-        } else {
-            return ParsedLine::NewOrChanged {
-                mac,
-                name: remainder.to_string(),
-            };
         }
     }
     ParsedLine::None
 }
 
+/// Parses one line of one-shot `bluetoothctl devices` output:
+/// `Device AA:BB:CC:DD:EE:FF Some Name`.
+fn parse_device_line(line: &str) -> Option<(String, String)> {
+    let stripped = strip_ansi(line);
+    let rest = after_prompt_redraw(&stripped).strip_prefix("Device ")?;
+    let mut parts = rest.splitn(2, ' ');
+    let mac = parts.next().unwrap_or("").to_string();
+    let name = parts.next().unwrap_or("").trim();
+    (is_mac(&mac) && !name.is_empty()).then(|| (mac, name.to_string()))
+}
+
 /// Opens a live discovery window for `seconds`, calling `on_device` once
 /// per new device and again each time BlueZ reports an updated RSSI for
-/// one already seen. Devices with an RSSI update but no prior name (a
-/// device already known to BlueZ from a previous session that never gets a
-/// `[NEW]` line this run) are skipped rather than surfaced nameless.
+/// one already seen.
+///
+/// Results are seeded from bluetoothd's device cache before discovery
+/// starts: a currently-connected device (e.g. an amp already paired to
+/// this node) stops advertising entirely and never emits a `[NEW]` line,
+/// and neither does anything still cached from a scan moments earlier — so
+/// without seeding, the connected device is unselectable and a rescan
+/// right after a scan looks empty.
 pub async fn scan(seconds: u8, mut on_device: impl FnMut(FoundDevice)) -> Result<(), String> {
+    let mut known_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    let (_, cached) = run_oneshot(&["devices"], Duration::from_secs(3)).await;
+    for line in cached.lines() {
+        if let Some((mac, name)) = parse_device_line(line) {
+            known_names.insert(mac.clone(), name.clone());
+            on_device(FoundDevice {
+                mac,
+                name,
+                rssi: None,
+            });
+        }
+    }
+
     let mut child = spawn_bluetoothctl()?;
     let mut stdin = child
         .stdin
@@ -143,12 +230,17 @@ pub async fn scan(seconds: u8, mut on_device: impl FnMut(FoundDevice)) -> Result
     let mut lines = BufReader::new(stdout).lines();
 
     stdin
+        .write_all(b"power on\n")
+        .await
+        .map_err(|e| format!("bluetoothctl: failed to power on adapter: {e}"))?;
+    tokio::time::sleep(POWER_ON_SETTLE).await;
+
+    stdin
         .write_all(b"scan on\n")
         .await
         .map_err(|e| format!("bluetoothctl: failed to start scan: {e}"))?;
 
-    let mut known_names: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut discovery_failed: Option<String> = None;
     let deadline = Instant::now() + Duration::from_secs(seconds as u64);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -174,6 +266,10 @@ pub async fn scan(seconds: u8, mut on_device: impl FnMut(FoundDevice)) -> Result
                         });
                     }
                 }
+                ParsedLine::DiscoveryFailed(msg) => {
+                    discovery_failed = Some(msg);
+                    break;
+                }
                 ParsedLine::None => {}
             },
             Ok(Ok(None)) => break, // bluetoothctl exited early
@@ -187,93 +283,69 @@ pub async fn scan(seconds: u8, mut on_device: impl FnMut(FoundDevice)) -> Result
 
     let _ = stdin.write_all(b"scan off\nexit\n").await;
     let _ = child.kill().await;
-    Ok(())
+    match discovery_failed {
+        Some(msg) => Err(format!("bluetoothctl: failed to start discovery: {msg}")),
+        None => Ok(()),
+    }
 }
 
-/// Reads lines until one contains `success_needle` or `fail_needle`
-/// (case-insensitive), both scoped to `mac`. "Already exists"-type
-/// failures are treated as success — pairing/trusting an already-known
-/// device isn't an error from the dashboard's point of view.
-async fn wait_for_step(
-    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-    mac: &str,
-    success_needle: &str,
-    fail_needle: &str,
-) -> Result<(), String> {
-    let mac_lower = mac.to_lowercase();
-    let deadline = Instant::now() + PAIR_STEP_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(format!(
-                "{success_needle}: timed out waiting for a response"
-            ));
+/// Runs a single one-shot `bluetoothctl <args>` command, returning whether
+/// it exited zero plus its combined stdout+stderr. One-shot invocations
+/// print the real outcome lines without the interactive prompt-redraw
+/// noise and exit when the underlying D-Bus call completes — far more
+/// reliable than string-matching an interactive session, whose "Pairing
+/// successful" line never carries the device MAC (verified live against
+/// the Fishman Loudbox, 2026-07-10).
+async fn run_oneshot(args: &[&str], limit: Duration) -> (bool, String) {
+    let mut cmd = Command::new("bluetoothctl");
+    cmd.args(args).kill_on_drop(true);
+    match timeout(limit, cmd.output()).await {
+        Ok(Ok(out)) => {
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            (out.status.success(), text)
         }
-        let Ok(Ok(Some(line))) = timeout(remaining, lines.next_line()).await else {
-            return Err(format!(
-                "{success_needle}: bluetoothctl closed unexpectedly"
-            ));
-        };
-        let clean = strip_ansi(&line);
-        let lower = clean.to_lowercase();
-        if !lower.contains(&mac_lower) {
-            continue;
-        }
-        if lower.contains(&success_needle.to_lowercase()) {
-            return Ok(());
-        }
-        if lower.contains(&fail_needle.to_lowercase()) {
-            if lower.contains("already exists") || lower.contains("already connected") {
-                return Ok(());
-            }
-            return Err(clean.trim().to_string());
-        }
+        Ok(Err(e)) => (false, format!("failed to run bluetoothctl: {e}")),
+        Err(_) => (false, format!("bluetoothctl {} timed out", args.join(" "))),
     }
+}
+
+/// Picks the most useful error line out of one-shot `connect` output — the
+/// `Failed to connect: org.bluez.Error…` line when present (it names the
+/// actual reason, e.g. `br-connection-profile-unavailable`), otherwise the
+/// last non-empty line.
+fn connect_failure_reason(output: &str) -> String {
+    let cleaned: Vec<String> = output
+        .lines()
+        .map(|l| {
+            let stripped = strip_ansi(l);
+            after_prompt_redraw(&stripped).to_string()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    cleaned
+        .iter()
+        .find(|l| l.to_lowercase().contains("failed to connect"))
+        .or_else(|| cleaned.last())
+        .cloned()
+        .unwrap_or_else(|| "no output from bluetoothctl connect".to_string())
 }
 
 /// Extracts the value of a `bluetoothctl info` "Name: <value>" line, if
 /// this is one. Factored out from `resolve_name` so the string-matching
 /// logic is unit-testable without spawning a process.
 fn extract_name_field(line: &str) -> Option<String> {
-    strip_ansi(line)
-        .trim()
+    let stripped = strip_ansi(line);
+    after_prompt_redraw(&stripped)
         .strip_prefix("Name: ")
         .map(str::to_string)
 }
 
-/// `pair()`'s own bluetoothctl session has no scan history, but BlueZ
-/// itself remembers this device's friendly name from whichever earlier
-/// session discovered it — `info <mac>` reads it back from bluetoothd.
+/// BlueZ remembers a device's friendly name from whichever earlier session
+/// discovered it — `info <mac>` reads it back from bluetoothd.
 async fn resolve_name(mac: &str) -> Option<String> {
-    let mut child = spawn_bluetoothctl().ok()?;
-    let mut stdin = child.stdin.take()?;
-    let stdout = child.stdout.take()?;
-    let mut lines = BufReader::new(stdout).lines();
-    stdin
-        .write_all(format!("info {mac}\n").as_bytes())
-        .await
-        .ok()?;
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut name = None;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        match timeout(remaining, lines.next_line()).await {
-            Ok(Ok(Some(line))) => {
-                if let Some(found) = extract_name_field(&line) {
-                    name = Some(found);
-                    break;
-                }
-            }
-            _ => break,
-        }
-    }
-    let _ = stdin.write_all(b"exit\n").await;
-    let _ = child.kill().await;
-    name
+    let (_, output) = run_oneshot(&["info", mac], Duration::from_secs(3)).await;
+    output.lines().find_map(extract_name_field)
 }
 
 async fn resolve_sink_name(mac: &str) -> Option<String> {
@@ -300,50 +372,95 @@ async fn resolve_sink_name(mac: &str) -> Option<String> {
     }
 }
 
-/// Pairs, trusts, and connects `mac`, then resolves its friendly name and
-/// the resulting PipeWire/Pulse sink name.
+fn connect_succeeded(ok: bool, output: &str) -> bool {
+    ok && !output.to_lowercase().contains("failed to connect")
+}
+
+/// A2DP Audio Sink service class UUID. Passing it to `bluetoothctl
+/// connect <mac> <uuid>` forces the connection onto classic BR/EDR — the
+/// only transport A2DP exists on.
+const A2DP_SINK_UUID: &str = "0000110b-0000-1000-8000-00805f9b34fb";
+
+/// Connects `mac` via one-shot `bluetoothctl` commands, then resolves its
+/// friendly name and the resulting PipeWire/Pulse sink name. `trust` is
+/// applied *after* a successful connect (best-effort, for auto-reconnect
+/// persistence) rather than before it.
+///
+/// Connect is profile-targeted (`connect <mac> <A2DP_SINK_UUID>`), never
+/// bare: a dual-mode speaker (the Fishman Loudbox exposes BLE battery/
+/// proximity services next to classic A2DP) leaves the stored record's
+/// `PreferredBearer=last-seen` pointing at LE after any scan — its BLE
+/// beacons are always the most recently seen — so a bare `connect` tries
+/// an LE connection that the device doesn't accept and hangs to BlueZ's
+/// ~30s timeout. Confirmed via btmon 2026-07-11: bare connect issued only
+/// LE scan commands, never a BR/EDR page; the UUID form connected
+/// instantly. (Pinning `PreferredBearer` needs bluetoothd's experimental
+/// flag, so the UUID form is the portable fix.)
+///
+/// No `trust` or explicit `pair` before the first connect: BlueZ pairs
+/// implicitly during `connect` ("just works" SSP), and running `trust`
+/// first (tried, reverted 2026-07-10) reliably made `connect` hang.
+/// Explicit `pair` runs only as a fallback after a failed connect.
 pub async fn pair(mac: &str) -> Result<PairOutcome, String> {
-    let mut child = spawn_bluetoothctl()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or("bluetoothctl: failed to open stdin")?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("bluetoothctl: failed to open stdout")?;
-    let mut lines = BufReader::new(stdout).lines();
+    let _ = run_oneshot(&["power", "on"], PAIR_STEP_TIMEOUT).await;
 
-    stdin
-        .write_all(format!("pair {mac}\n").as_bytes())
-        .await
-        .map_err(|e| format!("bluetoothctl: failed to send pair: {e}"))?;
-    wait_for_step(&mut lines, mac, "Pairing successful", "Failed to pair").await?;
+    let (ok, output) = run_oneshot(&["connect", mac, A2DP_SINK_UUID], PAIR_STEP_TIMEOUT).await;
+    if !connect_succeeded(ok, &output) {
+        let first_failure = connect_failure_reason(&output);
+        warn!(mac, error = %first_failure, "bluetooth: connect failed — trying explicit pair then reconnect");
 
-    stdin
-        .write_all(format!("trust {mac}\n").as_bytes())
-        .await
-        .map_err(|e| format!("bluetoothctl: failed to send trust: {e}"))?;
-    tokio::time::sleep(TRUST_SETTLE).await;
+        let (ok, output) = run_oneshot(&["pair", mac], PAIR_STEP_TIMEOUT).await;
+        if !ok && !output.to_lowercase().contains("already exists") {
+            warn!(mac, output = %output.trim(), "bluetooth: explicit pair also reported failure");
+        }
+        let (ok, output) = run_oneshot(&["connect", mac, A2DP_SINK_UUID], PAIR_STEP_TIMEOUT).await;
+        if !connect_succeeded(ok, &output) {
+            // Report the first failure's reason: the retry's error is
+            // usually secondary wreckage (e.g. device wedged by pair).
+            return Err(first_failure);
+        }
+    }
 
-    stdin
-        .write_all(format!("connect {mac}\n").as_bytes())
-        .await
-        .map_err(|e| format!("bluetoothctl: failed to send connect: {e}"))?;
-    wait_for_step(
-        &mut lines,
-        mac,
-        "Connection successful",
-        "Failed to connect",
-    )
-    .await?;
-
-    let _ = stdin.write_all(b"exit\n").await;
-    let _ = child.kill().await;
+    let (ok, output) = run_oneshot(&["trust", mac], PAIR_STEP_TIMEOUT).await;
+    if !ok {
+        warn!(mac, output = %output.trim(), "bluetooth: trust step reported failure (device stays connected regardless)");
+    }
 
     let name = resolve_name(mac).await.unwrap_or_else(|| mac.to_string());
     let sink_name = resolve_sink_name(mac).await;
     Ok(PairOutcome { name, sink_name })
+}
+
+/// Forgets every cached device bluetoothd knows about (`bluetoothctl
+/// remove <mac>`) except whichever one is currently connected — needed
+/// because `scan()` seeds its results from that same cache (see its doc
+/// comment), so anything left behind (an amp that fell out of range, a
+/// neighbour's phone from months ago) keeps reappearing in the dashboard's
+/// list indistinguishable from something actually live right now. Returns
+/// the number of devices removed.
+pub async fn clear_cache() -> Result<usize, String> {
+    let (ok, output) = run_oneshot(&["devices"], Duration::from_secs(5)).await;
+    if !ok {
+        return Err(format!("bluetoothctl devices failed: {}", output.trim()));
+    }
+
+    let mut cleared = 0usize;
+    for line in output.lines() {
+        let Some((mac, _)) = parse_device_line(line) else {
+            continue;
+        };
+        let (_, info) = run_oneshot(&["info", &mac], Duration::from_secs(3)).await;
+        if info.lines().any(|l| l.trim() == "Connected: yes") {
+            continue; // never rip out the device someone's actively using
+        }
+        let (ok, output) = run_oneshot(&["remove", &mac], Duration::from_secs(5)).await;
+        if ok {
+            cleared += 1;
+        } else {
+            warn!(mac, output = %output.trim(), "bluetooth: failed to remove cached device");
+        }
+    }
+    Ok(cleared)
 }
 
 #[cfg(test)]
@@ -433,6 +550,74 @@ mod tests {
     }
 
     #[test]
+    fn parse_scan_line_handles_prompt_redraw_prefix() {
+        // Real line captured from bluetoothctl piped on pi2: the prompt is
+        // redrawn in place before the event, all on one \n-terminated line.
+        let line = "\u{1b}[0;94m[bluetoothctl]> \u{1b}[0m\r                    \r[\u{1b}[0;92mNEW\u{1b}[0m] Device AA:BB:CC:DD:EE:02 Kitchen tv";
+        match parse_scan_line(line) {
+            ParsedLine::NewOrChanged { mac, name } => {
+                assert_eq!(mac, "AA:BB:CC:DD:EE:02");
+                assert_eq!(name, "Kitchen tv");
+            }
+            _ => panic!("expected NewOrChanged"),
+        }
+    }
+
+    #[test]
+    fn parse_scan_line_parses_hex_rssi_with_parenthesised_decimal() {
+        // Newer BlueZ prints RSSI as hex plus the decimal in parens.
+        match parse_scan_line("[CHG] Device AA:BB:CC:DD:EE:02 RSSI: 0xffffffcd (-51)") {
+            ParsedLine::Rssi { mac, rssi } => {
+                assert_eq!(mac, "AA:BB:CC:DD:EE:02");
+                assert_eq!(rssi, -51);
+            }
+            _ => panic!("expected Rssi"),
+        }
+    }
+
+    #[test]
+    fn parse_scan_line_treats_chg_name_as_name_update() {
+        match parse_scan_line("[CHG] Device AA:BB:CC:DD:EE:02 Name: Kitchen tv") {
+            ParsedLine::NewOrChanged { mac, name } => {
+                assert_eq!(mac, "AA:BB:CC:DD:EE:02");
+                assert_eq!(name, "Kitchen tv");
+            }
+            _ => panic!("expected NewOrChanged"),
+        }
+    }
+
+    #[test]
+    fn parse_scan_line_ignores_chg_metadata_fields() {
+        for line in [
+            "[CHG] Device AA:BB:CC:DD:EE:02 Class: 0x000c043c (787516)",
+            "[CHG] Device AA:BB:CC:DD:EE:02 Icon: audio-card",
+            "[CHG] Device AA:BB:CC:DD:EE:02 UUIDs: 0000110a-0000-1000-8000-00805f9b34fb",
+            "[CHG] Device AA:BB:CC:DD:EE:02 ManufacturerData.Key: 0x0075 (117)",
+        ] {
+            assert!(
+                matches!(parse_scan_line(line), ParsedLine::None),
+                "should ignore: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_scan_line_detects_discovery_failure() {
+        assert!(matches!(
+            parse_scan_line("Failed to start discovery: org.bluez.Error.NotReady"),
+            ParsedLine::DiscoveryFailed(_)
+        ));
+    }
+
+    #[test]
+    fn parse_scan_line_detects_missing_controller() {
+        assert!(matches!(
+            parse_scan_line("No default controller available"),
+            ParsedLine::DiscoveryFailed(_)
+        ));
+    }
+
+    #[test]
     fn extract_name_field_reads_info_output() {
         assert_eq!(
             extract_name_field("\tName: Fishman PA"),
@@ -443,5 +628,44 @@ mod tests {
     #[test]
     fn extract_name_field_ignores_unrelated_lines() {
         assert_eq!(extract_name_field("\tPaired: yes"), None);
+    }
+
+    #[test]
+    fn parse_device_line_reads_cached_device() {
+        assert_eq!(
+            parse_device_line("Device AA:BB:CC:DD:EE:01 Fishman Loudbox"),
+            Some((
+                "AA:BB:CC:DD:EE:01".to_string(),
+                "Fishman Loudbox".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_device_line_rejects_non_device_lines() {
+        assert_eq!(parse_device_line("Controller AA:BB:CC:DD:EE:03 pi2"), None);
+        assert_eq!(parse_device_line("Device not-a-mac Name"), None);
+    }
+
+    #[test]
+    fn connect_failure_reason_picks_the_bluez_error_line() {
+        // Real output captured from a one-shot connect on pi2.
+        let output = "Attempting to connect to AA:BB:CC:DD:EE:01\n[CHG] Device AA:BB:CC:DD:EE:01 Connected: yes\nFailed to connect: org.bluez.Error.Failed br-connection-profile-unavailable\n";
+        assert_eq!(
+            connect_failure_reason(output),
+            "Failed to connect: org.bluez.Error.Failed br-connection-profile-unavailable"
+        );
+    }
+
+    #[test]
+    fn connect_failure_reason_falls_back_to_last_line() {
+        assert_eq!(
+            connect_failure_reason("Attempting to connect to AA:BB:CC:DD:EE:FF\n"),
+            "Attempting to connect to AA:BB:CC:DD:EE:FF"
+        );
+        assert_eq!(
+            connect_failure_reason(""),
+            "no output from bluetoothctl connect"
+        );
     }
 }

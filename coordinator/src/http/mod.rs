@@ -81,6 +81,10 @@ pub fn router(
         .route("/api/bluetooth/scan/{node_id}", post(api::bluetooth::scan))
         .route("/api/bluetooth/pair/{node_id}", post(api::bluetooth::pair))
         .route(
+            "/api/bluetooth/clear-cache/{node_id}",
+            post(api::bluetooth::clear_cache),
+        )
+        .route(
             "/api/lights/{device}/command",
             post(api::lights::light_command),
         )

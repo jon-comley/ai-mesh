@@ -333,6 +333,72 @@ if has_feature audio; then
         AUDIO_ENV_BLOCK="${AUDIO_ENV_BLOCK}
 Environment=AUDIO_ALSA_DEVICE=${AUDIO_ALSA_DEVICE}"
     fi
+    # The agent runs as a system service, which gets no XDG_RUNTIME_DIR —
+    # without it, pactl/paplay can't find the user-session PipeWire socket
+    # and Bluetooth sink resolution/playback fail with "connection refused".
+    AGENT_UID="$(id -u "${AGENT_USER}")"
+    AUDIO_ENV_BLOCK="${AUDIO_ENV_BLOCK}
+Environment=XDG_RUNTIME_DIR=/run/user/${AGENT_UID}"
+
+    # Bluetooth playback needs a full A2DP stack, none of which a Lite
+    # image ships: PipeWire's BlueZ SPA plugin registers the A2DP endpoint
+    # with bluetoothd (without it every connect fails
+    # br-connection-profile-unavailable), pipewire-pulse + pulseaudio-utils
+    # provide the pactl/paplay interface capability-audio shells out to,
+    # and lingering keeps those user services alive with nobody logged in.
+    case ",${AUDIO_BACKENDS}," in *,bluetooth,*)
+        echo ">>> Installing PipeWire Bluetooth audio stack (A2DP endpoint for bluetoothd)..."
+        apt-get install -y -q --no-install-recommends \
+            pipewire pipewire-pulse wireplumber libspa-0.2-bluetooth pulseaudio-utils
+        # A persisted rfkill soft-block (survives reboots via systemd-rfkill)
+        # leaves the adapter off-blocked and every scan silently empty.
+        # Unblocking is safe to repeat — never disconnects anything live.
+        rfkill unblock bluetooth 2>/dev/null || true
+        mkdir -p /etc/wireplumber/wireplumber.conf.d
+        WPCONF=/etc/wireplumber/wireplumber.conf.d/50-bluez-headless.conf
+        WPCONF_NEW="$(mktemp)"
+        cat > "$WPCONF_NEW" <<'WPEOF'
+# Headless node: no logind seat session ever becomes active, so the default
+# seat-monitoring feature keeps WirePlumber's bluez monitor dormant and
+# BlueZ never gets an A2DP endpoint (every connect then fails with
+# br-connection-profile-unavailable).
+wireplumber.profiles = {
+  main = {
+    monitor.bluez.seat-monitoring = disabled
+  }
+}
+WPEOF
+        # Restarting pipewire/wireplumber drops any live Bluetooth audio
+        # connection (confirmed live 2026-07-11 — the Fishman Loudbox amp's
+        # module wedges on disconnect and needs a mains power-cycle plus a
+        # manual re-pair to recover). So only restart when something this
+        # deploy actually changed: the config differs from what's already
+        # there, or the services aren't running yet at all. A routine
+        # redeploy with no audio-stack changes must never touch a live
+        # connection.
+        CONFIG_CHANGED=false
+        if ! cmp -s "$WPCONF_NEW" "$WPCONF" 2>/dev/null; then
+            cp "$WPCONF_NEW" "$WPCONF"
+            CONFIG_CHANGED=true
+        fi
+        rm -f "$WPCONF_NEW"
+        loginctl enable-linger "${AGENT_USER}"
+        # enable --now starts each unit only if it isn't already running —
+        # always safe, never restarts a live one.
+        runuser -u "${AGENT_USER}" -- env XDG_RUNTIME_DIR="/run/user/${AGENT_UID}" \
+            systemctl --user enable --now pipewire pipewire-pulse wireplumber 2>/dev/null || true
+        SERVICES_ACTIVE=true
+        runuser -u "${AGENT_USER}" -- env XDG_RUNTIME_DIR="/run/user/${AGENT_UID}" \
+            systemctl --user is-active --quiet pipewire wireplumber 2>/dev/null || SERVICES_ACTIVE=false
+        if [ "$CONFIG_CHANGED" = true ] || [ "$SERVICES_ACTIVE" = false ]; then
+            echo ">>> Bluetooth audio config changed or services not running — restarting pipewire/wireplumber."
+            runuser -u "${AGENT_USER}" -- env XDG_RUNTIME_DIR="/run/user/${AGENT_UID}" \
+                systemctl --user restart wireplumber pipewire pipewire-pulse 2>/dev/null || true
+        else
+            echo ">>> Bluetooth audio config unchanged and services already running — leaving them alone (a restart would drop any live connection)."
+        fi
+        ;;
+    esac
 fi
 
 # ART_MATTE_PERCENT=0 (and ART_FRAME_THICKNESS=0) gives a true edge-to-edge
