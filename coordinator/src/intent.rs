@@ -5,8 +5,8 @@ use crate::registry::Registry;
 use crate::server::Connections;
 use shared::{
     ChatTurn, IntentRequest, IntentResponse, LightAction, LightCommandRequest, LightStateReport,
-    LightTarget, MeshMessage, ReaperCommandRequest, ReaperScriptRequest, SensorReport,
-    ToolCallRecord, WIRE_VERSION,
+    LightTarget, MeshMessage, MusicCommandRequest, ReaperCommandRequest, ReaperScriptRequest,
+    SensorReport, ToolCallRecord, WIRE_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,7 @@ fn collect_tool_schemas(registry: &Arc<Mutex<Registry>>) -> Vec<serde_json::Valu
         shared::Feature::Reaper,
         shared::Feature::Sensors,
         shared::Feature::Audio,
+        shared::Feature::Music,
     ] {
         if !reg.nodes_with_feature(feature).is_empty() {
             for schema in tool_schemas_for_feature(feature) {
@@ -357,7 +358,8 @@ pub async fn handle_intent(
             });
         }
 
-        let text = offline_skip_summary(&records, &device_room_map);
+        let text = offline_skip_summary(&records, &device_room_map)
+            .or_else(|| music_reply_summary(&records));
 
         return IntentResponse {
             request_id: request.request_id,
@@ -460,6 +462,19 @@ fn offline_skip_summary(
     Some(format!(
         "Heads up: {total} {plural} powered off (or unreachable), so I skipped {them} ({breakdown})."
     ))
+}
+
+/// Voice speaks only `IntentResponse.text`, and tool-call responses normally
+/// leave it unset — commands ("pause", "skip") stay silent, like lights. But a
+/// music *question* ("what's playing?") deserves a spoken answer, so surface
+/// the status call's result — already a finished sentence from the node — as
+/// the reply text.
+fn music_reply_summary(records: &[ToolCallRecord]) -> Option<String> {
+    records
+        .iter()
+        .filter(|r| r.tool == "music_control")
+        .find(|r| r.args["action"] == "status")
+        .and_then(|r| r.result.clone())
 }
 
 /// First currently-connected node advertising `feature`, with its sender.
@@ -918,6 +933,69 @@ async fn dispatch_reaper_command(
     }
 }
 
+/// `music_control`: forward to the music node and await the command result.
+/// Longer timeout than REAPER — a "play" can involve a token refresh, search,
+/// device lookup, and playback start against the Spotify Web API upstream.
+async fn dispatch_music_command(
+    request_id: &str,
+    args: &serde_json::Value,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    pending_intents: &PendingIntents,
+) -> String {
+    let Some((music_node_id, _)) =
+        connected_feature_node(shared::Feature::Music, registry, connections)
+    else {
+        return "no music node connected".into();
+    };
+
+    // Small local models drift on parameter names — accept common synonyms
+    // for the search query (precedent: get_climate's room/target fallback).
+    let mut params = args.clone();
+    if params["query"].as_str().is_none_or(|q| q.trim().is_empty()) {
+        for alt in ["target", "song", "track", "name"] {
+            if let Some(q) = args[alt].as_str().filter(|q| !q.trim().is_empty()) {
+                params["query"] = serde_json::Value::String(q.to_string());
+                break;
+            }
+        }
+    }
+
+    let cmd = MusicCommandRequest {
+        request_id: request_id.to_string(),
+        action: args["action"].as_str().unwrap_or("").to_string(),
+        params,
+    };
+
+    let (otx, orx) = oneshot::channel();
+    pending_intents
+        .lock()
+        .unwrap()
+        .insert(request_id.to_string(), otx);
+
+    let sent = connections
+        .lock()
+        .unwrap()
+        .get(&music_node_id)
+        .map(|tx| tx.try_send(MeshMessage::MusicCommand(cmd)).is_ok())
+        .unwrap_or(false);
+
+    if !sent {
+        pending_intents.lock().unwrap().remove(request_id);
+        return "failed to send MusicCommand to node".into();
+    }
+
+    match timeout(Duration::from_secs(10), orx).await {
+        // Relay the message whether ok or not — the node always phrases it
+        // as a finished sentence, and it may be spoken verbatim.
+        Ok(Ok(MeshMessage::MusicCommandResult(r))) => r.message,
+        _ => {
+            pending_intents.lock().unwrap().remove(request_id);
+            "the music player didn't answer in time".into()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_tool(
     request_id: &str,
@@ -1048,6 +1126,9 @@ async fn dispatch_tool(
                 pending_intents,
             )
             .await
+        }
+        "music_control" => {
+            dispatch_music_command(request_id, &args, registry, connections, pending_intents).await
         }
         "reaper_script" => {
             // `code` is required by the schema; empty -> daemon runs an empty file
@@ -2139,6 +2220,42 @@ fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> 
                 "required": ["text"]
             }
         })],
+        shared::Feature::Music => vec![serde_json::json!({
+            "name": "music_control",
+            "description": "Control Spotify music on the house speakers: play something by name, pause/resume, skip tracks, rewind/fast-forward, set volume, toggle shuffle, or report what's currently playing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["play", "pause", "resume", "next", "previous", "seek", "volume", "shuffle", "status"],
+                        "description": "play starts music (set 'query' to say what; omit query to resume where it left off). status answers 'what's playing?'. seek moves within the current track."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "For action=play: what to play, e.g. 'Hey Jude', 'Abbey Road', 'the Beatles', 'some jazz'."
+                    },
+                    "entity_type": {
+                        "type": "string",
+                        "enum": ["track", "album", "artist", "playlist"],
+                        "description": "What kind of thing 'query' names. Default: track."
+                    },
+                    "seconds": {
+                        "type": "integer",
+                        "description": "For action=seek: relative seconds; negative rewinds (e.g. -30 for 'go back 30 seconds')."
+                    },
+                    "percent": {
+                        "type": "integer",
+                        "description": "For action=volume: 0-100."
+                    },
+                    "on": {
+                        "type": "boolean",
+                        "description": "For action=shuffle: true to enable."
+                    }
+                },
+                "required": ["action"]
+            }
+        })],
         _ => vec![],
     }
 }
@@ -2149,6 +2266,15 @@ pub fn build_system_prompt(schemas: &[serde_json::Value]) -> String {
     }
 
     let schema_json = serde_json::to_string(schemas).unwrap_or_default();
+
+    // Conditional so the prompt never cites a tool that isn't offered: the
+    // state-question rule above would otherwise steer "what's playing?" into
+    // a free-text guess instead of a music_control status call.
+    let music_rule = if schemas.iter().any(|s| s["name"] == "music_control") {
+        "\n- Music questions (\"what's playing?\", \"what song is this?\") are also an exception: they MUST be a music_control call with action \"status\" — never answer them in free text."
+    } else {
+        ""
+    };
 
     format!(
         r#"You are a helpful smart home assistant embedded in ai-mesh. You have direct control of and live state for all listed devices.
@@ -2168,7 +2294,7 @@ Rules:
 - Never issue a command to a device shown as [OFFLINE — not responding].
 - For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists. Count devices sharing a [RoomName] tag to answer "how many". do NOT output JSON for these questions.
 - Sensor/climate questions (temperature, humidity, motion, contact, light level — e.g. "what's the office temperature?", "is anyone in the living room?", "is the office warm?") are the one exception: answer directly from the sensor readings below OR call get_climate — either is fine for a sensor-only question. But if the request COMBINES a climate question with a real action ("turn off the lights and tell me the bedroom temperature"), the climate part MUST be a get_climate call inside the JSON array — a single reply cannot mix free text with JSON tool calls.
-- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something, or asking a sensor/climate question per the rule above.
+- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something, or asking a sensor/climate question per the rule above.{music_rule}
 
 Available tools:
 {schema_json}"#
@@ -2303,6 +2429,28 @@ mod tests {
         assert!(p.contains("light_command"));
         assert!(p.contains("scene_load"));
         assert!(p.contains(r#"{"tool":"#));
+    }
+
+    #[test]
+    fn music_feature_offers_music_control_tool() {
+        let schemas = tool_schemas_for_feature(shared::Feature::Music);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0]["name"], "music_control");
+        let actions = schemas[0]["parameters"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(actions.contains(&serde_json::json!("play")));
+        assert!(actions.contains(&serde_json::json!("status")));
+    }
+
+    #[test]
+    fn build_system_prompt_music_rule_only_with_music_tool() {
+        let with = build_system_prompt(&tool_schemas_for_feature(shared::Feature::Music));
+        assert!(with.contains("what's playing"));
+        // Without the music tool the prompt must not cite it.
+        let without = build_system_prompt(&tool_schemas_for_feature(shared::Feature::Lighting));
+        assert!(!without.contains("what's playing"));
+        assert!(!without.contains("music_control"));
     }
 
     #[test]
@@ -3703,6 +3851,31 @@ mod tests {
         let msg = offline_skip_result("0x00178801");
         assert_eq!(parse_offline_skip(&msg), Some("0x00178801"));
         assert_eq!(parse_offline_skip("ok"), None);
+    }
+
+    fn music_record(action: &str, result: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            tool: "music_control".into(),
+            args: serde_json::json!({ "action": action }),
+            result: Some(result.into()),
+        }
+    }
+
+    #[test]
+    fn music_reply_summary_speaks_status_result() {
+        let records = vec![music_record("status", "Playing 'Hey Jude' by The Beatles")];
+        assert_eq!(
+            music_reply_summary(&records).as_deref(),
+            Some("Playing 'Hey Jude' by The Beatles")
+        );
+    }
+
+    #[test]
+    fn music_reply_summary_silent_for_commands() {
+        // Commands stay silent like lights — only questions get spoken.
+        let records = vec![music_record("pause", "Paused"), music_record("next", "ok")];
+        assert!(music_reply_summary(&records).is_none());
+        assert!(music_reply_summary(&[light_record("bulb_a", "ok")]).is_none());
     }
 
     #[test]

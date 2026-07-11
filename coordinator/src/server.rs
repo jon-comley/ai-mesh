@@ -1507,6 +1507,13 @@ async fn process_message(
             }
             None
         }
+        MeshMessage::MusicCommandResult(result) => {
+            let entry = pending_intents.lock().unwrap().remove(&result.request_id);
+            if let Some(otx) = entry {
+                let _ = otx.send(MeshMessage::MusicCommandResult(result));
+            }
+            None
+        }
         MeshMessage::ArtStatus(mut report) => {
             if let Some(id) = node_id.as_deref() {
                 report.node_id = id.to_string();
