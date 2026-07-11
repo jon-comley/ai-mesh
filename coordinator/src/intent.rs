@@ -955,16 +955,52 @@ async fn dispatch_tool(
             if text.is_empty() {
                 return "play_announcement requires non-empty text".into();
             }
-            match crate::audio::broadcast_announcement(
-                &text,
-                registry,
-                connections,
-                pending_intents,
-            )
-            .await
-            {
-                Ok(()) => "announcement sent".into(),
-                Err(e) => format!("announcement failed: {e}"),
+            let room = args["room"]
+                .as_str()
+                .map(str::trim)
+                .filter(|r| !r.is_empty());
+            match room {
+                None => match crate::audio::broadcast_announcement(
+                    &text,
+                    registry,
+                    connections,
+                    pending_intents,
+                )
+                .await
+                {
+                    Ok(()) => "announcement sent".into(),
+                    Err(e) => format!("announcement failed: {e}"),
+                },
+                Some(room) => {
+                    let url = match crate::audio::request_tts(
+                        &text,
+                        registry,
+                        connections,
+                        pending_intents,
+                    )
+                    .await
+                    {
+                        Ok(url) => url,
+                        Err(e) => return format!("announcement failed: {e}"),
+                    };
+                    let delivered = crate::audio::handle_audio_announce(
+                        shared::AudioAnnounceRequest {
+                            request_id: uuid::Uuid::new_v4().to_string(),
+                            url,
+                            room: Some(room.to_string()),
+                            broadcast: false,
+                        },
+                        registry,
+                        connections,
+                        pending_intents,
+                    )
+                    .await;
+                    if delivered {
+                        format!("announcement sent to {room}")
+                    } else {
+                        format!("announcement failed: no reachable speaker assigned to {room}")
+                    }
+                }
             }
         }
         "soundbar_volume" => {
@@ -2093,13 +2129,17 @@ fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> 
         })],
         shared::Feature::Audio => vec![serde_json::json!({
             "name": "play_announcement",
-            "description": "Speak a short announcement out loud on every connected speaker (e.g. 'someone's at the door', 'the wash cycle is done'). Not for normal conversational replies — only use when the user explicitly asks to announce or broadcast something.",
+            "description": "Speak a short announcement out loud (e.g. 'someone's at the door', 'the wash cycle is done'). Not for normal conversational replies — only use when the user explicitly asks to announce or broadcast something.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {
                         "type": "string",
                         "description": "The words to speak"
+                    },
+                    "room": {
+                        "type": "string",
+                        "description": "Speak only through that room's assigned speaker, e.g. 'Kitchen'. Omit to announce on every connected speaker in the house instead."
                     }
                 },
                 "required": ["text"]
@@ -3076,6 +3116,28 @@ mod tests {
             "r1",
             "play_announcement",
             serde_json::json!({"text": "someone is at the door"}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+            None,
+        )
+        .await;
+        assert!(result.contains("announcement failed"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_play_announcement_with_room_fails_without_voice_node() {
+        // No voice node connected → request_tts fails before room resolution
+        // is even reached, same failure shape as the broadcast path.
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "play_announcement",
+            serde_json::json!({"text": "dinner is ready", "room": "Kitchen"}),
             &registry,
             &connections,
             &pending_intents,
