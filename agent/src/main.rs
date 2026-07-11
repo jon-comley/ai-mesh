@@ -25,7 +25,6 @@ async fn main() {
     tracing_subscriber::fmt().init();
 
     let role = read_role_from_env();
-    let addr = resolve_coordinator_addr().await;
 
     // Resolve node_id once — persisted to ~/.ai-mesh/node-id so it's stable
     // across reconnects. Capabilities are built once and survive reconnects via Arc.
@@ -37,6 +36,10 @@ async fn main() {
         });
 
     let caps = build_capabilities(&node_id);
+    // Built once and shared (via Arc) across every reconnect, same lifetime
+    // as `caps` itself — see `DispatchTable`'s doc comment for why the
+    // per-capability locks must survive reconnects.
+    let dispatch_table = agent::dispatch::DispatchTable::new(caps.clone());
     // Floor for the reader's read timeout (see the reader loop). LLM nodes go
     // silent for a long stretch during a model load / inference (heartbeats stall
     // while llama-server is CPU-pegged), so their timeout must be generous enough
@@ -58,9 +61,18 @@ async fn main() {
         );
     }
 
-    info!("Agent starting, coordinator: {}", addr);
+    info!("Agent starting");
 
-    loop {
+    'reconnect: loop {
+        // Re-resolved every reconnect, not once at startup: a transient mDNS
+        // failure (e.g. Wi-Fi still settling right after boot, or radio
+        // contention from another capability's Bluetooth activity) used to
+        // wedge the agent onto the `127.0.0.1` fallback forever, since the
+        // old resolved-once `addr` was reused for every retry — confirmed
+        // live 2026-07-10 on pi2, requiring a manual service restart to
+        // recover. Each iteration now gets its own chance to find the real
+        // coordinator via mDNS again.
+        let addr = resolve_coordinator_addr().await;
         info!("Connecting to coordinator at {}", addr);
 
         let connector = make_connector();
@@ -68,14 +80,39 @@ async fn main() {
             .expect("invalid server name")
             .to_owned();
 
-        let stream = loop {
+        // Bounded: a resolved address that's simply wrong (e.g. the
+        // `127.0.0.1` fallback, or an mDNS-found IP that's since gone stale)
+        // must not be retried forever — that's exactly the wedge above,
+        // just moved one level down. After a few failures, fall back out to
+        // `'reconnect` so the next iteration re-resolves instead of
+        // hammering a dead address indefinitely. Kept at 3 (not higher):
+        // each failure sleeps 5s, so this is also the worst-case delay
+        // before a node with a bad resolved address re-attempts mDNS —
+        // higher counts trade cold-boot/reconnect latency for very little
+        // extra tolerance of transient failures.
+        const MAX_CONNECT_ATTEMPTS: u32 = 3;
+        let mut stream = None;
+        for attempt in 1..=MAX_CONNECT_ATTEMPTS {
             match TcpStream::connect(&addr).await {
-                Ok(s) => break s,
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
                 Err(e) => {
-                    warn!("Failed to connect to {}: {}. Retrying in 5s...", addr, e);
+                    warn!(
+                        "Failed to connect to {} (attempt {}/{}): {}. Retrying in 5s...",
+                        addr, attempt, MAX_CONNECT_ATTEMPTS, e
+                    );
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
             }
+        }
+        let Some(stream) = stream else {
+            warn!(
+                "giving up on {} after {} attempts — re-resolving coordinator address",
+                addr, MAX_CONNECT_ATTEMPTS
+            );
+            continue 'reconnect;
         };
 
         // Enable TCP keepalive so NIC power-management or network idle timeouts
@@ -166,7 +203,7 @@ async fn main() {
         // Reader task — routes inbound coordinator commands to capabilities.
         // SetHeartbeatInterval is handled here; everything else goes to dispatch().
         let tx_in = tx.clone();
-        let caps_reader = caps.clone();
+        let dispatch_table_reader = Arc::clone(&dispatch_table);
         let reader_key = hmac_key;
         let reader_interval = interval_handle.clone();
         // Signalled when the read half closes or errors. This is the *reliable*
@@ -220,12 +257,25 @@ async fn main() {
                                 Ok(m) => m,
                                 Err(_) => continue,
                             },
+                            Err(FrameVerifyError::Stale { ts, now, max_skew }) => {
+                                // Length-prefixed framing means this frame's bytes are
+                                // still fully consumed above — skipping it can't desync
+                                // the stream. A stale timestamp is just a delayed
+                                // delivery (e.g. under Wi-Fi/Bluetooth radio contention
+                                // on the sending node), not evidence of a compromised
+                                // connection, so don't tear down the whole session over
+                                // one late frame — verified live 2026-07-10, where doing
+                                // so killed the connection mid-Bluetooth-pairing.
+                                warn!(
+                                    ts,
+                                    now,
+                                    max_skew,
+                                    "dropping stale inbound frame — keeping connection open"
+                                );
+                                continue;
+                            }
                             Err(e) => {
-                                if matches!(e, FrameVerifyError::Stale { .. }) {
-                                    warn!("dropping inbound frame: {} — check NTP sync", e);
-                                } else {
-                                    warn!("dropping inbound frame: {}", e);
-                                }
+                                warn!("dropping inbound frame: {}", e);
                                 break;
                             }
                         },
@@ -243,7 +293,18 @@ async fn main() {
                         info!(secs, "heartbeat interval updated");
                         reader_interval.store(secs, Ordering::Relaxed);
                     }
-                    other => dispatch(other, &caps_reader, tx_in.clone()).await,
+                    // Spawned, not awaited: a slow capability call (a
+                    // Bluetooth scan/pair can run tens of seconds) must not
+                    // stall this reader loop from processing the next
+                    // inbound frame. See `dispatch`'s doc comment for why
+                    // this is safe to do unconditionally.
+                    other => {
+                        tokio::spawn(dispatch(
+                            other,
+                            Arc::clone(&dispatch_table_reader),
+                            tx_in.clone(),
+                        ));
+                    }
                 }
             }
             // Read half closed/errored — wake the writer loop so we reconnect.

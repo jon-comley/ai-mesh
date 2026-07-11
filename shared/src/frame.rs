@@ -105,12 +105,17 @@ impl SignedFrame {
     }
 
     /// Verify the HMAC signature and timestamp. Returns the payload on success.
-    /// Rejects frames whose timestamp differs from `now` by more than 30 seconds.
+    /// Rejects frames whose timestamp differs from `now` by more than
+    /// [`MAX_FRAME_SKEW_SECS`].
     pub fn verify(&self, key: &[u8; 32]) -> Result<&[u8], FrameVerifyError> {
         let now = now_secs();
         let skew = (self.ts as i64 - now as i64).unsigned_abs();
-        if skew > 30 {
-            return Err(FrameVerifyError::Stale { ts: self.ts, now });
+        if skew > MAX_FRAME_SKEW_SECS {
+            return Err(FrameVerifyError::Stale {
+                ts: self.ts,
+                now,
+                max_skew: MAX_FRAME_SKEW_SECS,
+            });
         }
         let expected = compute_sig(key, self.ts, &self.payload);
         if expected != self.sig {
@@ -120,10 +125,21 @@ impl SignedFrame {
     }
 }
 
+/// How far a frame's timestamp may drift from the receiver's clock before
+/// it's rejected as stale — an anti-replay measure, not a strict clock-sync
+/// requirement. 120s (not the original 30s) because on a node whose Wi-Fi
+/// shares a radio with heavy Bluetooth activity (e.g. a Pi 4's combo chip
+/// mid-scan/-pairing), a frame can legitimately take tens of seconds to
+/// actually land under real contention/TCP retransmission — verified live
+/// 2026-07-10, where 30s caused a mid-Bluetooth-pairing frame to read as
+/// stale and (see `main.rs`/`server.rs`) tear down the whole mesh
+/// connection at the worst possible moment.
+pub const MAX_FRAME_SKEW_SECS: u64 = 120;
+
 #[derive(Debug, thiserror::Error)]
 pub enum FrameVerifyError {
-    #[error("frame timestamp {ts} is stale (now={now}, max skew=30s)")]
-    Stale { ts: u64, now: u64 },
+    #[error("frame timestamp {ts} is stale (now={now}, max skew={max_skew}s)")]
+    Stale { ts: u64, now: u64, max_skew: u64 },
     #[error("HMAC signature mismatch — possible forgery or key mismatch")]
     InvalidSignature,
 }
@@ -163,11 +179,26 @@ mod tests {
     #[test]
     fn stale_timestamp_fails_verification() {
         let key = derive_hmac_key("token");
-        let frame = SignedFrame::sign_at(&key, now_secs().saturating_sub(60), b"data".to_vec());
+        let frame = SignedFrame::sign_at(
+            &key,
+            now_secs().saturating_sub(MAX_FRAME_SKEW_SECS + 10),
+            b"data".to_vec(),
+        );
         assert!(matches!(
             frame.verify(&key),
             Err(FrameVerifyError::Stale { .. })
         ));
+    }
+
+    #[test]
+    fn timestamp_within_skew_passes_verification() {
+        let key = derive_hmac_key("token");
+        let frame = SignedFrame::sign_at(
+            &key,
+            now_secs().saturating_sub(MAX_FRAME_SKEW_SECS - 10),
+            b"data".to_vec(),
+        );
+        assert!(frame.verify(&key).is_ok());
     }
 
     #[test]
