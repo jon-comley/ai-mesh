@@ -450,6 +450,7 @@ name = "capability-music"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "capability-audio",
  "capability-core",
  "dirs",
  "reqwest",

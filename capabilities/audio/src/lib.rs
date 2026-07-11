@@ -198,7 +198,11 @@ fn clear_paired_device() {
     let _ = std::fs::remove_file(bluetooth_sink_state_path());
 }
 
-fn paired_bluetooth_sink() -> Option<String> {
+/// PipeWire sink name of the dashboard-paired Bluetooth device, if any.
+/// `pub` for capability-music's librespot→pacat pipeline: the persisted
+/// state is JSON (`PairedDevice`), so exposing the one parser here beats a
+/// second one drifting out of sync — same rationale as `configured_backends`.
+pub fn paired_bluetooth_sink() -> Option<String> {
     paired_device().and_then(|d| d.sink_name)
 }
 

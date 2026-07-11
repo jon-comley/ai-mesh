@@ -729,6 +729,57 @@ spotify-push-creds node:
     fi
     echo ">>> {{node}}: Spotify credentials installed, agent restarted."
 
+# Cross-build librespot for the music node (aarch64). Pipe backend only:
+# --no-default-features drops the rodio/alsa C deps so no cross C libraries
+# are needed. cargo install ignores the repo's .cargo/config.toml, so the
+# aarch64 linker must be passed via env (confirmed: without it the host
+# x86-64 linker rejects every object). RUSTFLAGS="" neutralises the
+# workspace's -Dwarnings for this out-of-tree build. Binary lands at
+# target/librespot-aarch64/bin/librespot.
+build-librespot:
+    RUSTFLAGS="" \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    cargo install librespot --version 0.6.0 --locked \
+        --no-default-features \
+        --target aarch64-unknown-linux-gnu \
+        --root target/librespot-aarch64
+
+# Upload the cross-built librespot binary to a node's home dir (the path the
+# installer bakes into SPOTIFY_LIBRESPOT_BIN).
+# Usage: just deploy-librespot pi2
+deploy-librespot node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    BIN=target/librespot-aarch64/bin/librespot
+    if [ ! -f "$BIN" ]; then
+        echo ">>> ERROR: $BIN not found — run 'just build-librespot' first."
+        exit 1
+    fi
+    echo ">>> Uploading librespot to {{node}}..."
+    scp {{ssh_opts}} -q "$BIN" ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/librespot
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "chmod +x /home/${NODE_USER}/librespot"
+    echo ">>> {{node}}: librespot deployed. Next (first time only): just spotify-login {{node}}"
+
+# One-time librespot login on a node — the PLAYBACK device's credentials,
+# independent of spotify-auth's Web API token (see docs/music.md: two
+# credential stores). librespot prints its own authorize URL; its
+# 127.0.0.1:5588 OAuth redirect is tunnelled to the node through this SSH
+# session, so open the URL in any local browser (Windows is fine).
+# Ctrl-C once librespot logs that credentials were saved.
+# Usage: just spotify-login pi2
+spotify-login node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    echo ">>> librespot one-time login for {{node}}."
+    echo ">>> Open the URL librespot prints below in a browser on THIS machine"
+    echo ">>> (the 127.0.0.1:5588 redirect is tunnelled to {{node}} over SSH)."
+    echo ">>> After approving, Ctrl-C once credentials are reported saved."
+    echo ""
+    ssh {{ssh_opts}} -t -L 5588:127.0.0.1:5588 ${NODE_USER}@${NODE_HOST} \
+        "mkdir -p /home/${NODE_USER}/.ai-mesh/spotify-cache && /home/${NODE_USER}/librespot --enable-oauth --backend pipe --cache /home/${NODE_USER}/.ai-mesh/spotify-cache --name '${SPOTIFY_DEVICE_NAME:-AI Mesh}'"
+
 # Push the coordinator TLS fingerprint to a node's agent service and restart it.
 # Reads the fingerprint from /tmp/mesh-coordinator.log automatically.
 # Usage: just set-fingerprint pi1

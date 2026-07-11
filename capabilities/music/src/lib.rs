@@ -20,9 +20,15 @@ use shared::{MeshMessage, MusicCommandRequest, MusicCommandResult};
 use tokio::sync::mpsc::Sender;
 use tracing::warn;
 
+mod player;
 mod web_api;
 
 use web_api::{ApiError, PlayerCall, SpotifyClient};
+
+/// The librespot supervisor must run exactly once per process even though
+/// `start()` re-runs on every mesh reconnect (same guard as the audio
+/// capability's bluetooth status loop).
+static SUPERVISOR_STARTED: std::sync::Once = std::sync::Once::new();
 
 pub struct MusicCapability {
     #[allow(dead_code)] // device naming/logs once the Phase 4 supervisor lands
@@ -311,10 +317,11 @@ impl Capability for MusicCapability {
 
     async fn start(&self, tx: Sender<MeshMessage>) -> Result<(), String> {
         // start() re-runs on every reconnect; keep the sender fresh so
-        // background work always reaches the live connection. The Phase 4
-        // librespot supervisor spawns here, Once-guarded like
-        // capabilities/audio's bluetooth status loop.
+        // background work always reaches the live connection.
         *self.coordinator_tx.lock().unwrap() = Some(tx);
+        SUPERVISOR_STARTED.call_once(|| {
+            tokio::spawn(player::supervisor_loop(device_name()));
+        });
         Ok(())
     }
 
