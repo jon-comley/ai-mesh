@@ -77,6 +77,16 @@ let avDevices = [];
 let avLastFetch = 0;
 const AV_FETCH_MIN_INTERVAL_MS = 15_000;
 
+// Other modules (rooms.js, for its room-card Bluetooth badge) can't just
+// call getAvDevices() once — they need to know when it's worth re-reading
+// it. Registering here avoids a circular import (rooms.js already imports
+// from this module); dashboard.js wires the subscription once at startup.
+const avDevicesChangeListeners = [];
+
+export function onAvDevicesChanged(callback) {
+  avDevicesChangeListeners.push(callback);
+}
+
 function fetchAvDevices(force = false) {
   const now = Date.now();
   if (!force && now - avLastFetch < AV_FETCH_MIN_INTERVAL_MS) return;
@@ -86,7 +96,10 @@ function fetchAvDevices(force = false) {
     const json = await res.json();
     const changed = JSON.stringify(json.devices) !== JSON.stringify(avDevices);
     avDevices = json.devices ?? [];
-    if (changed) render();
+    if (changed) {
+      render();
+      for (const listener of avDevicesChangeListeners) listener();
+    }
   }).catch(() => {});
 }
 
