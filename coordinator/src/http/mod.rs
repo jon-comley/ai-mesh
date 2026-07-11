@@ -89,6 +89,11 @@ pub fn router(
             post(api::bluetooth::unpair),
         )
         .route(
+            "/api/bluetooth/volume/{node_id}",
+            post(api::bluetooth::volume),
+        )
+        .route("/api/bluetooth/mute/{node_id}", post(api::bluetooth::mute))
+        .route(
             "/api/lights/{device}/command",
             post(api::lights::light_command),
         )

@@ -15,7 +15,10 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
+
+const RECONNECT_BASE_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+const RECONNECT_MAX_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() {
@@ -63,6 +66,17 @@ async fn main() {
 
     info!("Agent starting");
 
+    // Backoff for connection-establishment failures (TCP connect exhausted,
+    // TLS handshake, auth token write, or the startup burst) — flagged
+    // repeatedly by third-party review as a flat 5s retry forever, which
+    // hammers a genuinely-down coordinator at a constant rate indefinitely.
+    // Doubles on each such failure, capped at RECONNECT_MAX_BACKOFF, and
+    // resets to RECONNECT_BASE_BACKOFF the moment a connection actually
+    // gets established (the startup burst succeeds) — a brief, otherwise-
+    // healthy disconnect still recovers in 5s; only repeated failures to
+    // even get connected slow down.
+    let mut backoff = RECONNECT_BASE_BACKOFF;
+
     'reconnect: loop {
         // Re-resolved every reconnect, not once at startup: a transient mDNS
         // failure (e.g. Wi-Fi still settling right after boot, or radio
@@ -109,9 +123,13 @@ async fn main() {
         }
         let Some(stream) = stream else {
             warn!(
+                backoff_secs = backoff.as_secs(),
                 "giving up on {} after {} attempts — re-resolving coordinator address",
-                addr, MAX_CONNECT_ATTEMPTS
+                addr,
+                MAX_CONNECT_ATTEMPTS
             );
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(RECONNECT_MAX_BACKOFF);
             continue 'reconnect;
         };
 
@@ -130,8 +148,12 @@ async fn main() {
         let tls_stream = match connector.connect(server_name.clone(), stream).await {
             Ok(s) => s,
             Err(e) => {
-                warn!("TLS handshake failed: {}. Retrying in 5s...", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                warn!(
+                    backoff_secs = backoff.as_secs(),
+                    "TLS handshake failed: {}. Retrying in {:?}...", e, backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RECONNECT_MAX_BACKOFF);
                 continue;
             }
         };
@@ -148,8 +170,12 @@ async fn main() {
                 let data = serde_json::to_vec(&MeshMessage::AuthToken(token.clone())).unwrap();
                 let len = (data.len() as u32).to_le_bytes();
                 if writer.write_all(&len).await.is_err() || writer.write_all(&data).await.is_err() {
-                    warn!("Failed to send AuthToken. Retrying in 5s...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    warn!(
+                        backoff_secs = backoff.as_secs(),
+                        "Failed to send AuthToken. Retrying in {:?}...", backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(RECONNECT_MAX_BACKOFF);
                     continue;
                 }
                 Some(derive_hmac_key(&token))
@@ -174,11 +200,22 @@ async fn main() {
         // model could race ahead of the clearing heartbeat and get wiped. The
         // heartbeat is enqueued on the FIFO channel here, before the caps below.
         match agent.start_once().await {
-            Ok(true) => {}
+            Ok(true) => {
+                // A connection is only "established" once the startup burst
+                // actually reaches the coordinator — reset backoff here so a
+                // brief, otherwise-healthy disconnect later still recovers
+                // in RECONNECT_BASE_BACKOFF rather than inheriting whatever
+                // this attempt's backoff had grown to.
+                backoff = RECONNECT_BASE_BACKOFF;
+            }
             Ok(false) => {
                 // Channel closed — connection already gone; reconnect.
-                warn!("connection dropped during startup burst. Reconnecting in 5s...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                warn!(
+                    backoff_secs = backoff.as_secs(),
+                    "connection dropped during startup burst. Retrying in {:?}...", backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(RECONNECT_MAX_BACKOFF);
                 continue;
             }
             Err(e) => warn!("startup burst failed: {e}"),
@@ -347,8 +384,16 @@ async fn main() {
         // reconnect; the next iteration spawns a fresh reader on the new socket.
         reader_handle.abort();
 
-        warn!("Disconnected from coordinator. Reconnecting in 5s...");
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        // Reached only after a connection was actually established (backoff
+        // was reset to RECONNECT_BASE_BACKOFF above), so this is always a
+        // quick fixed-delay retry — a live connection dropping is a
+        // different, lower-risk case than repeated failure to connect at
+        // all, and doesn't need to back off.
+        warn!(
+            "Disconnected from coordinator. Reconnecting in {:?}...",
+            backoff
+        );
+        tokio::time::sleep(backoff).await;
     }
 }
 
@@ -373,9 +418,20 @@ async fn resolve_coordinator_addr() -> String {
         return addr;
     }
 
-    warn!(
-        "mDNS: no coordinator found; falling back to 127.0.0.1:{}",
-        port
+    // No node's deploy config (nodes/*.env, install-node-linux.sh) sets
+    // COORDINATOR_IP today — every node, including pi1's own co-located
+    // agent, reaches this fallback on any sustained mDNS failure. It only
+    // ever resolves correctly for a node that happens to run on the same
+    // machine as the coordinator (currently true only for pi1) — for every
+    // other node this is a wrong address the agent will spin against
+    // forever, once per reconnect attempt, with the agent never able to
+    // reach the coordinator to surface the problem any other way. error!
+    // (not warn!) so it stands out in `journalctl -p err` on a node that
+    // mysteriously never shows up on the dashboard.
+    error!(
+        "mDNS: no coordinator found after 5s; falling back to 127.0.0.1:{port} — this only \
+         works if this agent runs on the same machine as the coordinator. If this node is \
+         remote, set COORDINATOR_IP explicitly (nodes/<node>.env) instead of relying on mDNS."
     );
     format!("127.0.0.1:{}", port)
 }

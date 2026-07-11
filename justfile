@@ -1990,8 +1990,18 @@ chaos: update-portproxy
     source scripts/mesh-env.sh
 
     export MESH_COORDINATOR="{{coordinator_ip}}:{{coordinator_port}}"
-    # Dashboard runs in WSL2 — no portproxy for 9001, so connect via localhost.
-    export MESH_DASHBOARD_HOST=127.0.0.1
+    # Dashboard host follows the coordinator: a LOCAL coordinator (WSL2) has
+    # no portproxy for 9001, so localhost is the only reachable path — but a
+    # REMOTE coordinator's dashboard lives on its own host, not this
+    # machine. Hardcoding 127.0.0.1 unconditionally (as before) silently
+    # pointed scenario 7 at whatever happens to be listening locally on
+    # 9001 (or nothing) instead of the real coordinator's dashboard,
+    # whenever the coordinator was actually remote.
+    if [ "{{coordinator_ip}}" != "127.0.0.1" ] && [ "{{coordinator_ip}}" != "localhost" ]; then
+        export MESH_DASHBOARD_HOST="{{coordinator_ip}}"
+    else
+        export MESH_DASHBOARD_HOST=127.0.0.1
+    fi
     cargo run -q --bin chaos -p cli
 
 # Verify that deploy-node pushes credentials automatically.

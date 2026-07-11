@@ -74,6 +74,12 @@ function confirmDelete(deviceId) {
 // — a different mechanism from the Zigbee devices table, same UI gesture.
 
 let avDevices = [];
+// Every node the coordinator knows about (not just Feature::Audio ones —
+// see NodeCommsInfo in coordinator/src/http/api/av.rs), fed by the same
+// /api/av-devices response `avDevices` comes from. Backs the per-node comms
+// panel: a node with no audio backends configured still gets a row, just a
+// placeholder one instead of real Bluetooth/HDMI controls.
+let commsNodes = [];
 let avLastFetch = 0;
 const AV_FETCH_MIN_INTERVAL_MS = 15_000;
 
@@ -94,8 +100,15 @@ function fetchAvDevices(force = false) {
   api('/av-devices').then(async res => {
     if (!res.ok) return;
     const json = await res.json();
-    const changed = JSON.stringify(json.devices) !== JSON.stringify(avDevices);
+    // Drop the 'chaos' security-test harness's synthetic node — same
+    // reasoning as dashboard.js's TopologyUpdate handler, just a second
+    // consumer that needs the same filter since this is a separate REST
+    // fetch, not the WS topology path.
+    const nodes = (json.nodes ?? []).filter(n => n.hostname !== 'chaos');
+    const changed = JSON.stringify(json.devices) !== JSON.stringify(avDevices)
+      || JSON.stringify(nodes) !== JSON.stringify(commsNodes);
     avDevices = json.devices ?? [];
+    commsNodes = nodes;
     if (changed) {
       render();
       for (const listener of avDevicesChangeListeners) listener();
@@ -241,17 +254,20 @@ function startAvRename(nameEl, dev) {
   input.addEventListener('blur', save);
 }
 
-function buildAvRow(dev) {
+function buildAvRow(dev, opts = {}) {
   const row = document.createElement('div');
   row.className = 'light-card device-row';
   row.dataset.avId = dev.id;
 
   const offline = dev.online === false;
+  // hideHost: the per-node comms panel already shows the hostname once in
+  // its block header (buildNodeCommsBlock) — repeating "via <hostname>" on
+  // every row nested under it would just be noise.
   row.innerHTML = `
     <div class="light-name-group">
       <span class="light-name device-row-name">${esc(dev.name)}</span>
       <span class="av-badge">${esc(dev.transport)}</span>
-      ${dev.hostname ? `<span class="av-host">via ${esc(dev.hostname)}</span>` : ''}
+      ${dev.hostname && !opts.hideHost ? `<span class="av-host">via ${esc(dev.hostname)}</span>` : ''}
       ${offline ? '<span class="av-offline">offline</span>' : ''}
     </div>`;
 
@@ -318,6 +334,49 @@ function buildPairedBluetoothStatus(nodeId, paired, rooms) {
   label.textContent = `${roomPart} — ${paired.connected ? 'in use' : 'off / out of range'}`;
   wrap.appendChild(label);
 
+  // Volume/mute only make sense against a live sink — a paired-but-off/
+  // out-of-range device has nothing for pactl to actually control.
+  if (paired.connected) {
+    const volumeRow = document.createElement('div');
+    volumeRow.className = 'bt-volume-row';
+
+    const muteBtn = document.createElement('button');
+    muteBtn.className = 'device-row-btn bt-mute-btn';
+    let muted = false;
+    muteBtn.textContent = '🔊';
+    muteBtn.title = 'Mute';
+    muteBtn.addEventListener('click', () => {
+      muted = !muted;
+      muteBtn.textContent = muted ? '🔇' : '🔊';
+      muteBtn.title = muted ? 'Unmute' : 'Mute';
+      setBluetoothMute(nodeId, muted);
+    });
+    volumeRow.appendChild(muteBtn);
+
+    // There's no way to query a sink's actual current volume back from
+    // pactl over the mesh — but the coordinator sets one explicitly right
+    // after pairing (capabilities/audio/src/bluetooth.rs's
+    // DEFAULT_INITIAL_VOLUME_PCT) and tracks every change after that, so
+    // paired.volume_pct is genuinely known, not guessed. The 20 fallback
+    // only applies to a device paired before this field existed.
+    const volumeSlider = document.createElement('input');
+    volumeSlider.type = 'range';
+    volumeSlider.min = '0';
+    volumeSlider.max = '100';
+    volumeSlider.value = String(paired.volume_pct ?? 20);
+    volumeSlider.className = 'bt-volume-slider';
+    volumeSlider.title = 'Volume';
+    let volumeDebounce = null;
+    volumeSlider.addEventListener('input', () => {
+      clearTimeout(volumeDebounce);
+      const value = Number(volumeSlider.value);
+      volumeDebounce = setTimeout(() => setBluetoothVolume(nodeId, value), 200);
+    });
+    volumeRow.appendChild(volumeSlider);
+
+    wrap.appendChild(volumeRow);
+  }
+
   const unpairBtn = document.createElement('button');
   unpairBtn.className = 'device-row-btn bt-unpair-btn';
   unpairBtn.textContent = 'Unpair';
@@ -346,6 +405,46 @@ export function handleBluetoothUnpairResult(evt) {
     fetchAvDevices(true);
   } else {
     showToast(`Unpair failed${evt.error ? ': ' + evt.error : ''}`, true);
+  }
+}
+
+function setBluetoothVolume(nodeId, volumePct) {
+  api(`/bluetooth/volume/${encodeURIComponent(nodeId)}`, {
+    method: 'POST',
+    body: { volume_pct: volumePct },
+  }).then(res => {
+    if (res.ok) return;
+    showToast(`Volume change failed (${res.status})`, true);
+  }).catch(e => showToast(`Volume change error: ${e.message}`, true));
+}
+
+function setBluetoothMute(nodeId, muted) {
+  api(`/bluetooth/mute/${encodeURIComponent(nodeId)}`, { method: 'POST', body: { muted } })
+    .then(res => {
+      if (res.ok) return;
+      showToast(`Mute change failed (${res.status})`, true);
+    })
+    .catch(e => showToast(`Mute change error: ${e.message}`, true));
+}
+
+// No success toast on either — these fire on every slider nudge/mute
+// click, and the request itself already gives instant visual feedback
+// (slider position, button icon). Only a genuine failure is worth
+// interrupting for, same reasoning as the light-brightness slider.
+export function handleBluetoothVolumeResult(evt) {
+  if (evt.success) {
+    // Keeps other open tabs/sessions (and this one, next render) in sync
+    // with the now-persisted volume_pct — see buildPairedBluetoothStatus's
+    // slider-init comment for why that's a real known value, not a guess.
+    fetchAvDevices(true);
+  } else {
+    showToast(`Volume change failed${evt.error ? ': ' + evt.error : ''}`, true);
+  }
+}
+
+export function handleBluetoothMuteResult(evt) {
+  if (!evt.success) {
+    showToast(`Mute change failed${evt.error ? ': ' + evt.error : ''}`, true);
   }
 }
 
@@ -401,6 +500,48 @@ function pairedMacForNode(nodeId) {
     ?.bluetooth_paired?.mac;
 }
 
+function pairedAvDeviceForNode(nodeId) {
+  return getAvDevices().find(d => d.node_id === nodeId && d.transport === 'bluetooth');
+}
+
+// Nudges the user to assign a room right after a successful pair — the
+// Zigbee light-pairing flow already does this inline (pairFeedRoomPrompt,
+// same "assign to room" gesture); Bluetooth pairing had no equivalent,
+// which is exactly why a freshly-paired speaker showed no room-card badge
+// and no room in its paired-status label until someone separately found
+// the Devices tab's own "+ add to room" dropdown. Only shown once per pair
+// (entry.roomNudgeDone) and only when the device genuinely has no room yet
+// — a device re-paired after already being assigned shouldn't be nudged
+// again. Defaults to the "any" role; a user who wants replies-only/
+// media-only can still refine it via the full buildAvRoomAssignments picker
+// in the Devices tab.
+function buildBluetoothRoomNudge(nodeId, avDevice, entry) {
+  const wrap = document.createElement('span');
+  wrap.className = 'bt-room-nudge';
+  wrap.append(' — assign to room: ');
+
+  const select = buildRoomSelect(model.rooms, null, roomId => {
+    entry.roomNudgeDone = true;
+    const room = model.rooms.find(r => r.id === roomId);
+    const finish = () => {
+      select.remove();
+      const confirmSpan = document.createElement('span');
+      confirmSpan.textContent = room ? `assigned to ${room.name}` : 'left unassigned';
+      wrap.appendChild(confirmSpan);
+    };
+    if (!room) {
+      finish();
+      return;
+    }
+    assignAvRoom(avDevice, room.name, 'any').then(() => {
+      fetchAvDevices(true);
+      finish();
+    });
+  });
+  wrap.appendChild(select);
+  return wrap;
+}
+
 function renderBluetoothScanList(nodeId) {
   const state = btScanPanels.get(nodeId);
   if (!state) return;
@@ -436,6 +577,14 @@ function renderBluetoothScanList(nodeId) {
       useBtn.addEventListener('click', () => pairBluetoothDevice(nodeId, dev));
     }
     row.append(buildSignalBars(dev.rssi), label, useBtn);
+    // dev.paired is only ever set to true by handleBluetoothPairResult for
+    // the exact device just paired this session — a device that merely
+    // reappears in a scan because it was already paired before never gets
+    // this flag set, so the nudge can't reappear on every reopen.
+    const avDevice = dev.mac === pairedMac ? pairedAvDeviceForNode(nodeId) : null;
+    if (dev.paired === true && !dev.roomNudgeDone && avDevice && !(avDevice.rooms?.length)) {
+      row.appendChild(buildBluetoothRoomNudge(nodeId, avDevice, dev));
+    }
     state.listEl.appendChild(row);
   }
 }
@@ -746,7 +895,8 @@ function render() {
   const switches = [...devicesMap.values()].filter(d => d.device_type === 'switch');
 
   if (lights.length === 0 && sensors.length === 0 && blinds.length === 0
-      && hvac.length === 0 && switches.length === 0 && avDevices.length === 0) {
+      && hvac.length === 0 && switches.length === 0 && avDevices.length === 0
+      && commsNodes.length === 0) {
     container.innerHTML = '<p class="placeholder">No devices paired yet.</p>';
     return;
   }
@@ -785,14 +935,67 @@ function render() {
     container.appendChild(body);
   }
 
-  if (avDevices.length > 0) {
-    const { heading, body } = buildCategorySection('Speakers & displays', avDevices.length);
+  // Split by whether a row is tied to a specific mesh node (Bluetooth/HDMI
+  // sinks, the voice puck) vs a pure LAN appliance with no node at all
+  // (soundbar/TV, configured by IP) — the two don't fit the same grouping.
+  const nodeScopedDevices = avDevices.filter(d => d.node_id != null);
+  const applianceDevices = avDevices.filter(d => d.node_id == null);
+
+  if (commsNodes.length > 0) {
+    const { heading, body } = buildCategorySection('Comms peripherals', commsNodes.length);
     container.appendChild(heading);
-    for (const dev of [...avDevices].sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const node of [...commsNodes].sort((a, b) => a.hostname.localeCompare(b.hostname))) {
+      body.appendChild(buildNodeCommsBlock(node, nodeScopedDevices));
+    }
+    container.appendChild(body);
+  }
+
+  if (applianceDevices.length > 0) {
+    const { heading, body } = buildCategorySection('Speakers & displays', applianceDevices.length);
+    container.appendChild(heading);
+    for (const dev of [...applianceDevices].sort((a, b) => a.name.localeCompare(b.name))) {
       body.appendChild(buildAvRow(dev));
     }
     container.appendChild(body);
   }
+}
+
+// One block per mesh node, whether or not it has anything configured yet —
+// generalizes what used to be a flat, pi2-only "Speakers & displays" list
+// (the only node with Feature::Audio in practice) into a per-node view that
+// shows every node the coordinator knows about. A node with no audio
+// backends configured gets a plain placeholder line instead of expecting
+// Bluetooth/HDMI controls it has no data for.
+function buildNodeCommsBlock(node, nodeScopedDevices) {
+  const block = document.createElement('div');
+  block.className = 'comms-node-block';
+
+  const header = document.createElement('div');
+  header.className = 'comms-node-header';
+  const dot = document.createElement('span');
+  dot.className = 'comms-node-dot' + (node.online ? ' comms-node-online' : ' comms-node-offline');
+  dot.textContent = node.online ? '●' : '○';
+  header.appendChild(dot);
+  const name = document.createElement('span');
+  name.className = 'comms-node-name';
+  name.textContent = node.hostname;
+  header.appendChild(name);
+  block.appendChild(header);
+
+  const rows = nodeScopedDevices.filter(d => d.node_id === node.id);
+  if (rows.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'comms-node-empty';
+    empty.textContent = node.has_audio_backends
+      ? 'No comms peripherals reported yet.'
+      : 'No comms peripherals configured on this node.';
+    block.appendChild(empty);
+  } else {
+    for (const dev of rows.sort((a, b) => a.name.localeCompare(b.name))) {
+      block.appendChild(buildAvRow(dev, { hideHost: true }));
+    }
+  }
+  return block;
 }
 
 // Sensors get sub-categories rather than one flat list — grouped by which

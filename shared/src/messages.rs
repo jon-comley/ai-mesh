@@ -452,6 +452,12 @@ pub struct BluetoothPairResult {
     /// used for playback instead of relying on the OS default sink.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sink_name: Option<String>,
+    /// The volume (0-100) the node set immediately after pairing (see
+    /// `capabilities/audio/src/bluetooth.rs`'s `DEFAULT_INITIAL_VOLUME_PCT`)
+    /// — `None` if no sink was resolved or the set itself failed, in which
+    /// case the volume genuinely stays unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_pct: Option<u8>,
 }
 
 /// Node → coordinator: a live Bluetooth scan failed to even start (e.g.
@@ -498,6 +504,48 @@ pub struct BluetoothUnpairRequest {
 pub struct BluetoothUnpairResult {
     pub node_id: String,
     pub mac: String,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Coordinator asks a node to set its Bluetooth sink's playback volume.
+/// Targets whichever device is currently paired on that node — a node has
+/// at most one active Bluetooth sink (see `capabilities/audio/src/lib.rs`'s
+/// `paired_device()`), so no MAC is needed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothVolumeRequest {
+    pub request_id: String,
+    /// 0-100; the coordinator clamps before sending.
+    pub volume_pct: u8,
+}
+
+/// Node → coordinator: the outcome of a `BluetoothVolumeRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothVolumeResult {
+    pub node_id: String,
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The volume (0-100) now actually set, on success — lets the
+    /// coordinator update its known-volume cache without separately
+    /// tracking what it last asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_pct: Option<u8>,
+}
+
+/// Coordinator asks a node to mute/unmute its Bluetooth sink. Same
+/// single-sink-per-node targeting as `BluetoothVolumeRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothMuteRequest {
+    pub request_id: String,
+    pub muted: bool,
+}
+
+/// Node → coordinator: the outcome of a `BluetoothMuteRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothMuteResult {
+    pub node_id: String,
     pub success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -778,6 +826,20 @@ pub enum MeshMessage {
     BluetoothUnpair(BluetoothUnpairRequest),
     BluetoothUnpairResult(BluetoothUnpairResult),
     BluetoothStatusUpdate(BluetoothStatusUpdate),
+    /// Coordinator → node: report the current paired-device status right
+    /// now (a `BluetoothStatusUpdate` reply), bypassing the "only push on
+    /// change" gate that message normally follows. Exists because
+    /// `DashboardState::bluetooth_status` is in-memory only — a coordinator
+    /// restart loses it, and a node whose paired device never actually
+    /// changed state across that restart would otherwise never be asked
+    /// again, leaving the dashboard blank for it indefinitely. Sent once
+    /// per node on its first heartbeat after a (re)connect; a node with
+    /// nothing currently paired replies with nothing.
+    BluetoothStatusRequest,
+    BluetoothVolume(BluetoothVolumeRequest),
+    BluetoothVolumeResult(BluetoothVolumeResult),
+    BluetoothMute(BluetoothMuteRequest),
+    BluetoothMuteResult(BluetoothMuteResult),
     SwitchAction(SwitchActionReport),
     // Intent routing
     IntentRequest(IntentRequest),

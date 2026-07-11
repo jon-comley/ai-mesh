@@ -1171,7 +1171,13 @@ function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
   const roomBluetoothDevices = getAvDevices().filter(d =>
     d.transport === 'bluetooth' && (d.rooms ?? []).some(r => r.room === room.name)
   );
-  if (anyMotion || anyLowBattery || tempIsNotable || roomBluetoothDevices.length > 0) {
+  // The voice puck is a single, room-assignable appliance (`av-room:puck`,
+  // see coordinator/src/http/api/av.rs) — same badge mechanism as the
+  // Bluetooth speaker above, just singular rather than a filtered list.
+  const roomPuck = getAvDevices().find(d =>
+    d.id === 'puck' && (d.rooms ?? []).some(r => r.room === room.name)
+  );
+  if (anyMotion || anyLowBattery || tempIsNotable || roomBluetoothDevices.length > 0 || roomPuck) {
     const notableRow = document.createElement('div');
     notableRow.className = 'room-notable-row';
     if (tempIsNotable) {
@@ -1208,6 +1214,18 @@ function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
         ? `${name} is paired but not currently connected — off, or out of range`
         : `${name} — this room's Bluetooth speaker`;
       badge.textContent = connected === false ? `🔊 ${name} (off / out of range)` : `🔊 ${name}`;
+      notableRow.appendChild(badge);
+    }
+    if (roomPuck) {
+      // `online` reflects whether the puck's node currently has a live
+      // mesh connection — unlike the Bluetooth badge's `connected`, there's
+      // no separate BlueZ ambiguity here, so a plain "offline" is accurate.
+      const badge = document.createElement('span');
+      badge.className = 'room-notable-badge' + (roomPuck.online === false ? ' room-notable-warn' : '');
+      badge.title = roomPuck.online === false
+        ? `${roomPuck.name} is offline`
+        : `${roomPuck.name} — this room's voice assistant`;
+      badge.textContent = roomPuck.online === false ? `🎤 ${roomPuck.name} (offline)` : `🎤 ${roomPuck.name}`;
       notableRow.appendChild(badge);
     }
     header.appendChild(notableRow);
@@ -2130,6 +2148,12 @@ async function sendDeviceCommand(deviceId, body, opts = {}) {
   try {
     const res = await api(`/lights/${encodeURIComponent(deviceId)}/command`, { method: 'POST', body });
     if (!res.ok) {
+      if (res.status === 409) {
+        // Device is known but currently offline — same wording as the
+        // room/group offline case, not a generic failure.
+        showToast('Device is offline — command not sent', false);
+        return;
+      }
       const text = await res.text().catch(() => '');
       showToast(`Command failed (${res.status})${text ? ': ' + text : ''}`, true);
     }

@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use shared::{LightAction, LightCommandRequest, LightTarget, MeshMessage};
+use shared::{LightAction, LightCommandRequest, LightStateReport, LightTarget, MeshMessage};
 use std::sync::{Arc, Mutex};
 
 use crate::http::state::{DashboardState, RoomInfo};
@@ -69,6 +69,26 @@ pub(crate) fn color_xy_action(x: f32, y: f32, transition_secs: Option<f32>) -> L
     }
 }
 
+/// Is `target` a device we know to be offline (Zigbee-level, not just the
+/// node's mesh connection — see `LightStateReport::online`'s doc comment)?
+/// An unknown target (never reported) is treated as online — let it
+/// through and let the lighting node decide if it actually exists, rather
+/// than guessing.
+///
+/// Shared by every light-command dispatch path — `intent.rs`'s voice/chat
+/// tool already had this check; the single-device HTTP endpoint below
+/// didn't, which meant clicking a light in the dashboard while its bulb was
+/// offline silently "succeeded" (204, optimistic snapshot update) with no
+/// feedback, while asking the assistant to do the same thing got a clear
+/// "device is offline" answer. One shared implementation, not two that can
+/// drift apart (same reasoning as `effects::exclude_device_from_its_active_effect`).
+pub(crate) fn device_is_offline(target: &str, states: &[LightStateReport]) -> bool {
+    states
+        .iter()
+        .find(|s| s.device_id == target)
+        .is_some_and(|s| !s.online)
+}
+
 pub(crate) fn build_light_action(body: &LightCommandBody) -> Option<LightAction> {
     match body.action.as_str() {
         "on" => Some(LightAction::On),
@@ -109,6 +129,13 @@ pub async fn light_command(
         )
             .into_response();
     };
+    if device_is_offline(&device, &state.get_light_snapshot()) {
+        return (
+            StatusCode::CONFLICT,
+            format!("device '{device}' is currently offline"),
+        )
+            .into_response();
+    }
 
     let cmd = LightCommandRequest {
         request_id: gen_request_id(),
@@ -331,6 +358,53 @@ mod tests {
         ));
     }
 
+    // ── device_is_offline ────────────────────────────────────────────────────
+    // Moved here from intent.rs: this check is shared by every light-command
+    // dispatch path, not just the voice/chat tool (see the shared
+    // `device_is_offline`'s doc comment).
+
+    #[test]
+    fn device_is_offline_returns_true_for_offline_device() {
+        let states = vec![
+            LightStateReport {
+                node_id: "n1".into(),
+                device_id: "bulb_a".into(),
+                on: false,
+                brightness: None,
+                color_xy: None,
+                color_temp: None,
+                online: false,
+            },
+            LightStateReport {
+                node_id: "n1".into(),
+                device_id: "bulb_b".into(),
+                on: true,
+                brightness: None,
+                color_xy: None,
+                color_temp: None,
+                online: true,
+            },
+        ];
+        assert!(device_is_offline("bulb_a", &states));
+        assert!(!device_is_offline("bulb_b", &states));
+    }
+
+    #[test]
+    fn device_is_offline_unknown_device_is_not_offline() {
+        let states = vec![LightStateReport {
+            node_id: "n1".into(),
+            device_id: "bulb_a".into(),
+            on: true,
+            brightness: None,
+            color_xy: None,
+            color_temp: None,
+            online: true,
+        }];
+        // Unknown target → not in states → treat as online (let it through;
+        // the lighting node decides if it actually exists).
+        assert!(!device_is_offline("unknown_bulb", &states));
+    }
+
     #[test]
     fn build_light_action_clamps_out_of_range_values() {
         let brightness = LightCommandBody {
@@ -392,6 +466,30 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn light_command_returns_409_for_offline_device() {
+        // Parity with intent.rs's voice/chat tool, which already refused an
+        // offline device before this fix — the dashboard's direct click
+        // path used to silently 204 here instead.
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        state.push_lighting_update(LightStateReport {
+            node_id: "pi1".into(),
+            device_id: "bulb1".into(),
+            on: false,
+            brightness: None,
+            color_xy: None,
+            color_temp: None,
+            online: false,
+        });
+
+        let status = post_light_cmd(state, "bulb1", "", r#"{"action":"on"}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(rx.try_recv().is_err(), "no command should have been sent");
     }
 
     #[tokio::test]

@@ -179,6 +179,22 @@ pub enum DashboardEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The outcome of a dashboard-initiated volume-set request.
+    BluetoothVolumeResult {
+        node_id: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        volume_pct: Option<u8>,
+    },
+    /// The outcome of a dashboard-initiated mute/unmute request.
+    BluetoothMuteResult {
+        node_id: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// A live connected/unavailable change for a node's currently-paired
     /// Bluetooth device — pushed only on change, not a heartbeat. Not
     /// replayed on connect: `GET /api/av-devices`' `bluetooth_paired` field
@@ -512,6 +528,16 @@ pub struct BluetoothPairedStatus {
     pub mac: String,
     pub name: String,
     pub connected: bool,
+    /// The volume (0-100) this node's sink was last set to — `None` if
+    /// never established (see `capabilities/audio/src/bluetooth.rs`'s
+    /// `DEFAULT_INITIAL_VOLUME_PCT`). Set fresh on a new pair; preserved
+    /// across a mere `BluetoothStatusUpdate` (see that handler in
+    /// `server.rs`) and updated in place by `set_bluetooth_volume` on a
+    /// successful `BluetoothVolumeResult` — neither of those otherwise
+    /// knows the rest of this struct, so overwriting the whole record on
+    /// either would silently forget the other's information.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume_pct: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1281,6 +1307,31 @@ impl DashboardState {
         });
     }
 
+    /// Broadcast the outcome of a dashboard-initiated Bluetooth volume-set.
+    pub fn push_bluetooth_volume_result(&self, result: shared::BluetoothVolumeResult) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let _ = self.tx.send(DashboardEvent::BluetoothVolumeResult {
+            node_id: result.node_id,
+            success: result.success,
+            error: result.error,
+            volume_pct: result.volume_pct,
+        });
+    }
+
+    /// Broadcast the outcome of a dashboard-initiated Bluetooth mute/unmute.
+    pub fn push_bluetooth_mute_result(&self, result: shared::BluetoothMuteResult) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let _ = self.tx.send(DashboardEvent::BluetoothMuteResult {
+            node_id: result.node_id,
+            success: result.success,
+            error: result.error,
+        });
+    }
+
     /// Broadcast a live connected/unavailable change for a node's paired
     /// Bluetooth device.
     pub fn push_bluetooth_status_update(&self, update: shared::BluetoothStatusUpdate) {
@@ -1314,6 +1365,18 @@ impl DashboardState {
     /// `GET /api/av-devices` for its bluetooth-transport rows.
     pub fn bluetooth_paired_status(&self, node_id: &str) -> Option<BluetoothPairedStatus> {
         self.bluetooth_status.lock().unwrap().get(node_id).cloned()
+    }
+
+    /// Updates just the volume field of a node's already-known paired-device
+    /// record — a `BluetoothVolumeResult` only ever reports the node_id and
+    /// the new volume, not the rest of the device's identity, so this
+    /// leaves mac/name/connected untouched. No-op if the node has no known
+    /// paired device yet (shouldn't happen in practice: a volume request is
+    /// only ever sent for a node with something paired).
+    pub fn set_bluetooth_volume(&self, node_id: &str, volume_pct: u8) {
+        if let Some(status) = self.bluetooth_status.lock().unwrap().get_mut(node_id) {
+            status.volume_pct = Some(volume_pct);
+        }
     }
 
     /// Broadcast the current solar position to all connected clients.
@@ -3226,5 +3289,34 @@ mod tests {
             date: "".into(),
         }]);
         assert_eq!(state.get_general_art_batch().unwrap().len(), 1);
+    }
+
+    // ── Bluetooth paired-status volume tracking ──────────────────────────────
+
+    #[test]
+    fn set_bluetooth_volume_updates_only_the_volume_field() {
+        let state = make_state();
+        state.set_bluetooth_paired(
+            "pi2",
+            BluetoothPairedStatus {
+                mac: "AA:BB:CC:DD:EE:FF".into(),
+                name: "Fishman PA".into(),
+                connected: true,
+                volume_pct: Some(20),
+            },
+        );
+        state.set_bluetooth_volume("pi2", 45);
+        let status = state.bluetooth_paired_status("pi2").unwrap();
+        assert_eq!(status.mac, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(status.name, "Fishman PA");
+        assert!(status.connected);
+        assert_eq!(status.volume_pct, Some(45));
+    }
+
+    #[test]
+    fn set_bluetooth_volume_is_a_noop_when_nothing_paired() {
+        let state = make_state();
+        state.set_bluetooth_volume("pi2", 45);
+        assert!(state.bluetooth_paired_status("pi2").is_none());
     }
 }

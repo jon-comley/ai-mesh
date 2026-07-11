@@ -41,6 +41,20 @@ pub struct RoomAssignment {
     pub role: String,
 }
 
+/// One entry per node the coordinator knows about at all — not just the
+/// Feature::Audio ones `AvDevice` rows come from. Backs the Devices tab's
+/// per-node comms panel: a node with `has_audio_backends: false` has
+/// nothing here to manage yet (no `capability-audio` compiled in, or
+/// `AUDIO_BACKENDS` unset) and gets a bare placeholder row instead of
+/// expecting real controls.
+#[derive(Serialize)]
+pub struct NodeCommsInfo {
+    pub id: String,
+    pub hostname: String,
+    pub online: bool,
+    pub has_audio_backends: bool,
+}
+
 #[derive(Serialize)]
 pub struct AvDevice {
     /// Stable id: `<node_id>:<backend>` for node sinks, `appliance:<x>`
@@ -117,9 +131,10 @@ pub async fn list_av_devices(
     State(state): State<Arc<DashboardState>>,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
 ) -> impl IntoResponse {
-    let (audio_nodes, voice_nodes, prefs) = {
+    let (all_nodes, audio_nodes, voice_nodes, prefs) = {
         let reg = registry.lock().unwrap();
         (
+            reg.list_nodes(),
             reg.nodes_with_feature(shared::Feature::Audio),
             reg.nodes_with_feature(shared::Feature::Voice),
             reg.get_all_preferences(PREF_USER_ID),
@@ -128,6 +143,31 @@ pub async fn list_av_devices(
     let connected: std::collections::HashSet<String> =
         state.connections.lock().unwrap().keys().cloned().collect();
     let room_sinks = all_room_sinks(&prefs);
+
+    // Every node, not just the Feature::Audio ones above — backs the
+    // Devices tab's per-node comms panel, which needs to show *every* node
+    // (even one with nothing configured yet) rather than silently omitting
+    // it. `has_audio_backends` is what the frontend checks to decide
+    // between rendering that node's real AvDevice rows (below) or a bare
+    // "nothing configured" placeholder.
+    let audio_backend_ids: std::collections::HashSet<&str> = audio_nodes
+        .iter()
+        .filter(|n| {
+            n.capabilities
+                .as_ref()
+                .is_some_and(|c| !c.audio_backends.is_empty())
+        })
+        .map(|n| n.id.as_str())
+        .collect();
+    let node_infos: Vec<NodeCommsInfo> = all_nodes
+        .iter()
+        .map(|n| NodeCommsInfo {
+            id: n.id.clone(),
+            hostname: n.hostname.clone(),
+            online: connected.contains(&n.id),
+            has_audio_backends: audio_backend_ids.contains(n.id.as_str()),
+        })
+        .collect();
 
     let mut devices: Vec<AvDevice> = Vec::new();
 
@@ -244,7 +284,7 @@ pub async fn list_av_devices(
         });
     }
 
-    Json(serde_json::json!({ "devices": devices })).into_response()
+    Json(serde_json::json!({ "devices": devices, "nodes": node_infos })).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -353,6 +393,53 @@ mod tests {
     async fn empty_registry_lists_nothing() {
         let json = get_devices(make_registry(), empty_connections()).await;
         assert_eq!(json["devices"].as_array().unwrap().len(), 0);
+        assert_eq!(json["nodes"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn nodes_list_includes_a_node_with_no_audio_backends() {
+        // A node with no Feature::Audio at all (e.g. an llm-only compute
+        // node) must still show up in "nodes" — the Devices tab's per-node
+        // comms panel needs to render it as a placeholder row, not silently
+        // omit it.
+        let registry = make_registry();
+        {
+            let mut reg = registry.lock().unwrap();
+            reg.update_heartbeat(shared::NodeIdentity {
+                id: "beelink1".into(),
+                hostname: "beelink1".into(),
+                ip: "10.0.0.11".into(),
+                role: shared::NodeRole::Compute,
+            });
+            reg.update_capabilities(
+                "beelink1",
+                shared::NodeCapabilities {
+                    features: vec![shared::Feature::Llm],
+                    ..shared::NodeCapabilities::default()
+                },
+            );
+        }
+        let json = get_devices(registry, empty_connections()).await;
+        let nodes = json["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["id"], "beelink1");
+        assert_eq!(nodes[0]["has_audio_backends"], false);
+        assert_eq!(nodes[0]["online"], false);
+    }
+
+    #[tokio::test]
+    async fn nodes_list_flags_a_node_with_configured_audio_backends() {
+        let registry = make_registry();
+        seed_audio_node(&registry, "pi2", &["hdmi", "bluetooth"]);
+        let connections = empty_connections();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        connections.lock().unwrap().insert("pi2".into(), tx);
+        let json = get_devices(registry, connections).await;
+        let nodes = json["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["id"], "pi2");
+        assert_eq!(nodes[0]["has_audio_backends"], true);
+        assert_eq!(nodes[0]["online"], true);
     }
 
     #[tokio::test]

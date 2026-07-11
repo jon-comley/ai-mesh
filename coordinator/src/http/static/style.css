@@ -1722,6 +1722,10 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+  /* Nudges the category heading (and its first-child sibling right under
+     the "Devices" h2) in from the edge so it reads as a subsection of the
+     panel heading above it, not a disconnected flush-left line. */
+  margin-left: 8px;
   cursor: pointer;
   user-select: none;
 }
@@ -2466,6 +2470,34 @@ body {
 .device-row-btn:hover { border-color: var(--accent); color: var(--accent); }
 .device-row-btn-delete:hover { border-color: var(--red); color: var(--red); }
 
+/* Per-node comms panel — one block per mesh node, grouping its
+   Bluetooth/HDMI rows (or a placeholder if it has none configured) under a
+   shared header instead of a flat cross-node list. */
+.comms-node-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.comms-node-block:last-child { margin-bottom: 0; }
+.comms-node-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.comms-node-dot { line-height: 1; }
+.comms-node-online { color: var(--accent); }
+.comms-node-offline { color: var(--text-muted); }
+.comms-node-name { color: var(--text); }
+.comms-node-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* Speakers & displays rows (AV endpoints) — transport badge + host note */
 .av-badge {
   display: inline-block;
@@ -2574,11 +2606,19 @@ body {
   font-size: 11px;
   opacity: 0.75;
 }
+.bt-room-nudge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.85;
+  white-space: nowrap;
+}
 
 /* Persisted paired-device row (survives refresh, unlike the scan panel) */
 .bt-paired-status {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   font-size: 12px;
 }
@@ -2586,6 +2626,19 @@ body {
 .bt-paired-connected { color: var(--accent); }
 .bt-paired-unavailable { color: var(--text-muted); }
 .bt-paired-name { color: var(--text-muted); }
+.bt-volume-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.bt-mute-btn {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.bt-volume-slider {
+  width: 90px;
+  vertical-align: middle;
+}
 
 .switch-bindings-panel {
   flex-basis: 100%;

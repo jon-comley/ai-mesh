@@ -104,12 +104,37 @@ pub struct BulbInRoom {
     pub current: BulbCurrentState,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BulbCurrentState {
     pub on: bool,
     pub brightness: Option<u8>,
     pub color_xy: Option<(f32, f32)>,
     pub color_temp: Option<u16>,
+    /// Mirrors `LightStateReport::online` — `false` once the Zigbee device
+    /// itself has gone offline (power-cycled or out of range), independent
+    /// of whether its node's mesh connection is still up. The runner uses
+    /// this to exclude the bulb from `EffectCtx::bulbs` (see
+    /// `EffectRunner::tick_one`'s `active_bulbs` filter) so an effect never
+    /// computes or sends a command a device can't possibly act on, and
+    /// never optimistically records a `LastEmittedState` for one that
+    /// couldn't have actually received it.
+    pub online: bool,
+}
+
+impl Default for BulbCurrentState {
+    fn default() -> Self {
+        Self {
+            on: false,
+            brightness: None,
+            color_xy: None,
+            color_temp: None,
+            // A bulb with no LightStateReport yet (never reported since the
+            // coordinator started) hasn't necessarily gone offline — treat
+            // it as online so an effect still targets it, matching
+            // LightStateReport::online's own default_true.
+            online: true,
+        }
+    }
 }
 
 // ── Pre-effect snapshot ──────────────────────────────────────────────────────

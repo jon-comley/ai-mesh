@@ -1,3 +1,4 @@
+use crate::http::api::lights::device_is_offline;
 use crate::http::state::{DashboardState, PendingInferences, PendingIntents};
 use crate::inference::dispatch_local_inference;
 use crate::registry::Registry;
@@ -390,13 +391,6 @@ pub async fn handle_intent(
         prompt_tokens_before,
         prompt_tokens_after,
     }
-}
-
-fn device_is_offline(target: &str, states: &[LightStateReport]) -> bool {
-    states
-        .iter()
-        .find(|s| s.device_id == target)
-        .is_some_and(|s| !s.online)
 }
 
 /// The tool result `dispatch_tool` returns when it refuses a light command because the
@@ -3690,49 +3684,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn device_is_offline_returns_true_for_offline_device() {
-        use shared::messages::LightStateReport;
-        let states = vec![
-            LightStateReport {
-                node_id: "n1".into(),
-                device_id: "bulb_a".into(),
-                on: false,
-                brightness: None,
-                color_xy: None,
-                color_temp: None,
-                online: false,
-            },
-            LightStateReport {
-                node_id: "n1".into(),
-                device_id: "bulb_b".into(),
-                on: true,
-                brightness: None,
-                color_xy: None,
-                color_temp: None,
-                online: true,
-            },
-        ];
-        assert!(device_is_offline("bulb_a", &states));
-        assert!(!device_is_offline("bulb_b", &states));
-    }
-
-    #[test]
-    fn device_is_offline_unknown_device_is_not_offline() {
-        use shared::messages::LightStateReport;
-        let states = vec![LightStateReport {
-            node_id: "n1".into(),
-            device_id: "bulb_a".into(),
-            on: true,
-            brightness: None,
-            color_xy: None,
-            color_temp: None,
-            online: true,
-        }];
-        // Unknown target → not in states → treat as online (let it through;
-        // the lighting node decides if it actually exists).
-        assert!(!device_is_offline("unknown_bulb", &states));
-    }
+    // device_is_offline itself is tested in http::api::lights (its new home
+    // — see that module's doc comment for why it moved there); dispatch_light_command's
+    // *use* of it is still covered here by the offline-skip tests below.
 
     fn light_record(target: &str, result: &str) -> ToolCallRecord {
         ToolCallRecord {
