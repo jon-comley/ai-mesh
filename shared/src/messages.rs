@@ -454,6 +454,35 @@ pub struct BluetoothPairResult {
     pub sink_name: Option<String>,
 }
 
+/// Node → coordinator: a live Bluetooth scan failed to even start (e.g.
+/// adapter rfkill-blocked or powered off) — distinct from "scan completed
+/// with zero devices," which looks identical to "nothing in range" and
+/// isn't itself an error worth surfacing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothScanError {
+    pub node_id: String,
+    pub error: String,
+}
+
+/// Coordinator asks a node to forget every cached (non-connected) BlueZ
+/// device — a scan seeds its results from that same cache, so a stale
+/// entry (out of range, or from months ago) otherwise keeps reappearing
+/// as if it were live right now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothClearCacheRequest {
+    pub request_id: String,
+}
+
+/// Node → coordinator: the outcome of a `BluetoothClearCacheRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BluetoothClearCacheResult {
+    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// One z2m `bridge/event` during pairing, forwarded by the zigbee-owning
 /// node: drives the dashboard's live "joined: <model>" feed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -709,6 +738,9 @@ pub enum MeshMessage {
     BluetoothDeviceFound(BluetoothDeviceInfo),
     BluetoothPair(BluetoothPairRequest),
     BluetoothPairResult(BluetoothPairResult),
+    BluetoothScanError(BluetoothScanError),
+    BluetoothClearCache(BluetoothClearCacheRequest),
+    BluetoothClearCacheResult(BluetoothClearCacheResult),
     SwitchAction(SwitchActionReport),
     // Intent routing
     IntentRequest(IntentRequest),

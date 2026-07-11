@@ -399,6 +399,33 @@ function tickBluetoothCountdown(nodeId) {
   state.remaining -= 1;
 }
 
+// Scan results are seeded (agent-side) from BlueZ's own device cache so a
+// currently-connected device still shows up — but that means anything
+// bluetoothd remembers (out of range, or from long ago) reappears looking
+// identical to something live right now. This button forgets everything
+// non-connected so the next scan only shows what's actually there.
+function clearBluetoothCache(nodeId) {
+  api(`/bluetooth/clear-cache/${encodeURIComponent(nodeId)}`, { method: 'POST' })
+    .then(res => {
+      if (res.ok) return;
+      showToast(`Clear cache failed (${res.status})`, true);
+    })
+    .catch(e => showToast(`Clear cache error: ${e.message}`, true));
+}
+
+export function handleBluetoothClearCacheResult(evt) {
+  if (evt.error) {
+    showToast(`Clear cache failed: ${evt.error}`, true);
+    return;
+  }
+  const state = btScanPanels.get(evt.node_id);
+  if (state) {
+    state.devices.clear();
+    renderBluetoothScanList(evt.node_id);
+  }
+  showToast(`Cleared ${evt.cleared ?? 0} cached Bluetooth device${evt.cleared === 1 ? '' : 's'}.`);
+}
+
 function buildBluetoothScanControls(nodeId) {
   const button = document.createElement('button');
   button.className = 'device-row-btn';
@@ -408,6 +435,13 @@ function buildBluetoothScanControls(nodeId) {
   const list = document.createElement('div');
   list.className = 'bt-scan-list';
   panel.appendChild(list);
+
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'device-row-btn bt-scan-clear-cache';
+  clearBtn.textContent = 'Clear cache';
+  clearBtn.title = 'Forget cached devices that are out of range or no longer relevant';
+  clearBtn.addEventListener('click', () => clearBluetoothCache(nodeId));
+  panel.appendChild(clearBtn);
 
   const existing = btScanPanels.get(nodeId);
   if (existing) {

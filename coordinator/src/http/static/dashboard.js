@@ -86,6 +86,7 @@ const handlers = {
   ZigbeeJoinEvent: evt => devices.handleJoinEvent(evt),
   BluetoothDeviceFound: evt => devices.handleBluetoothDeviceFound(evt),
   BluetoothPairResult: evt => devices.handleBluetoothPairResult(evt),
+  BluetoothClearCacheResult: evt => devices.handleBluetoothClearCacheResult(evt),
   SensorUpdate: evt => {
     rooms.notifySensors(evt.sensors);
     devices.refresh();

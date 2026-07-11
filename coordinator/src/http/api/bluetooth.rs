@@ -13,7 +13,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-use shared::{BluetoothPairRequest, BluetoothScanRequest, MeshMessage};
+use shared::{BluetoothClearCacheRequest, BluetoothPairRequest, BluetoothScanRequest, MeshMessage};
 use std::sync::Arc;
 
 use super::gen_request_id;
@@ -99,6 +99,30 @@ pub async fn pair(
     }
 }
 
+/// POST /api/bluetooth/clear-cache/{node_id} — forget every cached,
+/// non-connected BlueZ device on that node. `scan()` seeds its results
+/// from that cache, so without this a stale entry (out of range, or from
+/// long ago) keeps reappearing indistinguishable from something live
+/// right now. Feedback streams to the dashboard as a
+/// `BluetoothClearCacheResult` WS event.
+pub async fn clear_cache(
+    Path(node_id): Path<String>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    let sent = state.send_to_node(
+        &node_id,
+        MeshMessage::BluetoothClearCache(BluetoothClearCacheRequest {
+            request_id: gen_request_id(),
+        }),
+    );
+    if sent {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "node not reachable").into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +135,7 @@ mod tests {
         Router::new()
             .route("/api/bluetooth/scan/{node_id}", post(scan))
             .route("/api/bluetooth/pair/{node_id}", post(pair))
+            .route("/api/bluetooth/clear-cache/{node_id}", post(clear_cache))
             .with_state(state)
     }
 
@@ -213,6 +238,40 @@ mod tests {
             "POST",
             "/api/bluetooth/pair/pi2",
             r#"{"mac":"AA:BB:CC:DD:EE:FF"}"#,
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn clear_cache_sends_to_the_named_node() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi2".into(), tx);
+        let state = make_state(vec![], connections);
+
+        let status = send(
+            bluetooth_router(state),
+            "POST",
+            "/api/bluetooth/clear-cache/pi2",
+            "",
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        match rx.try_recv().unwrap() {
+            MeshMessage::BluetoothClearCache(_) => {}
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_cache_503_when_node_not_connected() {
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            bluetooth_router(state),
+            "POST",
+            "/api/bluetooth/clear-cache/pi2",
+            "",
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);

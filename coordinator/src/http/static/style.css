@@ -2568,6 +2568,12 @@ body {
 .bt-signal-bar-3 { height: 75%; }
 .bt-signal-bar-4 { height: 100%; }
 .bt-signal-bar-filled { background: var(--accent); }
+.bt-scan-clear-cache {
+  display: block;
+  margin: 8px 0 0 auto;
+  font-size: 11px;
+  opacity: 0.75;
+}
 
 .switch-bindings-panel {
   flex-basis: 100%;

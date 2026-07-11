@@ -163,6 +163,14 @@ pub enum DashboardEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The outcome of a dashboard-initiated "clear cache" request.
+    BluetoothClearCacheResult {
+        node_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cleared: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// One completed voice-assistant exchange (spoken transcript in, intent
     /// response out). Transient, broadcast-only — the chat window renders it
     /// when its "show voice commands" preference is on; a future TTS/speaker
@@ -1184,6 +1192,10 @@ impl DashboardState {
     /// scan is tied to whichever dashboard session started it.
     pub fn push_bluetooth_device_found(&self, info: shared::BluetoothDeviceInfo) {
         if self.tx.receiver_count() == 0 {
+            tracing::info!(
+                mac = %info.mac,
+                "bluetooth: device found but no dashboard WS subscribers — dropping"
+            );
             return;
         }
         let _ = self.tx.send(DashboardEvent::BluetoothDeviceFound {
@@ -1204,6 +1216,18 @@ impl DashboardState {
             mac: result.mac,
             name: result.name,
             success: result.success,
+            error: result.error,
+        });
+    }
+
+    /// Broadcast the outcome of a dashboard-initiated Bluetooth cache clear.
+    pub fn push_bluetooth_clear_cache_result(&self, result: shared::BluetoothClearCacheResult) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let _ = self.tx.send(DashboardEvent::BluetoothClearCacheResult {
+            node_id: result.node_id,
+            cleared: result.cleared,
             error: result.error,
         });
     }
