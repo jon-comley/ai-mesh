@@ -152,12 +152,15 @@ MESH_INSECURE=1 cargo run -p cli -- nodes
 | Node | OS | Hardware | Model | Capabilities |
 |------|----|----------|-------|--------------|
 | pi1 | Linux (ARM64) | Raspberry Pi 5, 8 GB RAM | `qwen2.5:1.5b` | llm, lighting |
+| pi2 | Linux (ARM64) | Raspberry Pi | — | art, audio, music |
 | Beelink SER8 (beelink1) | Windows 11 | AMD Radeon 780M, 8 GB VRAM | `qwen2.5:7b` | llm |
 | OmniLink1 (WSL2) | Linux (x86_64) | controller only | — | controller |
 
 The coordinator schedules inference requests to whichever node has the requested model loaded and ready.
 
 **Lighting**: pi1 runs Mosquitto + Zigbee2MQTT with an SLZB-06 Zigbee coordinator. Natural language intents like `just intent "turn all lights off"` are routed through the LLM and executed as MQTT commands to Zigbee devices. The coordinator receives the live device/group list from pi1 on connect (persisted across restarts), injects it into the LLM system prompt, and validates targets before dispatch — unknown device names return a clear error rather than a silent no-op. See `docs/pi1-lighting-setup.md`.
+
+**Music**: "play Blackbird by the Beatles", "pause", "what's playing?" — from chat or the voice puck. pi2 drives the Spotify Web API for search and control, and supervises a librespot Spotify Connect player whose audio feeds the paired Bluetooth speaker. Requires Spotify Premium and a one-time setup — see `docs/music.md`.
 
 ---
 
