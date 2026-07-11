@@ -364,12 +364,23 @@ impl Capability for AudioCapability {
 
 const BLUETOOTH_STATUS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Minimum gap between auto-reconnect attempts for the same device. Kept
+/// long deliberately: this hardware's fragile Bluetooth module wedges
+/// after repeated failed connection attempts (confirmed live with the
+/// Fishman Loudbox — only a full mains power-cycle recovers it), so a
+/// tight retry loop would turn "amp switched off for five minutes" into
+/// "amp needs a full manual reset ritual." The first attempt after a
+/// device is found disconnected is never delayed — only *subsequent*
+/// retries back off.
+const BLUETOOTH_RECONNECT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Periodically checks whether this node's currently-paired Bluetooth
-/// device is actually connected, pushing a `BluetoothStatusUpdate` only
-/// when that state changes — not a heartbeat. BlueZ can't distinguish
-/// "powered off" from "out of range/disconnected"; both surface as
-/// `connected: false`, worded honestly on the dashboard rather than
-/// guessing which.
+/// device is actually connected, attempting one rate-limited reconnect
+/// when it isn't (see `BLUETOOTH_RECONNECT_COOLDOWN`), and pushing a
+/// `BluetoothStatusUpdate` only when the connected state actually changes
+/// — not a heartbeat. BlueZ can't distinguish "powered off" from "out of
+/// range/disconnected"; both surface as `connected: false`, worded
+/// honestly on the dashboard rather than guessing which.
 ///
 /// Known limitation: this runs once for the agent process's lifetime
 /// (`start()` is spawned outside the reconnect loop, per
@@ -379,10 +390,35 @@ const BLUETOOTH_STATUS_POLL_INTERVAL: std::time::Duration = std::time::Duration:
 /// not fixed here.
 async fn bluetooth_status_loop(node_id: String, tx: Sender<MeshMessage>) {
     let mut last_connected: Option<bool> = None;
+    let mut last_mac: Option<String> = None;
+    let mut reconnect_after = tokio::time::Instant::now();
     loop {
         match paired_device() {
             Some(device) => {
-                let connected = bluetooth::is_connected(&device.mac).await;
+                // A freshly-paired or swapped device shouldn't inherit the
+                // previous device's reconnect cooldown.
+                if last_mac.as_deref() != Some(device.mac.as_str()) {
+                    if let Some(previous) = &last_mac {
+                        info!(previous_mac = %previous, mac = %device.mac, "bluetooth: paired device changed — reconnect cooldown reset");
+                    }
+                    reconnect_after = tokio::time::Instant::now();
+                    last_mac = Some(device.mac.clone());
+                }
+
+                let mut connected = bluetooth::is_connected(&device.mac).await;
+                if !connected && tokio::time::Instant::now() >= reconnect_after {
+                    reconnect_after = tokio::time::Instant::now() + BLUETOOTH_RECONNECT_COOLDOWN;
+                    match bluetooth::reconnect(&device.mac).await {
+                        Ok(()) => {
+                            info!(mac = %device.mac, "bluetooth: auto-reconnected");
+                            connected = true;
+                        }
+                        Err(e) => {
+                            warn!(mac = %device.mac, error = %e, "bluetooth: auto-reconnect attempt failed — backing off");
+                        }
+                    }
+                }
+
                 if last_connected != Some(connected) {
                     last_connected = Some(connected);
                     let _ = tx
@@ -397,7 +433,10 @@ async fn bluetooth_status_loop(node_id: String, tx: Sender<MeshMessage>) {
                         .await;
                 }
             }
-            None => last_connected = None,
+            None => {
+                last_connected = None;
+                last_mac = None;
+            }
         }
         tokio::time::sleep(BLUETOOTH_STATUS_POLL_INTERVAL).await;
     }

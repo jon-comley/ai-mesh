@@ -304,10 +304,18 @@ pub fn remove_room_sink(
     }
 }
 
-/// Node reports back within this long, or it counts as a failed delivery —
-/// long enough for a cold Bluetooth reconnect, short enough that a caller
-/// waiting to decide on a puck fallback doesn't stall the reply.
-const AUDIO_PLAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Node reports back within this long, or it counts as a failed delivery.
+///
+/// This has to cover a cold Bluetooth reconnect AND the clip's actual
+/// playback duration — `AudioPlayResult` is only sent after `play_url()`'s
+/// `paplay`/`aplay` process exits, i.e. after the whole reply has finished
+/// playing, not after playback merely started. A longer spoken reply can
+/// easily run 10-20+ seconds; the previous 10s value here (and the
+/// matching `ANNOUNCE_RESULT_TIMEOUT` in capability-voice, which wraps
+/// this call) was sized as if this were a quick dispatch ack, so it fired
+/// before a perfectly successful delivery could ever report back
+/// (confirmed live 2026-07-12).
+const AUDIO_PLAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// Send `url` to a specific node's tracked connection, on the named
 /// `sink` (or that node's default if `None`), and wait for the node's own
