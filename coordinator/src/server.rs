@@ -1344,6 +1344,16 @@ async fn process_message(
                 "bluetooth: pair result"
             );
             if let Some(dash) = dashboard {
+                if result.success {
+                    dash.set_bluetooth_paired(
+                        &result.node_id,
+                        crate::http::state::BluetoothPairedStatus {
+                            mac: result.mac.clone(),
+                            name: result.name.clone(),
+                            connected: true,
+                        },
+                    );
+                }
                 dash.push_bluetooth_pair_result(result);
             }
             None
@@ -1361,6 +1371,41 @@ async fn process_message(
             );
             if let Some(dash) = dashboard {
                 dash.push_bluetooth_clear_cache_result(result);
+            }
+            None
+        }
+        MeshMessage::BluetoothUnpairResult(result) => {
+            info!(
+                node_id = %result.node_id,
+                mac = %result.mac,
+                success = result.success,
+                "bluetooth: unpair result"
+            );
+            if let Some(dash) = dashboard {
+                if result.success {
+                    dash.clear_bluetooth_paired(&result.node_id);
+                }
+                dash.push_bluetooth_unpair_result(result);
+            }
+            None
+        }
+        MeshMessage::BluetoothStatusUpdate(update) => {
+            info!(
+                node_id = %update.node_id,
+                mac = %update.mac,
+                connected = update.connected,
+                "bluetooth: status update"
+            );
+            if let Some(dash) = dashboard {
+                dash.set_bluetooth_paired(
+                    &update.node_id,
+                    crate::http::state::BluetoothPairedStatus {
+                        mac: update.mac.clone(),
+                        name: update.name.clone(),
+                        connected: update.connected,
+                    },
+                );
+                dash.push_bluetooth_status_update(update);
             }
             None
         }

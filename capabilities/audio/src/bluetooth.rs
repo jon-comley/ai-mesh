@@ -348,6 +348,22 @@ async fn resolve_name(mac: &str) -> Option<String> {
     output.lines().find_map(extract_name_field)
 }
 
+/// Extracts a `bluetoothctl info` "Connected: yes"/"Connected: no" line's
+/// value, if this is one — ANSI-stripped and prompt-redraw-trimmed exactly
+/// like `extract_name_field`. One-shot `info` output colorizes its yes/no
+/// fields the same as `Name:` (confirmed live: this is why `resolve_name`
+/// already strips ANSI), so matching the raw line — as `clear_cache()`
+/// used to — can silently never match "Connected: yes" even when the
+/// device genuinely is connected.
+fn extract_connected_field(line: &str) -> Option<bool> {
+    let stripped = strip_ansi(line);
+    match after_prompt_redraw(&stripped) {
+        "Connected: yes" => Some(true),
+        "Connected: no" => Some(false),
+        _ => None,
+    }
+}
+
 async fn resolve_sink_name(mac: &str) -> Option<String> {
     let needle = mac.replace(':', "_");
     let deadline = Instant::now() + SINK_POLL_TIMEOUT;
@@ -450,7 +466,7 @@ pub async fn clear_cache() -> Result<usize, String> {
             continue;
         };
         let (_, info) = run_oneshot(&["info", &mac], Duration::from_secs(3)).await;
-        if info.lines().any(|l| l.trim() == "Connected: yes") {
+        if info.lines().find_map(extract_connected_field) == Some(true) {
             continue; // never rip out the device someone's actively using
         }
         let (ok, output) = run_oneshot(&["remove", &mac], Duration::from_secs(5)).await;
@@ -461,6 +477,41 @@ pub async fn clear_cache() -> Result<usize, String> {
         }
     }
     Ok(cleared)
+}
+
+/// Disconnects and forgets one specific paired device (`bluetoothctl
+/// disconnect <mac>` then `remove <mac>`) — unlike `clear_cache()`, this
+/// targets exactly the MAC the user picks, including the one currently
+/// connected. `disconnect` failing (e.g. already disconnected, or the
+/// device is out of range) doesn't block the `remove` step; only
+/// `remove`'s outcome determines success.
+pub async fn unpair(mac: &str) -> Result<(), String> {
+    let _ = run_oneshot(&["disconnect", mac], Duration::from_secs(10)).await;
+    let (ok, output) = run_oneshot(&["remove", mac], Duration::from_secs(5)).await;
+    if ok {
+        Ok(())
+    } else {
+        // strip_ansi: this error reaches the dashboard as a toast message —
+        // bluetoothctl colorizes one-shot output generally (see
+        // extract_connected_field's doc comment), so an unstripped error
+        // could leak raw escape sequences into the UI.
+        Err(format!(
+            "bluetoothctl remove failed: {}",
+            strip_ansi(&output).trim()
+        ))
+    }
+}
+
+/// Checks `bluetoothctl info <mac>` for `Connected: yes` — used by the
+/// periodic status-polling loop in `lib.rs`, not the pair flow (which
+/// already gets its own connect/fail signal from `connect`'s exit status).
+pub async fn is_connected(mac: &str) -> bool {
+    let (ok, output) = run_oneshot(&["info", mac], Duration::from_secs(5)).await;
+    let connected = output.lines().find_map(extract_connected_field);
+    if !ok && connected.is_none() {
+        warn!(mac, output = %output.trim(), "bluetooth: info check failed while polling status");
+    }
+    connected.unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -628,6 +679,30 @@ mod tests {
     #[test]
     fn extract_name_field_ignores_unrelated_lines() {
         assert_eq!(extract_name_field("\tPaired: yes"), None);
+    }
+
+    #[test]
+    fn extract_connected_field_reads_plain_info_output() {
+        assert_eq!(extract_connected_field("\tConnected: yes"), Some(true));
+        assert_eq!(extract_connected_field("\tConnected: no"), Some(false));
+    }
+
+    #[test]
+    fn extract_connected_field_strips_ansi_colouring() {
+        // Real bluetoothctl behaviour: the yes/no value is colorized even
+        // in one-shot `info` output — a raw string match against
+        // "Connected: yes" silently never matches this, which is exactly
+        // how the live status loop and clear_cache() both under-detected
+        // an actually-connected device before this fix.
+        assert_eq!(
+            extract_connected_field("\tConnected: \u{1b}[0;92myes\u{1b}[0m"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn extract_connected_field_ignores_unrelated_lines() {
+        assert_eq!(extract_connected_field("\tPaired: yes"), None);
     }
 
     #[test]

@@ -7,6 +7,7 @@ import { xyToRgb, hslToXy } from '/static/colormath.js';
 import { buildSlider, buildColourWheel } from '/static/controls.js';
 import { buildLightControls, buildTempBar, dismissOpenLightControl } from '/static/lightcontrols.js';
 import { buildSensorCard, isSensorPinned, buildGroupSelect } from '/static/devicewidgets.js';
+import { getAvDevices } from '/static/devices.js';
 import {
   createRoom, deleteRoom, renameRoom, reorderRooms,
   addDeviceToRoom, removeDeviceFromRoom, reorderRoomDevices,
@@ -1152,7 +1153,14 @@ function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
   const tempReading = roomReadOnlyAll.find(d => d.temperature != null)?.temperature;
   const tempIsNotable = tempReading != null && houseAvgTemp != null
     && Math.abs(tempReading - houseAvgTemp) >= 2;
-  if (anyMotion || anyLowBattery || tempIsNotable) {
+  // Bluetooth speakers live in the AV-device model (GET /api/av-devices),
+  // room-assigned via a separate mechanism from the Zigbee room_devices
+  // join table this card otherwise reads from — cross-referenced here by
+  // room name rather than device_ids.
+  const roomBluetoothDevices = getAvDevices().filter(d =>
+    d.transport === 'bluetooth' && (d.rooms ?? []).some(r => r.room === room.name)
+  );
+  if (anyMotion || anyLowBattery || tempIsNotable || roomBluetoothDevices.length > 0) {
     const notableRow = document.createElement('div');
     notableRow.className = 'room-notable-row';
     if (tempIsNotable) {
@@ -1171,6 +1179,24 @@ function renderRoomCard(room, houseAvgTemp, isFloorplan = false) {
       const badge = document.createElement('span');
       badge.className = 'room-notable-badge room-notable-warn';
       badge.textContent = '🔋 low';
+      notableRow.appendChild(badge);
+    }
+    for (const d of roomBluetoothDevices) {
+      // `bluetooth_paired` is `undefined` until the node has actually
+      // reported a status (see DashboardState::bluetooth_paired_status) —
+      // treat "not yet known" as fine (no warning styling), distinct from
+      // a confirmed `connected: false`.
+      const connected = d.bluetooth_paired?.connected;
+      const badge = document.createElement('span');
+      badge.className = 'room-notable-badge' + (connected === false ? ' room-notable-warn' : '');
+      const name = d.bluetooth_paired?.name ?? d.name;
+      // "off / out of range" names both possibilities BlueZ can't tell
+      // apart, and reads as normal/expected — not an error — for a simply
+      // switched-off speaker.
+      badge.title = connected === false
+        ? `${name} is paired but not currently connected — off, or out of range`
+        : `${name} — this room's Bluetooth speaker`;
+      badge.textContent = connected === false ? `🔊 ${name} (off / out of range)` : `🔊 ${name}`;
       notableRow.appendChild(badge);
     }
     header.appendChild(notableRow);

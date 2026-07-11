@@ -87,6 +87,8 @@ const handlers = {
   BluetoothDeviceFound: evt => devices.handleBluetoothDeviceFound(evt),
   BluetoothPairResult: evt => devices.handleBluetoothPairResult(evt),
   BluetoothClearCacheResult: evt => devices.handleBluetoothClearCacheResult(evt),
+  BluetoothUnpairResult: evt => devices.handleBluetoothUnpairResult(evt),
+  BluetoothStatusUpdate: evt => devices.handleBluetoothStatusUpdate(evt),
   SensorUpdate: evt => {
     rooms.notifySensors(evt.sensors);
     devices.refresh();

@@ -2575,6 +2575,18 @@ body {
   opacity: 0.75;
 }
 
+/* Persisted paired-device row (survives refresh, unlike the scan panel) */
+.bt-paired-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.bt-paired-dot { line-height: 1; }
+.bt-paired-connected { color: var(--accent); }
+.bt-paired-unavailable { color: var(--text-muted); }
+.bt-paired-name { color: var(--text-muted); }
+
 .switch-bindings-panel {
   flex-basis: 100%;
   margin-top: 8px;

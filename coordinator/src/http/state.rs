@@ -171,6 +171,25 @@ pub enum DashboardEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The outcome of a dashboard-initiated unpair request.
+    BluetoothUnpairResult {
+        node_id: String,
+        mac: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// A live connected/unavailable change for a node's currently-paired
+    /// Bluetooth device — pushed only on change, not a heartbeat. Not
+    /// replayed on connect: `GET /api/av-devices`' `bluetooth_paired` field
+    /// (backed by `DashboardState::bluetooth_paired_status`) is the
+    /// source of truth a freshly-connected dashboard reads instead.
+    BluetoothStatusUpdate {
+        node_id: String,
+        mac: String,
+        name: String,
+        connected: bool,
+    },
     /// One completed voice-assistant exchange (spoken transcript in, intent
     /// response out). Transient, broadcast-only — the chat window renders it
     /// when its "show voice commands" preference is on; a future TTS/speaker
@@ -477,6 +496,22 @@ pub struct DashboardState {
     /// every revert-to-general rather than re-querying the Met API each
     /// time a specific search goes idle.
     general_art_batch: Mutex<Option<Vec<ArtRotationItem>>>,
+    /// Currently-paired Bluetooth device per node, keyed by node_id — the
+    /// live source `GET /api/av-devices` reads for its `bluetooth_paired`
+    /// field. Set on a successful pair or `BluetoothStatusUpdate`, cleared
+    /// on a successful unpair. In-memory only: a coordinator restart loses
+    /// it until the next pair or status change (see
+    /// `capability_audio::bluetooth_status_loop`'s doc comment).
+    bluetooth_status: Mutex<HashMap<String, BluetoothPairedStatus>>,
+}
+
+/// A node's currently-paired Bluetooth device and whether it's actually
+/// connected right now. See `DashboardState::bluetooth_paired_status`.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct BluetoothPairedStatus {
+    pub mac: String,
+    pub name: String,
+    pub connected: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -542,6 +577,7 @@ impl DashboardState {
             art_snapshot: Mutex::new(None),
             art_rotation: Mutex::new(None),
             general_art_batch: Mutex::new(None),
+            bluetooth_status: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1230,6 +1266,54 @@ impl DashboardState {
             cleared: result.cleared,
             error: result.error,
         });
+    }
+
+    /// Broadcast the outcome of a dashboard-initiated Bluetooth unpair.
+    pub fn push_bluetooth_unpair_result(&self, result: shared::BluetoothUnpairResult) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let _ = self.tx.send(DashboardEvent::BluetoothUnpairResult {
+            node_id: result.node_id,
+            mac: result.mac,
+            success: result.success,
+            error: result.error,
+        });
+    }
+
+    /// Broadcast a live connected/unavailable change for a node's paired
+    /// Bluetooth device.
+    pub fn push_bluetooth_status_update(&self, update: shared::BluetoothStatusUpdate) {
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
+        let _ = self.tx.send(DashboardEvent::BluetoothStatusUpdate {
+            node_id: update.node_id,
+            mac: update.mac,
+            name: update.name,
+            connected: update.connected,
+        });
+    }
+
+    /// Records this node's currently-paired Bluetooth device — called on a
+    /// successful pair and on every `BluetoothStatusUpdate`.
+    pub fn set_bluetooth_paired(&self, node_id: &str, status: BluetoothPairedStatus) {
+        self.bluetooth_status
+            .lock()
+            .unwrap()
+            .insert(node_id.to_string(), status);
+    }
+
+    /// Forgets this node's paired-device status — called on a successful
+    /// unpair.
+    pub fn clear_bluetooth_paired(&self, node_id: &str) {
+        self.bluetooth_status.lock().unwrap().remove(node_id);
+    }
+
+    /// This node's currently-paired Bluetooth device, if any — read by
+    /// `GET /api/av-devices` for its bluetooth-transport rows.
+    pub fn bluetooth_paired_status(&self, node_id: &str) -> Option<BluetoothPairedStatus> {
+        self.bluetooth_status.lock().unwrap().get(node_id).cloned()
     }
 
     /// Broadcast the current solar position to all connected clients.
