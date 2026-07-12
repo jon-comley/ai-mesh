@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install or re-install the ai-mesh-agent systemd service on a Linux node.
 # Assumes agent binary is already uploaded to ~/agent on the remote machine.
-# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backends] [audio_alsa_device] [art_matte_percent] [art_frame_thickness] [spotify_device_name]"
+# Run via SSH: ssh user@host "sudo bash /tmp/install-node.sh <role> <user> [mqtt_host] [mqtt_port] [node_features] [voice_device_host] [voice_stt_remote] [voice_tts_base_url] [audio_backends] [audio_alsa_device] [art_matte_percent] [art_frame_thickness] [spotify_device_name] [art_side_margin_boost] [art_glaze_percent] [art_brightness_percent] [art_border_glaze_percent]"
 # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
 # (Set COORDINATOR_IP in the agent's environment to override discovery for debugging.)
 set -e
@@ -19,6 +19,10 @@ AUDIO_ALSA_DEVICE="${10:-}"
 ART_MATTE_PERCENT="${11:-}"
 ART_FRAME_THICKNESS="${12:-}"
 SPOTIFY_DEVICE_NAME="${13:-}"
+ART_SIDE_MARGIN_BOOST="${14:-}"
+ART_GLAZE_PERCENT="${15:-}"
+ART_BRIGHTNESS_PERCENT="${16:-}"
+ART_BORDER_GLAZE_PERCENT="${17:-}"
 
 if [ -z "$AGENT_USER" ]; then
     echo "Usage: $0 <role> <user> [mqtt_host] [mqtt_port] [node_features]"
@@ -413,6 +417,22 @@ if has_feature art; then
     if [ -n "$ART_FRAME_THICKNESS" ]; then
         ART_ENV_BLOCK="${ART_ENV_BLOCK}
 Environment=ART_FRAME_THICKNESS=${ART_FRAME_THICKNESS}"
+    fi
+    if [ -n "$ART_SIDE_MARGIN_BOOST" ]; then
+        ART_ENV_BLOCK="${ART_ENV_BLOCK}
+Environment=ART_SIDE_MARGIN_BOOST=${ART_SIDE_MARGIN_BOOST}"
+    fi
+    if [ -n "$ART_GLAZE_PERCENT" ]; then
+        ART_ENV_BLOCK="${ART_ENV_BLOCK}
+Environment=ART_GLAZE_PERCENT=${ART_GLAZE_PERCENT}"
+    fi
+    if [ -n "$ART_BRIGHTNESS_PERCENT" ]; then
+        ART_ENV_BLOCK="${ART_ENV_BLOCK}
+Environment=ART_BRIGHTNESS_PERCENT=${ART_BRIGHTNESS_PERCENT}"
+    fi
+    if [ -n "$ART_BORDER_GLAZE_PERCENT" ]; then
+        ART_ENV_BLOCK="${ART_ENV_BLOCK}
+Environment=ART_BORDER_GLAZE_PERCENT=${ART_BORDER_GLAZE_PERCENT}"
     fi
 fi
 
