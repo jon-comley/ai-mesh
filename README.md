@@ -109,7 +109,7 @@ The page itself loads with no auth; the first WebSocket connection prompts a nat
 
 > **If `pi1:9001` won't load:** the `pi1` and `100.x` addresses only resolve/route when that device is connected to the tailnet. Check that **Tailscale is on** (and the device shows online in `tailscale status` on pi1). On the home LAN you can always fall back to the direct `http://10.0.0.10:9001/`.
 
-A Progressive Web App — open in **Safari** on iOS/iPadOS (Chrome's iOS "Add to Home Screen" doesn't install a standalone PWA) and use Share → "Add to Home Screen" to install it as an app icon. Bookmark the remote URL for one-tap access from anywhere (cellular, public WiFi, etc.). Tabs: Nodes, Health, Models, Home, Devices, Security, Errors, Chat, REAPER, Online AI. Real-time data via WebSocket; the full Home (rooms, effects, scenes, device control) and Devices (pairing, inventory) tabs are live.
+A Progressive Web App — open in **Safari** on iOS/iPadOS (Chrome's iOS "Add to Home Screen" doesn't install a standalone PWA) and use Share → "Add to Home Screen" to install it as an app icon. Bookmark the remote URL for one-tap access from anywhere (cellular, public WiFi, etc.). Tabs: Nodes, Health, Models, Home, Devices, Security, Errors, Chat, REAPER, Online AI, Hunts. Real-time data via WebSocket; the full Home (rooms, effects, scenes, device control) and Devices (pairing, inventory) tabs are live.
 
 ---
 

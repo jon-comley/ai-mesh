@@ -50,6 +50,7 @@ const LAYOUT_JS: &str = include_str!("static/layout.js");
 const PREFS_JS: &str = include_str!("static/prefs.js");
 const REAPER_JS: &str = include_str!("static/reaper.js");
 const GATEWAY_JS: &str = include_str!("static/gateway.js");
+const EBAY_JS: &str = include_str!("static/ebay.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
@@ -211,6 +212,25 @@ pub fn router(
         .route("/api/art/next", post(api::art::next_art))
         .route("/api/art/current", get(api::art::get_art_current))
         .route("/api/art/general", post(api::art::general_art))
+        .route("/api/ebay/analyze", post(api::ebay::analyze))
+        .route(
+            "/api/ebay/hunts",
+            get(api::ebay::list_hunts).post(api::ebay::create_hunt),
+        )
+        .route(
+            "/api/ebay/hunts/{id}",
+            patch(api::ebay::update_hunt).delete(api::ebay::delete_hunt),
+        )
+        .route("/api/ebay/hunts/{id}/run-now", post(api::ebay::run_now))
+        .route("/api/ebay/finds", get(api::ebay::list_finds))
+        .route(
+            "/api/ebay/finds/{id}/reviewed",
+            post(api::ebay::mark_reviewed),
+        )
+        .route(
+            "/api/ebay/config",
+            get(api::ebay::get_config).post(api::ebay::set_config),
+        )
         .route(
             "/api/switch-bindings",
             get(api::switch_bindings::list_switch_bindings)
@@ -262,6 +282,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/prefs.js", PREFS_JS, JS),
         ("/static/reaper.js", REAPER_JS, JS),
         ("/static/gateway.js", GATEWAY_JS, JS),
+        ("/static/ebay.js", EBAY_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
     ];
@@ -281,6 +302,14 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         );
     }
     r
+}
+
+/// Re-arm every enabled eBay hunt's background search timer from persisted
+/// rows. Called once at coordinator startup, alongside the other startup
+/// spawns — see `api::ebay::rearm_all_hunts`'s doc comment for why (unlike
+/// the art rotation) hunts must survive a restart.
+pub fn rearm_ebay_hunts(dashboard: Arc<DashboardState>, registry: Arc<Mutex<Registry>>) {
+    api::ebay::rearm_all_hunts(dashboard, registry);
 }
 
 pub async fn start(

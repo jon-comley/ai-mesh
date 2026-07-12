@@ -7,6 +7,7 @@ use shared::messages::{
     SensorReport,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
@@ -241,6 +242,15 @@ pub enum DashboardEvent {
         last_command: Option<(String, bool, String)>,
     },
     GatewayUpdate(GatewaySnapshot),
+    /// A new listing surfaced for a hunt (see `plans/ebay-bargain-finder.md`).
+    /// Not replayed on connect — the Hunts tab loads its initial feed via
+    /// `GET /api/ebay/finds`, matching how `VoiceExchange` relies on a
+    /// separate snapshot fetch rather than WS replay.
+    EbayFind {
+        hunt_id: String,
+        hunt_name: String,
+        find: crate::registry::EbayFindRecord,
+    },
 }
 
 /// Combined gateway config (masked) + cumulative stats. Served by
@@ -519,6 +529,12 @@ pub struct DashboardState {
     /// it until the next pair or status change (see
     /// `capability_audio::bluetooth_status_loop`'s doc comment).
     bluetooth_status: Mutex<HashMap<String, BluetoothPairedStatus>>,
+    /// Per-hunt timer generation (see `plans/ebay-bargain-finder.md`), keyed
+    /// by hunt id. Bumped on any create/update/delete so a stale background
+    /// timer loop notices at its next wake and exits instead of racing a
+    /// freshly (re-)spawned one — same self-cancel trick as `art_rotation`'s
+    /// single generation counter, but keyed since hunts run concurrently.
+    ebay_hunt_generations: Mutex<HashMap<String, Arc<AtomicU64>>>,
 }
 
 /// A node's currently-paired Bluetooth device and whether it's actually
@@ -604,6 +620,7 @@ impl DashboardState {
             art_rotation: Mutex::new(None),
             general_art_batch: Mutex::new(None),
             bluetooth_status: Mutex::new(HashMap::new()),
+            ebay_hunt_generations: Mutex::new(HashMap::new()),
         })
     }
 
@@ -637,6 +654,59 @@ impl DashboardState {
         if self.tx.receiver_count() > 0 {
             let _ = self.tx.send(DashboardEvent::GatewayUpdate(snapshot));
         }
+    }
+
+    /// Broadcast a new hunt find to connected dashboards (no-op if none).
+    pub fn push_ebay_find(
+        &self,
+        hunt_id: &str,
+        hunt_name: &str,
+        find: crate::registry::EbayFindRecord,
+    ) {
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::EbayFind {
+                hunt_id: hunt_id.to_owned(),
+                hunt_name: hunt_name.to_owned(),
+                find,
+            });
+        }
+    }
+
+    /// The shared generation counter for `hunt_id`'s background timer,
+    /// creating one (starting at 0) if this is the first time it's asked
+    /// for. A running timer loop captures the current value before each
+    /// sleep and checks it again on waking; if it no longer matches, some
+    /// other call bumped it (see `bump_ebay_hunt_generation`) and the loop
+    /// exits rather than running a stale cycle.
+    pub fn ebay_hunt_generation(&self, hunt_id: &str) -> Arc<AtomicU64> {
+        self.ebay_hunt_generations
+            .lock()
+            .unwrap()
+            .entry(hunt_id.to_owned())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+
+    /// Invalidate `hunt_id`'s current background timer (if any) by bumping
+    /// its generation counter. Call on every update/delete/re-arm so an
+    /// outstanding sleep from a superseded timer becomes a no-op instead of
+    /// running with stale timeslots/terms. Returns the new generation.
+    pub fn bump_ebay_hunt_generation(&self, hunt_id: &str) -> u64 {
+        self.ebay_hunt_generation(hunt_id)
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    /// Drop `hunt_id`'s generation counter entirely — call on hunt deletion
+    /// so this map doesn't grow by one entry for every hunt ever created
+    /// over a coordinator's lifetime. Safe even if a timer loop is mid-cycle:
+    /// deletion is independently detected on that loop's next wake via
+    /// `Registry::get_hunt` returning `None`, and a fresh lookup after
+    /// removal starts back at generation 0, which a real in-flight loop's
+    /// captured generation (always >= 1, see `bump_ebay_hunt_generation`)
+    /// can never match — so it's still correctly treated as stale.
+    pub fn remove_ebay_hunt_generation(&self, hunt_id: &str) {
+        self.ebay_hunt_generations.lock().unwrap().remove(hunt_id);
     }
 
     /// Broadcast one completed voice exchange to connected dashboards
@@ -3318,5 +3388,50 @@ mod tests {
         let state = make_state();
         state.set_bluetooth_volume("pi2", 45);
         assert!(state.bluetooth_paired_status("pi2").is_none());
+    }
+
+    // ── ebay_hunt_generation / bump / remove ─────────────────────────────────
+
+    #[test]
+    fn bump_ebay_hunt_generation_returns_the_new_value_not_the_old_one() {
+        let state = make_state();
+        assert_eq!(state.bump_ebay_hunt_generation("h1"), 1);
+        assert_eq!(state.bump_ebay_hunt_generation("h1"), 2);
+    }
+
+    #[test]
+    fn ebay_hunt_generation_is_independent_per_hunt() {
+        let state = make_state();
+        state.bump_ebay_hunt_generation("h1");
+        state.bump_ebay_hunt_generation("h1");
+        assert_eq!(
+            state
+                .ebay_hunt_generation("h1")
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            state
+                .ebay_hunt_generation("h2")
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[test]
+    fn remove_ebay_hunt_generation_resets_a_fresh_lookup_to_zero() {
+        let state = make_state();
+        state.bump_ebay_hunt_generation("h1");
+        state.bump_ebay_hunt_generation("h1");
+        state.remove_ebay_hunt_generation("h1");
+        // A stale timer's captured generation (>= 1) can never match a
+        // freshly re-created counter's 0 — the leak fix can't silently
+        // reintroduce a false "still current" match.
+        assert_eq!(
+            state
+                .ebay_hunt_generation("h1")
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 }

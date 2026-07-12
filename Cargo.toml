@@ -11,6 +11,7 @@ members = [
     "capabilities/voice",
     "capabilities/audio",
     "capabilities/music",
+    "ebay",
     "agent",
     "coordinator",
     "cli",
