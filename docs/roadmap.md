@@ -2,6 +2,34 @@
 
 ---
 
+## Hunts / eBay Bargain Finder — deployed, awaiting eBay developer access to fully test (2026-07-12)
+
+`plans/ebay-bargain-finder.md` is fully implemented and deployed to pi1:
+the `ebay` crate, registry persistence, coordinator HTTP API, background
+per-hunt timer with startup re-arm, and the Hunts dashboard tab. Full
+workspace test suite and clippy are clean; live-verified against the running
+coordinator (config round-trip, hunt CRUD, `run-now`, `analyze` validation,
+static assets/tab) and the eBay OAuth call path was genuinely exercised
+(clean auth failure with placeholder credentials, handled gracefully).
+
+**⚠ Not yet exercised with real eBay data — blocked on eBay developer API
+access.** A production Browse API keyset needs registering at
+developer.ebay.com (walkthrough in `docs/ebay-hunts.md`); sandbox data is
+fake and useless for real bargain-hunting, so this can't be worked around
+with a placeholder keyset the way Music's Spotify Premium requirement can't
+either. Once access is granted:
+1. Paste real client_id/client_secret into the Hunts tab's settings block
+   (no deploy step — same operational model as the Online AI tab's key).
+2. `POST /api/ebay/analyze` against a real listing URL, confirm term
+   suggestions look sane.
+3. Create a hunt, `run-now`, confirm real listings come back and the ticker
+   + (if an ntfy topic is set) phone push both fire.
+4. Let a hunt run unattended through a scheduled timeslot to confirm the
+   background timer's real-world timing, not just the unit-tested pure
+   scheduling logic.
+
+---
+
 ## Music / Spotify — code-complete, NOT yet live-tested (2026-07-12)
 
 All build phases of `plans/spotify-music.md` are implemented and committed
