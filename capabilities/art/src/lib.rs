@@ -113,9 +113,30 @@ struct MatteConfig {
     canvas_w: u32,
     canvas_h: u32,
     matte_percent: f32,
+    /// Extra width added to the side (left/right) margins on top of the
+    /// base matte, as a percentage of the base side margin — visually, an
+    /// even-all-round mat still reads as slightly narrower at the sides
+    /// than top/bottom on a real TV, so this nudges it back out. 0 = sides
+    /// match top/bottom exactly.
+    side_margin_boost_percent: f32,
     matte_rgb: [u8; 3],
     frame_rgb: [u8; 3],
     frame_px: u32,
+    /// Strength (0-100) of the translucent white glaze blended over the
+    /// artwork itself — see `apply_glaze`. 0 = off, matching today's plain
+    /// display.
+    glaze_percent: f32,
+    glaze_rgb: [u8; 3],
+    /// Strength (0-100) of the same translucent glaze, applied separately to
+    /// the mat/frame border instead of the artwork — lets the two be washed
+    /// out by different amounts, since a mat and a photo don't necessarily
+    /// want the same glaze strength. Shares `glaze_rgb` as its colour.
+    border_glaze_percent: f32,
+    /// Overall brightness multiplier (percent) applied to the *entire*
+    /// composed frame — artwork, mat, and border line alike — as the very
+    /// last step before encoding. 100 = unchanged; below 100 dims
+    /// everything uniformly, above 100 brightens it.
+    brightness_percent: f32,
 }
 
 impl MatteConfig {
@@ -124,21 +145,219 @@ impl MatteConfig {
             canvas_w: env_u32("ART_CANVAS_WIDTH", 1920),
             canvas_h: env_u32("ART_CANVAS_HEIGHT", 1080),
             matte_percent: env_f32("ART_MATTE_PERCENT", 7.0),
+            side_margin_boost_percent: env_f32("ART_SIDE_MARGIN_BOOST", 0.0),
             // A warm, off-white museum-mat colour by default — not stark
             // white, which would look harsher next to most artwork than a
             // real paper mat.
             matte_rgb: env_rgb("ART_MATTE_COLOR", [0xED, 0xE7, 0xDA]),
             frame_rgb: env_rgb("ART_FRAME_COLOR", [0x2B, 0x2B, 0x2B]),
             frame_px: env_u32("ART_FRAME_THICKNESS", 3),
+            glaze_percent: env_f32("ART_GLAZE_PERCENT", 0.0),
+            glaze_rgb: env_rgb("ART_GLAZE_COLOR", [0xFF, 0xFF, 0xFF]),
+            border_glaze_percent: env_f32("ART_BORDER_GLAZE_PERCENT", 0.0),
+            brightness_percent: env_f32("ART_BRIGHTNESS_PERCENT", 100.0),
+        }
+    }
+}
+
+/// Normalized (0..1 within their own axis, scaled by that edge's own border
+/// thickness) distance from `(x,y)` to each of the canvas's four edges —
+/// real frame moulding is four straight strips cut at 45° and joined at
+/// each corner, and these four distances are what both the mitre seam and
+/// the bevel gradient are built from.
+fn border_edge_fracs(
+    x: u32,
+    y: u32,
+    canvas_w: u32,
+    canvas_h: u32,
+    bw_x: u32,
+    bw_y: u32,
+) -> (f32, f32, f32, f32) {
+    let left = x as f32 / bw_x.max(1) as f32;
+    let right = canvas_w.saturating_sub(1).saturating_sub(x) as f32 / bw_x.max(1) as f32;
+    let top = y as f32 / bw_y.max(1) as f32;
+    let bottom = canvas_h.saturating_sub(1).saturating_sub(y) as f32 / bw_y.max(1) as f32;
+    (top, bottom, left, right)
+}
+
+/// How "lit" (as opposed to shadowed) a border pixel is, continuously from
+/// 0 (fully shadowed) to 1 (fully lit). Finds the two *actually nearest*
+/// edges (not all four — comparing e.g. a far-off top distance against a
+/// close left one would leak vertical position into a purely horizontal
+/// reading) and, only when they disagree on lit/shadow (a real corner),
+/// blends between them over `BEVEL_TRANSITION`; beyond that gap the pixel
+/// is solidly whichever of the two it's actually nearest to, exactly
+/// matching the old discrete wedge classification away from every corner.
+const BEVEL_TRANSITION: f32 = 0.15;
+
+fn border_lit_amount(top: f32, bottom: f32, left: f32, right: f32) -> f32 {
+    let mut candidates = [(top, true), (bottom, false), (left, true), (right, false)];
+    candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let (nearest, nearest_lit) = candidates[0];
+    let (second, second_lit) = candidates[1];
+    if nearest_lit == second_lit {
+        return if nearest_lit { 1.0 } else { 0.0 };
+    }
+    // The two nearest edges disagree — a genuine corner. Blend from 0.5
+    // (right at the tie) up to fully `nearest_lit`'s value as the gap grows
+    // to `BEVEL_TRANSITION`.
+    let t = ((second - nearest) / BEVEL_TRANSITION).clamp(0.0, 1.0);
+    let nearest_weight = 0.5 + 0.5 * t;
+    if nearest_lit {
+        nearest_weight
+    } else {
+        1.0 - nearest_weight
+    }
+}
+
+/// Strength of the bevel effect — how far each channel moves toward white
+/// (fully lit) or black (fully shadowed), as a fraction of its remaining
+/// headroom. Proportional rather than a flat per-channel delta so a channel
+/// already near white/black eases smoothly toward the target instead of
+/// clipping flat against it (a flat +18 add, for instance, already pins the
+/// default matte colour's red channel — 237 — to the 255 ceiling).
+const BEVEL_STRENGTH: f32 = 0.14;
+/// How close the nearest and second-nearest edge distances (from
+/// `border_edge_fracs`, normalized 0..1) need to be to count as sitting on a
+/// mitre seam rather than solidly inside one wedge.
+const SEAM_EPSILON: f32 = 0.035;
+/// Mitre seam colour — a crisp near-black line reads as a real cut
+/// regardless of the configured frame/matte colours.
+const SEAM_RGB: [u8; 3] = [0x15, 0x15, 0x15];
+
+/// Blend `rgb` toward white and toward black by `BEVEL_STRENGTH` of its
+/// remaining headroom each way, then mix those two results by `lit_amount`
+/// (1 = fully lit, 0 = fully shadowed, anything between blends smoothly
+/// rather than flipping abruptly at a wedge boundary). Always strictly
+/// between the original colour and whichever target it's blending toward,
+/// so it can never clip the way a flat additive/subtractive delta can.
+fn bevel_shade(rgb: [u8; 3], lit_amount: f32) -> [u8; 3] {
+    let mut lit = rgb;
+    let mut shadow = rgb;
+    for (lit_channel, shadow_channel) in lit.iter_mut().zip(shadow.iter_mut()) {
+        let current = *lit_channel as f32;
+        *lit_channel = (current + (255.0 - current) * BEVEL_STRENGTH).round() as u8;
+        *shadow_channel = (current - current * BEVEL_STRENGTH).round() as u8;
+    }
+    let mut out = [0u8; 3];
+    for (out_channel, (lit_channel, shadow_channel)) in
+        out.iter_mut().zip(lit.iter().zip(shadow.iter()))
+    {
+        *out_channel = (*lit_channel as f32 * lit_amount
+            + *shadow_channel as f32 * (1.0 - lit_amount))
+            .round() as u8;
+    }
+    out
+}
+
+/// Blend a translucent white (or `glaze_rgb`) wash over every pixel of the
+/// artwork itself — the soft, matte "glare"/veil look Samsung's own Frame TV
+/// applies over displayed art, distinct from (and orthogonal to) the mat
+/// border: this touches only the picture's own pixels in place, so it never
+/// changes the artwork's size the way widening the mat does.
+fn apply_glaze(img: &mut RgbImage, percent: f32, glaze_rgb: [u8; 3]) {
+    if percent <= 0.0 {
+        return;
+    }
+    let alpha = (percent / 100.0).clamp(0.0, 1.0);
+    for pixel in img.pixels_mut() {
+        for (channel, glaze_channel) in pixel.0.iter_mut().zip(glaze_rgb) {
+            *channel =
+                (*channel as f32 * (1.0 - alpha) + glaze_channel as f32 * alpha).round() as u8;
+        }
+    }
+}
+
+/// Same wash as `apply_glaze`, but over the mat/frame border of `canvas`
+/// instead of the artwork — every pixel outside the artwork rect
+/// `(ix0,iy0)..(ix1,iy1)` gets blended toward `glaze_rgb`, independent of the
+/// artwork's own glaze strength.
+fn apply_border_glaze(
+    canvas: &mut RgbImage,
+    ix0: u32,
+    iy0: u32,
+    ix1: u32,
+    iy1: u32,
+    percent: f32,
+    glaze_rgb: [u8; 3],
+) {
+    if percent <= 0.0 {
+        return;
+    }
+    let alpha = (percent / 100.0).clamp(0.0, 1.0);
+    let (cw, ch) = canvas.dimensions();
+    for y in 0..ch {
+        for x in 0..cw {
+            if x >= ix0 && x < ix1 && y >= iy0 && y < iy1 {
+                continue;
+            }
+            let mut blended = canvas.get_pixel(x, y).0;
+            for (channel, glaze_channel) in blended.iter_mut().zip(glaze_rgb) {
+                *channel =
+                    (*channel as f32 * (1.0 - alpha) + glaze_channel as f32 * alpha).round() as u8;
+            }
+            canvas.put_pixel(x, y, Rgb(blended));
+        }
+    }
+}
+
+/// Scale every channel of every pixel in the fully-composed frame by
+/// `percent` — applied last, over artwork, mat, and frame border alike, so
+/// dimming the display dims the whole thing uniformly rather than needing a
+/// separate darkening pass per region.
+fn apply_brightness(canvas: &mut RgbImage, percent: f32) {
+    if (percent - 100.0).abs() < f32::EPSILON {
+        return;
+    }
+    let factor = (percent / 100.0).max(0.0);
+    for pixel in canvas.pixels_mut() {
+        for channel in pixel.0.iter_mut() {
+            *channel = (*channel as f32 * factor).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+/// Bevel-shade (lit top/left, shadowed bottom/right — the standard trick for
+/// reading a flat 2D border as a physically moulded 3D frame) and draw the
+/// mitre seam lines, over every already-painted border pixel of `canvas`
+/// outside the artwork rect `(ix0,iy0)..(ix1,iy1)` (left alone here; the
+/// artwork gets overlaid on top afterwards regardless).
+fn apply_bevel_and_seams(
+    canvas: &mut RgbImage,
+    ix0: u32,
+    iy0: u32,
+    ix1: u32,
+    iy1: u32,
+    bw_x: u32,
+    bw_y: u32,
+) {
+    let (cw, ch) = canvas.dimensions();
+    for y in 0..ch {
+        for x in 0..cw {
+            if x >= ix0 && x < ix1 && y >= iy0 && y < iy1 {
+                continue;
+            }
+            let (top, bottom, left, right) = border_edge_fracs(x, y, cw, ch, bw_x, bw_y);
+            let mut sorted = [top, bottom, left, right];
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let shaded = if sorted[1] - sorted[0] < SEAM_EPSILON {
+                SEAM_RGB
+            } else {
+                let lit_amount = border_lit_amount(top, bottom, left, right);
+                bevel_shade(canvas.get_pixel(x, y).0, lit_amount)
+            };
+            canvas.put_pixel(x, y, Rgb(shaded));
         }
     }
 }
 
 /// Decode `bytes`, composite onto a matte-coloured canvas at the panel's
-/// native resolution (fit-and-centre, preserving aspect ratio — a "contain"
-/// fit, never cropping the artwork), draw a thin frame line at its edge, and
-/// re-encode as JPEG. CPU-bound and synchronous by design — the caller runs
-/// this via `spawn_blocking` rather than blocking the async runtime.
+/// native resolution (stretched to exactly fill the padded inner rectangle —
+/// deliberately not aspect-preserving, so the matte border comes out even on
+/// all four sides regardless of the source image's own aspect ratio), draw a
+/// thin frame line at its edge, and re-encode as JPEG. CPU-bound and
+/// synchronous by design — the caller runs this via `spawn_blocking` rather
+/// than blocking the async runtime.
 fn compose_matte(bytes: &[u8], config: &MatteConfig) -> Result<Vec<u8>, String> {
     let source =
         image::load_from_memory(bytes).map_err(|e| format!("could not decode image: {e}"))?;
@@ -150,18 +369,22 @@ fn compose_matte(bytes: &[u8], config: &MatteConfig) -> Result<Vec<u8>, String> 
 
     let mut canvas = RgbImage::from_pixel(config.canvas_w, config.canvas_h, Rgb(config.matte_rgb));
 
-    let pad_x = ((config.canvas_w as f32) * config.matte_percent / 100.0) as u32;
-    let pad_y = ((config.canvas_h as f32) * config.matte_percent / 100.0) as u32;
-    let inner_w = config.canvas_w.saturating_sub(pad_x * 2).max(1);
-    let inner_h = config.canvas_h.saturating_sub(pad_y * 2).max(1);
+    // A single pixel padding (derived from the wider dimension) applied to
+    // both axes — a real picture-frame mat is an even width all the way
+    // round, not a percentage of whichever axis happens to be shorter, which
+    // on a 16:9 canvas would make the top/bottom mat visibly thinner than
+    // the sides.
+    let pad = ((config.canvas_w as f32) * config.matte_percent / 100.0) as u32;
+    let pad_x = (pad as f32 * (1.0 + config.side_margin_boost_percent / 100.0)) as u32;
+    let pad_y = pad;
+    let fit_w = config.canvas_w.saturating_sub(pad_x * 2).max(1);
+    let fit_h = config.canvas_h.saturating_sub(pad_y * 2).max(1);
 
-    let scale = (inner_w as f32 / sw as f32).min(inner_h as f32 / sh as f32);
-    let fit_w = ((sw as f32) * scale).round().max(1.0) as u32;
-    let fit_h = ((sh as f32) * scale).round().max(1.0) as u32;
-    let resized = imageops::resize(&source_rgb, fit_w, fit_h, imageops::FilterType::Lanczos3);
+    let mut resized = imageops::resize(&source_rgb, fit_w, fit_h, imageops::FilterType::Lanczos3);
+    apply_glaze(&mut resized, config.glaze_percent, config.glaze_rgb);
 
-    let offset_x = pad_x + inner_w.saturating_sub(fit_w) / 2;
-    let offset_y = pad_y + inner_h.saturating_sub(fit_h) / 2;
+    let offset_x = pad_x;
+    let offset_y = pad_y;
 
     draw_border(
         &mut canvas,
@@ -172,12 +395,31 @@ fn compose_matte(bytes: &[u8], config: &MatteConfig) -> Result<Vec<u8>, String> 
         config.frame_px,
         config.frame_rgb,
     );
+    apply_border_glaze(
+        &mut canvas,
+        offset_x,
+        offset_y,
+        offset_x + fit_w,
+        offset_y + fit_h,
+        config.border_glaze_percent,
+        config.glaze_rgb,
+    );
+    apply_bevel_and_seams(
+        &mut canvas,
+        offset_x,
+        offset_y,
+        offset_x + fit_w,
+        offset_y + fit_h,
+        pad_x + config.frame_px,
+        pad_y + config.frame_px,
+    );
     imageops::overlay(
         &mut canvas,
         &resized,
         i64::from(offset_x),
         i64::from(offset_y),
     );
+    apply_brightness(&mut canvas, config.brightness_percent);
 
     let mut out = Vec::new();
     image::DynamicImage::ImageRgb8(canvas)
@@ -728,9 +970,14 @@ mod tests {
             canvas_w: 200,
             canvas_h: 120,
             matte_percent: 10.0,
+            side_margin_boost_percent: 0.0,
             matte_rgb: [0xED, 0xE7, 0xDA],
             frame_rgb: [0x2B, 0x2B, 0x2B],
             frame_px: 3,
+            glaze_percent: 0.0,
+            glaze_rgb: [0xFF, 0xFF, 0xFF],
+            border_glaze_percent: 0.0,
+            brightness_percent: 100.0,
         }
     }
 
@@ -744,28 +991,105 @@ mod tests {
     }
 
     #[test]
-    fn compose_matte_corner_pixel_is_matte_colour() {
-        // A source image scaled to fit inside the padded area should never
-        // reach all the way to the canvas corner — the corner must still be
-        // the matte colour, not part of the source image or its frame line.
-        let src = tiny_test_jpeg(80, 40);
-        let config = small_config();
-        let out = compose_matte(&src, &config).unwrap();
-        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+    fn bevel_shade_never_clips_even_near_the_ceiling() {
+        // The default matte colour's red channel (237) plus a flat +18
+        // delta used to pin straight to 255, making the lit wedge
+        // indistinguishable from an even brighter matte. The proportional
+        // blend should still move a mid-high channel upward, but a channel
+        // already right at the ceiling must stay strictly below 255 rather
+        // than clipping flat against it.
+        let shaded = bevel_shade([237, 200, 254], 1.0);
         assert!(
-            approx_eq_rgb(decoded.get_pixel(0, 0).0, config.matte_rgb, 4),
-            "corner pixel {:?} should be close to matte colour {:?} (JPEG re-encode allows small drift)",
-            decoded.get_pixel(0, 0).0,
-            config.matte_rgb
+            shaded[0] > 237 && shaded[0] < 255,
+            "mid-high channel should move toward white without clipping: {shaded:?}"
+        );
+        assert!(shaded[1] > 200 && shaded[1] < 255);
+        assert!(
+            shaded[2] < 255,
+            "near-ceiling channel should stay below 255: {shaded:?}"
         );
     }
 
     #[test]
-    fn compose_matte_preserves_source_aspect_ratio() {
-        // A square source in a non-square canvas must not get stretched —
-        // verify by checking the fitted region is itself square-ish by
-        // sampling that the frame border forms an actual square, not a
-        // rectangle skewed to the canvas's own aspect ratio.
+    fn border_lit_amount_is_binary_away_from_any_corner() {
+        // Comfortably inside a single wedge (both a lit and shadow edge are
+        // clearly farther away than the nearest one), the result should
+        // match the old discrete classification exactly: 1.0 for a lit
+        // wedge, 0.0 for a shadow one.
+        assert_eq!(border_lit_amount(0.1, 20.0, 20.0, 20.0), 1.0); // top wins, lit
+        assert_eq!(border_lit_amount(20.0, 0.1, 20.0, 20.0), 0.0); // bottom wins, shadow
+    }
+
+    #[test]
+    fn border_lit_amount_blends_smoothly_at_a_lit_shadow_corner() {
+        // Top (lit) and right (shadow) are the two nearest edges and
+        // disagree — right at the tie, the result should be the ambiguous
+        // midpoint, not an abrupt flip.
+        assert_eq!(border_lit_amount(1.0, 20.0, 20.0, 1.0), 0.5);
+        // As right pulls away from top, the pixel should read as more
+        // lit, monotonically, until it saturates at 1.0 once the gap
+        // reaches BEVEL_TRANSITION.
+        let closer = border_lit_amount(1.0, 20.0, 20.0, 1.05);
+        let farther = border_lit_amount(1.0, 20.0, 20.0, 1.2);
+        assert!(closer > 0.5 && closer < farther);
+        assert_eq!(farther, 1.0);
+    }
+
+    #[test]
+    fn border_lit_amount_does_not_leak_the_far_axis_into_a_near_tie() {
+        // A pixel deep in the left band (clearly lit) but only mildly off
+        // vertical-centre — top and bottom both moderately far, left very
+        // close, right very far — must read as fully lit. Earlier logic
+        // that compared raw min(top,left) against min(bottom,right)
+        // (unbounded, no saturation) let a merely-larger-than-left bottom
+        // distance still drag the result away from 1.0.
+        assert_eq!(border_lit_amount(1.8, 1.79, 0.85, 8.2), 1.0);
+    }
+
+    #[test]
+    fn compose_matte_top_edge_pixel_is_lightened_matte() {
+        // A source image scaled to fit inside the padded area should never
+        // reach the canvas edge. Sampled at the top-middle — well clear of
+        // any corner mitre seam — a border pixel should read as the matte
+        // colour lightened by the bevel shading (top is one of the two "lit"
+        // wedges).
+        let src = tiny_test_jpeg(80, 40);
+        let config = small_config();
+        let out = compose_matte(&src, &config).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+        let expected = bevel_shade(config.matte_rgb, 1.0);
+        let pixel = decoded.get_pixel(config.canvas_w / 2, 0).0;
+        assert!(
+            approx_eq_rgb(pixel, expected, 6),
+            "top-edge pixel {:?} should be close to the lightened matte colour {:?} (JPEG re-encode allows small drift)",
+            pixel,
+            expected
+        );
+    }
+
+    #[test]
+    fn compose_matte_corners_are_mitre_seams() {
+        // The exact outer corner sits right on the diagonal where the top
+        // and left wedges meet — it should render as the dark seam colour,
+        // not a flat matte or frame colour, mimicking a real mitred joint.
+        let src = tiny_test_jpeg(80, 40);
+        let config = small_config();
+        let out = compose_matte(&src, &config).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+        let pixel = decoded.get_pixel(0, 0).0;
+        assert!(
+            approx_eq_rgb(pixel, SEAM_RGB, 10),
+            "corner pixel {pixel:?} should be close to the mitre seam colour {SEAM_RGB:?}"
+        );
+    }
+
+    #[test]
+    fn compose_matte_stretches_source_to_fill_inner_rectangle() {
+        // A square source in a non-square canvas is deliberately stretched to
+        // fill the padded inner rectangle exactly — matte thickness must come
+        // out even on every side regardless of the source's own aspect ratio.
+        // Verify by checking the frame border spans the full inner width, not
+        // just a square region sized to the tighter (height) dimension.
         let src = tiny_test_jpeg(50, 50);
         let config = MatteConfig {
             canvas_w: 300,
@@ -774,36 +1098,34 @@ mod tests {
         };
         let out = compose_matte(&src, &config).unwrap();
         let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
-        // The fitted image is bounded by inner_h (canvas_h minus padding,
-        // the tighter dimension for this canvas) — scan the middle row to
-        // find where the frame-coloured pixels start/end horizontally and
-        // confirm that span is roughly the same as the image's height
-        // (i.e. square, matching the square source), not stretched to fill
-        // the wide canvas.
         let mid_y = config.canvas_h / 2;
+        // Middle row sits well clear of the corner mitre seams, so every
+        // frame pixel there is bevel-tinted one way or the other (lighter on
+        // the left wedge, darker on the right) rather than the flat
+        // configured frame colour — accept either.
+        let lit = bevel_shade(config.frame_rgb, 1.0);
+        let shadow = bevel_shade(config.frame_rgb, 0.0);
         let frame_cols: Vec<u32> = (0..config.canvas_w)
-            .filter(|&x| approx_eq_rgb(decoded.get_pixel(x, mid_y).0, config.frame_rgb, 10))
+            .filter(|&x| {
+                let px = decoded.get_pixel(x, mid_y).0;
+                approx_eq_rgb(px, lit, 10) || approx_eq_rgb(px, shadow, 10)
+            })
             .collect();
         assert!(
             !frame_cols.is_empty(),
             "expected to find frame-coloured pixels on the middle row"
         );
-        // Full outer-edge-to-outer-edge span of the frame line itself, which
-        // is fit + 2*frame_px wide (the border sits *around* the fitted
-        // image, not inside it) — a square source should give a span close
-        // to the fitted height plus that same border margin, not to the
-        // wide canvas's own aspect ratio.
+        // Full outer-edge-to-outer-edge span of the frame line, which is
+        // fit_w + 2*frame_px wide (the border sits *around* the fitted
+        // image) — should now match the wide canvas's own inner width, not a
+        // square region.
         let span = frame_cols.last().unwrap() - frame_cols.first().unwrap();
-        let pad_h = (config.canvas_h as f32 * config.matte_percent / 100.0) as u32;
         let pad_w = (config.canvas_w as f32 * config.matte_percent / 100.0) as u32;
-        let inner_h = config.canvas_h - 2 * pad_h;
         let inner_w = config.canvas_w - 2 * pad_w;
-        let scale = (inner_w as f32 / 50.0).min(inner_h as f32 / 50.0);
-        let fit = (50.0 * scale).round() as u32;
-        let expected_span = fit + 2 * config.frame_px;
+        let expected_span = inner_w + 2 * config.frame_px;
         assert!(
             (span as i64 - expected_span as i64).abs() <= 3,
-            "expected roughly square fit (span={span}, expected={expected_span})"
+            "expected stretched fit spanning the inner width (span={span}, expected={expected_span})"
         );
     }
 
@@ -811,6 +1133,164 @@ mod tests {
     fn compose_matte_falls_back_gracefully_on_bad_bytes() {
         let config = small_config();
         assert!(compose_matte(b"not an image", &config).is_err());
+    }
+
+    #[test]
+    fn apply_glaze_zero_percent_leaves_pixels_unchanged() {
+        let mut img = RgbImage::from_pixel(4, 4, Rgb([200, 50, 50]));
+        apply_glaze(&mut img, 0.0, [0xFF, 0xFF, 0xFF]);
+        assert_eq!(img.get_pixel(0, 0).0, [200, 50, 50]);
+    }
+
+    #[test]
+    fn apply_glaze_100_percent_fully_replaces_with_glaze_colour() {
+        let mut img = RgbImage::from_pixel(4, 4, Rgb([200, 50, 50]));
+        apply_glaze(&mut img, 100.0, [0xFF, 0xFF, 0xFF]);
+        assert_eq!(img.get_pixel(0, 0).0, [255, 255, 255]);
+    }
+
+    #[test]
+    fn apply_glaze_50_percent_blends_halfway() {
+        let mut img = RgbImage::from_pixel(4, 4, Rgb([200, 50, 50]));
+        apply_glaze(&mut img, 50.0, [0xFF, 0xFF, 0xFF]);
+        let pixel = img.get_pixel(0, 0).0;
+        assert!(approx_eq_rgb(pixel, [227, 152, 152], 1));
+    }
+
+    #[test]
+    fn compose_matte_glaze_lightens_the_artwork_not_the_mat() {
+        // The glaze should blend into the picture's own pixels only — the
+        // mat/border colour, sampled well away from the image, must be
+        // untouched by it.
+        let src = tiny_test_jpeg(80, 40);
+        let config = MatteConfig {
+            glaze_percent: 50.0,
+            ..small_config()
+        };
+        let out = compose_matte(&src, &config).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+        let center = decoded
+            .get_pixel(config.canvas_w / 2, config.canvas_h / 2)
+            .0;
+        let expected_center = {
+            let mut px = [200u8, 50, 50];
+            for c in px.iter_mut() {
+                *c = (*c as f32 * 0.5 + 255.0 * 0.5).round() as u8;
+            }
+            px
+        };
+        assert!(
+            approx_eq_rgb(center, expected_center, 8),
+            "glazed centre pixel {center:?} should be close to {expected_center:?}"
+        );
+        let top_edge = decoded.get_pixel(config.canvas_w / 2, 0).0;
+        let expected_matte = bevel_shade(config.matte_rgb, 1.0);
+        assert!(
+            approx_eq_rgb(top_edge, expected_matte, 6),
+            "mat pixel {top_edge:?} should still be the (unglazed) lightened matte colour {expected_matte:?}"
+        );
+    }
+
+    #[test]
+    fn apply_border_glaze_skips_pixels_inside_the_artwork_rect() {
+        let mut canvas = RgbImage::from_pixel(10, 10, Rgb([10, 10, 10]));
+        apply_border_glaze(&mut canvas, 2, 2, 8, 8, 100.0, [0xFF, 0xFF, 0xFF]);
+        assert_eq!(
+            canvas.get_pixel(5, 5).0,
+            [10, 10, 10],
+            "inside the artwork rect must be untouched"
+        );
+        assert_eq!(
+            canvas.get_pixel(0, 0).0,
+            [255, 255, 255],
+            "outside it, 100% glaze should be pure white"
+        );
+    }
+
+    #[test]
+    fn compose_matte_border_glaze_lightens_the_mat_not_the_artwork() {
+        // The border glaze is independent of the artwork's own glaze — with
+        // only border_glaze_percent set, the mat should wash toward white
+        // while the artwork's own pixels stay untouched by it.
+        let src = tiny_test_jpeg(80, 40);
+        let config = MatteConfig {
+            border_glaze_percent: 50.0,
+            ..small_config()
+        };
+        let out = compose_matte(&src, &config).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+
+        let center = decoded
+            .get_pixel(config.canvas_w / 2, config.canvas_h / 2)
+            .0;
+        assert!(
+            approx_eq_rgb(center, [200, 50, 50], 4),
+            "artwork centre pixel {center:?} should be unaffected by the border glaze"
+        );
+
+        let top_edge = decoded.get_pixel(config.canvas_w / 2, 0).0;
+        let washed_matte = {
+            let mut px = config.matte_rgb;
+            for c in px.iter_mut() {
+                *c = (*c as f32 * 0.5 + 255.0 * 0.5).round() as u8;
+            }
+            px
+        };
+        let expected_matte = bevel_shade(washed_matte, 1.0);
+        assert!(
+            approx_eq_rgb(top_edge, expected_matte, 8),
+            "mat pixel {top_edge:?} should be close to the border-glazed, bevel-lit matte colour {expected_matte:?}"
+        );
+    }
+
+    #[test]
+    fn apply_brightness_100_percent_leaves_pixels_unchanged() {
+        let mut img = RgbImage::from_pixel(4, 4, Rgb([200, 100, 50]));
+        apply_brightness(&mut img, 100.0);
+        assert_eq!(img.get_pixel(0, 0).0, [200, 100, 50]);
+    }
+
+    #[test]
+    fn apply_brightness_50_percent_halves_every_channel() {
+        let mut img = RgbImage::from_pixel(4, 4, Rgb([200, 100, 50]));
+        apply_brightness(&mut img, 50.0);
+        assert_eq!(img.get_pixel(0, 0).0, [100, 50, 25]);
+    }
+
+    #[test]
+    fn compose_matte_brightness_dims_both_artwork_and_border() {
+        // Brightness is the very last step, applied over the whole composed
+        // frame — both the artwork's own pixels and the mat/border colour
+        // (sampled well clear of any corner seam) should come out dimmed by
+        // the same factor.
+        let src = tiny_test_jpeg(80, 40);
+        let config = MatteConfig {
+            brightness_percent: 50.0,
+            ..small_config()
+        };
+        let out = compose_matte(&src, &config).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+
+        let center = decoded
+            .get_pixel(config.canvas_w / 2, config.canvas_h / 2)
+            .0;
+        let expected_center = [100u8, 25, 25]; // half of the tiny_test_jpeg fill [200,50,50]
+        assert!(
+            approx_eq_rgb(center, expected_center, 8),
+            "dimmed artwork pixel {center:?} should be close to {expected_center:?}"
+        );
+
+        let top_edge = decoded.get_pixel(config.canvas_w / 2, 0).0;
+        let lit_matte = bevel_shade(config.matte_rgb, 1.0);
+        let expected_matte = [
+            (lit_matte[0] as f32 * 0.5).round() as u8,
+            (lit_matte[1] as f32 * 0.5).round() as u8,
+            (lit_matte[2] as f32 * 0.5).round() as u8,
+        ];
+        assert!(
+            approx_eq_rgb(top_edge, expected_matte, 6),
+            "dimmed mat pixel {top_edge:?} should be close to {expected_matte:?}"
+        );
     }
 
     #[test]

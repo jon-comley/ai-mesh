@@ -381,7 +381,7 @@ deploy-node node:
             scp_dots ">>> Uploading install script" \
                 scp {{ssh_opts}} -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
             ssh {{ssh_opts}} -t ${NODE_USER}@${NODE_HOST} \
-                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh '${NODE_ROLE}' '${NODE_USER}' '${MQTT_HOST:-}' '${MQTT_PORT:-1883}' '${NODE_FEATURES:-llm}' '${VOICE_DEVICE_HOST:-}' '${VOICE_STT_REMOTE:-}' '${VOICE_TTS_BASE_URL:-}' '${AUDIO_BACKENDS:-}' '${AUDIO_ALSA_DEVICE:-}' '${ART_MATTE_PERCENT:-}' '${ART_FRAME_THICKNESS:-}' '${SPOTIFY_DEVICE_NAME:-}'"
+                "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh '${NODE_ROLE}' '${NODE_USER}' '${MQTT_HOST:-}' '${MQTT_PORT:-1883}' '${NODE_FEATURES:-llm}' '${VOICE_DEVICE_HOST:-}' '${VOICE_STT_REMOTE:-}' '${VOICE_TTS_BASE_URL:-}' '${AUDIO_BACKENDS:-}' '${AUDIO_ALSA_DEVICE:-}' '${ART_MATTE_PERCENT:-}' '${ART_FRAME_THICKNESS:-}' '${SPOTIFY_DEVICE_NAME:-}' '${ART_SIDE_MARGIN_BOOST:-}' '${ART_GLAZE_PERCENT:-}' '${ART_BRIGHTNESS_PERCENT:-}' '${ART_BORDER_GLAZE_PERCENT:-}'"
         fi
         ;;
 
