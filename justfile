@@ -2839,6 +2839,7 @@ deploy-coordinator target_host:
     # Step 7: Enable and start the service
     echo ">>> Step 7: Enabling and starting ai-mesh-coordinator service..."
     ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "
+        set -e
         sudo systemctl enable ai-mesh-coordinator
         sudo systemctl restart ai-mesh-coordinator
         echo '>>> Service enabled and started'
