@@ -48,6 +48,8 @@ async fn main() {
     let runner = EffectRunner::new(coord.registry.clone(), dashboard.clone(), effects.clone());
     tokio::spawn(runner.run());
 
+    coordinator::http::rearm_ebay_hunts(dashboard.clone(), coord.registry.clone());
+
     tokio::spawn(coordinator::http::start(
         http_port,
         dashboard,

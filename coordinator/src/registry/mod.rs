@@ -10,10 +10,13 @@ use tracing::warn;
 
 // Domain method groups split into sibling files (each an `impl Registry` block
 // sharing this module's struct + private fields/helpers).
+mod ebay;
 mod effects;
 mod openings;
 mod scenes;
 mod switch_bindings;
+
+pub use ebay::EbayFindRecord;
 
 fn degrees_to_cardinal(deg: f32) -> &'static str {
     let d = ((deg % 360.0) + 360.0) % 360.0;
@@ -368,7 +371,42 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             command     TEXT NOT NULL,
             step_delta  INTEGER,
             UNIQUE(device_id, action)
-        );",
+        );
+        -- eBay bargain-finder ('Hunts'): a saved search (source item, search
+        -- terms incl. LLM-suggested misspellings, daily timeslots), the
+        -- listings already evaluated for it (dedup across cycles), and the
+        -- feed of matches shown in the dashboard's Hunts tab.
+        CREATE TABLE IF NOT EXISTS ebay_hunts (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            source_url      TEXT NOT NULL,
+            terms_json      TEXT NOT NULL,
+            timeslots_json  TEXT NOT NULL,
+            marketplace     TEXT NOT NULL DEFAULT 'EBAY_GB',
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            created_ms      INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ebay_seen_listings (
+            hunt_id       TEXT NOT NULL REFERENCES ebay_hunts(id) ON DELETE CASCADE,
+            item_id       TEXT NOT NULL,
+            first_seen_ms INTEGER NOT NULL,
+            PRIMARY KEY (hunt_id, item_id)
+        );
+        CREATE TABLE IF NOT EXISTS ebay_finds (
+            id            TEXT PRIMARY KEY,
+            hunt_id       TEXT NOT NULL REFERENCES ebay_hunts(id) ON DELETE CASCADE,
+            item_id       TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            price_minor   INTEGER,
+            currency      TEXT,
+            image_url     TEXT,
+            item_web_url  TEXT NOT NULL,
+            matched_term  TEXT NOT NULL,
+            verdict       TEXT,
+            found_ms      INTEGER NOT NULL,
+            reviewed      INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_ebay_finds_hunt_found ON ebay_finds(hunt_id, found_ms);",
     )?;
 
     // Migration: Add overrides_json to room_effects if absent.
