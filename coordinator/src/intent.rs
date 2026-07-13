@@ -26,6 +26,7 @@ fn collect_tool_schemas(registry: &Arc<Mutex<Registry>>) -> Vec<serde_json::Valu
         shared::Feature::Sensors,
         shared::Feature::Audio,
         shared::Feature::Music,
+        shared::Feature::Art,
     ] {
         if !reg.nodes_with_feature(feature).is_empty() {
             for schema in tool_schemas_for_feature(feature) {
@@ -1116,6 +1117,22 @@ async fn dispatch_tool(
             Err(e) => e,
         },
         "tv_audio_output" => crate::tv::audio_output_unsupported(),
+        "art_narration" => {
+            let Some(enabled) = args["enabled"].as_bool() else {
+                return "art_narration requires a boolean 'enabled' value".into();
+            };
+            registry.lock().unwrap().set_preference(
+                crate::http::api::prefs::PREF_USER_ID,
+                crate::http::api::art::NARRATION_PREF,
+                if enabled { "true" } else { "false" },
+            );
+            if enabled {
+                "Art narration turned on — I'll read out a fact about each picture as it's shown."
+                    .into()
+            } else {
+                "Art narration turned off.".into()
+            }
+        }
         "reaper_transport" | "reaper_action" => {
             dispatch_reaper_command(
                 request_id,
@@ -2256,6 +2273,20 @@ fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> 
                 "required": ["action"]
             }
         })],
+        shared::Feature::Art => vec![serde_json::json!({
+            "name": "art_narration",
+            "description": "Turn spoken narration of the art slideshow on or off — when on, a short spoken fact about each picture is read aloud as it's shown.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true to turn narration on, false to turn it off"
+                    }
+                },
+                "required": ["enabled"]
+            }
+        })],
         _ => vec![],
     }
 }
@@ -2941,6 +2972,36 @@ mod tests {
     }
 
     #[test]
+    fn collect_tool_schemas_omits_art_narration_when_no_art_node() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let schemas = collect_tool_schemas(&registry);
+        assert!(!schemas.iter().any(|s| s["name"] == "art_narration"));
+    }
+
+    #[test]
+    fn collect_tool_schemas_includes_art_narration_when_art_feature_connected() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .update_heartbeat(shared::NodeIdentity {
+                id: "pi2".into(),
+                hostname: "pi2".into(),
+                ip: "10.0.0.13".into(),
+                role: shared::NodeRole::Controller,
+            });
+        registry.lock().unwrap().update_capabilities(
+            "pi2",
+            shared::NodeCapabilities {
+                features: vec![shared::Feature::Art],
+                ..Default::default()
+            },
+        );
+        let schemas = collect_tool_schemas(&registry);
+        assert!(schemas.iter().any(|s| s["name"] == "art_narration"));
+    }
+
+    #[test]
     fn collect_tool_schemas_omits_tv_tools_when_unconfigured() {
         let registry = Arc::new(Mutex::new(Registry::new()));
         let schemas = collect_tool_schemas(&registry);
@@ -3041,6 +3102,75 @@ mod tests {
         )
         .await;
         assert!(result.contains("requires a numeric value"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_art_narration_requires_boolean_enabled() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "art_narration",
+            serde_json::json!({}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+            None,
+        )
+        .await;
+        assert!(result.contains("requires a boolean"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_art_narration_sets_preference_and_confirms() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+
+        let off_result = dispatch_tool(
+            "r1",
+            "art_narration",
+            serde_json::json!({"enabled": false}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+            None,
+        )
+        .await;
+        assert!(off_result.contains("turned off"));
+        assert_eq!(
+            registry.lock().unwrap().get_preference(
+                crate::http::api::prefs::PREF_USER_ID,
+                "art-narration-enabled"
+            ),
+            Some("false".into())
+        );
+
+        let on_result = dispatch_tool(
+            "r1",
+            "art_narration",
+            serde_json::json!({"enabled": true}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+            None,
+        )
+        .await;
+        assert!(on_result.contains("turned on"));
+        assert_eq!(
+            registry.lock().unwrap().get_preference(
+                crate::http::api::prefs::PREF_USER_ID,
+                "art-narration-enabled"
+            ),
+            Some("true".into())
+        );
     }
 
     #[tokio::test]

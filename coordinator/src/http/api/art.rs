@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::gen_request_id;
+use crate::http::api::prefs::PREF_USER_ID;
 use crate::http::auth::Authed;
 use crate::http::state::{ArtRotationItem, DashboardState};
 use crate::inference::dispatch_local_inference;
@@ -164,6 +165,11 @@ struct MetObject {
     title: String,
     #[serde(rename = "artistDisplayName", default)]
     artist_display_name: String,
+    /// Free-text nationality + birth/death years when known (e.g. "French,
+    /// 1840–1926") — grounding for the spoken narration's biographical
+    /// details, see `ArtRotationItem::artist_bio`.
+    #[serde(rename = "artistDisplayBio", default)]
+    artist_display_bio: String,
     #[serde(rename = "objectDate", default)]
     object_date: String,
     #[serde(default)]
@@ -329,6 +335,115 @@ fn parse_curated_indices(text: &str, candidate_count: usize) -> Option<Vec<usize
     }
 }
 
+/// User preference key gating spoken narration — the `art_narration` intent
+/// tool (`intent.rs`) is the only way to change it. Treated as enabled
+/// unless explicitly set to "false": narration is opt-out, not opt-in, once
+/// the art feature exists at all.
+pub const NARRATION_PREF: &str = "art-narration-enabled";
+
+fn narration_enabled(registry: &Arc<Mutex<Registry>>) -> bool {
+    registry
+        .lock()
+        .unwrap()
+        .get_preference(PREF_USER_ID, NARRATION_PREF)
+        .is_none_or(|v| v != "false")
+}
+
+/// How long the narration LLM call gets before giving up silently — same
+/// reasoning as `CURATION_TIMEOUT`. Since this always runs in the
+/// background (see `spawn_narration`), a slow or failed narration never
+/// holds up the slideshow itself.
+const NARRATION_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Ask whatever local model is currently Ready for a short, engaging,
+/// spoken-friendly fact about `item`, grounded in the Met's own metadata
+/// (title/artist/date/bio) rather than inventing unverifiable claims.
+/// Returns `None` on any failure — narration is a nice-to-have layered on
+/// top of the display itself, never a reason to interrupt it (see
+/// `spawn_narration`).
+async fn narrate_artwork(
+    item: &ArtRotationItem,
+    registry: &Arc<Mutex<Registry>>,
+    state: &Arc<DashboardState>,
+) -> Option<String> {
+    let model = registry.lock().unwrap().any_ready_llm_model()?;
+    let date = if item.date.is_empty() {
+        "date unknown"
+    } else {
+        &item.date
+    };
+    let bio = if item.artist_bio.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", item.artist_bio)
+    };
+    let prompt = format!(
+        "You're narrating a home art slideshow out loud. In one or two short \
+         sentences (under 35 words total), share an interesting, engaging \
+         fact or observation about this artwork, suitable for reading aloud. \
+         Stick to the facts given below — don't invent specific dates, \
+         names, or claims you're not given. Reply with ONLY the spoken \
+         text, no preamble, no quotation marks.\n\n\
+         Title: {}\nArtist: {}{bio}\nDate: {date}\n",
+        item.title, item.artist,
+    );
+
+    let request_id = format!("art-narrate-{}", gen_request_id());
+    let result = tokio::time::timeout(
+        NARRATION_TIMEOUT,
+        dispatch_local_inference(
+            &request_id,
+            &model,
+            vec![ChatTurn::user(prompt)],
+            120,
+            Some(0.4),
+            registry,
+            &state.connections,
+            &state.pending_inferences,
+        ),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let text = result.output.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+/// Fire-and-forget: generate and speak a fact about `item` on whatever's
+/// currently listening, without ever holding up the image display itself —
+/// the caller has already sent the `ArtShow` before this is spawned. Does
+/// nothing if narration is turned off (`NARRATION_PREF`) or no model/voice
+/// node is available, matching `curate_with_llm`'s "every failure mode just
+/// means less polish, not a broken slideshow" design.
+fn spawn_narration(
+    item: ArtRotationItem,
+    registry: Arc<Mutex<Registry>>,
+    state: Arc<DashboardState>,
+) {
+    if !narration_enabled(&registry) {
+        return;
+    }
+    tokio::spawn(async move {
+        let Some(text) = narrate_artwork(&item, &registry, &state).await else {
+            return;
+        };
+        if let Err(e) = crate::audio::broadcast_announcement(
+            &text,
+            &registry,
+            &state.connections,
+            &state.pending_intents,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, title = %item.title, "art: narration synthesis/playback failed");
+        }
+    });
+}
+
 fn to_rotation_item(obj: &MetObject) -> ArtRotationItem {
     ArtRotationItem {
         image_url: obj.primary_image.clone(),
@@ -343,6 +458,7 @@ fn to_rotation_item(obj: &MetObject) -> ArtRotationItem {
             obj.artist_display_name.clone()
         },
         date: obj.object_date.clone(),
+        artist_bio: obj.artist_display_bio.clone(),
     }
 }
 
@@ -439,9 +555,10 @@ pub async fn search_art(
         )
             .into_response();
     };
-    if !send_show_request(&state, &node_id, first.image_url) {
+    if !send_show_request(&state, &node_id, first.image_url.clone()) {
         return (StatusCode::SERVICE_UNAVAILABLE, "art node not reachable").into_response();
     }
+    spawn_narration(first, registry.clone(), state.clone());
 
     let interval = Duration::from_secs(
         body.interval_secs
@@ -494,7 +611,9 @@ fn spawn_art_rotation_timer(
             // A momentarily-unreachable node just misses this beat — the
             // rotation itself stays alive and the next tick tries again,
             // rather than tearing down the whole slideshow over one blip.
-            let _ = send_show_request(&state, &node_id, item.image_url);
+            if send_show_request(&state, &node_id, item.image_url.clone()) {
+                spawn_narration(item, registry.clone(), state.clone());
+            }
         }
     });
 }
@@ -588,9 +707,10 @@ pub async fn next_art(
     let Some(item) = state.manual_advance_art_rotation() else {
         return (StatusCode::NOT_FOUND, "no active rotation").into_response();
     };
-    if !send_show_request(&state, &node_id, item.image_url) {
+    if !send_show_request(&state, &node_id, item.image_url.clone()) {
         return (StatusCode::SERVICE_UNAVAILABLE, "art node not reachable").into_response();
     }
+    spawn_narration(item, registry.clone(), state.clone());
     Json(state.art_rotation_status().unwrap_or_default()).into_response()
 }
 
@@ -643,6 +763,32 @@ mod tests {
                 ..NodeCapabilities::default()
             },
         );
+    }
+
+    #[test]
+    fn narration_enabled_defaults_to_true_when_unset() {
+        let registry = make_registry();
+        assert!(narration_enabled(&registry));
+    }
+
+    #[test]
+    fn narration_enabled_false_when_explicitly_disabled() {
+        let registry = make_registry();
+        registry
+            .lock()
+            .unwrap()
+            .set_preference(PREF_USER_ID, NARRATION_PREF, "false");
+        assert!(!narration_enabled(&registry));
+    }
+
+    #[test]
+    fn narration_enabled_true_for_any_other_value() {
+        let registry = make_registry();
+        registry
+            .lock()
+            .unwrap()
+            .set_preference(PREF_USER_ID, NARRATION_PREF, "true");
+        assert!(narration_enabled(&registry));
     }
 
     #[tokio::test]
@@ -848,12 +994,14 @@ mod tests {
                     title: "One".into(),
                     artist: "Monet".into(),
                     date: "1900".into(),
+                    artist_bio: "".into(),
                 },
                 ArtRotationItem {
                     image_url: "https://example.com/2.jpg".into(),
                     title: "Two".into(),
                     artist: "Monet".into(),
                     date: "1901".into(),
+                    artist_bio: "".into(),
                 },
             ],
         );
@@ -898,6 +1046,7 @@ mod tests {
                 title: "Mona Lisa".into(),
                 artist: "Leonardo da Vinci".into(),
                 date: "1503".into(),
+                artist_bio: "".into(),
             }],
         );
         let (status, body) = send_with_body(
@@ -933,12 +1082,14 @@ mod tests {
                     title: "".into(),
                     artist: "".into(),
                     date: "".into(),
+                    artist_bio: "".into(),
                 },
                 ArtRotationItem {
                     image_url: "2".into(),
                     title: "".into(),
                     artist: "".into(),
                     date: "".into(),
+                    artist_bio: "".into(),
                 },
             ],
         );
@@ -964,12 +1115,14 @@ mod tests {
                     title: "".into(),
                     artist: "".into(),
                     date: "".into(),
+                    artist_bio: "".into(),
                 },
                 ArtRotationItem {
                     image_url: "2".into(),
                     title: "".into(),
                     artist: "".into(),
                     date: "".into(),
+                    artist_bio: "".into(),
                 },
             ],
         );
@@ -1018,6 +1171,7 @@ mod tests {
             title: "".into(),
             artist: "".into(),
             date: "".into(),
+            artist_bio: "".into(),
         }
     }
 

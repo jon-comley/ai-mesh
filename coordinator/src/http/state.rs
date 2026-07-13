@@ -556,12 +556,17 @@ pub struct BluetoothPairedStatus {
     pub volume_pct: Option<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct ArtRotationItem {
     pub image_url: String,
     pub title: String,
     pub artist: String,
     pub date: String,
+    /// The Met's free-text `artistDisplayBio` field (e.g. "French,
+    /// 1840–1926") — nationality plus birth/death years when known, used to
+    /// ground the spoken narration (see `art::narrate_artwork`) without
+    /// inventing unverifiable biographical claims.
+    pub artist_bio: String,
 }
 
 struct ArtRotationState {
@@ -3309,12 +3314,14 @@ mod tests {
                     title: "".into(),
                     artist: "".into(),
                     date: "".into(),
+                    artist_bio: "".into(),
                 },
                 ArtRotationItem {
                     image_url: "2".into(),
                     title: "".into(),
                     artist: "".into(),
                     date: "".into(),
+                    artist_bio: "".into(),
                 },
             ],
         );
@@ -3341,6 +3348,7 @@ mod tests {
                 title: "".into(),
                 artist: "".into(),
                 date: "".into(),
+                artist_bio: "".into(),
             }],
         );
         assert!(state.art_rotation_current_item().is_some());
@@ -3357,6 +3365,7 @@ mod tests {
             title: "".into(),
             artist: "".into(),
             date: "".into(),
+            artist_bio: "".into(),
         }]);
         assert_eq!(state.get_general_art_batch().unwrap().len(), 1);
     }
