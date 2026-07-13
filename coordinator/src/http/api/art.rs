@@ -100,6 +100,12 @@ pub async fn get_art_status(
 /// How many of the Met's (often thousands of) matching object IDs to fetch
 /// full details for — capped to keep one search fast and polite to the API.
 const SEARCH_CANDIDATE_CAP: usize = 25;
+/// Candidate fetch cap when `by_artist` is set — generous, since a named
+/// artist's *actual* public-domain, has-image body of work at the Met is
+/// typically far smaller than the "often thousands" of keyword hits the raw
+/// search returns (most of which are tangential, not by that artist at all
+/// — see `SearchArtBody::by_artist`'s doc comment).
+const ARTIST_SEARCH_CANDIDATE_CAP: usize = 100;
 /// Max images kept in the final rotation, whether LLM-curated or not.
 const ROTATION_CAP: usize = 12;
 const DEFAULT_INTERVAL_SECS: u64 = 30;
@@ -345,6 +351,16 @@ pub struct SearchArtBody {
     query: String,
     #[serde(default)]
     interval_secs: Option<u64>,
+    /// Show *every* public-domain, has-image work whose own artist field
+    /// actually matches `query` — not just a keyword hit anywhere in the
+    /// Met's record (confirmed live: a plain "Claude Monet" search surfaces
+    /// works merely *about* him, e.g. a portrait of his family painted by
+    /// Manet). Skips both the LLM curation subset-pick and `ROTATION_CAP`.
+    /// Off by default — a curated best-of-N is the better fit for a broad
+    /// or generic query, where "every match" could be huge and mostly
+    /// irrelevant.
+    #[serde(default)]
+    by_artist: bool,
 }
 
 /// `POST /api/art/search` — search the Met's Open Access collection for
@@ -367,22 +383,47 @@ pub async fn search_art(
         return (StatusCode::SERVICE_UNAVAILABLE, "no art node connected").into_response();
     };
 
-    let candidates = match fetch_met_candidates(&query, SEARCH_CANDIDATE_CAP, false).await {
+    let candidate_cap = if body.by_artist {
+        ARTIST_SEARCH_CANDIDATE_CAP
+    } else {
+        SEARCH_CANDIDATE_CAP
+    };
+    let mut candidates = match fetch_met_candidates(&query, candidate_cap, false).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, query = %query, "art search failed");
             return (StatusCode::BAD_GATEWAY, e).into_response();
         }
     };
-
-    let order = match curate_with_llm(&query, &candidates, &registry, &state).await {
-        Some(indices) => {
-            tracing::info!(query = %query, count = indices.len(), "art search: LLM-curated order");
-            indices
+    if body.by_artist {
+        let needle = query.to_lowercase();
+        candidates.retain(|o| o.artist_display_name.to_lowercase().contains(&needle));
+        if candidates.is_empty() {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("no public-domain images actually credited to \"{query}\" found"),
+            )
+                .into_response();
         }
-        None => {
-            tracing::info!(query = %query, "art search: no LLM curation available, using raw order");
-            (0..candidates.len().min(ROTATION_CAP)).collect()
+    }
+
+    let order = if body.by_artist {
+        tracing::info!(
+            query = %query,
+            count = candidates.len(),
+            "art search: showing full artist collection, no curation or cap"
+        );
+        (0..candidates.len()).collect()
+    } else {
+        match curate_with_llm(&query, &candidates, &registry, &state).await {
+            Some(indices) => {
+                tracing::info!(query = %query, count = indices.len(), "art search: LLM-curated order");
+                indices
+            }
+            None => {
+                tracing::info!(query = %query, "art search: no LLM curation available, using raw order");
+                (0..candidates.len().min(ROTATION_CAP)).collect()
+            }
         }
     };
 
