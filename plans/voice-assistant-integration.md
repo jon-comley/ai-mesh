@@ -422,6 +422,19 @@ push. Privacy stance intact: "never leaves your house" holds unless the
 user explicitly flips the Online AI toggle, which now applies to speech
 exactly as it does to typed chat.
 
+**Cloud provider cascade before local fallback, 2026-07-13**: a failed
+primary cloud call no longer drops straight to local — `handle_intent`
+now tries every other provider preset with a saved API key first
+(`cloud::fallback_providers`, in preset order), and only falls back to
+local once all of them have failed too. Discovered live: a burst of
+`play_announcement` test calls tripped Groq's free-tier rate limit,
+which sent a *voice* intent straight to local inference on pi1 — a 90s
+wait (vs. Groq's usual sub-second reply) that read as the chat session
+having died. Since keys are already stored per-endpoint from switching
+providers in the Gateway tab, no new key-management UI was needed to
+wire this up. Applies equally to voice/mesh intents and dashboard chat,
+since both share `handle_intent`.
+
 ## Next phase (not started)
 
 1. ~~Speech-to-text engine~~ — **done 2026-07-08**, see above.

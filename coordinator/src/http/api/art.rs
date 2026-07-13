@@ -28,7 +28,7 @@ use crate::registry::Registry;
 /// room/device-style "which one" disambiguation other domains have. Whether
 /// it's actually reachable *right now* is determined by `send_to_node`'s own
 /// return value at the call site, not here.
-fn art_node_id(registry: &Arc<Mutex<Registry>>) -> Option<String> {
+pub(crate) fn art_node_id(registry: &Arc<Mutex<Registry>>) -> Option<String> {
     registry
         .lock()
         .unwrap()
@@ -100,13 +100,12 @@ pub async fn get_art_status(
 
 /// How many of the Met's (often thousands of) matching object IDs to fetch
 /// full details for — capped to keep one search fast and polite to the API.
-const SEARCH_CANDIDATE_CAP: usize = 25;
-/// Candidate fetch cap when `by_artist` is set — generous, since a named
-/// artist's *actual* public-domain, has-image body of work at the Met is
-/// typically far smaller than the "often thousands" of keyword hits the raw
-/// search returns (most of which are tangential, not by that artist at all
-/// — see `SearchArtBody::by_artist`'s doc comment).
-const ARTIST_SEARCH_CANDIDATE_CAP: usize = 100;
+/// Generous rather than tight: `perform_art_search` always attempts an
+/// artist-field filter over whatever's fetched (see its own doc comment),
+/// and a named artist's *actual* public-domain, has-image body of work is
+/// often scattered well past the first handful of a keyword search's raw
+/// hits, so too small a cap would miss real matches.
+const SEARCH_CANDIDATE_CAP: usize = 100;
 /// Max images kept in the final rotation, whether LLM-curated or not.
 const ROTATION_CAP: usize = 12;
 const DEFAULT_INTERVAL_SECS: u64 = 30;
@@ -313,6 +312,32 @@ async fn curate_with_llm(
     parse_curated_indices(&result.output, candidates.len())
 }
 
+/// Shuffle `items` in place (Fisher-Yates, seeded from the system clock) —
+/// see `perform_art_search`'s call site for why. Not cryptographic quality
+/// — doesn't need to be, just enough variety that a repeat search doesn't
+/// feel stuck on the same result. Avoids pulling in the `rand` crate for
+/// this one shuffle.
+fn shuffle<T>(items: &mut [T]) {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1)
+        ^ (items.as_ptr() as u64);
+    if seed == 0 {
+        seed = 1; // xorshift64 is stuck at 0 forever if seeded with 0
+    }
+    let mut next_rand = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for i in (1..items.len()).rev() {
+        let j = (next_rand() % (i as u64 + 1)) as usize;
+        items.swap(i, j);
+    }
+}
+
 /// Pull a JSON array of (1-based) picks out of `text` — small local models
 /// sometimes wrap the array in a sentence despite being told not to, so this
 /// looks for the first `[...]` substring rather than requiring the whole
@@ -467,16 +492,111 @@ pub struct SearchArtBody {
     query: String,
     #[serde(default)]
     interval_secs: Option<u64>,
-    /// Show *every* public-domain, has-image work whose own artist field
-    /// actually matches `query` — not just a keyword hit anywhere in the
-    /// Met's record (confirmed live: a plain "Claude Monet" search surfaces
-    /// works merely *about* him, e.g. a portrait of his family painted by
-    /// Manet). Skips both the LLM curation subset-pick and `ROTATION_CAP`.
-    /// Off by default — a curated best-of-N is the better fit for a broad
-    /// or generic query, where "every match" could be huge and mostly
-    /// irrelevant.
+    /// Show *every* matching work instead of a curated best-of — skips both
+    /// the LLM curation subset-pick and `ROTATION_CAP`. Off by default (a
+    /// curated best-of-N is the better fit for most searches, since "every
+    /// match" could be large). Independent of artist filtering, below —
+    /// this only controls quantity/curation, not which candidates qualify.
     #[serde(default)]
     by_artist: bool,
+}
+
+/// Shared by `POST /api/art/search` and the `art_search` intent tool (see
+/// `intent.rs`) — runs the actual search/curate-or-filter/build-rotation/
+/// show-first-item/spawn-timer-and-narration pipeline against an
+/// already-resolved `node_id`. Returns the first item now showing so each
+/// caller can format its own response (HTTP JSON vs a spoken confirmation).
+pub(crate) async fn perform_art_search(
+    query: &str,
+    interval_secs: Option<u64>,
+    by_artist: bool,
+    node_id: &str,
+    registry: &Arc<Mutex<Registry>>,
+    state: &Arc<DashboardState>,
+) -> Result<ArtRotationItem, String> {
+    // Always fetch generously and always *attempt* an artist-field filter,
+    // regardless of `by_artist` — confirmed live this was the actual bug
+    // behind "showing Rembrandt" surfacing Egyptian antiquities and
+    // Delacroix: the Met's plain keyword search matches anywhere in the
+    // record, and the old code only ever filtered when `by_artist` was
+    // explicitly set, which the model has no reliable way to always guess
+    // right for a plain "show me Rembrandt". If the query names a real
+    // artist, filtering finds their actual work no matter how `by_artist`
+    // ends up set; if it's a theme/subject instead ("pictures of ships"),
+    // the filter naturally comes up empty and the broad keyword results are
+    // used unfiltered, exactly as before.
+    let mut candidates = fetch_met_candidates(query, SEARCH_CANDIDATE_CAP, false)
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, query, "art search failed"))?;
+    let needle = query.to_lowercase();
+    let by_artist_count = candidates
+        .iter()
+        .filter(|o| o.artist_display_name.to_lowercase().contains(&needle))
+        .count();
+    if by_artist_count > 0 {
+        candidates.retain(|o| o.artist_display_name.to_lowercase().contains(&needle));
+        tracing::info!(
+            query,
+            count = candidates.len(),
+            "art search: query matches an artist field, filtered to their actual work"
+        );
+    }
+    // The Met's search API returns the same fixed order for the same query
+    // every time, and without this, a repeat search deterministically shows
+    // the identical first result whenever LLM curation times out and falls
+    // back to raw order — confirmed live: "Rembrandt" kept opening on the
+    // exact same picture on every re-search. Shuffled before either the
+    // curated or fallback path picks from it.
+    shuffle(&mut candidates);
+
+    let order = if by_artist {
+        tracing::info!(
+            query,
+            count = candidates.len(),
+            "art search: showing every match, no curation or cap"
+        );
+        (0..candidates.len()).collect()
+    } else {
+        match curate_with_llm(query, &candidates, registry, state).await {
+            Some(indices) => {
+                tracing::info!(
+                    query,
+                    count = indices.len(),
+                    "art search: LLM-curated order"
+                );
+                indices
+            }
+            None => {
+                tracing::info!(
+                    query,
+                    "art search: no LLM curation available, using raw order"
+                );
+                (0..candidates.len().min(ROTATION_CAP)).collect()
+            }
+        }
+    };
+
+    let items: Vec<ArtRotationItem> = order
+        .into_iter()
+        .map(|i| to_rotation_item(&candidates[i]))
+        .collect();
+    let generation = state.set_art_rotation(query.to_string(), items);
+    let first = state
+        .art_rotation_current_item()
+        .ok_or_else(|| "rotation built but empty".to_string())?;
+    if !send_show_request(state, node_id, first.image_url.clone()) {
+        return Err("art node not reachable".into());
+    }
+    spawn_narration(first.clone(), registry.clone(), state.clone());
+
+    let interval = Duration::from_secs(
+        interval_secs
+            .unwrap_or(DEFAULT_INTERVAL_SECS)
+            .max(MIN_INTERVAL_SECS),
+    );
+    spawn_art_rotation_timer(state.clone(), registry.clone(), generation, interval);
+
+    Ok(first)
 }
 
 /// `POST /api/art/search` — search the Met's Open Access collection for
@@ -499,75 +619,25 @@ pub async fn search_art(
         return (StatusCode::SERVICE_UNAVAILABLE, "no art node connected").into_response();
     };
 
-    let candidate_cap = if body.by_artist {
-        ARTIST_SEARCH_CANDIDATE_CAP
-    } else {
-        SEARCH_CANDIDATE_CAP
-    };
-    let mut candidates = match fetch_met_candidates(&query, candidate_cap, false).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, query = %query, "art search failed");
-            return (StatusCode::BAD_GATEWAY, e).into_response();
+    match perform_art_search(
+        &query,
+        body.interval_secs,
+        body.by_artist,
+        &node_id,
+        &registry,
+        &state,
+    )
+    .await
+    {
+        Ok(_) => Json(state.art_rotation_status().unwrap_or_default()).into_response(),
+        Err(e) if e == "art node not reachable" => {
+            (StatusCode::SERVICE_UNAVAILABLE, e).into_response()
         }
-    };
-    if body.by_artist {
-        let needle = query.to_lowercase();
-        candidates.retain(|o| o.artist_display_name.to_lowercase().contains(&needle));
-        if candidates.is_empty() {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("no public-domain images actually credited to \"{query}\" found"),
-            )
-                .into_response();
+        Err(e) if e == "rotation built but empty" => {
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
         }
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
     }
-
-    let order = if body.by_artist {
-        tracing::info!(
-            query = %query,
-            count = candidates.len(),
-            "art search: showing full artist collection, no curation or cap"
-        );
-        (0..candidates.len()).collect()
-    } else {
-        match curate_with_llm(&query, &candidates, &registry, &state).await {
-            Some(indices) => {
-                tracing::info!(query = %query, count = indices.len(), "art search: LLM-curated order");
-                indices
-            }
-            None => {
-                tracing::info!(query = %query, "art search: no LLM curation available, using raw order");
-                (0..candidates.len().min(ROTATION_CAP)).collect()
-            }
-        }
-    };
-
-    let items: Vec<ArtRotationItem> = order
-        .into_iter()
-        .map(|i| to_rotation_item(&candidates[i]))
-        .collect();
-    let generation = state.set_art_rotation(query.clone(), items);
-    let Some(first) = state.art_rotation_current_item() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "rotation built but empty",
-        )
-            .into_response();
-    };
-    if !send_show_request(&state, &node_id, first.image_url.clone()) {
-        return (StatusCode::SERVICE_UNAVAILABLE, "art node not reachable").into_response();
-    }
-    spawn_narration(first, registry.clone(), state.clone());
-
-    let interval = Duration::from_secs(
-        body.interval_secs
-            .unwrap_or(DEFAULT_INTERVAL_SECS)
-            .max(MIN_INTERVAL_SECS),
-    );
-    spawn_art_rotation_timer(state.clone(), registry.clone(), generation, interval);
-
-    Json(state.art_rotation_status().unwrap_or_default()).into_response()
 }
 
 /// Background auto-advance for the slideshow — one of these is spawned per

@@ -273,6 +273,11 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 impl OpenAiCompatProvider {
+    /// The endpoint this provider talks to (normalized, no trailing slash).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Provider label for logging / response attribution (the endpoint host).
     pub fn provider_name(&self) -> &str {
         self.base_url
@@ -409,6 +414,33 @@ impl OpenAiCompatProvider {
     }
 }
 
+/// Other providers to try if the primary cloud call fails — any preset for
+/// which a key was saved at some point (switching endpoints in the Gateway
+/// tab leaves the old key in place under its own `api_key:<base_url>` pref),
+/// excluding whichever endpoint is primary right now. Each fallback uses its
+/// preset's first model, since there's no per-provider model preference to
+/// restore. Order follows `provider_presets()`.
+pub fn fallback_providers(reg: &Registry, exclude_base_url: &str) -> Vec<OpenAiCompatProvider> {
+    let exclude = normalize_url(exclude_base_url);
+    let prefs: std::collections::HashMap<String, String> =
+        reg.get_all_preferences(GATEWAY_USER).into_iter().collect();
+    provider_presets()
+        .iter()
+        .filter(|p| normalize_url(p.base_url) != exclude)
+        .filter_map(|p| {
+            let key = prefs
+                .get(&provider_key_name(p.base_url))
+                .filter(|k| !k.is_empty())?;
+            let model = p.models.first()?;
+            Some(OpenAiCompatProvider {
+                base_url: normalize_url(p.base_url).to_string(),
+                api_key: key.clone(),
+                model: model.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// Persist a single gateway config field (writes through the registry K/V store).
 pub fn set_gateway_pref(reg: &Registry, key: &str, value: &str) {
     reg.set_preference(GATEWAY_USER, key, value);
@@ -494,5 +526,60 @@ mod tests {
         );
         reg.set_preference(GATEWAY_USER, "base_url", openrouter);
         assert_eq!(GatewayConfig::load(&reg).api_key.as_deref(), Some("or-key"));
+    }
+
+    #[test]
+    fn fallback_providers_only_returns_endpoints_with_a_saved_key() {
+        let reg = Registry::new();
+        assert!(fallback_providers(&reg, "https://api.groq.com/openai/v1").is_empty());
+
+        reg.set_preference(
+            GATEWAY_USER,
+            &provider_key_name("https://openrouter.ai/api/v1"),
+            "or-key",
+        );
+        let fb = fallback_providers(&reg, "https://api.groq.com/openai/v1");
+        assert_eq!(fb.len(), 1);
+        assert_eq!(fb[0].base_url(), "https://openrouter.ai/api/v1");
+        assert_eq!(fb[0].api_key, "or-key");
+        assert_eq!(fb[0].model, "openai/gpt-oss-120b:free");
+    }
+
+    #[test]
+    fn fallback_providers_excludes_the_primary_endpoint() {
+        let reg = Registry::new();
+        let groq = "https://api.groq.com/openai/v1";
+        reg.set_preference(GATEWAY_USER, &provider_key_name(groq), "groq-key");
+        reg.set_preference(
+            GATEWAY_USER,
+            &provider_key_name("https://openrouter.ai/api/v1"),
+            "or-key",
+        );
+
+        // Excluding groq (the primary) leaves openrouter as the only fallback,
+        // even though groq itself also has a stored key.
+        let fb = fallback_providers(&reg, groq);
+        assert_eq!(fb.len(), 1);
+        assert_eq!(fb[0].base_url(), "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn fallback_providers_follows_preset_order() {
+        let reg = Registry::new();
+        for preset in provider_presets() {
+            reg.set_preference(
+                GATEWAY_USER,
+                &provider_key_name(preset.base_url),
+                "some-key",
+            );
+        }
+        let fb = fallback_providers(&reg, "https://api.groq.com/openai/v1");
+        let expected: Vec<&str> = provider_presets()
+            .iter()
+            .map(|p| p.base_url)
+            .filter(|&u| u != "https://api.groq.com/openai/v1")
+            .collect();
+        let got: Vec<&str> = fb.iter().map(|p| p.base_url()).collect();
+        assert_eq!(got, expected);
     }
 }

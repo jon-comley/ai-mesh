@@ -34,6 +34,17 @@ use tracing::{info, warn};
 /// timed out mid-download on pi2's connection) gives real museum-API image
 /// sizes enough headroom without being unbounded.
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(45);
+/// How many times to retry a failed download before giving up — confirmed
+/// live that a node's WiFi link can intermittently drop a request or two
+/// even when otherwise healthy (a working connection moments before and
+/// after). Without a retry, one bad request used to mean the whole
+/// slideshow sat frozen on the last successfully-shown image until the next
+/// scheduled advance — many seconds, or on a busy rotation minutes — later,
+/// with no visible explanation. A short, bounded retry covers the common
+/// "one bad request" case without materially delaying a genuinely
+/// unreachable host.
+const DOWNLOAD_RETRIES: u32 = 3;
+const DOWNLOAD_RETRY_DELAY: Duration = Duration::from_millis(750);
 
 // ── Matte/border compositing ────────────────────────────────────────────────
 // The real Frame TV's "art mode" look (a picture-frame border/mat around the
@@ -693,6 +704,24 @@ impl ArtCapability {
             .map_err(|e| format!("could not build HTTP client: {e}"))
     }
 
+    /// One GET attempt, no retry — the actual network fetch, split out so
+    /// `download_to` can retry it without re-running the (cheap, local)
+    /// directory-creation step each time.
+    async fn fetch_once(url: &str) -> Result<Vec<u8>, String> {
+        let resp = Self::http_client()?
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("download failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("download failed: HTTP {}", resp.status()));
+        }
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("download failed reading body: {e}"))
+    }
+
     /// Fetch `url` and write it to `dest`, creating `dest`'s parent dir if
     /// needed. Shared by the single-image path (`cache_path()`) and the
     /// batch path (`batch_item_path(i)`).
@@ -702,18 +731,24 @@ impl ArtCapability {
                 .await
                 .map_err(|e| format!("could not create cache dir {}: {e}", dir.display()))?;
         }
-        let resp = Self::http_client()?
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| format!("download failed: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("download failed: HTTP {}", resp.status()));
+        let mut last_err = String::new();
+        let mut bytes = None;
+        for attempt in 1..=DOWNLOAD_RETRIES {
+            if attempt > 1 {
+                tokio::time::sleep(DOWNLOAD_RETRY_DELAY).await;
+            }
+            match Self::fetch_once(url).await {
+                Ok(b) => {
+                    bytes = Some(b);
+                    break;
+                }
+                Err(e) => {
+                    warn!(error = %e, url, attempt, of = DOWNLOAD_RETRIES, "art: download attempt failed");
+                    last_err = e;
+                }
+            }
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("download failed reading body: {e}"))?;
+        let bytes = bytes.ok_or(last_err)?;
 
         // CPU-bound (decode/resize/re-encode) — spawn_blocking rather than
         // tying up the async runtime's worker threads for it. Falls back to
@@ -1263,6 +1298,35 @@ mod tests {
     #[tokio::test]
     async fn viewer_running_false_before_any_show() {
         assert!(!ArtCapability::viewer_running().await);
+    }
+
+    #[tokio::test]
+    async fn download_to_retries_before_giving_up() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_clone = attempts.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                attempts_clone.fetch_add(1, AtomicOrdering::SeqCst);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.jpg");
+        let url = format!("http://{addr}/image.jpg");
+        let result = ArtCapability::download_to(&url, &dest).await;
+        assert!(result.is_err());
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), DOWNLOAD_RETRIES);
     }
 
     #[tokio::test]
