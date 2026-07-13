@@ -530,6 +530,29 @@ of this list anymore.
    `llama3.2:1b`, displayed on `pi2`, both manual next and the timer
    advanced correctly. This is a REST endpoint, not an intent/voice tool —
    step 7 below is still the gap.
+3.6. **Done 2026-07-13 — fbi replaced with mpv to kill the per-image blink.**
+   First real end-to-end test against the actual HDMI-connected TV (steps 3
+   and 3.5 above had only ever been verified via `pgrep`/logs, no TV wired
+   up) surfaced that `fbi`'s kill-and-relaunch-per-image design causes a
+   visible black-screen blink on every single slideshow advance — the
+   console's graphics mode gets torn down and rebuilt each time. Investigated
+   alternatives live on `pi2`: `imv` ruled out immediately (X11/Wayland only,
+   no framebuffer/DRM backend at all — confirmed via `dpkg -L` and a live
+   "Failed to create window" test); `mpv --vo=drm` confirmed working
+   headless under the same `vc4-fkms-v3d` overlay `fbi` already needed, no
+   config changes required. `capability-art` now launches one persistent
+   `mpv` process and drives every later image change through its JSON IPC
+   socket (`--input-ipc-server`) instead of killing/relaunching — no more
+   blink. Two non-obvious things confirmed live along the way: a bare
+   `loadfile` doesn't visibly redraw a frozen still image (needs a follow-up
+   no-op `seek`), and mpv's built-in `vf=fade` crossfade filter gets
+   permanently stuck at a black first frame for a held still image (its
+   internal playback clock never advances for `--image-display-duration=inf`
+   + `--keep-open=yes`), so a real animated crossfade is deferred — this step
+   ships the blink-free hard-cut only. The original objection to mpv (~600 MB
+   of Debian GTK/X11 deps, a bad fit for a 512 MB Pi Zero 2 W) no longer
+   applies now that the Pi Zero migration is dropped (see the note at the
+   top of this file) in favour of staying on the Pi 4.
 4. Art library curation + pipeline (can happen in parallel with 3 — it's
    independent server-side work). Not started.
 5. TV WebSocket control (input switch, power) — nice-to-have, not blocking
@@ -544,6 +567,19 @@ of this list anymore.
    tool yet — this step is now specifically "expose it as one," a smaller
    lift than before since the hard part (the search/curation/rotation
    logic) already exists and works.
+8. True crossfade between images (parked, not started) — `mpv`'s own
+   `--vf=fade` filter got stuck permanently at a black first frame for a
+   held still image (`--image-display-duration=inf` + `--keep-open=yes`
+   never advances mpv's internal playback clock, so the fade's `t=0` state
+   never progresses — confirmed live during step 3.6's investigation). The
+   current blink-free swap (persistent `mpv` process, `loadfile` + a
+   `playback-restart`-gated `seek 0` to force the redraw) ships without a
+   real fade. Revisiting this now has slightly better odds than when it was
+   first tried: step 3.6 also added `wait_for_playback_restart`, an
+   event-driven wait on mpv's own IPC stream instead of a blind sleep, which
+   could plausibly be adapted to drive a real playing-forward-briefly
+   fade-in instead of the current frozen-image workaround — but that's
+   genuinely new design work, not a quick follow-on.
 
 ## 11. What changed from the original spec, and why
 

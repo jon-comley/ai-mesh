@@ -82,21 +82,28 @@ echo ">>> Installing system dependencies..."
 apt-get install -y -q git curl
 
 if has_feature art; then
-    # fbi against the raw framebuffer, not feh/pqiv/mpv: a Lite install has
-    # no X server (feh/pqiv can't start), and while mpv --vo=drm does work,
-    # Debian's mpv package drags in a full GTK/X11/audio stack as unused
-    # linked dependencies (~600 MB, 265 packages — confirmed on the actual
-    # first node) for a single-purpose kiosk display. fbi needs only a
-    # handful of small deps.
-    echo ">>> Installing fbi (art-display fullscreen viewer, framebuffer)..."
-    apt-get install -y -q --no-install-recommends fbi
+    # mpv --vo=drm, not fbi/feh/pqiv: a Lite install has no X server
+    # (feh/pqiv can't start at all), and fbi's kill-and-relaunch-per-image
+    # model was replaced after a real TV finally got wired up and the
+    # resulting black-screen blink on every single image change turned out
+    # to be genuinely visible — see capability-art's `show()` doc comment.
+    # mpv's IPC socket lets one persistent process hold the display across
+    # many images instead. Debian's mpv package does drag in a full
+    # GTK/X11/audio stack as unused linked dependencies (~600 MB) that fbi
+    # didn't need, but that's a non-issue on the Pi 4 this now targets — the
+    # original concern was fitting a future 512 MB Pi Zero 2 W, a migration
+    # since dropped.
+    echo ">>> Installing mpv (art-display viewer, headless DRM output)..."
+    apt-get install -y -q mpv
 
     # This SoC's default full-KMS driver (vc4-kms-v3d) exposes no /dev/fb0
-    # at all, which fbi needs — confirmed on the actual first node. The
-    # legacy "fake KMS" overlay is still hardware-accelerated and does
-    # expose it. hdmi_force_hotplug=1 makes the Pi assume a display is
-    # present at boot even before the TV is wired up/powered on, which is
-    # also required for /dev/fb0 to appear at all.
+    # at all, which fbi needed — the legacy "fake KMS" overlay below was
+    # originally added for that. Confirmed live that mpv's DRM output (a
+    # different path, /dev/dri/cardN rather than /dev/fb0) also works fine
+    # under this same fkms overlay, so it's left in place rather than
+    # touching a working config on unverified assumptions about the modern
+    # kms driver. hdmi_force_hotplug=1 makes the Pi assume a display is
+    # present at boot even before the TV is wired up/powered on.
     CONFIG_TXT="/boot/firmware/config.txt"
     CONFIG_CHANGED=0
     if [ -f "$CONFIG_TXT" ]; then
@@ -118,9 +125,9 @@ if has_feature art; then
         if [ "$CONFIG_CHANGED" = "1" ]; then
             echo ""
             echo ">>> ################################################################"
-            echo ">>> #  DISPLAY CONFIG CHANGED — REBOOT NEEDED before /dev/fb0       #"
-            echo ">>> #  exists. Run 'sudo reboot' once, manually, before testing      #"
-            echo ">>> #  the art display.                                             #"
+            echo ">>> #  DISPLAY CONFIG CHANGED — REBOOT NEEDED before the display     #"
+            echo ">>> #  output exists. Run 'sudo reboot' once, manually, before       #"
+            echo ">>> #  testing the art display.                                     #"
             echo ">>> ################################################################"
             echo ""
         fi

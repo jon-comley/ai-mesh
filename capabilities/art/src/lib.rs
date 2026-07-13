@@ -12,6 +12,7 @@
 //! it was last told to.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -20,14 +21,19 @@ use async_trait::async_trait;
 use capability_core::Capability;
 use image::{GenericImageView, Rgb, RgbImage, imageops};
 use shared::{ArtBatchRequest, ArtShowRequest, ArtStatusReport, MeshMessage};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::Sender;
 use tracing::{info, warn};
 
 /// A slow/hung source URL shouldn't hang an ArtShow request indefinitely —
-/// the coordinator would just wait forever for the ArtStatus reply.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
+/// the coordinator would just wait forever for the ArtStatus reply. 45s
+/// (bumped from 15s after a live multi-MB original-resolution Met image
+/// timed out mid-download on pi2's connection) gives real museum-API image
+/// sizes enough headroom without being unbounded.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(45);
 
 // ── Matte/border compositing ────────────────────────────────────────────────
 // The real Frame TV's "art mode" look (a picture-frame border/mat around the
@@ -72,11 +78,33 @@ fn env_rgb(name: &str, default: [u8; 3]) -> [u8; 3] {
         .unwrap_or(default)
 }
 
+/// Fill a solid rectangle, clipped to the canvas bounds — used for the
+/// "infill" panel that soaks up whatever gap contain-fit leaves between the
+/// artwork and the frame's fixed interior boundary, coloured to match the
+/// artwork's own edge rather than a flat fixed colour (see `compose_matte`
+/// and `avg_row`/`avg_col`). Deliberately un-bevelled: that treatment
+/// belongs to the frame itself (`draw_ring`, below), which never changes
+/// size regardless of the artwork's own aspect ratio.
+fn fill_rect(canvas: &mut RgbImage, x0: u32, y0: u32, w: u32, h: u32, rgb: [u8; 3]) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let color = Rgb(rgb);
+    let (cw, ch) = canvas.dimensions();
+    let x_end = (x0 + w).min(cw);
+    let y_end = (y0 + h).min(ch);
+    for yy in y0..y_end {
+        for xx in x0..x_end {
+            canvas.put_pixel(xx, yy, color);
+        }
+    }
+}
+
 /// Draw a rectangular outline (not filled) of `thickness` pixels, clipped to
-/// the canvas bounds — used for the thin "frame line" right at the image's
-/// edge, a common real-world mat-and-frame detail (a "fillet") rather than
-/// just the mat colour alone.
-fn draw_border(
+/// the canvas bounds — the frame's own thin "fillet" line, always exactly
+/// `frame_px` wide regardless of the artwork's aspect ratio (see
+/// `compose_matte`).
+fn draw_ring(
     canvas: &mut RgbImage,
     x0: u32,
     y0: u32,
@@ -351,11 +379,79 @@ fn apply_bevel_and_seams(
     }
 }
 
+/// Scale `(sw, sh)` down/up preserving its own aspect ratio (never
+/// distorted, never cropped) so it fits entirely within `(available_w,
+/// available_h)` — the artwork's actual displayed size. Pure/pixel-free so
+/// the aspect-ratio-preserving math is cheap to test directly.
+fn contain_fit(sw: u32, sh: u32, available_w: u32, available_h: u32) -> (u32, u32) {
+    let scale = (available_w as f32 / sw as f32).min(available_h as f32 / sh as f32);
+    let pic_w = ((sw as f32) * scale)
+        .round()
+        .max(1.0)
+        .min(available_w as f32) as u32;
+    let pic_h = ((sh as f32) * scale)
+        .round()
+        .max(1.0)
+        .min(available_h as f32) as u32;
+    (pic_w, pic_h)
+}
+
+/// Average colour of one horizontal row of `img` — used to sink the
+/// infill's own colour to whatever colour the artwork's own edge is (see
+/// `compose_matte`), rather than a flat fixed colour, so it reads as the
+/// picture bleeding out into the gap instead of a visibly separate panel.
+fn avg_row(img: &RgbImage, y: u32) -> [u8; 3] {
+    let w = img.width();
+    let mut sum = [0u64; 3];
+    for x in 0..w {
+        let p = img.get_pixel(x, y).0;
+        for (s, c) in sum.iter_mut().zip(p) {
+            *s += c as u64;
+        }
+    }
+    let count = (w as u64).max(1);
+    [
+        (sum[0] / count) as u8,
+        (sum[1] / count) as u8,
+        (sum[2] / count) as u8,
+    ]
+}
+
+/// Average colour of one vertical column of `img` — see `avg_row`.
+fn avg_col(img: &RgbImage, x: u32) -> [u8; 3] {
+    let h = img.height();
+    let mut sum = [0u64; 3];
+    for y in 0..h {
+        let p = img.get_pixel(x, y).0;
+        for (s, c) in sum.iter_mut().zip(p) {
+            *s += c as u64;
+        }
+    }
+    let count = (h as u64).max(1);
+    [
+        (sum[0] / count) as u8,
+        (sum[1] / count) as u8,
+        (sum[2] / count) as u8,
+    ]
+}
+
 /// Decode `bytes`, composite onto a matte-coloured canvas at the panel's
-/// native resolution (stretched to exactly fill the padded inner rectangle —
-/// deliberately not aspect-preserving, so the matte border comes out even on
-/// all four sides regardless of the source image's own aspect ratio), draw a
-/// thin frame line at its edge, and re-encode as JPEG. CPU-bound and
+/// native resolution — a "contain" fit: scaled preserving the source's own
+/// aspect ratio to fit entirely within the frame's fixed interior, the whole
+/// artwork always visible, never cropped or distorted. Two earlier
+/// approaches were tried and confirmed live to look wrong: stretching to
+/// exactly fill the interior (visibly distorted proportions once enough
+/// differently-shaped Met images had cycled through), then a "cover"
+/// crop-to-fill (no distortion, but cropped a large fraction off portrait-
+/// oriented artwork whenever the interior's own aspect ratio was very
+/// different from the artwork's) — and a version after that which grew the
+/// bevelled/mitred frame itself to absorb the slack, which read as the frame
+/// changing size per image rather than staying the fixed, familiar assembly
+/// it always was. This version keeps the frame (mat width, line, bevel,
+/// mitre seams) exactly fixed-size regardless of the artwork's aspect ratio,
+/// and instead gives whatever gap is left over between the artwork and the
+/// frame's interior an infill coloured to match the artwork's own edge — see
+/// `fill_rect`'s, `avg_row`'s, and `draw_ring`'s doc comments. CPU-bound and
 /// synchronous by design — the caller runs this via `spawn_blocking` rather
 /// than blocking the async runtime.
 fn compose_matte(bytes: &[u8], config: &MatteConfig) -> Result<Vec<u8>, String> {
@@ -380,13 +476,17 @@ fn compose_matte(bytes: &[u8], config: &MatteConfig) -> Result<Vec<u8>, String> 
     let fit_w = config.canvas_w.saturating_sub(pad_x * 2).max(1);
     let fit_h = config.canvas_h.saturating_sub(pad_y * 2).max(1);
 
-    let mut resized = imageops::resize(&source_rgb, fit_w, fit_h, imageops::FilterType::Lanczos3);
-    apply_glaze(&mut resized, config.glaze_percent, config.glaze_rgb);
-
+    // The frame's own interior — offset_x/offset_y/fit_w/fit_h — never
+    // changes size regardless of the artwork's aspect ratio; the mat width,
+    // frame line, bevel and mitre seams below are all still computed exactly
+    // as they always have been, fixed. Only where *inside* that interior the
+    // artwork itself sits varies, since it's now contain-fit (preserving its
+    // own aspect ratio, never cropped or distorted) rather than stretched or
+    // cropped to fill the interior exactly.
     let offset_x = pad_x;
     let offset_y = pad_y;
 
-    draw_border(
+    draw_ring(
         &mut canvas,
         offset_x.saturating_sub(config.frame_px),
         offset_y.saturating_sub(config.frame_px),
@@ -413,11 +513,55 @@ fn compose_matte(bytes: &[u8], config: &MatteConfig) -> Result<Vec<u8>, String> 
         pad_x + config.frame_px,
         pad_y + config.frame_px,
     );
+
+    let (pic_w, pic_h) = contain_fit(sw, sh, fit_w, fit_h);
+    let mut resized = imageops::resize(&source_rgb, pic_w, pic_h, imageops::FilterType::Lanczos3);
+    apply_glaze(&mut resized, config.glaze_percent, config.glaze_rgb);
+    let border_x = (fit_w - pic_w) / 2;
+    let border_y = (fit_h - pic_h) / 2;
+    let pic_offset_x = offset_x + border_x;
+    let pic_offset_y = offset_y + border_y;
+    // Whatever gap contain-fit leaves between the artwork and the frame's
+    // fixed interior — zero on the axis the artwork actually fills, however
+    // much its aspect ratio calls for on the other — gets filled with a
+    // colour sampled from the artwork's own edge (averaged along that edge,
+    // post-glaze) rather than a flat fixed colour, so it reads as the
+    // picture bleeding out into the gap. contain_fit only ever leaves slack
+    // on one axis at a time, never both, so at most one of these branches
+    // does anything. Deliberately painted after the frame/bevel/mitre pass
+    // above (which only touches *outside* this interior) and before the
+    // artwork overlay, so it never disturbs the frame's own fixed-size
+    // treatment.
+    if border_y > 0 {
+        let top_color = avg_row(&resized, 0);
+        let bottom_color = avg_row(&resized, pic_h - 1);
+        fill_rect(&mut canvas, offset_x, offset_y, fit_w, border_y, top_color);
+        fill_rect(
+            &mut canvas,
+            offset_x,
+            offset_y + fit_h - border_y,
+            fit_w,
+            border_y,
+            bottom_color,
+        );
+    } else if border_x > 0 {
+        let left_color = avg_col(&resized, 0);
+        let right_color = avg_col(&resized, pic_w - 1);
+        fill_rect(&mut canvas, offset_x, offset_y, border_x, fit_h, left_color);
+        fill_rect(
+            &mut canvas,
+            offset_x + fit_w - border_x,
+            offset_y,
+            border_x,
+            fit_h,
+            right_color,
+        );
+    }
     imageops::overlay(
         &mut canvas,
         &resized,
-        i64::from(offset_x),
-        i64::from(offset_y),
+        i64::from(pic_offset_x),
+        i64::from(pic_offset_y),
     );
     apply_brightness(&mut canvas, config.brightness_percent);
 
@@ -431,22 +575,42 @@ fn compose_matte(bytes: &[u8], config: &MatteConfig) -> Result<Vec<u8>, String> 
     Ok(out)
 }
 
-/// After killing the previous viewer, give the kernel a moment to actually
-/// release `/dev/fb0` before the new one opens it — confirmed against the
-/// real node that `pkill` returning doesn't guarantee the killed process has
-/// finished releasing its file descriptors yet.
+/// After killing a stuck/crashed viewer (the fallback path — see `show`),
+/// give the kernel a moment to actually release the display before the
+/// replacement opens it — confirmed against the real node that `pkill`
+/// returning doesn't guarantee the killed process has finished releasing its
+/// file descriptors yet.
 const RESPAWN_SETTLE: Duration = Duration::from_millis(150);
 
 /// How long to give the old viewer to exit cleanly on SIGTERM before
 /// escalating to SIGKILL — see `kill_existing_viewer`.
 const KILL_GRACE_PERIOD: Duration = Duration::from_millis(200);
 
+/// How often to check whether `mpv` has created its IPC socket file yet —
+/// see `launch_viewer`'s doc comment for why this is polled rather than a
+/// fixed sleep.
+const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Give up waiting for the socket after this long — a launch that's this
+/// broken will fail loudly on the first IPC attempt anyway (see `show`'s
+/// fallback path) rather than hang forever.
+const SOCKET_POLL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A `loadfile` command alone doesn't visibly redraw a still image once mpv
+/// is just holding it frozen (its internal state/IPC events update
+/// immediately, but the screen doesn't) — confirmed live on the real node. A
+/// no-op absolute seek right after forces the redraw, but a seek sent before
+/// mpv's own `playback-restart` event confirms the load actually landed can
+/// silently no-op — also confirmed live, a fixed few-hundred-ms guess wasn't
+/// reliably long enough. This bounds how long to wait for that event before
+/// giving up and sending the seek anyway.
+const IPC_REDRAW_TIMEOUT: Duration = Duration::from_secs(3);
+
 pub struct ArtCapability {
     node_id: String,
-    /// Serializes show() calls — `fbi` runs detached from its own launcher
-    /// (see `show`'s doc comment), so there's no child handle to hold onto;
-    /// this just stops two overlapping ArtShow requests from racing on the
-    /// kill-then-respawn sequence.
+    /// Serializes show() calls — the persistent `mpv` process is controlled
+    /// over its IPC socket rather than via a held child handle (see `show`'s
+    /// doc comment), so this just stops two overlapping ArtShow requests
+    /// from racing on the launch-or-control decision.
     show_lock: Arc<Mutex<()>>,
     current_url: Arc<Mutex<Option<String>>>,
     /// Bumped on every `ArtShow` or `ArtBatch` received — a running batch
@@ -468,11 +632,18 @@ impl ArtCapability {
     }
 
     fn viewer_bin() -> String {
-        std::env::var("ART_VIEWER_BIN").unwrap_or_else(|_| "fbi".into())
+        std::env::var("ART_VIEWER_BIN").unwrap_or_else(|_| "mpv".into())
     }
 
-    fn fb_device() -> String {
-        std::env::var("ART_FB_DEVICE").unwrap_or_else(|_| "/dev/fb0".into())
+    /// One persistent viewer process holds the display for as long as the
+    /// node's up — every image change after the first goes through this
+    /// socket rather than killing/relaunching the process (see `show`'s doc
+    /// comment for why).
+    fn ipc_socket_path() -> PathBuf {
+        if let Ok(p) = std::env::var("ART_MPV_IPC_SOCKET") {
+            return PathBuf::from(p);
+        }
+        Self::cache_dir().join("mpv.sock")
     }
 
     fn cache_dir() -> PathBuf {
@@ -485,10 +656,17 @@ impl ArtCapability {
             .join("art-cache")
     }
 
-    /// Fixed filename, overwritten on every single ArtShow — no history to
-    /// keep around for a one-off image, unlike the batch cache below.
-    fn cache_path() -> PathBuf {
-        Self::cache_dir().join("current_art")
+    /// Ping-pongs between two filenames rather than always overwriting one
+    /// fixed name — confirmed live that `mpv` appears to cache decoded
+    /// output keyed by path, so re-`loadfile`-ing the exact same path with
+    /// freshly-written bytes underneath can just redisplay whatever it last
+    /// showed for that path instead of genuinely re-reading it. Alternating
+    /// guarantees consecutive shows always hand `mpv` a path distinct from
+    /// the one it's currently displaying, forcing a real reload, while still
+    /// bounding disk use to two files rather than growing unbounded over the
+    /// agent's uptime.
+    fn cache_path(generation: u64) -> PathBuf {
+        Self::cache_dir().join(format!("current_art_{}", generation % 2))
     }
 
     /// Where a batch's images live, one file per index — cleared and
@@ -561,88 +739,193 @@ impl ArtCapability {
         Ok(())
     }
 
-    async fn download(url: &str) -> Result<PathBuf, String> {
-        let path = Self::cache_path();
+    async fn download(url: &str, generation: u64) -> Result<PathBuf, String> {
+        let path = Self::cache_path(generation);
         Self::download_to(url, &path).await?;
         Ok(path)
     }
 
-    /// Kill whatever's currently showing (if anything) and start the viewer
-    /// fresh on `path`. Uses `fbi` against the raw framebuffer, not
-    /// feh/pqiv/mpv — a Raspberry Pi OS *Lite* install (no desktop,
-    /// confirmed against the real hardware while bringing the first node
-    /// up) has no X server, so an X11-only viewer like feh can't start at
-    /// all; `mpv --vo=drm` does work, but Debian's `mpv` package drags in a
-    /// full GTK/X11/audio stack as unused linked dependencies (~600 MB) —
-    /// wildly disproportionate for a single-purpose kiosk display, and a bad
-    /// fit for the eventual 512 MB Pi Zero 2 W. `fbi` needs only a handful
-    /// of small deps and writes straight to `/dev/fb0`. That device isn't
-    /// exposed by this SoC's default full-KMS driver at all — the node this
-    /// was built against needed `dtoverlay=vc4-fkms-v3d` (legacy fake-KMS,
-    /// still hardware-accelerated) plus `hdmi_force_hotplug=1` in
-    /// `/boot/firmware/config.txt` before `/dev/fb0` appeared; see
-    /// `docs/frame-tv-setup.md`. `-T 1` targets the primary VT, `-d` skips
-    /// fbi's own failed DRM-dumb-buffer auto-probe (it tries DRM before
-    /// falling back to fbdev otherwise), `-a` autozooms to fit the screen,
-    /// `-noverbose` suppresses fbi's on-image filename/size overlay.
+    /// Show `path`, reusing an already-running viewer over its IPC socket
+    /// when there is one rather than killing and relaunching it.
     ///
-    /// Run via `sudo -n`: `/dev/fb0` is `root:video` (the agent's user is in
-    /// `video`, so that part's fine on its own) but fbi also needs to
-    /// control the active VT via `/dev/tty1`, and VT-switching ioctls need
-    /// real root regardless of file permissions on that device — confirmed
-    /// against the real node that even after a udev rule opened up
-    /// `/dev/tty1` to the `video` group, fbi still silently exited without
-    /// root. The agent's systemd unit already runs as an account with full
-    /// passwordless sudo (see `scripts/install-node-linux.sh`'s existing
-    /// NOPASSWD rationale for this solo home-lab setup), so this doesn't
-    /// grant anything new.
+    /// **Why this replaced the old kill-and-relaunch-`fbi`-per-image
+    /// design**: that approach tore down and rebuilt the console's graphics
+    /// mode on *every single image change*, which reads as a visible
+    /// black-screen blink each time — confirmed live once a real TV was
+    /// finally wired up to watch it (see plans/frame-tv-art-display.md).
+    /// `mpv --vo=drm` holds the display continuously across many images
+    /// instead: launch it once, then drive every later change through its
+    /// JSON IPC socket (`--input-ipc-server`). The original objection to
+    /// mpv (Debian's package drags in ~600 MB of GTK/X11 deps as unused
+    /// linked dependencies, a bad fit for a 512 MB Pi Zero 2 W) no longer
+    /// applies now that the Pi Zero migration has been dropped in favour of
+    /// staying on a full Pi 4 — 600 MB of SD-card space there is a
+    /// non-issue. `feh`/`pqiv` are still ruled out (X11-only, no desktop on
+    /// this Lite install); mpv's `--vo=drm` needs no X11 or Wayland session
+    /// and was confirmed live to work under the same `vc4-fkms-v3d` overlay
+    /// `fbi` already required (see `docs/frame-tv-setup.md`), so no config
+    /// change was needed switching from one to the other.
     ///
-    /// **Not tracked via a held child handle** — confirmed against the real
-    /// node that `sudo`'s own process exits as soon as it has forked fbi
-    /// (fbi itself immediately re-forks and detaches to hold the console),
-    /// so a `Child` captured at spawn time is already gone moments later;
-    /// killing it would do nothing and leave the real fbi process running
-    /// forever, stacking a new one on every ArtShow. Killing by process
-    /// name (`pkill -x`) and checking liveness by name (`pgrep -x`, see
-    /// `viewer_running`) is what actually reaches the detached process.
+    /// **Confirmed live, two non-obvious gotchas**: (1) a bare `loadfile`
+    /// command doesn't visibly redraw anything once mpv is just holding a
+    /// frozen still image — its internal state and IPC events update
+    /// immediately, but the actual screen doesn't, until a no-op absolute
+    /// `seek` is sent right after (`send_ipc_show` below); (2) mpv creates
+    /// its IPC socket file as `root` (it's launched via `sudo -n`, same
+    /// NOPASSWD rationale as before, see `scripts/install-node-linux.sh`) —
+    /// this process runs as a regular user, so the socket gets `chmod`'d
+    /// open immediately after launch rather than needing every later
+    /// message wrapped in its own `sudo` call.
     async fn show(show_lock: &Mutex<()>, path: &Path) -> Result<(), String> {
         let _guard = show_lock.lock().await;
-        Self::kill_existing_viewer().await;
-        tokio::time::sleep(RESPAWN_SETTLE).await;
-        let output = Command::new("sudo")
+        if Self::viewer_running().await {
+            match Self::send_ipc_show(path).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    warn!(error = %e, "art: mpv IPC control failed, restarting viewer fresh");
+                    Self::kill_existing_viewer().await;
+                    tokio::time::sleep(RESPAWN_SETTLE).await;
+                }
+            }
+        }
+        Self::launch_viewer(path).await
+    }
+
+    /// First-time (or fallback-after-a-dead-socket) launch: start the
+    /// viewer fresh on `path` and open up its IPC socket for later control.
+    /// `--idle=yes` keeps it alive with nothing loaded rather than exiting,
+    /// though in practice a path is always given up front here too.
+    async fn launch_viewer(path: &Path) -> Result<(), String> {
+        let socket = Self::ipc_socket_path();
+        // A stale socket file from a crashed prior instance would make mpv
+        // fail to bind a fresh one on top of it.
+        let _ = tokio::fs::remove_file(&socket).await;
+        let mut child = Command::new("sudo")
             .arg("-n")
             .arg(Self::viewer_bin())
-            .arg("-T")
-            .arg("1")
-            .arg("-d")
-            .arg(Self::fb_device())
-            .arg("-a")
-            .arg("-noverbose")
+            .arg("--vo=drm")
+            .arg("--fullscreen")
+            .arg("--image-display-duration=inf")
+            .arg("--idle=yes")
+            .arg(format!("--input-ipc-server={}", socket.display()))
             .arg(path)
-            .output()
-            .await
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
             .map_err(|e| format!("failed to launch {}: {e}", Self::viewer_bin()))?;
-        // sudo's own exit here just means it successfully forked fbi (which
-        // has by now already detached to hold the console) — a non-zero
-        // status means the launch itself never happened (bad sudoers rule,
-        // missing binary, etc.), which is worth surfacing distinctly.
-        if !output.status.success() {
+        // Unlike `fbi` (which re-forks and detaches, so even a short-lived
+        // parent process means it's already running independently), mpv
+        // stays in the foreground holding the display itself — awaiting its
+        // exit would block until the process is killed. A quick
+        // `try_wait` just catches an immediate launch failure (bad sudoers
+        // rule, missing binary); letting the `Child` drop afterwards is
+        // deliberate fire-and-forget (tokio does not kill on drop unless
+        // `kill_on_drop` is set), leaving the process running independently.
+        if let Ok(Some(status)) = child.try_wait() {
             return Err(format!(
-                "{} launch failed: {}",
-                Self::viewer_bin(),
-                String::from_utf8_lossy(&output.stderr).trim()
+                "{} exited immediately with {status}",
+                Self::viewer_bin()
             ));
         }
+        // A fixed sleep here was confirmed live to be unreliable — mpv's
+        // own startup time varies, and a chmod that runs before the socket
+        // file actually exists leaves it root-only, silently failing every
+        // later IPC connect attempt with "Permission denied" and falling
+        // back to a full kill/relaunch (and its blink) on every single
+        // subsequent image, defeating the entire point of this design. Poll
+        // for the file to actually exist instead of guessing a delay.
+        let deadline = tokio::time::Instant::now() + SOCKET_POLL_TIMEOUT;
+        while tokio::fs::metadata(&socket).await.is_err() {
+            if tokio::time::Instant::now() >= deadline {
+                warn!(
+                    "art: mpv IPC socket never appeared within {SOCKET_POLL_TIMEOUT:?} — later IPC control may fail"
+                );
+                break;
+            }
+            tokio::time::sleep(SOCKET_POLL_INTERVAL).await;
+        }
+        let _ = Command::new("sudo")
+            .arg("-n")
+            .arg("chmod")
+            .arg("666")
+            .arg(&socket)
+            .status()
+            .await;
         Ok(())
     }
 
+    /// Tell an already-running viewer to switch to `path` over its IPC
+    /// socket — see `show`'s doc comment for why this needs both a
+    /// `loadfile` and a follow-up no-op `seek` to actually redraw, and
+    /// `wait_for_playback_restart`'s doc comment for why the seek waits on
+    /// mpv's own confirmation rather than a fixed delay.
+    async fn send_ipc_show(path: &Path) -> Result<(), String> {
+        let socket = Self::ipc_socket_path();
+        let mut stream = UnixStream::connect(&socket)
+            .await
+            .map_err(|e| format!("could not connect to mpv IPC socket: {e}"))?;
+        Self::send_ipc_command(
+            &mut stream,
+            &serde_json::json!({"command": ["loadfile", path.to_string_lossy()]}),
+        )
+        .await?;
+        Self::wait_for_playback_restart(&mut stream).await;
+        Self::send_ipc_command(
+            &mut stream,
+            &serde_json::json!({"command": ["seek", "0", "absolute"]}),
+        )
+        .await
+    }
+
+    /// Block (up to `IPC_REDRAW_TIMEOUT`) until mpv's own IPC event stream
+    /// confirms the just-requested `loadfile` has actually finished loading
+    /// and started rendering, rather than guessing a fixed delay — confirmed
+    /// live that a seek sent too early (before this event) can silently
+    /// no-op, leaving the previous image on screen despite `loadfile` having
+    /// already updated mpv's own internal state. Gives up and returns
+    /// (letting the caller send the seek anyway, on the chance it still
+    /// helps) if the event never arrives in time.
+    async fn wait_for_playback_restart(stream: &mut UnixStream) {
+        let deadline = tokio::time::Instant::now() + IPC_REDRAW_TIMEOUT;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 512];
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                warn!(
+                    "art: timed out waiting for mpv's playback-restart event, sending seek anyway"
+                );
+                return;
+            }
+            match tokio::time::timeout(remaining, stream.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return, // connection closed, read error, or timed out
+                Ok(Ok(n)) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if String::from_utf8_lossy(&buf).contains("\"event\":\"playback-restart\"") {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn send_ipc_command(
+        stream: &mut UnixStream,
+        cmd: &serde_json::Value,
+    ) -> Result<(), String> {
+        let mut line = cmd.to_string();
+        line.push('\n');
+        stream
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("mpv IPC write failed: {e}"))
+    }
+
     /// SIGTERM first, escalating to SIGKILL only if it's still alive after a
-    /// brief grace period. `fbi` puts the console into graphics mode via
-    /// ioctl and only restores it on its own normal exit path — SIGKILL
-    /// bypasses that entirely, which can leave the VT in a scrambled state.
-    /// Since nothing here needs instant termination (there's already a
-    /// settle delay before the next viewer spawns), giving it a fair chance
-    /// to exit cleanly first is free.
+    /// brief grace period — only used as a fallback when IPC control fails
+    /// (see `show`), since the whole point of the persistent-process design
+    /// is to not do this on every single image change any more.
     async fn kill_existing_viewer() {
         let _ = Command::new("sudo")
             .arg("-n")
@@ -680,9 +963,9 @@ impl ArtCapability {
     /// bumping the generation here is what makes a running batch loop
     /// notice and exit next time it wakes (see `spawn_batch_loop`).
     async fn handle_show(&self, req: ArtShowRequest, tx: Sender<MeshMessage>) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let result = async {
-            let path = Self::download(&req.image_url).await?;
+            let path = Self::download(&req.image_url, generation).await?;
             Self::show(&self.show_lock, &path).await?;
             Ok::<(), String>(())
         }
@@ -848,7 +1131,101 @@ impl Capability for ArtCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::UnixListener;
     use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn send_ipc_command_writes_a_newline_terminated_json_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let accept = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 256];
+            let n = stream.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            buf
+        });
+
+        let mut client = UnixStream::connect(&socket_path).await.unwrap();
+        ArtCapability::send_ipc_command(
+            &mut client,
+            &serde_json::json!({"command": ["loadfile", "/tmp/x.jpg"]}),
+        )
+        .await
+        .unwrap();
+
+        let received = accept.await.unwrap();
+        let text = String::from_utf8(received).unwrap();
+        assert!(
+            text.ends_with('\n'),
+            "expected a newline-terminated line: {text:?}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(parsed["command"][0], "loadfile");
+        assert_eq!(parsed["command"][1], "/tmp/x.jpg");
+    }
+
+    #[tokio::test]
+    async fn send_ipc_show_sends_loadfile_then_a_seek() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+        // Safe in tests: this crate's only other env::set_var call sites are
+        // absent, and each test here uses its own tempdir/socket so this
+        // doesn't race with anything else.
+        unsafe {
+            std::env::set_var("ART_MPV_IPC_SOCKET", &socket_path);
+        }
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let accept = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // send_ipc_show writes two separate lines over the same
+            // connection, waiting in between for this mock server to send
+            // back mpv's own playback-restart event — keep reading (rather
+            // than a single `read` call, which would return after the first
+            // line and let the connection close before the second write)
+            // until both lines have arrived.
+            let mut buf = Vec::new();
+            let mut chunk = vec![0u8; 512];
+            let mut sent_event = false;
+            while buf.iter().filter(|&&b| b == b'\n').count() < 2 {
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "connection closed before two lines arrived");
+                buf.extend_from_slice(&chunk[..n]);
+                if !sent_event && buf.contains(&b'\n') {
+                    stream
+                        .write_all(b"{\"event\":\"playback-restart\"}\n")
+                        .await
+                        .unwrap();
+                    sent_event = true;
+                }
+            }
+            buf
+        });
+
+        ArtCapability::send_ipc_show(Path::new("/tmp/next.jpg"))
+            .await
+            .unwrap();
+        unsafe {
+            std::env::remove_var("ART_MPV_IPC_SOCKET");
+        }
+
+        let received = accept.await.unwrap();
+        let text = String::from_utf8(received).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected exactly a loadfile then a seek: {lines:?}"
+        );
+        let loadfile: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(loadfile["command"][0], "loadfile");
+        assert_eq!(loadfile["command"][1], "/tmp/next.jpg");
+        let seek: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(seek["command"][0], "seek");
+    }
 
     #[test]
     fn name_is_art() {
@@ -869,6 +1246,18 @@ mod tests {
             interval_secs: 30,
         })));
         assert!(!cap.handles(&MeshMessage::Ping));
+    }
+
+    #[test]
+    fn cache_path_alternates_between_two_files() {
+        let a = ArtCapability::cache_path(1);
+        let b = ArtCapability::cache_path(2);
+        let c = ArtCapability::cache_path(3);
+        assert_ne!(a, b, "consecutive generations should use different paths");
+        assert_eq!(
+            a, c,
+            "the same parity should reuse the same path (bounded disk use)"
+        );
     }
 
     #[tokio::test]
@@ -1084,49 +1473,73 @@ mod tests {
     }
 
     #[test]
-    fn compose_matte_stretches_source_to_fill_inner_rectangle() {
-        // A square source in a non-square canvas is deliberately stretched to
-        // fill the padded inner rectangle exactly — matte thickness must come
-        // out even on every side regardless of the source's own aspect ratio.
-        // Verify by checking the frame border spans the full inner width, not
-        // just a square region sized to the tighter (height) dimension.
-        let src = tiny_test_jpeg(50, 50);
+    fn compose_matte_infill_absorbs_a_mismatched_ratio_without_touching_the_frame() {
+        // A very wide (5:1) source into a roughly square frame interior
+        // can't fill both axes without cropping or distorting the artwork —
+        // the frame itself stays fixed-size; the leftover gap gets an infill
+        // sampled from the artwork's own edge colour instead. tiny_test_jpeg
+        // is a flat fill, so that sampled colour is exactly the source's own
+        // [200, 50, 50] — verify a pixel well inside that gap matches it
+        // (not bevel-tinted, and not the frame's own dark colour — that
+        // treatment is reserved for the frame's own thin line, unaffected
+        // by the artwork's aspect ratio).
+        let src = tiny_test_jpeg(100, 20);
         let config = MatteConfig {
-            canvas_w: 300,
+            canvas_w: 120,
             canvas_h: 120,
+            matte_percent: 10.0,
             ..small_config()
         };
         let out = compose_matte(&src, &config).unwrap();
         let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
-        let mid_y = config.canvas_h / 2;
-        // Middle row sits well clear of the corner mitre seams, so every
-        // frame pixel there is bevel-tinted one way or the other (lighter on
-        // the left wedge, darker on the right) rather than the flat
-        // configured frame colour — accept either.
-        let lit = bevel_shade(config.frame_rgb, 1.0);
-        let shadow = bevel_shade(config.frame_rgb, 0.0);
-        let frame_cols: Vec<u32> = (0..config.canvas_w)
-            .filter(|&x| {
-                let px = decoded.get_pixel(x, mid_y).0;
-                approx_eq_rgb(px, lit, 10) || approx_eq_rgb(px, shadow, 10)
-            })
-            .collect();
+        // pad=12, fit_w=fit_h=96. contain_fit(100,20,96,96): scale=
+        // min(96/100,96/20)=min(0.96,4.8)=0.96 -> pic_w=96, pic_h=19. The
+        // picture sits vertically centred within the interior (y=[50,69)) —
+        // well above it, at y=30, is deep infill territory, clear of both
+        // the frame's own ring (y<12) and the picture itself.
+        let pixel = decoded.get_pixel(config.canvas_w / 2, 30).0;
         assert!(
-            !frame_cols.is_empty(),
-            "expected to find frame-coloured pixels on the middle row"
+            approx_eq_rgb(pixel, [200, 50, 50], 6),
+            "expected the infill to match the artwork's own (flat) edge colour, got {pixel:?}"
         );
-        // Full outer-edge-to-outer-edge span of the frame line, which is
-        // fit_w + 2*frame_px wide (the border sits *around* the fitted
-        // image) — should now match the wide canvas's own inner width, not a
-        // square region.
-        let span = frame_cols.last().unwrap() - frame_cols.first().unwrap();
-        let pad_w = (config.canvas_w as f32 * config.matte_percent / 100.0) as u32;
-        let inner_w = config.canvas_w - 2 * pad_w;
-        let expected_span = inner_w + 2 * config.frame_px;
+        // And the bevel-tinted mat colour, right outside the (always
+        // fixed-size) frame interior, must be completely unaffected by the
+        // artwork's unusual aspect ratio.
+        let mat_pixel = decoded.get_pixel(config.canvas_w / 2, 0).0;
+        let expected_mat = bevel_shade(config.matte_rgb, 1.0);
         assert!(
-            (span as i64 - expected_span as i64).abs() <= 3,
-            "expected stretched fit spanning the inner width (span={span}, expected={expected_span})"
+            approx_eq_rgb(mat_pixel, expected_mat, 6),
+            "expected the fixed-size mat's own bevel untouched, got {mat_pixel:?} (expected {expected_mat:?})"
         );
+    }
+
+    #[test]
+    fn contain_fit_preserves_the_source_aspect_ratio() {
+        // A 4:1 source into a square target must scale uniformly (same
+        // factor on both axes) — a distorting "stretch" would instead scale
+        // each axis independently to fill both dimensions exactly.
+        let (pic_w, pic_h) = contain_fit(200, 50, 100, 100);
+        let source_ratio = 200.0 / 50.0;
+        let pic_ratio = pic_w as f32 / pic_h as f32;
+        assert!(
+            (source_ratio - pic_ratio).abs() < 0.01,
+            "source_ratio={source_ratio} pic_ratio={pic_ratio} (pic_w={pic_w}, pic_h={pic_h})"
+        );
+    }
+
+    #[test]
+    fn contain_fit_never_exceeds_the_available_space() {
+        let (pic_w, pic_h) = contain_fit(200, 50, 100, 100);
+        assert!(pic_w <= 100 && pic_h <= 100);
+    }
+
+    #[test]
+    fn contain_fit_computes_the_exact_size_for_a_wide_source() {
+        // scale = min(100/200, 100/50) = min(0.5, 2.0) = 0.5 -> (100, 25):
+        // width fills the available space exactly, height is left over for
+        // the dark frame to absorb.
+        let (pic_w, pic_h) = contain_fit(200, 50, 100, 100);
+        assert_eq!((pic_w, pic_h), (100, 25));
     }
 
     #[test]
@@ -1302,12 +1715,39 @@ mod tests {
     }
 
     #[test]
-    fn draw_border_only_touches_the_outline_not_the_interior() {
+    fn avg_row_averages_a_horizontal_line() {
+        let mut img = RgbImage::new(2, 1);
+        img.put_pixel(0, 0, Rgb([100, 0, 0]));
+        img.put_pixel(1, 0, Rgb([200, 0, 0]));
+        assert_eq!(avg_row(&img, 0), [150, 0, 0]);
+    }
+
+    #[test]
+    fn avg_col_averages_a_vertical_line() {
+        let mut img = RgbImage::new(1, 2);
+        img.put_pixel(0, 0, Rgb([0, 100, 0]));
+        img.put_pixel(0, 1, Rgb([0, 200, 0]));
+        assert_eq!(avg_col(&img, 0), [0, 150, 0]);
+    }
+
+    #[test]
+    fn fill_rect_paints_only_the_given_rect() {
         let mut canvas = RgbImage::from_pixel(20, 20, Rgb([0, 0, 0]));
-        draw_border(&mut canvas, 5, 5, 10, 10, 2, [255, 255, 255]);
+        fill_rect(&mut canvas, 5, 5, 10, 10, [255, 255, 255]);
+        // Inside the rect, including its own interior: painted.
+        assert_eq!(canvas.get_pixel(5, 5).0, [255, 255, 255]);
+        assert_eq!(canvas.get_pixel(10, 10).0, [255, 255, 255]);
+        // Outside the rect entirely: untouched.
+        assert_eq!(canvas.get_pixel(0, 0).0, [0, 0, 0]);
+    }
+
+    #[test]
+    fn draw_ring_only_touches_the_outline_not_the_interior() {
+        let mut canvas = RgbImage::from_pixel(20, 20, Rgb([0, 0, 0]));
+        draw_ring(&mut canvas, 5, 5, 10, 10, 2, [255, 255, 255]);
         // Corner of the outline: painted.
         assert_eq!(canvas.get_pixel(5, 5).0, [255, 255, 255]);
-        // Centre of the bordered rect: untouched (still background).
+        // Centre of the ringed rect: untouched (still background).
         assert_eq!(canvas.get_pixel(10, 10).0, [0, 0, 0]);
         // Outside the rect entirely: untouched.
         assert_eq!(canvas.get_pixel(0, 0).0, [0, 0, 0]);
