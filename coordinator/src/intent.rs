@@ -162,11 +162,12 @@ pub async fn handle_intent(
         .model_name
         .clone()
         .or_else(|| registry.lock().unwrap().any_ready_llm_model());
-    let model_name = match (&gateway, &local_model) {
-        (Some(gw), _) => gw.provider.model().to_string(),
-        (None, Some(m)) => m.clone(),
-        (None, None) => return fail("no LLM model is ready on any node".into()),
-    };
+    // The actual model used is only known once inference runs (cloud may fall
+    // back across providers, or to local) — this match exists purely as an
+    // early-exit guard for "no model anywhere".
+    if gateway.is_none() && local_model.is_none() {
+        return fail("no LLM model is ready on any node".into());
+    }
 
     // 3. Build system prompt + conversation
     let (known_devices, known_groups) = registry.lock().unwrap().lighting_targets();
@@ -250,14 +251,70 @@ pub async fn handle_intent(
     };
 
     let llm_result = if let Some(gw) = &gateway {
-        match gw.provider.complete(&intent_messages(), 0.4).await {
-            Ok(reply) => {
+        let messages = intent_messages();
+        // Every attempt's failure is warn!-logged as it happens; `attempted`
+        // additionally collects them so the final "all providers failed"
+        // line (if we get there) summarizes every provider tried, not just
+        // the last one.
+        let mut attempted: Vec<String> = Vec::new();
+        let mut result = gw.provider.complete(&messages, 0.4).await.map(|r| {
+            (
+                r,
+                gw.provider.provider_name().to_string(),
+                gw.provider.model().to_string(),
+            )
+        });
+
+        if let Err(e) = &result {
+            warn!(
+                request_id = %request.request_id,
+                "cloud provider {} failed: {e}; trying other configured providers",
+                gw.provider.provider_name()
+            );
+            gw.state.record_gateway_error(e.to_string());
+            attempted.push(format!("{}: {e}", gw.provider.provider_name()));
+
+            let fallbacks = {
+                let reg = registry.lock().unwrap();
+                crate::cloud::fallback_providers(&reg, gw.provider.base_url())
+            };
+            for fp in fallbacks {
+                match fp.complete(&messages, 0.4).await {
+                    Ok(reply) => {
+                        info!(
+                            request_id = %request.request_id,
+                            provider = %fp.provider_name(),
+                            "cloud fallback succeeded"
+                        );
+                        result = Ok((
+                            reply,
+                            fp.provider_name().to_string(),
+                            fp.model().to_string(),
+                        ));
+                        break;
+                    }
+                    Err(fe) => {
+                        warn!(
+                            request_id = %request.request_id,
+                            provider = %fp.provider_name(),
+                            "cloud fallback provider failed: {fe}"
+                        );
+                        gw.state.record_gateway_error(fe.to_string());
+                        attempted.push(format!("{}: {fe}", fp.provider_name()));
+                        result = Err(fe);
+                    }
+                }
+            }
+        }
+
+        match result {
+            Ok((reply, node_id, model_name)) => {
                 gw.state
                     .record_gateway_call(prompt_tokens_before as u64, prompt_tokens_after as u64);
                 shared::InferenceResult {
                     request_id: request.request_id.clone(),
-                    node_id: gw.provider.provider_name().to_string(),
-                    model_name: model_name.clone(),
+                    node_id,
+                    model_name,
                     output: reply.text,
                     tokens_generated: reply.completion_tokens,
                     prompt_tokens: reply.prompt_tokens,
@@ -267,16 +324,18 @@ pub async fn handle_intent(
                     wire_version: WIRE_VERSION,
                 }
             }
-            Err(e) => {
+            Err(_) => {
+                let summary = attempted.join("; ");
                 warn!(
                     request_id = %request.request_id,
-                    "cloud provider failed: {e}; falling back to local"
+                    "all cloud providers failed ({summary}); falling back to local"
                 );
-                gw.state.record_gateway_error(e.to_string());
                 match run_local(local_model.clone()).await {
                     Ok(r) => r,
                     Err(msg) => {
-                        return fail(format!("cloud failed ({e}); local fallback failed: {msg}"));
+                        return fail(format!(
+                            "cloud failed ({summary}); local fallback failed: {msg}"
+                        ));
                     }
                 }
             }
@@ -937,6 +996,52 @@ async fn dispatch_reaper_command(
 /// `music_control`: forward to the music node and await the command result.
 /// Longer timeout than REAPER — a "play" can involve a token refresh, search,
 /// device lookup, and playback start against the Spotify Web API upstream.
+/// `art_search` needs the whole `DashboardState` (rotation state, pending
+/// inferences, node connections) that only the dashboard/HTTP call path
+/// carries — `dashboard` is `None` for any other caller (e.g. the CLI),
+/// which just can't start a search this way.
+async fn dispatch_art_search(
+    args: &serde_json::Value,
+    registry: &Arc<Mutex<Registry>>,
+    dashboard: Option<&Arc<DashboardState>>,
+) -> String {
+    let query = args["query"].as_str().unwrap_or("").trim();
+    if query.is_empty() {
+        return "art_search requires a non-empty 'query'".into();
+    }
+    let Some(state) = dashboard else {
+        return "art search isn't available in this context".into();
+    };
+    let Some(node_id) = crate::http::api::art::art_node_id(registry) else {
+        return "no art display connected".into();
+    };
+    let by_artist = args["by_artist"].as_bool().unwrap_or(false);
+    let interval_secs = args["interval_secs"].as_u64();
+    match crate::http::api::art::perform_art_search(
+        query,
+        interval_secs,
+        by_artist,
+        &node_id,
+        registry,
+        state,
+    )
+    .await
+    {
+        Ok(item) => {
+            let artist = if item.artist.is_empty() {
+                "an unknown artist".to_string()
+            } else {
+                item.artist.clone()
+            };
+            format!(
+                "Showing \"{}\" by {artist} — starting a slideshow for \"{query}\".",
+                item.title
+            )
+        }
+        Err(e) => format!("art search failed: {e}"),
+    }
+}
+
 async fn dispatch_music_command(
     request_id: &str,
     args: &serde_json::Value,
@@ -1133,6 +1238,7 @@ async fn dispatch_tool(
                 "Art narration turned off.".into()
             }
         }
+        "art_search" => dispatch_art_search(&args, registry, dashboard).await,
         "reaper_transport" | "reaper_action" => {
             dispatch_reaper_command(
                 request_id,
@@ -2273,20 +2379,44 @@ fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> 
                 "required": ["action"]
             }
         })],
-        shared::Feature::Art => vec![serde_json::json!({
-            "name": "art_narration",
-            "description": "Turn spoken narration of the art slideshow on or off — when on, a short spoken fact about each picture is read aloud as it's shown.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "enabled": {
-                        "type": "boolean",
-                        "description": "true to turn narration on, false to turn it off"
-                    }
-                },
-                "required": ["enabled"]
-            }
-        })],
+        shared::Feature::Art => vec![
+            serde_json::json!({
+                "name": "art_search",
+                "description": "Search the Metropolitan Museum's collection and start an art slideshow on the display — any theme, subject, or artist name, e.g. 'show me some Rembrandt', 'find pictures of ships', 'display something calming'. Not limited to art you'd expect to already know about — search for whatever the user asks.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "What to search for — an artist name, subject, theme, or style."
+                        },
+                        "by_artist": {
+                            "type": "boolean",
+                            "description": "true to show every matching piece with no curated cap (e.g. 'show me everything by Monet', 'all of Rembrandt's work' — use for explicit 'everything'/'all' requests). false (default) gives a curated best-of selection instead. Either way, if the query names a real artist, results are automatically filtered to their actual work — this flag only controls quantity, not accuracy."
+                        },
+                        "interval_secs": {
+                            "type": "integer",
+                            "description": "Seconds between each picture auto-advancing. Omit for the default (30s)."
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }),
+            serde_json::json!({
+                "name": "art_narration",
+                "description": "Turn spoken narration of the art slideshow on or off — when on, a short spoken fact about each picture is read aloud as it's shown.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "true to turn narration on, false to turn it off"
+                        }
+                    },
+                    "required": ["enabled"]
+                }
+            }),
+        ],
         _ => vec![],
     }
 }
@@ -2999,6 +3129,47 @@ mod tests {
         );
         let schemas = collect_tool_schemas(&registry);
         assert!(schemas.iter().any(|s| s["name"] == "art_narration"));
+        assert!(schemas.iter().any(|s| s["name"] == "art_search"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_art_search_requires_nonempty_query() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "art_search",
+            serde_json::json!({}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+            None,
+        )
+        .await;
+        assert!(result.contains("requires a non-empty 'query'"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_art_search_without_dashboard_reports_unavailable() {
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
+        let pending_intents: PendingIntents = Arc::new(Mutex::new(HashMap::new()));
+        let result = dispatch_tool(
+            "r1",
+            "art_search",
+            serde_json::json!({"query": "Rembrandt"}),
+            &registry,
+            &connections,
+            &pending_intents,
+            &[],
+            &[],
+            None,
+        )
+        .await;
+        assert!(result.contains("isn't available in this context"));
     }
 
     #[test]

@@ -559,14 +559,31 @@ of this list anymore.
    the slideshow itself. Not started.
 6. Automation triggers (occupancy/light/time-of-day) — deliberately last;
    depends on 3 working reliably first.
-7. Voice/chat browsing (`art_show` filter args + the read-only `art_current`
-   "what is this?" tool) — depends on 3 and 4, and on Phase C's
-   `get_climate` pattern already existing to copy from; smallest step once
-   those are in place. Step 3.5's `/api/art/search` covers the mechanism
-   (live query → curated result → rotation) but isn't itself an intent
-   tool yet — this step is now specifically "expose it as one," a smaller
-   lift than before since the hard part (the search/curation/rotation
-   logic) already exists and works.
+7. **Done 2026-07-13 — voice/chat browsing, `art_search` intent tool.** A
+   real gap surfaced live: asking the assistant for "Rembrandt curated" did
+   nothing (no tool existed to call), and nothing about the request was
+   visible anywhere — the LLM just had no way to act on it. `perform_art_search`
+   was factored out of `search_art`'s HTTP handler so both it and the new
+   `art_search` tool (`{query, by_artist?, interval_secs?}`) share the exact
+   same search/curate-or-filter/rotation/narration pipeline — free-text query,
+   not limited to a fixed artist list, e.g. "show me some Rembrandt", "find
+   pictures of ships", "display something calming". Also shipped
+   `art_narration`'s own toggle the same session (see below) — the
+   `art_current` "what is this?" read-only tool from the original step 7 scope
+   is still open, smaller now that the rest of the plumbing exists.
+7.5. **Done 2026-07-13 — spoken narration, `art_narration` toggle.** Each
+   rotation advance (initial show, timer, or manual next) gets the local LLM
+   to generate a short spoken-friendly fact about the artwork — grounded in
+   the Met's title/artist/date/bio fields, not invented — read aloud through
+   the existing TTS/announcement pipeline, fire-and-forget so it never holds
+   up the image display. `art_narration` (`{"enabled": true/false}`) turns it
+   on/off by voice/chat; on by default. Confirmed live the announcement plays
+   through whichever backend is a node's *default* `AUDIO_BACKENDS` entry —
+   on pi2 that's HDMI (the TV's own speakers), not the paired Bluetooth
+   speaker, since broadcast-style announcements don't do per-room sink
+   routing. Also surfaced (and fixed) that pi2's HDMI PipeWire sinks defaulted
+   to 40% volume at the OS level — bumped to 100%, confirmed WirePlumber's own
+   state-restore persists it across a full audio-stack restart.
 8. True crossfade between images (parked, not started) — `mpv`'s own
    `--vf=fade` filter got stuck permanently at a black first frame for a
    held still image (`--image-display-duration=inf` + `--keep-open=yes`

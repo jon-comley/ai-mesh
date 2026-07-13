@@ -1650,9 +1650,22 @@ Frame TV art-display fullscreen/User-Agent fixes.
   `taskkill` workaround only, no watchdog/auto-recovery. Can't build or
   test this without hands-on access to a Windows box.
 - **Cloud gateway has no per-provider latency/success-rate metrics** in
-  the dashboard — the underlying error handling/fallback-to-local logic
-  itself is already solid and well-tested (`coordinator/src/cloud.rs`);
-  this would just be a nice-to-have observability panel.
+  the dashboard — the underlying error handling/fallback logic itself is
+  already solid and well-tested (`coordinator/src/cloud.rs`); this would
+  just be a nice-to-have observability panel.
+- **Cloud fallback ✓ (2026-07-13)**: a failed primary provider call
+  (rate limit, auth, network) now cascades through every other preset
+  with a saved API key (`cloud::fallback_providers`, preset order) before
+  dropping to local inference — no new key management needed, since keys
+  were already stored per-endpoint (`api_key:<base_url>`) from switching
+  providers in the Gateway tab. Each attempt is logged individually and
+  summarized in the final "all cloud providers failed" message. Shared by
+  both dashboard chat and voice/mesh intents (`intent::handle_intent`).
+  **Known gap**: each fallback provider uses its preset's *first* model,
+  not any previously-selected one — there's only a single global
+  `selected_model` pref tied to whichever endpoint is currently active,
+  no per-provider model memory. Low priority; would need a
+  `model:<base_url>` pref plus Gateway tab UI changes.
 - **Coordinator state file has no version field** — low urgency: it's
   parsed key-by-key (`coordinator/src/state.rs`), so unknown/missing keys
   are already forward/backward compatible without one. Would only help
