@@ -2,7 +2,7 @@
 
 ---
 
-## Hunts / eBay Bargain Finder — deployed, awaiting eBay developer access to fully test (2026-07-12)
+## Hunts / eBay Bargain Finder — deployed, production keyset issued, not yet exercised with real data (2026-07-15)
 
 `plans/ebay-bargain-finder.md` is fully implemented and deployed to pi1:
 the `ebay` crate, registry persistence, coordinator HTTP API, background
@@ -12,12 +12,22 @@ coordinator (config round-trip, hunt CRUD, `run-now`, `analyze` validation,
 static assets/tab) and the eBay OAuth call path was genuinely exercised
 (clean auth failure with placeholder credentials, handled gracefully).
 
-**⚠ Not yet exercised with real eBay data — blocked on eBay developer API
-access.** A production Browse API keyset needs registering at
-developer.ebay.com (walkthrough in `docs/ebay-hunts.md`); sandbox data is
-fake and useless for real bargain-hunting, so this can't be worked around
-with a placeholder keyset the way Music's Spotify Premium requirement can't
-either. Once access is granted:
+A production Browse API keyset was issued 2026-07-15. Generating it required
+satisfying eBay's mandatory **Marketplace Account Deletion/Closure
+Notification** endpoint field — undocumented in `docs/ebay-hunts.md`'s
+walkthrough, and a real blocker since it demands a publicly-reachable HTTPS
+URL that pi1 (LAN/Tailscale-only) can't serve directly. Hunts never uses
+OAuth user tokens (Browse API only needs an app-level client-credentials
+token), so no eBay user PII is ever stored and the notification itself needs
+no real handling — just the verification challenge response. Solved with a
+standalone Cloudflare Worker (`your-worker.example.workers.dev`,
+deployed via `wrangler` CLI rather than the dashboard's web editor, which
+repeatedly corrupted pasted code) that computes the SHA-256 challenge
+response and 200s any deletion POST. Decoupled from home infra on purpose —
+it has to answer eBay's periodic re-verification checks regardless of
+whether pi1/Tailscale is up.
+
+**⚠ Still not exercised with real eBay data.** Next:
 1. Paste real client_id/client_secret into the Hunts tab's settings block
    (no deploy step — same operational model as the Online AI tab's key).
 2. `POST /api/ebay/analyze` against a real listing URL, confirm term
