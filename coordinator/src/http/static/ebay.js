@@ -151,7 +151,11 @@ function openEditor(hunt) {
     </div>
     <div class="gw-field">
       <span class="gw-label">Daily timeslots</span>
-      <div id="ebay-timeslots" class="ebay-timeslots"></div>
+      <div id="ebay-timeslot-chips" class="ebay-chips"></div>
+      <div class="gw-field gw-inline">
+        <input id="ebay-timeslot-add" type="time" value="00:00">
+        <button id="ebay-timeslot-add-btn" type="button">Add</button>
+      </div>
     </div>
     <div class="gw-field gw-inline">
       <button id="ebay-save" type="button">${hunt ? 'Save' : 'Create hunt'}</button>
@@ -165,7 +169,7 @@ function openEditor(hunt) {
 
   editor.querySelector('#ebay-cancel').addEventListener('click', closeEditor);
   editor.querySelector('#ebay-save').addEventListener('click', saveHunt);
-  editor.querySelector('#ebay-term-add-btn').addEventListener('click', () => {
+  const addTerm = () => {
     const input = editor.querySelector('#ebay-term-add');
     const text = input.value.trim();
     if (text) {
@@ -173,6 +177,10 @@ function openEditor(hunt) {
       input.value = '';
       renderTermChips();
     }
+  };
+  editor.querySelector('#ebay-term-add-btn').addEventListener('click', addTerm);
+  editor.querySelector('#ebay-term-add').addEventListener('keydown', e => {
+    if (e.key === 'Enter') addTerm();
   });
   if (!hunt) {
     editor.querySelector('#ebay-analyze').addEventListener('click', analyzeUrl);
@@ -181,9 +189,21 @@ function openEditor(hunt) {
     editor.querySelector('#ebay-toggle-enabled').addEventListener('click', () => toggleEnabled(hunt));
     editor.querySelector('#ebay-delete').addEventListener('click', () => deleteHunt(hunt.id));
   }
+  const addTimeslot = () => {
+    const input = editor.querySelector('#ebay-timeslot-add');
+    const [h, m] = (input.value || '').split(':').map(Number);
+    if (Number.isNaN(h) || Number.isNaN(m)) return;
+    draftTimeslots.add(h * 60 + m);
+    renderTimeslotChips();
+  };
+  editor.querySelector('#ebay-timeslot-add-btn').addEventListener('click', addTimeslot);
+  editor.querySelector('#ebay-timeslot-add').addEventListener('input', syncTimeslotAddButton);
+  editor.querySelector('#ebay-timeslot-add').addEventListener('keydown', e => {
+    if (e.key === 'Enter') addTimeslot();
+  });
 
   renderTermChips();
-  renderTimeslotGrid();
+  renderTimeslotChips();
 }
 
 function closeEditor() {
@@ -215,21 +235,39 @@ function renderTermChips() {
   }));
 }
 
-// 24 hourly cells (minutes-since-midnight) — a good enough default
-// granularity; half-hour cells would just double this array.
-function renderTimeslotGrid() {
-  const box = document.getElementById('ebay-timeslots');
+function renderTimeslotChips() {
+  const box = document.getElementById('ebay-timeslot-chips');
   if (!box) return;
-  box.innerHTML = Array.from({ length: 24 }, (_, h) => {
-    const minute = h * 60;
-    const on = draftTimeslots.has(minute);
-    return `<button type="button" class="ebay-slot${on ? ' ebay-slot-on' : ''}" data-minute="${minute}">${String(h).padStart(2, '0')}</button>`;
+  const sorted = Array.from(draftTimeslots).sort((a, b) => a - b);
+  if (!sorted.length) {
+    box.innerHTML = '<p class="placeholder">No timeslots yet — add one below.</p>';
+    return;
+  }
+  box.innerHTML = sorted.map(m => {
+    const hh = String(Math.floor(m / 60)).padStart(2, '0');
+    const mm = String(m % 60).padStart(2, '0');
+    return `<span class="ebay-chip">
+      <span>${hh}:${mm}</span>
+      <button type="button" class="ebay-chip-remove" data-minute="${m}" aria-label="remove timeslot">×</button>
+    </span>`;
   }).join('');
-  box.querySelectorAll('.ebay-slot').forEach(btn => btn.addEventListener('click', () => {
-    const m = +btn.dataset.minute;
-    if (draftTimeslots.has(m)) draftTimeslots.delete(m); else draftTimeslots.add(m);
-    renderTimeslotGrid();
+  box.querySelectorAll('.ebay-chip-remove').forEach(btn => btn.addEventListener('click', () => {
+    draftTimeslots.delete(+btn.dataset.minute);
+    renderTimeslotChips();
   }));
+  syncTimeslotAddButton();
+}
+
+// Disabled once the picker's current value is already in draftTimeslots —
+// re-enabled by the 'input' listener the moment the value changes, so the
+// same time can't be added twice via a stray extra click.
+function syncTimeslotAddButton() {
+  const input = document.getElementById('ebay-timeslot-add');
+  const btn = document.getElementById('ebay-timeslot-add-btn');
+  if (!input || !btn) return;
+  const [h, m] = (input.value || '').split(':').map(Number);
+  const minute = Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m;
+  btn.disabled = minute === null || draftTimeslots.has(minute);
 }
 
 async function analyzeUrl() {

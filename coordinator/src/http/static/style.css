@@ -4394,14 +4394,6 @@ body {
 }
 .ebay-chip-remove:hover { background: color-mix(in srgb, var(--red) 20%, transparent); color: var(--red); }
 
-.ebay-timeslots { display: grid; grid-template-columns: repeat(12, 1fr); gap: 4px; }
-@media (max-width: 480px) { .ebay-timeslots { grid-template-columns: repeat(6, 1fr); } }
-.ebay-slot {
-  border: 1px solid var(--border); border-radius: 4px; padding: 6px 0;
-  background: var(--surface-2); color: var(--text-muted); font-size: 12px; cursor: pointer;
-}
-.ebay-slot-on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
-
 #ebay-ticker { display: flex; flex-direction: column; gap: 10px; }
 .ebay-find {
   display: flex; gap: 12px; align-items: flex-start;
