@@ -38,6 +38,29 @@ whether pi1/Tailscale is up.
    background timer's real-world timing, not just the unit-tested pure
    scheduling logic.
 
+**Timeslot picker reworked (2026-07-15):** the original UI was a fixed
+00–23 hourly grid, and a CSS specificity bug (`.ebay-editor button` was
+unintentionally more specific than `.ebay-slot`/`.ebay-slot-on`) meant the
+"selected" highlight never actually rendered — clicking silently did
+nothing. Replaced with a `type="time"` picker + removable chip list (same
+pattern as the search-terms box), live-verified working on pi1. The
+backend already stored timeslots as arbitrary minutes-since-midnight
+(`ebay/src/schedule.rs`), so this was purely a frontend fix/upgrade — no
+API or schema change.
+
+**⚠ No cap on timeslots-per-hunt or total daily eBay calls.** Each hunt
+firing makes one Browse API call per *enabled* search term
+(`run_hunt_cycle`, `coordinator/src/http/api/ebay.rs`), so daily call
+volume ≈ hunts × active terms/hunt × timeslots/day — and now that
+timeslots are freely user-added rather than capped at 24 (one per hour),
+that product has no ceiling. eBay's Browse API typically grants ~5,000
+calls/day (exact figure depends on what the specific application was
+approved for; see `plans/ebay-bargain-finder.md`'s original risk note),
+and realistic hand-entered usage sits nowhere near that, but there is
+**no enforced guard today** beyond a log line + skip-this-cycle if eBay
+actually returns a 429 (`EbayError::RateLimited` handling, same file).
+Worth a soft cap or running-total warning if hunt/timeslot count grows.
+
 ---
 
 ## Music / Spotify — code-complete, NOT yet live-tested (2026-07-12)
