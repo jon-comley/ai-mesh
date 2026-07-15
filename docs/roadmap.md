@@ -1895,6 +1895,70 @@ up rather than guessing here.
 
 ---
 
+## Puck as Last-Resort Announcement Target (Proposed 2026-07-13)
+
+Triggered by a live incident: `play_announcement` fired three times for a
+reminder ("time for Sigmond and the Sea Monsters") and nothing played
+anywhere. Root cause — `broadcast_announcement`
+(`coordinator/src/audio.rs:464`) fans out only to `nodes_with_feature(Feature::Audio)`,
+which today is just pi2; when pi2's paired Bluetooth amp is down (as it was
+— `bluetooth: status update ... connected=false` right in that window) there
+is no other target, so the announcement is logged as skipped and dropped.
+The puck's own "fall back to my speaker" logic (`capability-voice`) only
+covers *its own* spoken-reply routing when a live voice session's room-sink
+delivery fails — it is not wired into `play_announcement`'s broadcast path
+at all, so a coordinator-initiated alert with no originating voice session
+currently has nowhere to fall back to.
+
+**Feasibility confirmed live 2026-07-13** (not just protocol theory): ran
+the repo's existing `capability-voice --example entities` diagnostic
+against the puck (`10.0.0.14:6053`) and it advertises a real `media_player`
+entity, independent of any voice-assistant session:
+
+```
+ListEntitiesMediaPlayerResponse { object_id: "media_player", key: 2232357057,
+  supported_formats: [
+    { format: "flac", sample_rate: 48000, channels: 1, purpose: Announcement },
+    { format: "flac", sample_rate: 48000, channels: 2, purpose: Default },
+  ]
+}
+MediaPlayerStateResponse { key: 2232357057, state: Idle, volume: 1.0, muted: false }
+```
+
+The `purpose: Announcement` format is the same mechanism Home Assistant's
+own Voice PE integration uses for proactive announcements/timers — stock
+firmware (currently 25.5.2, update to 26.6.0 available), nothing custom to
+flash. Push it with a `MediaPlayerCommandRequest { key: 2232357057,
+has_media_url: true, media_url: <url>, has_announcement: true, announcement:
+true }` over the same ESPHome native-API connection `capability-voice`
+already holds open — no wake-word session required, ducks whatever's
+playing. The Rust types (`MediaPlayerCommandRequest`,
+`ListEntitiesMediaPlayerResponse`, `MediaPlayerStateResponse`) already exist
+in the `esphome_client` crate for free — its `build.rs` code-generates every
+message with an `option (id)` in the proto file, not a hand-picked subset,
+so no crate fork/patch is needed.
+
+Confirmed the puck's ESPHome native API accepts a second concurrent client
+without disturbing the production connection (pi1's own heartbeats to the
+coordinator were unaffected during the live test) — worth re-checking under
+real concurrent use, but not a blocker.
+
+Open item before building: the negotiated announcement format is mono FLAC
+— check whether the puck transcodes an arbitrary media URL server-side or
+whether the existing Piper TTS output (WAV, per Phase 1 of
+`plans/audio-output-integration.md`) needs converting first.
+
+This is exactly the "room speaker → puck → nothing" fallback chain
+`plans/audio-output-integration.md`'s Phase 6 already named as the target
+design (see that file for the full room-routing policy) — this entry
+narrows it to the specific, now-proven mechanism for reaching the puck
+out-of-band. Implementation: extend `broadcast_announcement`/
+`handle_audio_announce` (`coordinator/src/audio.rs`) to add the puck as a
+final target when every other `Feature::Audio` node fails, using this
+`MediaPlayerCommandRequest` path.
+
+---
+
 ## Phase 12 — Distributed Execution
 
 - Multi-node inference
