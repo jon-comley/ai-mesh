@@ -2007,6 +2007,13 @@ Test plan, in order:
    SLZB-06 `10.0.0.12` per its z2m serial.port fix), so it needs a
    planned migration, not a casual toggle.
 
+Related gotcha (2026-07-16): the laptop turned up with DNS from the ISP router
+box (`192.168.1.1`) — either it hops between the ISP router's own Wi-Fi and
+the mesh router's, or the adapter's static DNS got reset. Devices on the ISP router
+side get its (stale-prone) DNS cache. While investigating, set the ISP router
+box's DNS forwarders to 1.1.1.1 as well, and check which SSIDs the
+laptop auto-joins.
+
 ---
 
 ## Phase 12 — Distributed Execution
