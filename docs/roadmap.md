@@ -1982,6 +1982,33 @@ final target when every other `Feature::Audio` node fails, using this
 
 ---
 
+## Home Network Throughput Investigation (Proposed 2026-07-15)
+
+The mesh router measures roughly half the throughput of the ISP router that
+feeds it. Chase where the loss actually is instead of guessing. Known
+facts from a separate domain DNS work (2026-07-15): the mesh router's WAN sits
+on `192.168.1.13` behind the ISP router box at `192.168.1.1` — so the LAN is
+**double-NATted** — and the mesh router's upstream DNS now points at 1.1.1.1
+(changed from `192.168.1.1` after the ISP router box served stale records; DNS
+is latency-only, irrelevant to throughput).
+
+Test plan, in order:
+1. **Wired test through the mesh router** vs the same test wired to the ISP router
+   box — separates routing loss from Wi-Fi limits. (Prime suspect: the
+   halving was measured over Wi-Fi on a 2×2 Wi-Fi 6 client whose
+   real-world ceiling is ~500–700 Mbps regardless of router.)
+2. **Check the mesh router WAN link rate** and the cable between the ISP router and the mesh router
+   (should negotiate ≥1 Gbps).
+3. **Audit the mesh router features** that tax the routing path: QoS, traffic
+   meter, Netgear Armor.
+4. If double NAT turns out to be implicated, consider **the mesh router AP mode**
+   (the ISP router box routes, the mesh router does Wi-Fi only) — but this re-shuffles the
+   LAN, and mesh device IPs are baked into configs (pi1 `10.0.0.10`,
+   SLZB-06 `10.0.0.12` per its z2m serial.port fix), so it needs a
+   planned migration, not a casual toggle.
+
+---
+
 ## Phase 12 — Distributed Execution
 
 - Multi-node inference
