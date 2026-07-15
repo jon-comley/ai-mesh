@@ -268,6 +268,17 @@ Design this phase later; the broadcast mechanic itself is cheap once
 Phases 1-5 exist, since it's just "send to every sink" rather than "pick
 one."
 
+**Puck-as-broadcast-target mechanism confirmed feasible** (live incident +
+investigation, 2026-07-13): see `docs/roadmap.md`'s "Puck as Last-Resort
+Announcement Target" entry for the full writeup. Short version — the puck
+exposes a stock ESPHome `media_player` entity
+(`MediaPlayerCommandRequest`/`has_announcement=true`) that accepts a
+pushed media URL independent of any voice-assistant session, confirmed
+live against the real device. That's the missing piece for wiring the
+puck into `broadcast_announcement`'s fan-out
+(`coordinator/src/audio.rs:464`) as the last-resort target this Phase
+describes — not yet implemented.
+
 ## Risks / open questions
 
 - **TV-on dependency**: the soundbar/Samsung-BT paths through HDMI need
