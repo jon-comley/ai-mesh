@@ -15,6 +15,10 @@ use crate::http::state::DashboardState;
 #[derive(Deserialize, Default)]
 pub struct PermitJoinBody {
     /// Pairing-window length; z2m caps at 254 s (also the default).
+    /// `0` is not "open for zero seconds" — it's an explicit cancel, closing
+    /// an already-open window early (see `permit_join_payload`'s doc
+    /// comment on why this needs to be a real `"value":false`, not a
+    /// zero-duration open).
     #[serde(default)]
     seconds: Option<u16>,
 }
