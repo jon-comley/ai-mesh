@@ -274,7 +274,7 @@ impl Capability for LightingCapability {
             },
             MeshMessage::DeviceRemove(req) => match self.zigbee.get() {
                 Some(client) => {
-                    if let Err(e) = client.remove_device(&req.device_id).await {
+                    if let Err(e) = client.remove_device(&req.device_id, req.force).await {
                         warn!(request_id = %req.request_id, device_id = %req.device_id, "device remove failed: {e}");
                     } else {
                         info!(request_id = %req.request_id, device_id = %req.device_id, "device removal requested");
@@ -366,6 +366,7 @@ mod tests {
         assert!(cap.handles(&MeshMessage::DeviceRemove(DeviceRemoveRequest {
             request_id: "r".into(),
             device_id: "d".into(),
+            force: false,
         })));
     }
 

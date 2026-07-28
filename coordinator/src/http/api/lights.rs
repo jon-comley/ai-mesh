@@ -6,7 +6,7 @@
 
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -189,9 +189,20 @@ pub async fn group_light_command(
     }
 }
 
+#[derive(Deserialize)]
+pub struct DeleteDeviceQuery {
+    /// Skip the network Leave and only drop z2m's record. Leaves the device
+    /// paired-but-orphaned (it can never rejoin on its own), so this is
+    /// only for devices that are physically gone and can't acknowledge a
+    /// Leave. See `DeviceRemoveRequest::force`.
+    #[serde(default)]
+    force: bool,
+}
+
 /// DELETE /api/lights/{id} — delete a device completely from the system.
 pub async fn delete_device(
     Path(device_id): Path<String>,
+    Query(query): Query<DeleteDeviceQuery>,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
     _: Authed,
     State(state): State<Arc<DashboardState>>,
@@ -209,6 +220,7 @@ pub async fn delete_device(
             let req = shared::DeviceRemoveRequest {
                 request_id: gen_request_id(),
                 device_id: device_id.clone(),
+                force: query.force,
             };
             if !state.send_to_node(&node_id, MeshMessage::DeviceRemove(req)) {
                 tracing::warn!(%device_id, "delete_device: zigbee node unreachable — removed locally only");
