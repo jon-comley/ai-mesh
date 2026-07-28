@@ -337,6 +337,23 @@ Fields:
 - `devices: Vec<String>` — friendly names of individual Zigbee devices
 - `groups: Vec<String>` — friendly names of Z2M groups (e.g. `"all"`)
 
+### `PermitJoin(PermitJoinRequest)`
+Coordinator → Lighting node  
+Opens a Zigbee pairing window on the bridge (`bridge/request/permit_join`). Bridge-wide admin command — any lighting-capable node applies it regardless of device routing.
+
+Fields:
+- `request_id: String`
+- `seconds: u8` — window length, capped at 254
+
+### `DeviceRemove(DeviceRemoveRequest)`
+Coordinator → Lighting node  
+Removes a device from the Zigbee network (`bridge/request/device/remove`). Fire-and-forget: z2m republishes `bridge/devices` afterwards, which flows back as the usual device-list update.
+
+Fields:
+- `request_id: String`
+- `device_id: String` — Z2M friendly name or IEEE address
+- `force: bool` — **`false` (default path) sends the device a network Leave** so it wipes its pairing state and can rejoin later. `true` only deletes z2m's database entry: the device keeps its network keys, stays silently joined, and can never re-pair on its own (z2m drops announces from unknown devices) — recovery then requires z2m database surgery or a point-blank Touchlink reset. Forcing is strictly for devices that are physically gone and will never acknowledge a Leave. Exposed over HTTP as `DELETE /api/lights/{id}?force=true`.
+
 ### `SceneLoad(SceneLoadRequest)`
 Coordinator → Lighting node  
 Instructs the lighting node to activate a named scene.

@@ -178,6 +178,15 @@ Zigbee network (`bridge/request/device/remove`) as well as clearing the
 coordinator's records — deleting while pi1 is offline only clears local
 records, and the device reappears when the node returns.
 
+Removal sends the device a graceful network Leave (`force: false`), so the
+device wipes its pairing state and can be re-paired later. The device must be
+powered and reachable to acknowledge the Leave — if it's dead or physically
+gone, use `DELETE /api/lights/{id}?force=true`, which only drops z2m's record.
+Never force-remove a live device: it keeps its network keys, stays silently
+joined, and can never re-pair on its own — recovery then means z2m
+`database.db` surgery or a point-blank Touchlink reset (see
+`docs/roadmap.md`, orphaned-bulbs incident, for the full recovery playbook).
+
 **Rename the device** after pairing:
 
 ```bash
