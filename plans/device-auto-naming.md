@@ -67,6 +67,8 @@ short code for SONOFF — see correction above):
 | `SNZB-03PR2` | SONOFF — motion sensor (numeric lux) | `Sonoff Motion Sensor` | 3 |
 | `8719514440937/8719514440999` (RDM002) | Philips — Hue Tap dial switch | `Hue Tap Dial Switch` | 1 |
 | `8718699693985` (ROM001) | Philips — Hue smart button | `Hue Smart Button` | 1 |
+| `9290035639` (SOC001) | Philips — Hue Secure contact sensor | `Hue Secure Contact Sensor` | 2 |
+| `EBF_RGB_Zm` | AwoX — LED with adjustable color temp + RGB strip, sold as EGLO connect.z Rovito-Z | `Eglo Rovito-Z Ceiling Light` | 1 |
 
 Everything currently paired is Philips Hue (Signify) or SONOFF, nothing
 else (originally surveyed via `mosquitto_sub -h 10.0.0.10 -t
