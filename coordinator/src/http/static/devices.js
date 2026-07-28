@@ -1109,7 +1109,10 @@ function wirePairButton() {
   const btn = document.getElementById('pair-device-btn');
   if (!btn) return;
   btn.addEventListener('click', async () => {
-    if (pairCountdown) return; // window already open
+    if (pairCountdown) {
+      await stopPairing(btn);
+      return;
+    }
     try {
       const res = await api('/zigbee/permit-join', { method: 'POST' });
       if (!res.ok) {
@@ -1126,19 +1129,46 @@ function wirePairButton() {
   });
 }
 
+// seconds: 0 tells the bridge to close the window now rather than wait out
+// the countdown — the button doubles as "Stop pairing" while one is open.
+async function stopPairing(btn) {
+  clearInterval(pairCountdown);
+  pairCountdown = null;
+  btn.disabled = true;
+  try {
+    const res = await api('/zigbee/permit-join', {
+      method: 'POST',
+      body: { seconds: 0 },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      showToast(`Stop pairing failed (${res.status})${text ? ': ' + text : ''}`, true);
+      return;
+    }
+    pairFeedLine('Pairing window closed.');
+  } catch (e) {
+    showToast(`Stop pairing error: ${e.message}`, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Pair device';
+  }
+}
+
 function startPairCountdown(btn, seconds) {
   let remaining = seconds;
-  btn.disabled = true;
+  btn.disabled = false;
+  btn.title = 'Click to stop pairing early';
   const tick = () => {
     if (remaining <= 0) {
       clearInterval(pairCountdown);
       pairCountdown = null;
       btn.disabled = false;
+      btn.title = '';
       btn.textContent = 'Pair device';
       pairFeedLine('Pairing window closed.');
       return;
     }
-    btn.textContent = `Pairing… ${remaining}s`;
+    btn.textContent = `Pairing… ${remaining}s (click to stop)`;
     remaining -= 1;
   };
   tick();

@@ -336,11 +336,13 @@ impl ZigbeeClient {
             .map_err(|e| ZigbeeError::Client(e.to_string()))
     }
 
-    /// Open the bridge-wide pairing window. z2m caps the window at 254 s.
-    /// The `value` field is redundant on current z2m but kept for
-    /// compatibility with 1.x payload shape (matches the CLI recipe).
+    /// Open the bridge-wide pairing window, or close it early with
+    /// `seconds: 0` — the dashboard's "Pair device" button doubles as a
+    /// cancel button while a window is open, and z2m only actually stops
+    /// early on an explicit `"value":false`; `{"value":true,"time":0}`
+    /// isn't documented to mean the same thing. z2m caps the window at 254 s.
     pub async fn permit_join(&self, seconds: u8) -> Result<(), ZigbeeError> {
-        let payload = format!(r#"{{"value":true,"time":{}}}"#, seconds.min(254));
+        let payload = permit_join_payload(seconds);
         self.mqtt
             .publish(
                 "zigbee2mqtt/bridge/request/permit_join",
@@ -412,6 +414,15 @@ impl ZigbeeClient {
 /// so the graceful/forced wire shape stays pinned by unit tests.
 fn remove_device_payload(device_id: &str, force: bool) -> String {
     serde_json::json!({ "id": device_id, "force": force }).to_string()
+}
+
+/// Payload for z2m's `bridge/request/permit_join`. `seconds: 0` must send an
+/// explicit `"value":false` (an early cancel) rather than `{"value":true,
+/// "time":0}` — the latter isn't documented to mean "close now" and z2m may
+/// treat it as "open indefinitely" or a no-op. Caps at 254 s (z2m's limit).
+fn permit_join_payload(seconds: u8) -> String {
+    let seconds = seconds.min(254);
+    serde_json::json!({ "value": seconds > 0, "time": seconds }).to_string()
 }
 
 fn parse_group_names(payload: &[u8]) -> Vec<String> {
@@ -686,6 +697,30 @@ mod tests {
             serde_json::from_str(&remove_device_payload("dead_bulb", true)).unwrap();
         assert_eq!(p["id"], "dead_bulb");
         assert_eq!(p["force"], true);
+    }
+
+    #[test]
+    fn permit_join_payload_opens_window() {
+        let p: serde_json::Value = serde_json::from_str(&permit_join_payload(60)).unwrap();
+        assert_eq!(p["value"], true);
+        assert_eq!(p["time"], 60);
+    }
+
+    #[test]
+    fn permit_join_payload_zero_seconds_sends_explicit_disable() {
+        let p: serde_json::Value = serde_json::from_str(&permit_join_payload(0)).unwrap();
+        assert_eq!(
+            p["value"], false,
+            "an early cancel must be an explicit disable"
+        );
+        assert_eq!(p["time"], 0);
+    }
+
+    #[test]
+    fn permit_join_payload_caps_at_254_seconds() {
+        let p: serde_json::Value = serde_json::from_str(&permit_join_payload(255)).unwrap();
+        assert_eq!(p["time"], 254);
+        assert_eq!(p["value"], true);
     }
 
     #[test]

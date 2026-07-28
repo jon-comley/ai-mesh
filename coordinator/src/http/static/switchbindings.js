@@ -199,8 +199,20 @@ function buildAddForm(deviceId, declaredActions, onAdded) {
 
   const deltaInput = document.createElement('input');
   deltaInput.type = 'number';
+  // min must be negative for iOS Safari (and most Android keyboards) to show
+  // a minus key at all on the numeric pad — without it the field silently
+  // can't accept a negative step no matter what's typed.
+  deltaInput.min = '-254';
+  deltaInput.max = '254';
   deltaInput.placeholder = 'e.g. 25 or -25';
   deltaInput.className = 'switch-binding-delta-input';
+  deltaInput.autocomplete = 'off';
+  deltaInput.name = 'switch-binding-step-delta';
+  // Suppress mobile password-manager autofill prompts — some heuristically
+  // flag any bare number input inside a form, autocomplete="off" alone.
+  deltaInput.setAttribute('data-lpignore', 'true');
+  deltaInput.setAttribute('data-1p-ignore', '');
+  deltaInput.setAttribute('data-bwignore', 'true');
   deltaInput.hidden = true;
   commandSelect.addEventListener('change', () => {
     deltaInput.hidden = commandSelect.value !== 'brightness_step';
