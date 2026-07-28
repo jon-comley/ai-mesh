@@ -50,6 +50,30 @@ active-device availability lag (see the zigbee-bridge-stale-ip note
 below and `docs/pi1-lighting-setup.md`) — expected z2m behaviour, not a
 regression, unless it persists well past 10 minutes.
 
+**Post-commit review (Bing + Gemini) surfaced two real gaps in the same
+day's model-capacity-gate and zigbee-removal work, both fixed before
+anything shipped:**
+
+1. `model_load_blocker`'s disk check silently no-op'd when a node had no
+   `disk_free_gb` health sample yet — not just a brief post-connect race,
+   since the agent's disk-mount lookup (`agent.rs`, matching the model
+   directory against `sysinfo`'s disk list) can legitimately return `None`
+   indefinitely for a node whose filesystem layout doesn't match any
+   detected mount. That silently let through exactly the failure this
+   gate was built to catch. Fixed to refuse with a clear reason instead,
+   mirroring how the RAM check already refuses on missing capabilities
+   rather than skipping.
+2. `DELETE /api/lights/{id}` returned a plain 204 even when the Zigbee
+   unpair request couldn't be sent (node unreachable or unknown) —
+   registry-only ("removed locally only") was only ever logged
+   server-side via `tracing::warn!`, invisible to the caller. Now returns
+   200 with a `{"warning": "..."}` body in that case (204 unchanged for
+   the fully-successful path), surfaced as a toast in the dashboard —
+   the device may still be joined to the Zigbee network, and the user
+   should know that instead of assuming a clean unpair.
+
+854 tests, clippy clean.
+
 ## Hunts / eBay Bargain Finder — deployed, production keyset issued, not yet exercised with real data (2026-07-15)
 
 `plans/ebay-bargain-finder.md` is fully implemented and deployed to pi1:

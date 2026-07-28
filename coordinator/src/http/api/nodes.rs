@@ -23,6 +23,14 @@ use crate::http::auth::Authed;
 /// from the scheduler (the same budget auto-placement uses); disk headroom
 /// mirrors the agent's own 2×-size download requirement, skipped when the
 /// node already has `model_name` on record (a reload downloads nothing).
+///
+/// A download with no known `disk_free_gb` refuses rather than passing —
+/// the agent-side disk detection can legitimately stay `None` forever for a
+/// node (e.g. no mounted filesystem prefixes its model directory), so
+/// treating "unknown" as "fine" would let exactly the failure this gate
+/// exists to catch through for that node indefinitely. Mirrors how the RAM
+/// check above already refuses when a node hasn't reported its
+/// capabilities yet, rather than silently skipping.
 pub(crate) fn model_load_blocker(
     registry: &Mutex<Registry>,
     state: &DashboardState,
@@ -44,16 +52,24 @@ pub(crate) fn model_load_blocker(
     if let Err(reason) = capacity {
         return Some(reason);
     }
-    if !already_known && let Some(free_gb) = state.latest_disk_free_gb(node_id) {
-        let free_mb = (free_gb as f64 * 1024.0) as u64;
-        let needed_mb = size_mb.saturating_mul(2);
-        if free_mb < needed_mb {
-            return Some(format!(
-                "insufficient disk to download: need {needed_mb} MB free (2× model size), node has {free_mb} MB"
-            ));
-        }
+    if already_known {
+        return None;
     }
-    None
+    let needed_mb = size_mb.saturating_mul(2);
+    match state.latest_disk_free_gb(node_id) {
+        Some(free_gb) => {
+            let free_mb = (free_gb as f64 * 1024.0) as u64;
+            if free_mb < needed_mb {
+                return Some(format!(
+                    "insufficient disk to download: need {needed_mb} MB free (2× model size), node has {free_mb} MB"
+                ));
+            }
+            None
+        }
+        None => Some(
+            "cannot verify free disk space on this node yet — no health sample received; wait a few seconds for its next heartbeat and retry".to_string(),
+        ),
+    }
 }
 
 #[derive(Deserialize)]
@@ -433,6 +449,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
         connections.lock().unwrap().insert("node1".into(), tx);
         let state = make_state(vec![], connections);
+        state.push_health("node1", 1.0, 1.0, 8.0, None, None, None, Some(20.0));
 
         let status = post_load_with_registry(
             state,
@@ -479,6 +496,29 @@ mod tests {
         let state = make_state(vec![], connections);
         // 3.7 GB free < the 2×2000 MB download headroom the agent will demand.
         state.push_health("node1", 1.0, 1.0, 8.0, None, None, None, Some(3.7));
+
+        let status = post_load_with_registry(
+            state,
+            registry_with_compute_node("node1", 8.0),
+            "",
+            r#"{"node_id":"node1","model_name":"qwen2.5:7b","size_mb":2000}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(rx.try_recv().is_err(), "no ModelLoad may be forwarded");
+    }
+
+    #[tokio::test]
+    async fn load_model_returns_409_when_disk_is_unknown() {
+        // No push_health at all for this node — disk_free_gb has never been
+        // reported. Must refuse, not silently allow: an agent whose disk
+        // detection never finds a matching mount would otherwise sail
+        // through this check forever, which is exactly the failure this
+        // gate exists to catch.
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("node1".into(), tx);
+        let state = make_state(vec![], connections);
 
         let status = post_load_with_registry(
             state,
