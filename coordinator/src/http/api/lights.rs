@@ -211,31 +211,44 @@ pub async fn delete_device(
     // cosmetic: a still-paired device re-announces and reappears on the next
     // bridge/devices publish. Best-effort: with the node offline we still
     // clean local records (the device returns when the node does, and the
-    // user can delete again).
+    // user can delete again) — but the caller must be told, not just an
+    // operator watching logs, since a silent 204 here looks identical to a
+    // real Zigbee unpair and the device may still be joined to the network.
     let node = state
         .get_node_for_device(&device_id)
         .or_else(|| state.get_zigbee_node());
-    match node {
+    let warning = match node {
         Some(node_id) => {
             let req = shared::DeviceRemoveRequest {
                 request_id: gen_request_id(),
                 device_id: device_id.clone(),
                 force: query.force,
             };
-            if !state.send_to_node(&node_id, MeshMessage::DeviceRemove(req)) {
+            if state.send_to_node(&node_id, MeshMessage::DeviceRemove(req)) {
+                None
+            } else {
                 tracing::warn!(%device_id, "delete_device: zigbee node unreachable — removed locally only");
+                Some(
+                    "zigbee node unreachable — device removed from the dashboard only; it may still be joined to the Zigbee network",
+                )
             }
         }
         None => {
             tracing::warn!(%device_id, "delete_device: no zigbee node known — removed locally only");
+            Some(
+                "no zigbee node known — device removed from the dashboard only; it may still be joined to the Zigbee network",
+            )
         }
-    }
+    };
     registry.lock().unwrap().delete_device(&device_id);
     // Registry deletion alone is invisible to already-connected clients —
     // without this, the device keeps showing "Unassigned" forever (see
     // DashboardState::remove_device).
     state.remove_device(&device_id);
-    StatusCode::NO_CONTENT.into_response()
+    match warning {
+        Some(msg) => (StatusCode::OK, Json(serde_json::json!({ "warning": msg }))).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
 }
 
 // ── Device names ─────────────────────────────────────────────────────────────
@@ -678,14 +691,62 @@ mod tests {
 
     #[tokio::test]
     async fn delete_device_without_node_still_cleans_registry() {
+        // No node known at all for this device — must still clean the
+        // registry (204's replacement here is 200 + a warning body, checked
+        // in delete_device_without_node_returns_warning_body below; this
+        // test only pins that the deletion itself still happens).
         let state = make_state(vec![], empty_connections());
+        let state_check = state.clone();
         let registry = Arc::new(Mutex::new(Registry::new()));
         let router: Router = Router::new()
             .route("/api/lights/{device}", axum::routing::delete(delete_device))
             .layer(axum::Extension(registry))
             .with_state(state);
         let status = send(router, "DELETE", "/api/lights/ghost", "").await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !state_check
+                .get_light_snapshot()
+                .iter()
+                .any(|l| l.device_id == "ghost"),
+            "registry/dashboard state must still be cleaned even with no node known"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_device_without_node_returns_warning_body() {
+        let state = make_state(vec![], empty_connections());
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let router: Router = Router::new()
+            .route("/api/lights/{device}", axum::routing::delete(delete_device))
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let (status, body) = send_with_body(router, "DELETE", "/api/lights/ghost", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("may still be joined"),
+            "expected a warning about the device possibly still being on the Zigbee network, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_device_with_unreachable_node_returns_warning_body() {
+        // The device is known to belong to "pi1", but "pi1" has no live
+        // connection registered — send_to_node must fail, and the caller
+        // must be told rather than getting a plain success.
+        let state = make_state(vec![], empty_connections());
+        seed_light(&state, "old_bulb", "pi1");
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let router: Router = Router::new()
+            .route("/api/lights/{device}", axum::routing::delete(delete_device))
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let (status, body) = send_with_body(router, "DELETE", "/api/lights/old_bulb", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("unreachable") && body.contains("may still be joined"),
+            "expected an unreachable-node warning, got: {body}"
+        );
     }
 
     // ── group_light_command ───────────────────────────────────────────────────

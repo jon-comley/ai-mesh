@@ -92,7 +92,15 @@ export async function setDeviceGroup(roomId, deviceId, groupId) {
 export async function deleteDevice(deviceId) {
   try {
     const res = await api(`/lights/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
-    if (!res.ok) showToast(`Delete device failed (${res.status})`, true);
+    if (!res.ok) { showToast(`Delete device failed (${res.status})`, true); return; }
+    // 200 (vs 204) means the registry was cleaned but the Zigbee-side unpair
+    // request couldn't be sent — the device may still be joined to the
+    // network. Surface that instead of a silent success (see delete_device
+    // in coordinator/src/http/api/lights.rs).
+    if (res.status === 200) {
+      const { warning } = await res.json();
+      if (warning) showToast(warning, true);
+    }
   } catch (e) { showToast(`Delete device error: ${e.message}`, true); }
 }
 
