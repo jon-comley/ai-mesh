@@ -16,7 +16,7 @@ import {
 import { buildBindingsPanel } from '/static/switchbindings.js';
 
 function formatDeviceName(id) {
-  return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return model.names.get(id) ?? id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 function roomIdForDevice(deviceId) {
@@ -31,7 +31,7 @@ function onRoomChange(deviceId, newRoomId) {
 }
 
 function startRename(nameEl, deviceId) {
-  const current = model.names.get(deviceId) ?? formatDeviceName(deviceId);
+  const current = formatDeviceName(deviceId);
   const input = document.createElement('input');
   input.value = current;
   input.className = 'room-rename-input';
@@ -887,6 +887,14 @@ function buildCategorySection(category, count) {
 function render() {
   const container = document.getElementById('device-list');
   if (!container) return;
+  // render() fires on any LightingUpdate/RoomsUpdate/SensorUpdate WS event —
+  // constant background traffic, unrelated to whatever the user is doing.
+  // Without this, typing in the switch-bindings Add Binding form (or any
+  // other in-container input) gets wiped by the next unrelated event to
+  // land, not just by testing the very switch being configured. Same guard
+  // shape as models.js's render() for the same reason — if a third render()
+  // needs this, centralise it into a shared helper instead of copying again.
+  if (container.querySelector('input:focus, select:focus, textarea:focus')) return;
 
   const lights = [...devicesMap.values()].filter(d => d.device_type === 'light');
   const sensors = [...devicesMap.values()].filter(d => d.device_type === 'sensor');

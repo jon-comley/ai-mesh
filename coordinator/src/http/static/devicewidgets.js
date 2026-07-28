@@ -8,6 +8,7 @@
 // those are different concerns, not the same logic built twice.
 
 import { esc } from '/static/util.js';
+import { model } from '/static/state.js';
 
 export function formatSensorReadout(s) {
   const parts = [];
@@ -31,7 +32,7 @@ export function formatLightStatus(dev) {
 }
 
 function formatDeviceName(id) {
-  return id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return model.names.get(id) ?? id.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 // ── Switch action flash ──────────────────────────────────────────────────────

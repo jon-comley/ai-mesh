@@ -26,6 +26,8 @@ pub fn product_line_name(definition_model: &str) -> Option<&'static str> {
         "SNZB-03PR2" => "Sonoff Motion Sensor",
         "8719514440937/8719514440999" => "Hue Tap Dial Switch", // RDM002
         "8718699693985" => "Hue Smart Button",                  // ROM001
+        "9290035639" => "Hue Secure Contact Sensor",            // SOC001
+        "EBF_RGB_Zm" => "Eglo Rovito-Z Ceiling Light",          // AwoX-made, sold as EGLO connect.z
         _ => return None,
     })
 }
