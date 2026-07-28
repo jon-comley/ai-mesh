@@ -2,6 +2,54 @@
 
 ---
 
+## Bug fix — dashboard device names reverting to hex on every reconnect (2026-07-28)
+
+Long-standing regression, present since device rename shipped 2026-05-26,
+only diagnosed now: every fresh WebSocket connection — a page load, a
+browser reconnect, a coordinator restart — showed every device's raw hex
+id instead of its custom name, even though the name was correctly
+persisted and returned by `GET /api/lights/names`. Root cause: the
+`RoomsUpdate` dashboard event carries a `device_names` map, but the
+initial snapshot pushed to a newly-connected client on `ws.rs` sent an
+**empty** map, and 13 of 14 coordinator-side triggers for a `RoomsUpdate`
+broadcast (room create/delete/reorder/rename, device add/remove/reorder,
+room groups, orientation/origin/dimensions) called the no-names
+convenience wrapper `push_rooms_update`, which does the same — silently
+wiping every *already-connected* client's names back to hex the moment
+any of those actions fired, not just fresh connections. The frontend's
+`model.names` Map is fully replaced on each `RoomsUpdate`, so a single
+empty-map broadcast reverted every device's display name mesh-wide until
+the next rename happened to refresh it.
+
+Fixed: `DashboardState` now caches the last-pushed `device_names` map
+(`device_names_snapshot`, mirroring the existing `room_snapshot`
+pattern) and exposes it via `get_device_names_snapshot()`; `ws.rs`'s
+initial-connect push reads from it instead of sending `HashMap::new()`.
+The no-names `push_rooms_update` wrapper was removed entirely (footgun,
+not kept for back-compat) — every call site now goes through
+`push_rooms_update_with_names` with the registry's full current name map
+(`Registry::get_all_device_names()`), via a new `push_rooms_and_names`
+helper in `rooms.rs` that all 13 room-mutation handlers share. Two new
+tests pin the cache-and-replace behaviour in `state.rs`; full suite
+(851 tests) and clippy clean.
+
+Investigated alongside two other reported symptoms after today's
+Zigbee-heavy session (11 bulbs restored + 2 Touchlink-recovered + z2m
+restarted for the SNZB-03PR2 converter): the 4 SNZB-02P temp/humidity
+sensors (and the Hue smart button) showing `offline` is **not** a
+coordinator bug — z2m's own `<device>/availability` topic independently
+reports the same, while every mains-powered device came back online
+immediately. z2m tracks battery/sleepy end devices "passively" (only
+flips them online when they next report, not via an active ping), and
+after a restart plus a heavily-churned Zigbee topology (13 devices
+removed/re-paired same day) that can take a while — genuinely a live
+mesh-health condition, not a software defect, so no code fix applied;
+recommended a battery pull/reseat if it doesn't clear on its own.
+"Available while switched off" is the already-documented 10-minute
+active-device availability lag (see the zigbee-bridge-stale-ip note
+below and `docs/pi1-lighting-setup.md`) — expected z2m behaviour, not a
+regression, unless it persists well past 10 minutes.
+
 ## Hunts / eBay Bargain Finder — deployed, production keyset issued, not yet exercised with real data (2026-07-15)
 
 `plans/ebay-bargain-finder.md` is fully implemented and deployed to pi1:

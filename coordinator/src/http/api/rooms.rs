@@ -32,6 +32,17 @@ pub(crate) fn rooms_from_registry(registry: &Arc<Mutex<Registry>>) -> Vec<RoomIn
         .collect()
 }
 
+/// Push a rooms update carrying the registry's full current device-name
+/// map. Every room-list change must go through this, not the raw
+/// `push_rooms_update_with_names` with a partial map — see that method's
+/// doc comment for why a partial map corrupts every other connected
+/// client's names.
+fn push_rooms_and_names(state: &Arc<DashboardState>, registry: &Arc<Mutex<Registry>>) {
+    let rooms = rooms_from_registry(registry);
+    let names = registry.lock().unwrap().get_all_device_names();
+    state.push_rooms_update_with_names(rooms, names);
+}
+
 #[derive(Deserialize)]
 pub struct ReorderRoomsBody {
     ids: Vec<String>,
@@ -48,7 +59,7 @@ pub async fn reorder_rooms(
         let refs: Vec<&str> = body.ids.iter().map(|s| s.as_str()).collect();
         reg.set_room_positions(&refs);
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -68,7 +79,7 @@ pub async fn create_room(
         return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
     }
     let room_id = registry.lock().unwrap().create_room(&name).id;
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     (
         StatusCode::CREATED,
         Json(serde_json::json!({ "id": room_id })),
@@ -89,7 +100,7 @@ pub async fn delete_room(
         }
         reg.delete_room(&room_id);
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -116,7 +127,7 @@ pub async fn rename_room(
         }
         reg.rename_room(&room_id, &name);
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -147,7 +158,7 @@ pub async fn modify_room_devices(
             reg.add_device_to_room(&room_id, device_id);
         }
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -170,7 +181,7 @@ pub async fn reorder_room_devices(
         }
         reg.reorder_room_devices(&room_id, &body.ids);
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -279,7 +290,7 @@ pub async fn create_room_group(
         }
         reg.create_room_group(&room_id, &name).id
     };
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     (
         StatusCode::CREATED,
         Json(serde_json::json!({ "id": group_id })),
@@ -311,7 +322,7 @@ pub async fn rename_room_group(
         }
         reg.rename_room_group(&group_id, &name);
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -329,7 +340,7 @@ pub async fn delete_room_group(
         }
         reg.delete_room_group(&group_id);
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -374,7 +385,7 @@ pub async fn set_device_group(
         .lock()
         .unwrap()
         .set_device_group(&device_id, body.group_id.as_deref());
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -445,7 +456,7 @@ pub async fn set_room_orientation(
         }
         reg.set_room_orientation(&room_id, body.orientation_degrees);
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     state.solar_sweep_notify.notify_one();
     StatusCode::NO_CONTENT.into_response()
 }
@@ -472,7 +483,7 @@ pub async fn set_room_origin(
         }
         reg.set_room_origin(&room_id, body.origin_x, body.origin_y);
     }
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -506,7 +517,7 @@ pub async fn set_room_dimensions(
         .lock()
         .unwrap()
         .set_room_dimensions(&room_id, width_m, depth_m, height_m);
-    state.push_rooms_update(rooms_from_registry(&registry));
+    push_rooms_and_names(&state, &registry);
     StatusCode::NO_CONTENT.into_response()
 }
 

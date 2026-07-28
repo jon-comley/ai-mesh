@@ -470,6 +470,12 @@ pub struct DashboardState {
     /// Group friendly name → node_id that owns it.
     group_snapshot: Mutex<HashMap<String, String>>,
     room_snapshot: Mutex<Vec<RoomInfo>>,
+    /// Device id → custom name, mirrored from the registry on every
+    /// `push_rooms_update_with_names` call so a fresh WS connection (or one
+    /// that reconnects after a coordinator restart) gets real names
+    /// immediately instead of the hex fallback the frontend uses when its
+    /// name map is empty. See `RoomsUpdate`'s `device_names` field.
+    device_names_snapshot: Mutex<HashMap<String, String>>,
     scene_snapshot: Mutex<Vec<SceneInfo>>,
     /// Per-room currently-active effect (if any). Mirrors `room_effects` rows
     /// where `enabled = 1`. Pushed to new WS clients on connect.
@@ -605,6 +611,7 @@ impl DashboardState {
             other_device_snapshot: Mutex::new(HashMap::new()),
             group_snapshot: Mutex::new(HashMap::new()),
             room_snapshot: Mutex::new(Vec::new()),
+            device_names_snapshot: Mutex::new(HashMap::new()),
             scene_snapshot: Mutex::new(Vec::new()),
             effect_snapshot: Mutex::new(HashMap::new()),
             zigbee_status: Mutex::new(None),
@@ -1046,17 +1053,22 @@ impl DashboardState {
         self.group_snapshot.lock().unwrap().contains_key(name)
     }
 
-    /// Store and broadcast the current rooms state.
-    pub fn push_rooms_update(&self, rooms: Vec<RoomInfo>) {
-        self.push_rooms_update_with_names(rooms, HashMap::new());
-    }
-
+    /// Store and broadcast the current rooms state, along with the full
+    /// current set of device custom names. `device_names` must be the
+    /// registry's complete name map (`Registry::get_all_device_names`), not
+    /// a partial delta — this replaces the cached snapshot outright, and
+    /// that snapshot is what re-arms every fresh WS connection (see
+    /// `get_device_names_snapshot`). Passing anything less than the full
+    /// map would make already-named devices revert to their hex fallback
+    /// for every other connected client, and for this one on its next
+    /// reconnect.
     pub fn push_rooms_update_with_names(
         &self,
         rooms: Vec<RoomInfo>,
         device_names: HashMap<String, String>,
     ) {
         *self.room_snapshot.lock().unwrap() = rooms.clone();
+        *self.device_names_snapshot.lock().unwrap() = device_names.clone();
         if self.tx.receiver_count() > 0 {
             let _ = self.tx.send(DashboardEvent::RoomsUpdate {
                 rooms,
@@ -1068,6 +1080,12 @@ impl DashboardState {
     /// Return a point-in-time copy of the rooms snapshot for warm-starting new WS clients.
     pub fn get_room_snapshot(&self) -> Vec<RoomInfo> {
         self.room_snapshot.lock().unwrap().clone()
+    }
+
+    /// Return a point-in-time copy of the device names snapshot for
+    /// warm-starting new WS clients — see `push_rooms_update_with_names`.
+    pub fn get_device_names_snapshot(&self) -> HashMap<String, String> {
+        self.device_names_snapshot.lock().unwrap().clone()
     }
 
     /// Store and broadcast the current scenes state.
@@ -3029,7 +3047,10 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        state.push_rooms_update(vec![make_room_info("r1", "Living Room")]);
+        state.push_rooms_update_with_names(
+            vec![make_room_info("r1", "Living Room")],
+            HashMap::new(),
+        );
         let snap = state.get_room_snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].id, "r1");
@@ -3042,8 +3063,8 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        state.push_rooms_update(vec![make_room_info("r1", "Old")]);
-        state.push_rooms_update(vec![make_room_info("r2", "New")]);
+        state.push_rooms_update_with_names(vec![make_room_info("r1", "Old")], HashMap::new());
+        state.push_rooms_update_with_names(vec![make_room_info("r2", "New")], HashMap::new());
         let snap = state.get_room_snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].id, "r2");
@@ -3056,7 +3077,7 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
         let mut rx = state.tx.subscribe();
-        state.push_rooms_update(vec![make_room_info("r1", "Bedroom")]);
+        state.push_rooms_update_with_names(vec![make_room_info("r1", "Bedroom")], HashMap::new());
         match rx.try_recv().unwrap() {
             DashboardEvent::RoomsUpdate { rooms, .. } => {
                 assert_eq!(rooms.len(), 1);
@@ -3072,8 +3093,38 @@ mod tests {
             Arc::new(vec![]),
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         );
-        state.push_rooms_update(vec![make_room_info("r1", "Hall")]);
+        state.push_rooms_update_with_names(vec![make_room_info("r1", "Hall")], HashMap::new());
         assert_eq!(state.get_room_snapshot().len(), 1);
+    }
+
+    #[test]
+    fn push_rooms_update_with_names_caches_names_for_new_ws_clients() {
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut names = HashMap::new();
+        names.insert("bulb1".to_string(), "Living Room Lamp".to_string());
+        state
+            .push_rooms_update_with_names(vec![make_room_info("r1", "Living Room")], names.clone());
+        assert_eq!(state.get_device_names_snapshot(), names);
+    }
+
+    #[test]
+    fn push_rooms_update_with_names_replaces_the_cached_map() {
+        // A later push with fewer names must not leave stale entries behind
+        // — the cache always mirrors exactly what was last pushed.
+        let state = DashboardState::new(
+            Arc::new(vec![]),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+        let mut first = HashMap::new();
+        first.insert("bulb1".to_string(), "Old Name".to_string());
+        state.push_rooms_update_with_names(vec![], first);
+        let mut second = HashMap::new();
+        second.insert("bulb2".to_string(), "New Name".to_string());
+        state.push_rooms_update_with_names(vec![], second.clone());
+        assert_eq!(state.get_device_names_snapshot(), second);
     }
 
     #[test]
