@@ -352,17 +352,19 @@ impl ZigbeeClient {
             .map_err(|e| ZigbeeError::Client(e.to_string()))
     }
 
-    /// Remove a device from the Zigbee network (not just from z2m's list).
-    /// z2m republishes `bridge/devices` afterwards, which flows back to the
-    /// coordinator as the usual device-list update. `force: true` because a
-    /// graceful (non-forced) remove asks the device itself to leave the
-    /// network and silently does nothing if it never acknowledges — routine
-    /// for a sleeping battery sensor or a bulb switched off at the wall.
-    /// Forcing means z2m drops it from its own database (and clears the
-    /// retained state topic) regardless of whether the device answers, so
-    /// deletion is never blocked on the device being reachable.
-    pub async fn remove_device(&self, device_id: &str) -> Result<(), ZigbeeError> {
-        let payload = serde_json::json!({ "id": device_id, "force": true }).to_string();
+    /// Remove a device from the Zigbee network. A graceful remove
+    /// (`force: false`) sends the device a network Leave so it wipes its
+    /// pairing state and can rejoin later. A forced remove only deletes
+    /// z2m's database entry: the device keeps its keys, stays silently
+    /// joined, and can never re-pair — z2m ignores announces from devices
+    /// it doesn't know, so the only ways back are database surgery or a
+    /// point-blank Touchlink reset. Callers must therefore default to
+    /// `force: false` and reserve forcing for devices that are physically
+    /// gone and will never acknowledge the Leave. z2m republishes
+    /// `bridge/devices` afterwards, which flows back to the coordinator as
+    /// the usual device-list update.
+    pub async fn remove_device(&self, device_id: &str, force: bool) -> Result<(), ZigbeeError> {
+        let payload = serde_json::json!({ "id": device_id, "force": force }).to_string();
         self.mqtt
             .publish(
                 "zigbee2mqtt/bridge/request/device/remove",

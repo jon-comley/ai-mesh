@@ -399,10 +399,20 @@ pub struct PermitJoinRequest {
 /// Without this a "deleted" device re-announces and reappears in the next
 /// `bridge/devices` publish. Fire-and-forget: z2m republishes the device
 /// list after removal, which flows back as the usual `DeviceList`.
+///
+/// `force: false` is the only safe default: a graceful remove sends the
+/// device a network Leave, which clears its pairing state so it can join
+/// again later. A forced remove only deletes z2m's database entry — the
+/// device keeps its network keys, stays silently joined, and can never
+/// re-pair (z2m drops announces from devices it doesn't know). Recovering
+/// from that requires hand-editing z2m's database or a Touchlink reset at
+/// point-blank range. Force is strictly for devices that are physically
+/// gone or dead and will never acknowledge a Leave.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeviceRemoveRequest {
     pub request_id: String,
     pub device_id: String,
+    pub force: bool,
 }
 
 /// Coordinator asks a specific audio-capable node to open a live Bluetooth
@@ -1489,6 +1499,7 @@ mod tests {
         let msg = MeshMessage::DeviceRemove(DeviceRemoveRequest {
             request_id: "r1".into(),
             device_id: "old_bulb".into(),
+            force: false,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
