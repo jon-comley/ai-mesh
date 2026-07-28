@@ -618,7 +618,33 @@ mod tests {
         let status = send(router, "DELETE", "/api/lights/old_bulb", "").await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         match rx.try_recv().unwrap() {
-            MeshMessage::DeviceRemove(req) => assert_eq!(req.device_id, "old_bulb"),
+            MeshMessage::DeviceRemove(req) => {
+                assert_eq!(req.device_id, "old_bulb");
+                assert!(!req.force, "removal must default to a graceful leave");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_device_force_query_requests_forced_removal() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("pi1".into(), tx);
+        let state = make_state(vec![], connections);
+        seed_light(&state, "old_bulb", "pi1");
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let router: Router = Router::new()
+            .route("/api/lights/{device}", axum::routing::delete(delete_device))
+            .layer(axum::Extension(registry))
+            .with_state(state);
+        let status = send(router, "DELETE", "/api/lights/old_bulb?force=true", "").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        match rx.try_recv().unwrap() {
+            MeshMessage::DeviceRemove(req) => {
+                assert_eq!(req.device_id, "old_bulb");
+                assert!(req.force);
+            }
             other => panic!("unexpected message: {other:?}"),
         }
     }

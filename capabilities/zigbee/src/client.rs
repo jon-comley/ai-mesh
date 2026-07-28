@@ -364,7 +364,7 @@ impl ZigbeeClient {
     /// `bridge/devices` afterwards, which flows back to the coordinator as
     /// the usual device-list update.
     pub async fn remove_device(&self, device_id: &str, force: bool) -> Result<(), ZigbeeError> {
-        let payload = serde_json::json!({ "id": device_id, "force": force }).to_string();
+        let payload = remove_device_payload(device_id, force);
         self.mqtt
             .publish(
                 "zigbee2mqtt/bridge/request/device/remove",
@@ -406,6 +406,12 @@ impl ZigbeeClient {
             })
             .collect()
     }
+}
+
+/// Payload for z2m's `bridge/request/device/remove`. Kept as a pure function
+/// so the graceful/forced wire shape stays pinned by unit tests.
+fn remove_device_payload(device_id: &str, force: bool) -> String {
+    serde_json::json!({ "id": device_id, "force": force }).to_string()
 }
 
 fn parse_group_names(payload: &[u8]) -> Vec<String> {
@@ -664,6 +670,22 @@ mod tests {
     #[test]
     fn parse_malformed_json_returns_none() {
         assert!(parse_state_report("zigbee2mqtt/bulb/state", b"not json", "pi1").is_none());
+    }
+
+    #[test]
+    fn remove_device_payload_graceful_sends_network_leave() {
+        let p: serde_json::Value =
+            serde_json::from_str(&remove_device_payload("old_bulb", false)).unwrap();
+        assert_eq!(p["id"], "old_bulb");
+        assert_eq!(p["force"], false);
+    }
+
+    #[test]
+    fn remove_device_payload_forced_drops_db_entry_only() {
+        let p: serde_json::Value =
+            serde_json::from_str(&remove_device_payload("dead_bulb", true)).unwrap();
+        assert_eq!(p["id"], "dead_bulb");
+        assert_eq!(p["force"], true);
     }
 
     #[test]

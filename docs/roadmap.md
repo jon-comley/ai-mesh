@@ -99,7 +99,7 @@ Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x`
 
 ---
 
-## TODO — 13 kitchen bulbs orphaned from the Zigbee network (2026-07-07)
+## RESOLVED — kitchen bulbs orphaned from the Zigbee network (2026-07-07 → 2026-07-28)
 
 While testing the device-auto-naming feature (`plans/device-auto-naming.md`), deleted all 13 kitchen bulbs via the dashboard's `DELETE /api/lights/{device}` (force-unpair). z2m confirms all 13 are gone from its own device list, but z2m's health telemetry shows `leave_count: 0` for every one of them right up to removal — **none of them ever received/acknowledged an actual "leave network" command**, only `force: true` local bookkeeping removal. So each bulb still believes it's joined to the existing network with its old credentials; it's not searching for a network to join, which is why normal permit-join (from both z2m and a real Hue Bridge's own "search for lights") finds nothing — the bulb has to *want* to look, and it doesn't.
 
@@ -117,6 +117,17 @@ While testing the device-auto-naming feature (`plans/device-auto-naming.md`), de
 Related: `plans/device-auto-naming.md`'s live re-validation step is blocked on this — the auto-naming fix (keying on `definition.model` SKU, not the nonexistent `model_id`) hasn't been confirmed against a real re-pair yet.
 
 **Attempted 2026-07-12, still blocked on step 1:** SLZB-06 physically moved next to pi1 and cabled into `eth0`, but the `eth0` static-IP step (plan item 1) was never actually done — `ping 10.0.0.12` from both pi1 and OmniLink1 returned `Destination Host Unreachable`. `zigbee2mqtt/bridge/state` still reported `online`, which turned out to be a stale TCP session from before the move, not evidence the radio was reachable. Ran the touchlink scan twice (`zigbee2mqtt/bridge/request/touchlink/scan` via `mosquitto_sub`/`mosquitto_pub` against the broker on `10.0.0.10`) — both times it returned nothing, consistent with the radio being unreachable rather than a touchlink/hardware problem (this same scan succeeded cleanly on 2026-07-07 per the note above, before the SLZB-06 was moved). Next time: actually complete step 1 (`sudo ip addr add 10.0.0.19/24 dev eth0` or similar on pi1, confirm the ping succeeds) and restart `zigbee2mqtt` to drop the stale socket before attempting the scan again.
+
+**RESOLVED 2026-07-28 — all bulbs recovered, zero physical resets; touchlink was never needed for these.** The insight that unlocked it: a force-removed bulb still holds *this* network's keys, so it is still a functioning router on our own network — it doesn't need resetting, it needs its z2m database entry back. zigbee-herdsman drops announces from devices not in its database (`controller.js onDeviceAnnounce`), which is why weeks of power-cycling and permit-join did nothing. Recovery procedure (full playbook in the ops notes):
+
+1. Collected the missing IEEE addresses from `configuration.yaml.bak-*` in `/opt/zigbee2mqtt/data/`.
+2. `bridge/request/networkmap` (`{"type":"raw","routes":false}`, allow ~4 min) — the coordinator's neighbour table listed every orphaned router with its live network address, including 3 bulbs absent from the config backup.
+3. Stopped z2m, appended minimal entries to `database.db` (`{"id":N,"type":"Router","ieeeAddr":…,"nwkAddr":<real>,"manufId":4107,"epList":[],"endpoints":{},"interviewCompleted":false,"interviewState":"FAILED","meta":{}}`, one JSON object per line — beware: the file has no trailing newline, a naive append corrupts the last entry).
+4. Restarted z2m and issued `bridge/request/device/interview {"id":"0x…"}` per device — all 11 interviewed successfully (8× LCG006 GU10 colour spots, 3× LTA005 E27 filaments) and were live end-to-end, coordinator names intact. (`test_bulb`/`0x…077c` remains a placeholder entry — currently unpowered; it will announce and heal whenever it next gets power.)
+
+Same day, two further recoveries rode on the momentum: (a) two pre-Bluetooth Hue White Ambiance GU10s (LTW013) stuck on a defunct Hue Bridge were freed via Touchlink after all — which exposed that the ember adapter's Touchlink *receive* path is broken upstream (`Koenkk/zigbee-herdsman#1742`: TX works, responses never reach the host), worked around by patching `touchlink.js` `factoryResetFirst` on pi1 to broadcast `resetToFactoryNew` blind with the scan request's transaction ID (patch is in `node_modules` — a z2m update wipes it); bulb-side RSSI proximity gating kept every other bulb safe at ~5 cm range. (b) The two SNZB-03PR2 motion sensors gained proper definitions via an external converter backported from `zigbee-herdsman-converters` PR #12338 (`/opt/zigbee2mqtt/data/external_converters/snzb-03pr2.js` — delete once the shipped converters package supports the model natively).
+
+**Root cause fixed (commit `2c2559e`):** `DELETE /api/lights/{id}` now defaults to a graceful network Leave; `force: true` is an explicit opt-in query parameter (`?force=true`) reserved for devices that are physically gone. The `force` flag rides on `DeviceRemoveRequest` (shared wire type — coordinator and all nodes must deploy together). `plans/device-auto-naming.md`'s live re-validation is hereby unblocked.
 
 ---
 

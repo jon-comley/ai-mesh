@@ -1506,6 +1506,18 @@ mod tests {
     }
 
     #[test]
+    fn device_remove_forced_roundtrip_keeps_force_on_the_wire() {
+        let msg = MeshMessage::DeviceRemove(DeviceRemoveRequest {
+            request_id: "r1".into(),
+            device_id: "dead_bulb".into(),
+            force: true,
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""force":true"#));
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
     fn zigbee_join_roundtrip() {
         let msg = MeshMessage::ZigbeeJoin(ZigbeeJoinEvent {
             node_id: "pi1".into(),
