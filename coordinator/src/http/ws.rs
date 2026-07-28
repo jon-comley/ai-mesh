@@ -128,12 +128,16 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<DashboardState>) {
         }
     }
 
-    // Push current rooms snapshot so the Rooms panel populates immediately on connect.
+    // Push current rooms snapshot so the Rooms panel populates immediately on
+    // connect. device_names comes from the same cached snapshot every other
+    // RoomsUpdate broadcast draws from — sending an empty map here was the
+    // bug that made every device show its raw hex id on first load /
+    // reconnect until some unrelated room event happened to refresh it.
     let rooms = state.get_room_snapshot();
     if !rooms.is_empty() {
         let evt = DashboardEvent::RoomsUpdate {
             rooms,
-            device_names: std::collections::HashMap::new(),
+            device_names: state.get_device_names_snapshot(),
         };
         match serde_json::to_string(&evt) {
             Ok(json) => {
