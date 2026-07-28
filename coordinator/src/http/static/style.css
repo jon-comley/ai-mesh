@@ -3105,6 +3105,19 @@ body {
   .layout-sidebar.sheet-open { display: flex; }
   .layout-sidebar-resize,
   .layout-sidebar-toggle { display: none; }   /* collapse/resize are desktop-only */
+
+  /* Device rows/cards (Devices tab list, room-card sensor/switch rows):
+     .light-name-group's min-width: 0 lets flexbox shrink the name down to
+     near-nothing before its sibling (actions row / readout) ever wraps to
+     its own line — on a narrow phone that meant "Hue Tap Dial Switch 2"
+     rendering as "Hu…" even though there was plenty of vertical room to
+     just drop the actions below instead. Forcing the name to claim the
+     full row width means the sibling can never fit alongside it and always
+     wraps below, exactly the trade a portrait phone has room for. */
+  .device-row .light-name-group,
+  .sensor-card .light-name-group {
+    min-width: 100%;
+  }
 }
 
 @media (min-width: 900px) {
