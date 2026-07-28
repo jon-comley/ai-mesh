@@ -638,6 +638,12 @@ body {
 }
 .model-search-hit:hover { border-color: var(--accent); }
 
+.model-search-hit-blocked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.model-search-hit-blocked:hover { border-color: var(--border); }
+
 .model-search-hit-name {
   overflow: hidden;
   text-overflow: ellipsis;

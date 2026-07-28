@@ -129,6 +129,8 @@ Same day, two further recoveries rode on the momentum: (a) two pre-Bluetooth Hue
 
 **Root cause fixed (commit `2c2559e`):** `DELETE /api/lights/{id}` now defaults to a graceful network Leave; `force: true` is an explicit opt-in query parameter (`?force=true`) reserved for devices that are physically gone. The `force` flag rides on `DeviceRemoveRequest` (shared wire type — coordinator and all nodes must deploy together). `plans/device-auto-naming.md`'s live re-validation is hereby unblocked.
 
+**Follow-up (2026-07-28) — coordinator-side model capacity gate.** Cleanup of a stale `llama3.2:3b` Failed record on pi1 (the agent had refused the download 1 MB short of its 2×-size disk headroom) exposed that the scheduler's capacity check only ran for *auto-placed* loads — an explicitly targeted `POST /api/models/load` was forwarded blind and left to fail on the agent. Now every load path runs the same gate: `Scheduler::check_node_for_model` (RAM headroom = `max_model_size_gb` minus Ready/Loading models) plus a disk pre-check against the node's latest health-reported `disk_free_gb` (2× model size, matching the agent's own rule; skipped when the node already has the model on record, since a reload downloads nothing). HTTP returns 409 with the human-readable reason, which the dashboard now surfaces instead of a bare status code; the CLI mesh path refuses with a logged reason. The HF file picker passes the target node to `GET /api/models/search/files?node_id=…` and files that can't fit come back annotated with `blocked_reason`, rendered greyed-out — a model that can't load on a node is no longer offered for it.
+
 ---
 
 ## Code Audit — Findings to Action (2026-06-02)

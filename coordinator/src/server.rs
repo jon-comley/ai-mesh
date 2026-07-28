@@ -758,6 +758,17 @@ async fn handle_model_load(
                 return Some(MeshMessage::Acknowledge);
             }
         }
+    } else if let Some(id) = req.node_id.as_deref() {
+        // Explicit target: hold it to the same capacity rules auto-placement
+        // applies, instead of forwarding blind and leaving the agent to fail.
+        let capacity = {
+            let reg = registry.lock().unwrap();
+            Scheduler::new(&reg).check_node_for_model(id, req.model_size_mb)
+        };
+        if let Err(reason) = capacity {
+            warn!(node_id = %id, model_name = %req.model_name, %reason, "refusing ModelLoad");
+            return Some(MeshMessage::Acknowledge);
+        }
     }
     let target_id = req.node_id.as_deref().unwrap_or("");
     let agent_tx = connections.lock().unwrap().get(target_id).cloned();

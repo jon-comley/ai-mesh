@@ -1575,6 +1575,19 @@ impl DashboardState {
         });
     }
 
+    /// Most recent reported free space on `node_id`'s model filesystem, if
+    /// any health sample has arrived carrying one. Used to refuse model
+    /// downloads that cannot fit before the agent even starts.
+    pub fn latest_disk_free_gb(&self, node_id: &str) -> Option<f32> {
+        self.health_store
+            .lock()
+            .unwrap()
+            .get(node_id)?
+            .iter()
+            .rev()
+            .find_map(|s| s.disk_free_gb)
+    }
+
     /// Update the REAPER snapshot and broadcast if status changed.
     /// Always updates the snapshot (even when offline) so stale data is never frozen.
     pub fn push_reaper_status(&self, report: ReaperStatusReport) {

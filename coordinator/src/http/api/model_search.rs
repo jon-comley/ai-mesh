@@ -100,6 +100,11 @@ pub async fn search_models(_: Authed, Query(q): Query<SearchQuery>) -> impl Into
 #[derive(Deserialize)]
 pub struct FilesQuery {
     repo: String,
+    /// When present, each file is annotated with why this node can't take
+    /// it (RAM headroom / disk), so the picker can grey those out instead
+    /// of offering a load the coordinator would refuse.
+    #[serde(default)]
+    node_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -115,13 +120,26 @@ struct HfTreeEntry {
 pub struct ModelFileHit {
     filename: String,
     size_mb: u64,
+    /// Why the requested node can't load this file; absent when it can (or
+    /// when no `node_id` was given).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocked_reason: Option<String>,
 }
 
 /// `GET /api/models/search/files?repo=<org>/<repo>` — single-file GGUFs only
 /// (filenames containing "-of-" are one shard of a multi-file set;
 /// `resolve_gguf`'s `hf:` path can't load those, so they're filtered out here
 /// rather than surfaced as a choice that would fail on load).
-pub async fn search_model_files(_: Authed, Query(q): Query<FilesQuery>) -> impl IntoResponse {
+pub async fn search_model_files(
+    _: Authed,
+    axum::Extension(registry): axum::Extension<
+        std::sync::Arc<std::sync::Mutex<crate::registry::Registry>>,
+    >,
+    axum::extract::State(state): axum::extract::State<
+        std::sync::Arc<crate::http::state::DashboardState>,
+    >,
+    Query(q): Query<FilesQuery>,
+) -> impl IntoResponse {
     let repo = q.repo.trim();
     if repo.is_empty() || !repo.contains('/') {
         return (StatusCode::BAD_REQUEST, "repo must look like org/repo").into_response();
@@ -156,9 +174,16 @@ pub async fn search_model_files(_: Authed, Query(q): Query<FilesQuery>) -> impl 
     let mut files: Vec<ModelFileHit> = entries
         .into_iter()
         .filter(|e| e.entry_type == "file" && e.path.ends_with(".gguf") && !e.path.contains("-of-"))
-        .map(|e| ModelFileHit {
-            filename: e.path,
-            size_mb: e.size / (1024 * 1024),
+        .map(|e| {
+            let size_mb = e.size / (1024 * 1024);
+            let blocked_reason = q.node_id.as_deref().and_then(|node_id| {
+                super::nodes::model_load_blocker(&registry, &state, node_id, None, size_mb)
+            });
+            ModelFileHit {
+                filename: e.path,
+                size_mb,
+                blocked_reason,
+            }
         })
         .collect();
     files.sort_by_key(|f| f.size_mb);
@@ -178,6 +203,9 @@ mod tests {
         Router::new()
             .route("/api/models/search", get(search_models))
             .route("/api/models/search/files", get(search_model_files))
+            .layer(axum::Extension(Arc::new(std::sync::Mutex::new(
+                crate::registry::Registry::new(),
+            ))))
             .with_state(state)
     }
 

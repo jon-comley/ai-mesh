@@ -227,7 +227,7 @@ async function showModelFiles(row, repo) {
   const token = localStorage.getItem('meshToken') ?? '';
   try {
     const res = await fetch(
-      `/api/models/search/files?repo=${encodeURIComponent(repo)}&token=${encodeURIComponent(token)}`,
+      `/api/models/search/files?repo=${encodeURIComponent(repo)}&node_id=${encodeURIComponent(row.dataset.searchNode)}&token=${encodeURIComponent(token)}`,
       { signal: controller.signal });
     if (!res.ok) { resultsEl.innerHTML = '<span class="model-search-status">Could not load files</span>'; return; }
     const files = await res.json();
@@ -236,7 +236,11 @@ async function showModelFiles(row, repo) {
       resultsEl.innerHTML = back + '<span class="model-search-status">No single-file GGUFs in this repo</span>';
       return;
     }
-    resultsEl.innerHTML = back + files.map(f => `
+    resultsEl.innerHTML = back + files.map(f => f.blocked_reason ? `
+      <button class="model-search-hit model-search-hit-blocked" disabled title="${esc(f.blocked_reason)}">
+        <span class="model-search-hit-name">${esc(f.filename)}</span>
+        <span class="model-search-hit-meta">${(f.size_mb / 1024).toFixed(1)} GB — won't fit</span>
+      </button>` : `
       <button class="model-search-hit" data-repo="${esc(repo)}" data-filename="${esc(f.filename)}" data-size-mb="${f.size_mb}">
         <span class="model-search-hit-name">${esc(f.filename)}</span>
         <span class="model-search-hit-meta">${(f.size_mb / 1024).toFixed(1)} GB</span>
@@ -456,7 +460,8 @@ async function loadModel(nodeId, modelName, sizeMb, btn, errEl) {
       body:    JSON.stringify({ node_id: nodeId, model_name: modelName, size_mb: sizeMb }),
     });
     if (!r.ok) {
-      errEl.textContent = `Failed (HTTP ${r.status})`;
+      const reason = (await r.text().catch(() => '')).trim();
+      errEl.textContent = reason || `Failed (HTTP ${r.status})`;
       btn.disabled = false;
       btn.textContent = originalLabel;
     }

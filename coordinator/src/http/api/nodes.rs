@@ -12,9 +12,49 @@ use std::sync::{Arc, Mutex};
 
 use crate::http::state::DashboardState;
 use crate::registry::Registry;
+use crate::scheduler::Scheduler;
 
 use super::gen_request_id;
 use crate::http::auth::Authed;
+
+/// Why a model of `size_mb` cannot go to `node_id` right now — `None` means
+/// it can. One place for both the load endpoint and the file picker so the
+/// UI can never offer what the load path would refuse. RAM headroom comes
+/// from the scheduler (the same budget auto-placement uses); disk headroom
+/// mirrors the agent's own 2×-size download requirement, skipped when the
+/// node already has `model_name` on record (a reload downloads nothing).
+pub(crate) fn model_load_blocker(
+    registry: &Mutex<Registry>,
+    state: &DashboardState,
+    node_id: &str,
+    model_name: Option<&str>,
+    size_mb: u64,
+) -> Option<String> {
+    let (capacity, already_known) = {
+        let reg = registry.lock().unwrap();
+        let capacity = Scheduler::new(&reg).check_node_for_model(node_id, size_mb);
+        let already_known = model_name
+            .map(|name| {
+                reg.get(node_id)
+                    .is_some_and(|n| n.models.contains_key(name))
+            })
+            .unwrap_or(false);
+        (capacity, already_known)
+    };
+    if let Err(reason) = capacity {
+        return Some(reason);
+    }
+    if !already_known && let Some(free_gb) = state.latest_disk_free_gb(node_id) {
+        let free_mb = (free_gb as f64 * 1024.0) as u64;
+        let needed_mb = size_mb.saturating_mul(2);
+        if free_mb < needed_mb {
+            return Some(format!(
+                "insufficient disk to download: need {needed_mb} MB free (2× model size), node has {free_mb} MB"
+            ));
+        }
+    }
+    None
+}
 
 #[derive(Deserialize)]
 pub struct SetIntervalBody {
@@ -56,6 +96,7 @@ pub struct UnloadModelBody {
 
 pub async fn load_model(
     _: Authed,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
     State(state): State<Arc<DashboardState>>,
     Json(body): Json<LoadModelBody>,
 ) -> impl IntoResponse {
@@ -73,6 +114,14 @@ pub async fn load_model(
         model_name,
         size_mb,
     } = body;
+    if registry.lock().unwrap().get(&node_id).is_none() {
+        return (StatusCode::NOT_FOUND, "unknown node").into_response();
+    }
+    if let Some(reason) =
+        model_load_blocker(&registry, &state, &node_id, Some(&model_name), size_mb)
+    {
+        return (StatusCode::CONFLICT, reason).into_response();
+    }
     let req = ModelLoadRequest {
         request_id: gen_request_id(),
         node_id: Some(node_id.clone()),
@@ -205,7 +254,27 @@ mod tests {
     use crate::http::api::test_util::*;
     use axum::Router;
     use axum::routing::post;
+    use shared::hardware::{NodeCapabilities, NodeIdentity, NodeRole};
     use tokio::sync::mpsc;
+
+    /// Registry containing one Compute node with the given model budget.
+    fn registry_with_compute_node(id: &str, max_model_size_gb: f32) -> Registry {
+        let mut registry = Registry::new();
+        registry.update_heartbeat(NodeIdentity {
+            id: id.into(),
+            hostname: format!("{id}-host"),
+            ip: "127.0.0.1".into(),
+            role: NodeRole::Compute,
+        });
+        registry.update_capabilities(
+            id,
+            NodeCapabilities {
+                max_model_size_gb,
+                ..NodeCapabilities::default()
+            },
+        );
+        registry
+    }
 
     async fn post_interval(
         state: Arc<DashboardState>,
@@ -323,8 +392,18 @@ mod tests {
     // ── load_model / unload_model ─────────────────────────────────────────────
 
     async fn post_load(state: Arc<DashboardState>, token: &str, body: &str) -> StatusCode {
+        post_load_with_registry(state, Registry::new(), token, body).await
+    }
+
+    async fn post_load_with_registry(
+        state: Arc<DashboardState>,
+        registry: Registry,
+        token: &str,
+        body: &str,
+    ) -> StatusCode {
         let router: Router = Router::new()
             .route("/api/models/load", post(load_model))
+            .layer(Extension(Arc::new(Mutex::new(registry))))
             .with_state(state);
         send(
             router,
@@ -355,8 +434,9 @@ mod tests {
         connections.lock().unwrap().insert("node1".into(), tx);
         let state = make_state(vec![], connections);
 
-        let status = post_load(
+        let status = post_load_with_registry(
             state,
+            registry_with_compute_node("node1", 8.0),
             "",
             r#"{"node_id":"node1","model_name":"qwen2.5:7b","size_mb":4000}"#,
         )
@@ -371,6 +451,73 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn load_model_returns_409_when_model_exceeds_headroom() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("node1".into(), tx);
+        let state = make_state(vec![], connections);
+
+        let status = post_load_with_registry(
+            state,
+            registry_with_compute_node("node1", 1.0),
+            "",
+            r#"{"node_id":"node1","model_name":"qwen2.5:7b","size_mb":4000}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(rx.try_recv().is_err(), "no ModelLoad may be forwarded");
+    }
+
+    #[tokio::test]
+    async fn load_model_returns_409_when_disk_cannot_hold_the_download() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("node1".into(), tx);
+        let state = make_state(vec![], connections);
+        // 3.7 GB free < the 2×2000 MB download headroom the agent will demand.
+        state.push_health("node1", 1.0, 1.0, 8.0, None, None, None, Some(3.7));
+
+        let status = post_load_with_registry(
+            state,
+            registry_with_compute_node("node1", 8.0),
+            "",
+            r#"{"node_id":"node1","model_name":"qwen2.5:7b","size_mb":2000}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(rx.try_recv().is_err(), "no ModelLoad may be forwarded");
+    }
+
+    #[tokio::test]
+    async fn load_model_skips_disk_check_when_model_already_on_node() {
+        let connections = empty_connections();
+        let (tx, mut rx) = mpsc::channel::<MeshMessage>(4);
+        connections.lock().unwrap().insert("node1".into(), tx);
+        let state = make_state(vec![], connections);
+        state.push_health("node1", 1.0, 1.0, 8.0, None, None, None, Some(0.5));
+
+        // The node already knows this model (e.g. Unloaded after an earlier
+        // run) — a reload downloads nothing, so low disk must not block it.
+        let mut registry = registry_with_compute_node("node1", 8.0);
+        registry.update_model_status(
+            "node1",
+            "qwen2.5:7b",
+            2000,
+            shared::ModelLifecycleState::Unloaded,
+        );
+
+        let status = post_load_with_registry(
+            state,
+            registry,
+            "",
+            r#"{"node_id":"node1","model_name":"qwen2.5:7b","size_mb":2000}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(rx.try_recv().is_ok(), "ModelLoad must be forwarded");
     }
 
     #[tokio::test]
