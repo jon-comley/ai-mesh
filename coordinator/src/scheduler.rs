@@ -44,31 +44,65 @@ impl<'a> Scheduler<'a> {
             .eligible_compute_nodes()
             .into_iter()
             .filter_map(|lite| {
-                self.registry.get(&lite.id).and_then(|node| {
-                    let caps = node.capabilities.as_ref()?;
-                    let max_mb = (caps.max_model_size_gb * 1024.0) as u64;
-                    let allocated_mb: u64 = node
-                        .models
-                        .values()
-                        .filter(|m| {
-                            m.state == ModelLifecycleState::Ready
-                                || m.state == ModelLifecycleState::Loading
-                        })
-                        .map(|m| m.size_mb)
-                        .sum();
-                    let remaining = max_mb.saturating_sub(allocated_mb);
-                    if remaining >= model_size_mb {
-                        Some((lite, remaining))
-                    } else {
-                        None
-                    }
-                })
+                let remaining = self.model_headroom_mb(&lite.id)?;
+                if remaining >= model_size_mb {
+                    Some((lite, remaining))
+                } else {
+                    None
+                }
             })
             .collect();
 
         // Most headroom first so placements spread across nodes.
         candidates.sort_by_key(|b| std::cmp::Reverse(b.1));
         candidates.into_iter().next().map(|(node, _)| node)
+    }
+
+    /// RAM budget left for new models on one node: its reported
+    /// `max_model_size_gb` minus everything already Ready or Loading.
+    /// `None` when the node is unknown or has never reported capabilities.
+    pub fn model_headroom_mb(&self, node_id: &str) -> Option<u64> {
+        let node = self.registry.get(node_id)?;
+        let caps = node.capabilities.as_ref()?;
+        let max_mb = (caps.max_model_size_gb * 1024.0) as u64;
+        let allocated_mb: u64 = node
+            .models
+            .values()
+            .filter(|m| {
+                m.state == ModelLifecycleState::Ready || m.state == ModelLifecycleState::Loading
+            })
+            .map(|m| m.size_mb)
+            .sum();
+        Some(max_mb.saturating_sub(allocated_mb))
+    }
+
+    /// Validate an *explicitly targeted* model load against the same capacity
+    /// rules auto-placement uses — the check that historically only ran when
+    /// no node was named. `Err` carries a human-readable refusal reason.
+    pub fn check_node_for_model(&self, node_id: &str, model_size_mb: u64) -> Result<(), String> {
+        let node = self
+            .registry
+            .get(node_id)
+            .ok_or_else(|| format!("unknown node '{node_id}'"))?;
+        if node.identity.role != shared::hardware::NodeRole::Compute {
+            return Err(format!(
+                "node '{}' is a {:?} node, not Compute — it does not load models",
+                node.identity.hostname, node.identity.role
+            ));
+        }
+        let headroom = self.model_headroom_mb(node_id).ok_or_else(|| {
+            format!(
+                "node '{}' has not reported its model capabilities yet",
+                node.identity.hostname
+            )
+        })?;
+        if headroom < model_size_mb {
+            return Err(format!(
+                "model needs {model_size_mb} MB but node '{}' has only {headroom} MB of model headroom left",
+                node.identity.hostname
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -369,5 +403,72 @@ mod tests {
             selected.id, b.id,
             "node-b has more headroom and should be preferred"
         );
+    }
+
+    #[test]
+    fn check_node_for_model_accepts_a_fitting_model() {
+        let mut registry = Registry::new();
+        let compute = make_identity("compute", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+        registry.update_capabilities(
+            &compute.id,
+            NodeCapabilities {
+                max_model_size_gb: 4.0,
+                ..NodeCapabilities::default()
+            },
+        );
+        assert!(
+            Scheduler::new(&registry)
+                .check_node_for_model(&compute.id, 2048)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn check_node_for_model_rejects_when_headroom_exhausted() {
+        let mut registry = Registry::new();
+        let compute = make_identity("compute", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+        registry.update_capabilities(
+            &compute.id,
+            NodeCapabilities {
+                max_model_size_gb: 4.0,
+                ..NodeCapabilities::default()
+            },
+        );
+        registry.update_model_status(&compute.id, "resident", 3072, ModelLifecycleState::Ready);
+        let err = Scheduler::new(&registry)
+            .check_node_for_model(&compute.id, 2048)
+            .unwrap_err();
+        assert!(err.contains("headroom"), "unexpected reason: {err}");
+    }
+
+    #[test]
+    fn check_node_for_model_rejects_non_compute_nodes() {
+        let mut registry = Registry::new();
+        let controller = make_identity("controller", NodeRole::Controller);
+        registry.update_heartbeat(controller.clone());
+        let err = Scheduler::new(&registry)
+            .check_node_for_model(&controller.id, 128)
+            .unwrap_err();
+        assert!(err.contains("not Compute"), "unexpected reason: {err}");
+    }
+
+    #[test]
+    fn check_node_for_model_rejects_unknown_node_and_missing_capabilities() {
+        let mut registry = Registry::new();
+        assert!(
+            Scheduler::new(&registry)
+                .check_node_for_model("ghost", 128)
+                .is_err()
+        );
+
+        // Known Compute node that has never sent a Capabilities message.
+        let compute = make_identity("compute", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+        let err = Scheduler::new(&registry)
+            .check_node_for_model(&compute.id, 128)
+            .unwrap_err();
+        assert!(err.contains("capabilities"), "unexpected reason: {err}");
     }
 }
