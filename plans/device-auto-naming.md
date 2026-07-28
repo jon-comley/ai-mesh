@@ -60,6 +60,7 @@ short code for SONOFF — see correction above):
 | `definition.model` | vendor / description | product line name | count seen |
 |---|---|---|---|
 | `929003666501` (LCG006) | Philips — Hue White and color ambiance GU10 spot LED w/ Bluetooth | `Hue GU10 Spot CCT/COL` | 8 |
+| `8718696598283` (LTW013) | Philips — Hue white ambiance GU10 (CCT only, pre-Bluetooth) | `Hue GU10 Spot CCT` | 2 |
 | `8719514392830` (LTA005) | Philips — Hue White Ambiance E27 filament screw globe | `Hue Filament Globe CCT` | 3 |
 | `9290012574` (LCT010) | Philips — Hue White and Color Ambiance B22/E27 806lm | `Hue Color Ambiance Bulb` | 1 |
 | `SNZB-02P` | SONOFF — Temperature and humidity sensor | `Sonoff Temp/Humidity Sensor` | 4 |

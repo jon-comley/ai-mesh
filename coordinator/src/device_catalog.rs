@@ -19,6 +19,7 @@ use std::collections::HashMap;
 pub fn product_line_name(definition_model: &str) -> Option<&'static str> {
     Some(match definition_model {
         "929003666501" => "Hue GU10 Spot CCT/COL",   // LCG006
+        "8718696598283" => "Hue GU10 Spot CCT",      // LTW013
         "8719514392830" => "Hue Filament Globe CCT", // LTA005
         "9290012574" => "Hue Color Ambiance Bulb",   // LCT010
         "SNZB-02P" => "Sonoff Temp/Humidity Sensor",
@@ -54,6 +55,20 @@ mod tests {
             Some("Hue GU10 Spot CCT/COL")
         );
         assert_eq!(product_line_name("totally-unknown"), None);
+    }
+
+    #[test]
+    fn cct_line_numbering_ignores_cct_col_names() {
+        // "Hue GU10 Spot CCT" is a prefix of "Hue GU10 Spot CCT/COL", so the
+        // CCT-only sequence must not be advanced by CCT/COL device names:
+        // stripping the shorter prefix leaves "/COL n", which fails the
+        // number parse and is ignored.
+        let mut existing = HashMap::new();
+        existing.insert("dev1".to_string(), "Hue GU10 Spot CCT/COL 7".to_string());
+        assert_eq!(
+            next_name_in_line(&existing, "Hue GU10 Spot CCT"),
+            "Hue GU10 Spot CCT 1"
+        );
     }
 
     #[test]
