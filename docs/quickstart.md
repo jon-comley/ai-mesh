@@ -31,9 +31,9 @@ Installs Rust, cross-compilation toolchains, git hooks, SSH keys, and cross-comp
 just deploy-coordinator pi1
 ```
 
-Cross-builds coordinator for ARM64, copies state/DB from laptop, installs as systemd service on pi1 (10.0.0.10:9001). The coordinator now runs 24/7 independent of laptop power. Verify with `just verify-coordinator pi1`.
+Cross-builds coordinator for ARM64, copies state/DB from laptop, installs as systemd service on pi1 (10.0.0.x:9001). The coordinator now runs 24/7 independent of laptop power. Verify with `just verify-coordinator pi1`.
 
-For remote phone access, install Tailscale on pi1 + phone; dashboard is then accessible at `http://100.100.100.100:9001/?token=...` or `http://pi1:9001/?token=...` (once the built-in DNS propagates).
+For remote phone access, install Tailscale on pi1 + phone; dashboard is then accessible at `http://100.x.x.x:9001/?token=...` or `http://pi1:9001/?token=...` (once the built-in DNS propagates).
 
 ### 3. Provision compute nodes
 
@@ -96,18 +96,18 @@ The coordinator on **pi1** serves a web dashboard on **port 9001** (override wit
 
 **Local access (home LAN):**
 ```
-http://10.0.0.10:9001/
+http://10.0.0.x:9001/
 ```
 
 **Remote access (Tailscale, anywhere):**
 ```
-http://100.100.100.100:9001/
+http://100.x.x.x:9001/
 http://pi1:9001/              (once built-in DNS propagates)
 ```
 
 The page itself loads with no auth; the first WebSocket connection prompts a native browser dialog for `MESH_AUTH_TOKEN` (retrieve it with `echo $MESH_AUTH_TOKEN` on OmniLink1, or from `MESH_AUTH_TOKEN=` in pi1's `/var/lib/ai-mesh/coordinator.state`) and caches it in the browser's local storage — a `?token=` query param is not read by the client. Tap the connection dot (top of the page) to re-enter it if it's ever rejected.
 
-> **If `pi1:9001` won't load:** the `pi1` and `100.x` addresses only resolve/route when that device is connected to the tailnet. Check that **Tailscale is on** (and the device shows online in `tailscale status` on pi1). On the home LAN you can always fall back to the direct `http://10.0.0.10:9001/`.
+> **If `pi1:9001` won't load:** the `pi1` and `100.x` addresses only resolve/route when that device is connected to the tailnet. Check that **Tailscale is on** (and the device shows online in `tailscale status` on pi1). On the home LAN you can always fall back to the direct `http://10.0.0.x:9001/`.
 
 A Progressive Web App — open in **Safari** on iOS/iPadOS (Chrome's iOS "Add to Home Screen" doesn't install a standalone PWA) and use Share → "Add to Home Screen" to install it as an app icon. Bookmark the remote URL for one-tap access from anywhere (cellular, public WiFi, etc.). Tabs: Nodes, Health, Models, Home, Devices, Security, Errors, Chat, REAPER, Online AI, Hunts. Real-time data via WebSocket; the full Home (rooms, effects, scenes, device control) and Devices (pairing, inventory) tabs are live.
 
@@ -155,12 +155,15 @@ MESH_INSECURE=1 cargo run -p cli -- nodes
 | pi2 | Linux (ARM64) | Raspberry Pi | — | art, audio, music |
 | Beelink SER8 (beelink1) | Windows 11 | AMD Radeon 780M, 8 GB VRAM | `qwen2.5:7b` | llm |
 | OmniLink1 (WSL2) | Linux (x86_64) | controller only | — | controller |
+| Mac mini (mac1) | macOS (Apple Silicon, M4) | Mac mini M4 | TBD | llm, reaper |
 
 The coordinator schedules inference requests to whichever node has the requested model loaded and ready.
 
 **Lighting**: pi1 runs Mosquitto + Zigbee2MQTT with an SLZB-06 Zigbee coordinator. Natural language intents like `just intent "turn all lights off"` are routed through the LLM and executed as MQTT commands to Zigbee devices. The coordinator receives the live device/group list from pi1 on connect (persisted across restarts), injects it into the LLM system prompt, and validates targets before dispatch — unknown device names return a clear error rather than a silent no-op. See `docs/pi1-lighting-setup.md`.
 
 **Music**: "play Blackbird by the Beatles", "pause", "what's playing?" — from chat or the voice puck. pi2 drives the Spotify Web API for search and control, and supervises a librespot Spotify Connect player whose audio feeds the paired Bluetooth speaker. Requires Spotify Premium and a one-time setup — see `docs/music.md`.
+
+**DAW (REAPER)**: mac1 drives REAPER via the same natural-language intent path as lighting and music — the macOS launch/scripts-path handling is already in place (see `docs/reaper.md`).
 
 ---
 
