@@ -1,8 +1,9 @@
 # ai-mesh
 
 A distributed, hardware-aware mesh for running LLM inference and home
-automation across a set of heterogeneous machines — Linux, Windows, and ARM
-(Raspberry Pi) — coordinated from a single Rust workspace.
+automation across a set of heterogeneous machines — Linux, Windows, ARM
+(Raspberry Pi), and macOS (Apple Silicon) — coordinated from a single Rust
+workspace.
 
 Point any OpenAI-SDK client at the coordinator and it routes requests to
 whichever node actually has the right model loaded, with no manual
@@ -32,8 +33,8 @@ orchestration. The same coordinator drives natural-language home automation
   chaos-test suite fires real attack scenarios at a live coordinator to prove
   it holds.
 - **Cross-platform by design** — the same agent binary cross-compiles and
-  runs as a proper OS service on Linux (systemd) and Windows (NSSM), plus
-  native ARM64 builds for Raspberry Pi.
+  runs as a proper OS service on Linux (systemd), Windows (NSSM), and macOS
+  (launchd), plus native ARM64 builds for Raspberry Pi and Apple Silicon.
 
 ## Why
 
