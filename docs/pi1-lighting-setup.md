@@ -1,6 +1,6 @@
 # pi1 Lighting Infrastructure Setup
 
-One-time manual setup on pi1 (10.0.0.10) to support the `lighting` and
+One-time manual setup on pi1 (pi1.local) to support the `lighting` and
 `sensors` capabilities (both ride the same Mosquitto + Z2M bridge; see §9 for
 the sensors specifics). The agent binary handles MQTT automatically once
 Mosquitto and Z2M are running.
@@ -23,7 +23,7 @@ Mosquitto and Z2M are running.
 ## 1. Install Mosquitto
 
 ```bash
-ssh jonno@10.0.0.10
+ssh jonno@pi1.local
 sudo apt update
 sudo apt install -y mosquitto mosquitto-clients
 sudo systemctl enable --now mosquitto
@@ -48,8 +48,8 @@ sudo systemctl restart mosquitto
 Verify from OmniLink1:
 
 ```bash
-mosquitto_pub -h 10.0.0.10 -t test -m hello
-mosquitto_sub -h 10.0.0.10 -t test -C 1   # should print "hello"
+mosquitto_pub -h pi1.local -t test -m hello
+mosquitto_sub -h pi1.local -t test -C 1   # should print "hello"
 ```
 
 ---
@@ -190,7 +190,7 @@ joined, and can never re-pair on its own — recovery then means z2m
 **Rename the device** after pairing:
 
 ```bash
-mosquitto_pub -h 10.0.0.10 \
+mosquitto_pub -h pi1.local \
   -t 'zigbee2mqtt/bridge/request/device/rename' \
   -m '{"from":"0xXXXXXXXXXXXXXXXX","to":"my_bulb"}'
 ```
@@ -198,7 +198,7 @@ mosquitto_pub -h 10.0.0.10 \
 Confirm:
 
 ```bash
-mosquitto_sub -h 10.0.0.10 -t 'zigbee2mqtt/bridge/devices' -C 1 \
+mosquitto_sub -h pi1.local -t 'zigbee2mqtt/bridge/devices' -C 1 \
   | python3 -m json.tool | grep friendly_name
 ```
 
@@ -210,11 +210,11 @@ Groups let you control multiple bulbs with one command. Create an `all` group
 and add devices to it:
 
 ```bash
-mosquitto_pub -h 10.0.0.10 \
+mosquitto_pub -h pi1.local \
   -t 'zigbee2mqtt/bridge/request/group/add' \
   -m '{"friendly_name":"all"}'
 
-mosquitto_pub -h 10.0.0.10 \
+mosquitto_pub -h pi1.local \
   -t 'zigbee2mqtt/bridge/request/group/members/add' \
   -m '{"group":"all","device":"my_bulb"}'
 ```

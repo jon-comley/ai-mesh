@@ -3,8 +3,8 @@
 Step-by-step guide for adding a fresh Windows 11 machine to the ai-mesh cluster as a compute node. Captures every gotcha encountered during the Beelink SER8 provisioning.
 
 > **Network note (2026-06-25 the mesh router migration).** The home subnet moved
-> `192.168.1.x` → `10.0.0.x`. Current addresses: **pi1 `10.0.0.10`**,
-> **beelink1 `10.0.0.11`**, **SLZB-06 Zigbee `10.0.0.12`** (set the mesh router DHCP
+> `192.168.1.x` → `10.0.0.x`. Current addresses: **pi1 `pi1.local`**,
+> **beelink1 `beelink1.local`**, **SLZB-06 Zigbee `10.0.0.12`** (set the mesh router DHCP
 > reservations so they don't move). **Any `192.168.1.x` address below is
 > historical** — substitute the current address when following the steps. The
 > troubleshooting section near the end intentionally keeps the old IPs because it
@@ -42,11 +42,11 @@ Add your WSL public key to `C:\Users\<user>\.ssh\authorized_keys` so that SSH fr
 
 ## 1. Network Setup
 
-The agent connects **outbound** from the Windows machine to the coordinator on **pi1** (`10.0.0.10:9000`). Outbound connections are allowed by default, so **no inbound firewall rule or portproxy is required on the Windows node**. Just confirm the node can reach pi1:
+The agent connects **outbound** from the Windows machine to the coordinator on **pi1** (`pi1.local:9000`). Outbound connections are allowed by default, so **no inbound firewall rule or portproxy is required on the Windows node**. Just confirm the node can reach pi1:
 
 ```powershell
 # Run on the Windows machine
-Test-NetConnection 10.0.0.10 -Port 9000   # expect TcpTestSucceeded : True
+Test-NetConnection pi1.local -Port 9000   # expect TcpTestSucceeded : True
 ```
 
 > **Legacy:** earlier versions ran the coordinator in WSL2 on the laptop, which required a Windows firewall rule plus a `netsh` portproxy (`just update-portproxy`) to expose it on the LAN. With the coordinator on pi1 that setup is no longer needed for compute nodes.
@@ -99,7 +99,7 @@ This step **must be done locally on the Windows machine** (not over SSH) because
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp 10.0.0.10
+& "C:\Users\<user>\ai-mesh\install-node-windows.ps1" -CoordinatorIp pi1.local
 ```
 
 The provision script does:
@@ -133,7 +133,7 @@ After it completes, verify the node is registered and the model is ready:
 
 ```bash
 just nodes
-# BEELINK1 | 10.0.0.11 | Compute | ... | qwen2.5:7b (Ready)
+# BEELINK1 | beelink1.local | Compute | ... | qwen2.5:7b (Ready)
 
 just validate-routing
 ```
@@ -200,7 +200,7 @@ just logs-node beelink1
 
 Or check the NSSM service environment:
 ```bash
-ssh jonno@10.0.0.11 'nssm get ai-mesh-agent AppEnvironmentExtra'
+ssh jonno@beelink1.local 'nssm get ai-mesh-agent AppEnvironmentExtra'
 # Should show LLAMA_GPU_LAYERS=99 LLAMA_FLASH_ATTN=1
 ```
 
@@ -233,8 +233,8 @@ Prevention: the agent must **not spawn child processes** during normal operation
 
 Check in order:
 1. Is the service RUNNING? `ssh user@host "sc.exe query ai-mesh-agent"`
-2. Can the Windows machine reach the coordinator on pi1? On the Windows machine: `Test-NetConnection 10.0.0.10 -Port 9000`
-3. Is the service env pointed at pi1? `COORDINATOR_IP` should be `10.0.0.10` (see "Service environment variables" below).
+2. Can the Windows machine reach the coordinator on pi1? On the Windows machine: `Test-NetConnection pi1.local -Port 9000`
+3. Is the service env pointed at pi1? `COORDINATOR_IP` should be `pi1.local` (see "Service environment variables" below).
 4. Are there stale registry entries obscuring the new entry? `just reset` clears them.
 5. Check the agent log: `just logs-node beelink1`
 
@@ -293,10 +293,10 @@ idempotent (llama-server and other already-present steps are skipped).
 NSSM `AppEnvironmentExtra` requires each variable as a **separate argument**, not semicolon-separated:
 ```powershell
 # CORRECT
-nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=10.0.0.10" "AGENT_ROLE=compute"
+nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=pi1.local" "AGENT_ROLE=compute"
 
 # WRONG — produces a single malformed variable
-nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=10.0.0.10;AGENT_ROLE=compute"
+nssm set ai-mesh-agent AppEnvironmentExtra "COORDINATOR_IP=pi1.local;AGENT_ROLE=compute"
 ```
 
 Verify what NSSM has stored:
@@ -308,11 +308,11 @@ nssm get ai-mesh-agent AppEnvironmentExtra
 
 When setting env vars inline in cmd.exe, it is easy to include a trailing space:
 ```cmd
-REM WRONG — COORDINATOR_IP = "10.0.0.10 " (note trailing space)
-set COORDINATOR_IP=10.0.0.10 && agent.exe
+REM WRONG — COORDINATOR_IP = "pi1.local " (note trailing space)
+set COORDINATOR_IP=pi1.local && agent.exe
 
 REM RIGHT — quotes prevent trailing space
-set "COORDINATOR_IP=10.0.0.10" && agent.exe
+set "COORDINATOR_IP=pi1.local" && agent.exe
 ```
 
 ### AMD GPU not detected / llama-server crashes during inference
@@ -388,7 +388,7 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 1. Once the machine boots and is reachable on the network, re-copy the SSH key:
    ```bash
-   ssh-copy-id jonno@10.0.0.11
+   ssh-copy-id jonno@beelink1.local
    ```
    If `ssh-copy-id` fails because the key isn't in `authorized_keys` yet, add it manually — open a PowerShell on the Beelink and run:
    ```powershell
@@ -396,7 +396,7 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
    ```
    Or from WSL:
    ```bash
-   cat ~/.ssh/id_ed25519.pub | ssh jonno@10.0.0.11 "powershell -Command \"Add-Content 'C:\\ProgramData\\ssh\\administrators_authorized_keys' '\$(cat)'\""
+   cat ~/.ssh/id_ed25519.pub | ssh jonno@beelink1.local "powershell -Command \"Add-Content 'C:\\ProgramData\\ssh\\administrators_authorized_keys' '\$(cat)'\""
    ```
 
 2. Re-add the firewall rule (CMOS reset can clear custom rules):
@@ -438,12 +438,12 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 **Diagnostics — run after any recovery:**
 ```bash
-ssh jonno@10.0.0.11 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
+ssh jonno@beelink1.local "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
 ```
 
 **Check current driver version:**
 ```bash
-ssh jonno@10.0.0.11 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object Caption, DriverVersion, DriverDate | Format-List\""
+ssh jonno@beelink1.local "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object Caption, DriverVersion, DriverDate | Format-List\""
 ```
 
 ---
@@ -660,7 +660,7 @@ Power plan: High Performance                  ✅
 
 #### 2026-06-24/25 — the mesh router network migration + fTPM storm regression (4th) + Smart App Control discovered
 
-Context: home network migrated from the ISP router to a mesh router. Subnet changed `192.168.1.x` → `10.0.0.x` (new: pi1 `10.0.0.10`, beelink1 `10.0.0.11`, SLZB-06 `10.0.0.12` — dynamic leases, reservations pending). Getting beelink back on the mesh surfaced three stacked problems:
+Context: home network migrated from the ISP router to a mesh router. Subnet changed `192.168.1.x` → `10.0.0.x` (new: pi1 `pi1.local`, beelink1 `beelink1.local`, SLZB-06 `10.0.0.12` — dynamic leases, reservations pending). Getting beelink back on the mesh surfaced three stacked problems:
 
 **1. Stale `COORDINATOR_IP` (network migration).** Every agent had `COORDINATOR_IP=192.168.1.11` baked in from the old network and looped `No route to host` / `os error 10060`. On beelink this lives in the nssm registry env, not a file:
 ```powershell
@@ -668,14 +668,14 @@ Context: home network migrated from the ISP router to a mesh router. Subnet chan
 (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\ai-mesh-agent\Parameters').AppEnvironmentExtra
 # surgically rewrite only COORDINATOR_IP (elevated), preserving the other 8 entries + the fingerprint/token
 $k='HKLM:\SYSTEM\CurrentControlSet\Services\ai-mesh-agent\Parameters'
-$e=(Get-ItemProperty $k).AppEnvironmentExtra | ForEach-Object { $_ -replace '^COORDINATOR_IP=.*','COORDINATOR_IP=10.0.0.10' }
+$e=(Get-ItemProperty $k).AppEnvironmentExtra | ForEach-Object { $_ -replace '^COORDINATOR_IP=.*','COORDINATOR_IP=pi1.local' }
 Set-ItemProperty $k -Name AppEnvironmentExtra -Value $e -Type MultiString
 ```
 The TLS fingerprint and auth token already matched (both persist in coordinator state across restarts), so `set-fingerprint` was **not** needed — only the IP. (On pi1 the equivalent fix was a drop-in `coordinator.conf` pointing the co-located agent at `127.0.0.1`, immune to future LAN changes.)
 
 **2. Orphan process + nssm "failed to start".** Env is read once at process start, so the registry change had no effect until the running agent was restarted — but a stale `agent.exe` **orphan** (nssm lost track of it; service showed STOPPED while the child kept running on the old IP) blocked a clean restart. Killing all `agent.exe` first is required: `Get-Process agent | Stop-Process -Force` then `Start-Service`.
 
-**3. Smart App Control blocked the binary (the real blocker).** Even after the IP fix and killing the orphan, the service still wouldn't start — `agent.exe` was blocked by **Smart App Control** (`VerifiedAndReputablePolicyState=1`, CodeIntegrity Event 3118 "Smart App Control Block"), auto-enabled after the box's earlier self-reinstall. See the dedicated troubleshooting section above. Fix: SAC off + reboot. After that the agent launched, connected to `10.0.0.10`, and loaded `phi4:14b` (the 16 G UMA golden state now auto-selects 14b over the old 7b).
+**3. Smart App Control blocked the binary (the real blocker).** Even after the IP fix and killing the orphan, the service still wouldn't start — `agent.exe` was blocked by **Smart App Control** (`VerifiedAndReputablePolicyState=1`, CodeIntegrity Event 3118 "Smart App Control Block"), auto-enabled after the box's earlier self-reinstall. See the dedicated troubleshooting section above. Fix: SAC off + reboot. After that the agent launched, connected to `pi1.local`, and loaded `phi4:14b` (the 16 G UMA golden state now auto-selects 14b over the old 7b).
 
 **Note — non-elevated SSH.** `LocalAccountTokenFilterPolicy` was lost in the reinstall, so SSH sessions land **non-elevated**: registry writes under `HKLM\SYSTEM`, `Start-Service`, and BIOS-adjacent work must be done from a **local elevated** PowerShell (or re-enable it: `New-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force`). ICMP stays firewalled (ping is useless for liveness — use TCP/22).
 
@@ -751,22 +751,22 @@ This applies: AMD ULPS/sleep registry tweaks, Intel AX200 NIC power management f
 #    Software check: Get-Tpm should report TpmPresent=False, and no TPM-WMI Event 1025 after boot.
 
 # 2. ULPS disabled (harmless belt-and-braces, baked into boot task)
-ssh jonno@10.0.0.11 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
+ssh jonno@beelink1.local "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v EnableUlps"
 # Expect: 0x0
 
 # 3. Shader deep sleep disabled
-ssh jonno@10.0.0.11 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v PP_SclkDeepSleepDisable"
+ssh jonno@beelink1.local "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\" /v PP_SclkDeepSleepDisable"
 # Expect: 0x1
 
 # 4. TdrDelay NOT set (should error — absence is correct)
-ssh jonno@10.0.0.11 "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\" /v TdrDelay"
+ssh jonno@beelink1.local "reg query \"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\" /v TdrDelay"
 # Expect: ERROR (key absent)
 
 # 5. Driver version
-ssh jonno@10.0.0.11 "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object DriverVersion, DriverDate | Format-List\""
+ssh jonno@beelink1.local "powershell -Command \"Get-WmiObject Win32_VideoController | Select-Object DriverVersion, DriverDate | Format-List\""
 
 # 6. No recent unexpected shutdowns (Event ID 41)
-ssh jonno@10.0.0.11 "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
+ssh jonno@beelink1.local "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 100 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 } | Select-Object TimeCreated, Id, Message | Format-List\""
 ```
 
 ---

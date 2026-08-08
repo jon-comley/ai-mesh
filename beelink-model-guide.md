@@ -37,7 +37,7 @@ bandwidth formula `~80 GB/s ÷ model_size`. Measured values are marked.
 
 Real `llama-server` numbers (not formula estimates), all **Q4_K_M**, full GPU offload
 (`--n-gpu-layers 99`), `--ctx-size 4096`, flash-attn forced `on` except where noted.
-Measured on beelink1 (10.0.0.11, Ryzen 8745HS + Radeon 780M, Windows, Vulkan llama.cpp build).
+Measured on beelink1 (Ryzen 8745HS + Radeon 780M, Windows, Vulkan llama.cpp build).
 
 | Model (GGUF) | Decode tok/s | Prefill tok/s |
 |---|---|---|
@@ -71,7 +71,7 @@ and read `timings.predicted_per_second` (decode) and `timings.prompt_per_second`
 - Harness on the box: `C:\Users\jonno\llama-bench.ps1` — params `-ModelFile <name.gguf>`
   (bare filename; quoting it through ssh→powershell corrupts the path), `-FlashAttn`,
   `-Port`, `-NGL`, `-Ctx`. Model files live in `C:\Users\jonno\.ai-mesh\models`.
-- Example: `ssh jonno@10.0.0.11 "powershell -ExecutionPolicy Bypass -File C:\\Users\\jonno\\llama-bench.ps1 -ModelFile Qwen3-4B-Q4_K_M.gguf -FlashAttn"`
+- Example: `ssh jonno@beelink1.local "powershell -ExecutionPolicy Bypass -File C:\\Users\\jonno\\llama-bench.ps1 -ModelFile Qwen3-4B-Q4_K_M.gguf -FlashAttn"`
 - For a quick isolated number use a short prompt (e.g. "Count from 1 to 30") — the harness
   can stall on a long prompt for some models (which is what first made Gemma-3 look broken).
 

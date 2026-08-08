@@ -20,7 +20,7 @@ no tool calls are executed — that behaviour stays on the dashboard's
 | `/v1/chat/completions` | POST | Chat completion (JSON or SSE streaming) |
 | `/v1/models` | GET | Models the mesh can serve right now |
 
-Base URL: `http://pi1:9001/v1` (or `http://10.0.0.10:9001/v1` on the LAN,
+Base URL: `http://pi1:9001/v1` (or `http://pi1.local:9001/v1` on the LAN,
 Tailscale addresses from anywhere).
 
 ## Auth

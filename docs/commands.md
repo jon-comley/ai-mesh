@@ -35,7 +35,7 @@ What it does:
 
 After setup:
 ```bash
-just provision-all    # deploy agent to all nodes, pointed at pi1 (the coordinator, 10.0.0.10)
+just provision-all    # deploy agent to all nodes, pointed at pi1 (the coordinator, pi1.local)
 just start-cluster    # bring the full cluster up
 ```
 
@@ -192,7 +192,7 @@ Defined at the top of `justfile`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `coordinator_ip` | `10.0.0.10` | pi1's LAN IP — where the coordinator runs (always-on systemd service); all nodes connect here. This is pi1's IP, **not** the laptop's; only change it if pi1's IP changes, then run `just provision-all` |
+| `coordinator_ip` | `pi1.local` | pi1's mDNS hostname — where the coordinator runs (always-on systemd service); all nodes connect here. This is **pi1**, not the laptop. Derived from whichever `nodes/*.env` carries `NODE_COORDINATOR=true`, so change it there rather than here, then run `just provision-all`. A hostname rather than an IP deliberately: DHCP leases are not reserved and every node's address has moved at least once — see the 2026-08-08 entry in `docs/roadmap.md` |
 | `coordinator_port` | `9000` | Coordinator TCP port |
 | `MESH_HTTP_PORT` | `9001` | Dashboard HTTP port (env var, not a justfile variable) |
 

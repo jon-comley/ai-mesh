@@ -1,6 +1,6 @@
 # Coordinator host is derived from whichever nodes/*.env carries NODE_COORDINATOR=true
-# (single source of truth). Falls back to pi1's IP if no marker is found.
-coordinator_ip   := `f=$(grep -l "^NODE_COORDINATOR=true" nodes/*.env 2>/dev/null | head -1); if [ -n "$f" ]; then grep -h "^NODE_HOST=" "$f" | head -1 | cut -d= -f2; else echo 10.0.0.10; fi`
+# (single source of truth). Falls back to pi1's hostname if no marker is found.
+coordinator_ip   := `f=$(grep -l "^NODE_COORDINATOR=true" nodes/*.env 2>/dev/null | head -1); if [ -n "$f" ]; then grep -h "^NODE_HOST=" "$f" | head -1 | cut -d= -f2; else echo pi1.local; fi`
 coordinator_port := "9000"
 
 # Shared SSH/SCP options for every node operation. ConnectTimeout bounds the connect so
@@ -293,7 +293,7 @@ nodes:
 
 # Set heartbeat interval for a node. Accepts hostname, IP, or UUID.
 # Usage: just set-heartbeat beelink1 10
-# Usage: just set-heartbeat 10.0.0.11 30
+# Usage: just set-heartbeat beelink1.local 30
 set-heartbeat node secs:
     #!/usr/bin/env bash
     source scripts/mesh-env.sh
@@ -1929,7 +1929,7 @@ logs:
 # Usage: just pair-bulb
 pair-bulb:
     #!/usr/bin/env bash
-    PI_MQTT="10.0.0.10"
+    PI_MQTT="pi1.local"
     echo ">>> Opening 5-minute pairing window on Zigbee network..."
     mosquitto_pub -h ${PI_MQTT} -t 'zigbee2mqtt/bridge/request/permit_join' \
         -m '{"value":true,"time":254}'
@@ -2005,7 +2005,7 @@ intent text:
 # Validate that each model routes to the correct hardware node.
 # Assumes the cluster is already running with hardware-selected models loaded
 # (i.e. run `just start-cluster` first).
-# Pi (10.0.0.10) should serve qwen2.5:1.5b; Beelink (10.0.0.11) should serve qwen2.5:7b.
+# Pi (pi1.local) should serve qwen2.5:1.5b; Beelink (beelink1.local) should serve qwen2.5:7b.
 # Usage: just validate-routing
 validate-routing: update-portproxy chaos
     #!/usr/bin/env bash
