@@ -72,7 +72,7 @@ The REAPER capability is a compile-time feature. Build the agent on OmniLink1:
 ```bash
 cargo build --release -p agent --features reaper
 cp target/release/agent ~/agent
-sudo bash scripts/install-node-linux.sh 10.0.0.10 controller jonno
+sudo bash scripts/install-node-linux.sh pi1.local controller jonno
 ```
 
 Add the REAPER environment drop-in:
