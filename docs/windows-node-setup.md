@@ -436,6 +436,30 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 **⚠️ REGRESSED 2026-07-01/02 — worst storm on record.** The 06-11 stable state regressed again. Live event-log pull: **20× `0x133`/`param2=0x1e00` bugchecks in 24h** (07-01 03:57 → 07-02 01:28), accelerating into a **crash every ~22 min** since ~21:46 on 07-01 (11 in a row on a near-exact 22-min cadence); uptime never exceeded ~40 min → node effectively unusable. Kernel-Power 41/6008 + minidumps (`070126-*.dmp`) confirm. Fix unchanged (TPM level = Disabled), but this is the **fourth regression** (05-28, 06-02, 06-04, 07-01) → the board clearly isn't holding BIOS settings across power events: **replace the CMOS battery** is now the prime durable fix, else execute the standing move-to-Linux/LTSC plan. Fallout while crashing: constant model loss, `deploy-node` hangs, TLS-fingerprint crash-loop, coordinator read-timeout closes — all downstream of the reboots, not ai-mesh bugs.
 
+**⚠️ REGRESSED AGAIN 2026-08-12 — fTPM is ON, despite being believed disabled.** Live pull
+from the box (reachable at `192.168.1.225` after the network merge — see
+`infrastructure/network.md`):
+
+- **`(Get-Tpm).TpmPresent` = `True`.** The fix is *not* in place, whatever the BIOS was
+  last set to.
+- **TPM-WMI `1025` on every boot** — 11:32:17, 11:33:00, 11:46:40, 11:57:32.
+- **Full crash signature present:** WER `1001` (BugCheck) + Kernel-Power `41` +
+  EventLog `6008` at 11:46 and again at 11:57.
+- **Crash cadence ~11 minutes** — bugchecks at 11:46:19 and 11:57:09, last boot
+  11:57:07. Faster than the 07-01 storm's 22-minute cadence.
+
+**This is the fifth regression** (05-28, 06-02, 06-04, 07-01, 08-12) and the second time
+the box has been *believed* fixed while fTPM was actually running. The two explanations,
+both already documented above:
+
+1. **Pluton disabled but the TPM level left enabled** — the exact trap corrected on
+   06-25. Disabling Pluton alone does not stop fTPM.
+2. **The board is not holding BIOS settings** across power events — the CMOS battery.
+
+**Do not trust "TPM has been disabled" as a statement of state.** Verify it:
+`(Get-Tpm).TpmPresent` must return `False`, and no Event 1025 may appear after the
+next boot. Anything else means it is still storming.
+
 **Diagnostics — run after any recovery:**
 ```bash
 ssh jonno@beelink1.local "powershell -Command \"Get-WinEvent -LogName System -MaxEvents 500 | Where-Object { \$_.Id -eq 41 -or \$_.Id -eq 1001 -or \$_.Id -eq 4101 -or \$_.Id -eq 109 } | Select-Object TimeCreated, Id, @{N='Msg';E={\$_.Message.Substring(0,[Math]::Min(300,\$_.Message.Length))}} | Format-List\""
