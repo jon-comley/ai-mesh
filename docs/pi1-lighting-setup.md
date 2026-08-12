@@ -11,11 +11,11 @@ Mosquitto and Z2M are running.
 
 - **Raspberry Pi 5** — 8 GB RAM, runs Mosquitto + Z2M + ai-mesh agent
 - **SLZB-06** Zigbee coordinator — PoE device; power via USB-C, network via ethernet
-  - IP: `10.0.0.12`, port `6638` — **set a DHCP reservation** for this on the
+  - IP: `<slzb-06>`, port `6638` — **set a DHCP reservation** for this on the
     the mesh router. Z2M's `serial.port` hard-codes this address; if the lease changes,
     Z2M fails with `EHOSTUNREACH` and crash-loops, and all lights go dead with no
     error on the dashboard (this is exactly what the 2026-06-25 the mesh router migration broke
-    — the SLZB-06 moved off `192.168.1.16` but the Z2M config still pointed at it).
+    — the SLZB-06 moved off `<slzb-06-old>` but the Z2M config still pointed at it).
   - Firmware: EmberZNet 8.0.2 / EZSP v14 (Z2M adapter type: `ember`)
 
 ---
@@ -88,7 +88,7 @@ mqtt:
   retain: true            # broker holds last per-device state so agents get it on subscribe
 
 serial:
-  port: tcp://10.0.0.12:6638
+  port: tcp://<slzb-06>:6638
   adapter: ember          # required for EZSP v13+; was 'ezsp' on older firmware
 
 permit_join: false        # set true temporarily when pairing
@@ -150,7 +150,7 @@ sudo systemctl status zigbee2mqtt
 
 ## 4. SLZB-06 Firmware
 
-If Z2M reports EZSP version < 13, update the EFR32 radio firmware via the SLZB-06 web UI at `http://10.0.0.12`:
+If Z2M reports EZSP version < 13, update the EFR32 radio firmware via the SLZB-06 web UI at `http://<slzb-06>`:
 
 1. Open the web UI → Firmware tab
 2. Select the latest EmberZNet release (v3.x.x) and flash

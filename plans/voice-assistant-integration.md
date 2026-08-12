@@ -3,7 +3,7 @@
 Written 2026-07-08. Companion to `plans/multi-domain-home.md` Phase C
 ("the local AI voice grows senses" — this is that voice actually gaining
 ears). New hardware: Home Assistant Voice Preview Edition
-(`home-assistant-voice-0a6d24`, `10.0.0.14`, ESP32-S3 + XMOS XU316 mic
+(`home-assistant-voice-0a6d24`, `<puck>`, ESP32-S3 + XMOS XU316 mic
 array, stock ESPHome 2025.5.1 firmware, unmodified).
 
 ## Why stock firmware, not custom
@@ -225,7 +225,7 @@ a new `has_feature voice` block in `scripts/install-node-linux.sh`
 (downloads the prebuilt `whisper-bin-ubuntu-arm64.tar.gz` release asset and
 `ggml-base.en.bin` from `ggerganov/whisper.cpp` on HuggingFace, same pattern
 as the existing llama.cpp block). `nodes/pi1.env` now carries
-`voice` in `NODE_FEATURES` and `VOICE_DEVICE_HOST=10.0.0.14:6053`.
+`voice` in `NODE_FEATURES` and `VOICE_DEVICE_HOST=<puck>:6053`.
 
 Not yet done: feeding the transcript into `coordinator/src/intent.rs` (item
 2), TTS (item 3), and replacing the `stt-no-text-recognized` placeholder

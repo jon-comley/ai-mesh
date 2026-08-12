@@ -165,11 +165,11 @@ second room speaker exists (`plans/spotify-music.md` Phase 6).
 
 ## Infra note — the mesh router network migration (2026-06-25)
 
-Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x` → `10.0.0.x` (pi1 `10.0.0.10`, beelink1 `10.0.0.11`, SLZB-06 `10.0.0.12`). `nodes/*.env`, `justfile`, `README.md`, and `handover.md` updated. Follow-ups: set the mesh router DHCP reservations (leases still dynamic); re-verify beelink BIOS Pluton/fTPM golden state (crash storm regressed during the move — `docs/windows-node-setup.md`). beelink also needed Smart App Control disabled to run the self-built agent after its earlier Windows reinstall.
+Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x` → `10.0.0.x` (pi1 `<pi1>`, beelink1 `<beelink1>`, SLZB-06 `<slzb-06>`). `nodes/*.env`, `justfile`, `README.md`, and `handover.md` updated. Follow-ups: set the mesh router DHCP reservations (leases still dynamic); re-verify beelink BIOS Pluton/fTPM golden state (crash storm regressed during the move — `docs/windows-node-setup.md`). beelink also needed Smart App Control disabled to run the self-built agent after its earlier Windows reinstall.
 
-**Follow-up (2026-06-29) — z2m crash-loop from a missed stale IP; all lights dead.** The migration updated runtime config but **not** zigbee2mqtt's `configuration.yaml` on pi1: its `serial.port` still pointed at the SLZB-06's old `tcp://192.168.1.16:6638`. Z2M failed with `connect EHOSTUNREACH` → `Failed to start EZSP layer (HOST_FATAL_ERROR)` and crash-looped every ~6 s, so the Zigbee bridge was down and every light command published into MQTT and vanished — with **no error on the dashboard** (the coordinator's lighting capability was happily connected to Mosquitto on `127.0.0.1`; the break was downstream at z2m↔radio). *Fixed:* repointed `serial.port` → `tcp://10.0.0.12:6638` (backup saved alongside) and restarted z2m — it reconnected (`Coordinator firmware … EmberZNet 8.0.2`, `9 devices joined`, `Connected to MQTT`); a test command round-tripped (`test_bulb` off/on → 204). **Root-cause prevention: set the mesh router DHCP reservation for the SLZB-06** (`10.0.0.12`) — z2m hard-codes it, so a lease change re-breaks this. Repo-side, the stale `192.168.1.x` sweep found no runtime config affected (`nodes/*.env`/`justfile` were already correct); only **docs** lagged — `docs/pi1-lighting-setup.md` (the z2m config source), `docs/{commands,mesh,reaper}.md` updated inline, `docs/windows-node-setup.md` got the historical-IP disclaimer. Plan docs + in-code test fixtures left as historical.
+**Follow-up (2026-06-29) — z2m crash-loop from a missed stale IP; all lights dead.** The migration updated runtime config but **not** zigbee2mqtt's `configuration.yaml` on pi1: its `serial.port` still pointed at the SLZB-06's old `tcp://<slzb-06-old>:6638`. Z2M failed with `connect EHOSTUNREACH` → `Failed to start EZSP layer (HOST_FATAL_ERROR)` and crash-looped every ~6 s, so the Zigbee bridge was down and every light command published into MQTT and vanished — with **no error on the dashboard** (the coordinator's lighting capability was happily connected to Mosquitto on `127.0.0.1`; the break was downstream at z2m↔radio). *Fixed:* repointed `serial.port` → `tcp://<slzb-06>:6638` (backup saved alongside) and restarted z2m — it reconnected (`Coordinator firmware … EmberZNet 8.0.2`, `9 devices joined`, `Connected to MQTT`); a test command round-tripped (`test_bulb` off/on → 204). **Root-cause prevention: set the mesh router DHCP reservation for the SLZB-06** (`<slzb-06>`) — z2m hard-codes it, so a lease change re-breaks this. Repo-side, the stale `192.168.1.x` sweep found no runtime config affected (`nodes/*.env`/`justfile` were already correct); only **docs** lagged — `docs/pi1-lighting-setup.md` (the z2m config source), `docs/{commands,mesh,reaper}.md` updated inline, `docs/windows-node-setup.md` got the historical-IP disclaimer. Plan docs + in-code test fixtures left as historical.
 
-**Follow-up (2026-08-08) — the reservations were never set, and every node has moved.** Found from the `guv` repo while picking a host for its Maestro device lab: `nodes/pi1.env` said `10.0.0.10`, which does not answer, so pi1 looked offline. It is not — it moved. mDNS resolved all three LAN nodes correctly, and every one of them was on a different address than this repo recorded. Not one of the three was still true. (Current addresses deliberately not written down here — see the 2026-08-02 genericization commit; `nodes/*.env` is the place for real values, and it no longer needs any.) Both entries above name "set the mesh router DHCP reservations" as the fix, and neither was done — so this is the same failure a third time.
+**Follow-up (2026-08-08) — the reservations were never set, and every node has moved.** Found from the `guv` repo while picking a host for its Maestro device lab: `nodes/pi1.env` said `<pi1>`, which does not answer, so pi1 looked offline. It is not — it moved. mDNS resolved all three LAN nodes correctly, and every one of them was on a different address than this repo recorded. Not one of the three was still true. (Current addresses deliberately not written down here — see the 2026-08-02 genericization commit; `nodes/*.env` is the place for real values, and it no longer needs any.) Both entries above name "set the mesh router DHCP reservations" as the fix, and neither was done — so this is the same failure a third time.
 
 *Fixed repo-side by removing the dependency rather than re-entering addresses that will rot again:* `nodes/*.env` `NODE_HOST` plus pi1's `VOICE_STT_REMOTE`/`VOICE_TTS_BASE_URL` now use `pi1.local`/`beelink1.local`/`pi2.local`; `justfile`'s `coordinator_ip` fallback, `PI_MQTT` in `pair-bulb`, and the `set-heartbeat`/model-serving comments follow; `cli/src/bin/chaos.rs`'s `MESH_COORDINATOR` default was a genuinely wrong runtime default and is now `pi1.local:9000`. Docs updated inline. mDNS verified for all three from the WSL controller — including beelink1, so Windows advertises fine. Left as historical on purpose: this log, plan docs, in-code test fixtures, and `coordinator/src/coordinator.rs`'s 2026-07-05 incident comment.
 
@@ -194,13 +194,13 @@ While testing the device-auto-naming feature (`plans/device-auto-naming.md`), de
 **Plan to execute (deferred — picking back up when not exhausted):**
 1. pi1 connects to the LAN over `wlan0` only — `eth0` is completely unused (confirmed via `ip -brief addr`/`nmcli`). Give `eth0` a static IP on `10.0.0.x`; this doesn't touch `wlan0`/the default route, so the dashboard and everything else on pi1 stays up throughout.
 2. Move the SLZB-06 (currently network-attached elsewhere) next to pi1, connect via a regular Ethernet cable directly into `eth0`.
-3. Confirm it comes up reachable at its usual `10.0.0.12` over that direct link — if it needs a DHCP lease rather than already being static, its MAC (`aa:bb:cc:dd:ee:04`) is captured so it can be handed exactly `10.0.0.12` and zigbee2mqtt's `configuration.yaml` needs zero changes.
+3. Confirm it comes up reachable at its usual `<slzb-06>` over that direct link — if it needs a DHCP lease rather than already being static, its MAC (`aa:bb:cc:dd:ee:04`) is captured so it can be handed exactly `<slzb-06>` and zigbee2mqtt's `configuration.yaml` needs zero changes.
 4. Per bulb (still installed in the kitchen fixture, no unscrewing needed since the radio is now in the room): Touchlink-scan to find it, then Touchlink factory-reset targeting its address, then let it join z2m fresh (permit-join already on).
 5. Afterwards: unplug the SLZB-06, return it to its normal spot, tear down the temporary `eth0` config.
 
 Related: `plans/device-auto-naming.md`'s live re-validation step is blocked on this — the auto-naming fix (keying on `definition.model` SKU, not the nonexistent `model_id`) hasn't been confirmed against a real re-pair yet.
 
-**Attempted 2026-07-12, still blocked on step 1:** SLZB-06 physically moved next to pi1 and cabled into `eth0`, but the `eth0` static-IP step (plan item 1) was never actually done — `ping 10.0.0.12` from both pi1 and OmniLink1 returned `Destination Host Unreachable`. `zigbee2mqtt/bridge/state` still reported `online`, which turned out to be a stale TCP session from before the move, not evidence the radio was reachable. Ran the touchlink scan twice (`zigbee2mqtt/bridge/request/touchlink/scan` via `mosquitto_sub`/`mosquitto_pub` against the broker on `10.0.0.10`) — both times it returned nothing, consistent with the radio being unreachable rather than a touchlink/hardware problem (this same scan succeeded cleanly on 2026-07-07 per the note above, before the SLZB-06 was moved). Next time: actually complete step 1 (`sudo ip addr add 10.0.0.19/24 dev eth0` or similar on pi1, confirm the ping succeeds) and restart `zigbee2mqtt` to drop the stale socket before attempting the scan again.
+**Attempted 2026-07-12, still blocked on step 1:** SLZB-06 physically moved next to pi1 and cabled into `eth0`, but the `eth0` static-IP step (plan item 1) was never actually done — `ping <slzb-06>` from both pi1 and OmniLink1 returned `Destination Host Unreachable`. `zigbee2mqtt/bridge/state` still reported `online`, which turned out to be a stale TCP session from before the move, not evidence the radio was reachable. Ran the touchlink scan twice (`zigbee2mqtt/bridge/request/touchlink/scan` via `mosquitto_sub`/`mosquitto_pub` against the broker on `<pi1>`) — both times it returned nothing, consistent with the radio being unreachable rather than a touchlink/hardware problem (this same scan succeeded cleanly on 2026-07-07 per the note above, before the SLZB-06 was moved). Next time: actually complete step 1 (`sudo ip addr add <pi1-eth0>/24 dev eth0` or similar on pi1, confirm the ping succeeds) and restart `zigbee2mqtt` to drop the stale socket before attempting the scan again.
 
 **RESOLVED 2026-07-28 — all bulbs recovered, zero physical resets; touchlink was never needed for these.** The insight that unlocked it: a force-removed bulb still holds *this* network's keys, so it is still a functioning router on our own network — it doesn't need resetting, it needs its z2m database entry back. zigbee-herdsman drops announces from devices not in its database (`controller.js onDeviceAnnounce`), which is why weeks of power-cycling and permit-join did nothing. Recovery procedure (full playbook in the ops notes):
 
@@ -315,7 +315,7 @@ into 15 review units; each finding independently verified by a skeptic pass).
 
 ## Lighting MVP ✓ Complete
 
-- **Phase A — pi1 infrastructure**: Mosquitto 2.x (remote listener), Zigbee2MQTT with SLZB-06 PoE coordinator (192.168.1.16, EmberZNet 8.0.2 / EZSP v14, adapter `ember`), Z2M as systemd service
+- **Phase A — pi1 infrastructure**: Mosquitto 2.x (remote listener), Zigbee2MQTT with SLZB-06 PoE coordinator (<slzb-06-old>, EmberZNet 8.0.2 / EZSP v14, adapter `ember`), Z2M as systemd service
 - **Phase B — `capability-zigbee` crate**: rumqttc 0.24 MQTT client; `ZigbeeClient::connect()` spawns EventLoop poll task internally; broadcast channel for `ZigbeeEvent` (StateChanged, DeviceListUpdated, GroupListUpdated, ConnectionLost, ConnectionRestored); `DeviceRegistry` parses `zigbee2mqtt/bridge/devices`; unit tests
 - **Phase C — `capability-lighting` wired**: reads `MQTT_HOST`/`MQTT_PORT` from env; stubs gracefully when unset (tests pass); forwards `LightState` events back on the mesh tx channel; `handle(LightCommand)` publishes via `ZigbeeClient`
 - **Phase D — end-to-end**: `just intent "turn test_bulb on/off"` → LLM tool call → MQTT → Zigbee → bulb responds; brightness (`50% → 127`) and colour temperature (`candlelight → 1500K`) working
@@ -381,7 +381,7 @@ into 15 review units; each finding independently verified by a skeptic pass).
 
 - **Bulb power-cycle detection + UI indication** — when a bulb is physically switched off and back on at the wall, it reverts to its factory/last-power-on state (typically warm white full brightness), overriding any active effect or scene. The coordinator needs to detect this transition (a bulb reporting `on:true` with default state after having been `on:false` or `online:false`) and: (1) surface it visually on the device card (e.g. a "reverted" indicator or distinct icon state); (2) optionally re-apply the active effect/scene to that bulb automatically. Detection signal is already available via the `LightingUpdate` WS path — needs a heuristic to distinguish a genuine power-cycle revert from a normal user-on command.
 
-- **Zigbee latency ceiling** — the observed ~300–500ms bulb switch time is inherent to the Zigbee protocol (RF transmission + bulb processing + optional ACK). The SLZB-06 is network-attached (Ethernet, 192.168.1.16), so moving Z2M ownership to a different machine would not reduce this — the RF path is identical. Meaningful latency improvements would require: Zigbee direct binding (bypass Z2M for switch→bulb, not applicable to software commands), or migrating to Matter/Thread hardware (typically ~50–100ms).
+- **Zigbee latency ceiling** — the observed ~300–500ms bulb switch time is inherent to the Zigbee protocol (RF transmission + bulb processing + optional ACK). The SLZB-06 is network-attached (Ethernet, <slzb-06-old>), so moving Z2M ownership to a different machine would not reduce this — the RF path is identical. Meaningful latency improvements would require: Zigbee direct binding (bypass Z2M for switch→bulb, not applicable to software commands), or migrating to Matter/Thread hardware (typically ~50–100ms).
 
 - **Remove the dead device-card view in `lighting.js`** — `dashboard.js` calls `setRoomsActive()` unconditionally at startup with no reset, so `roomsActive` is permanently true and `lighting.js`'s device-card `render()` (and its sibling slider-patch path) always bails: it's unreachable. The lighting tab is exclusively the rooms view (`rooms.js`). Cleanup: delete the dead `render()`/device-card builders and the `roomsActive` flag from `lighting.js`, keeping only what the rooms view still imports (e.g. `buildLightControls`, `formatDeviceName`), and drop the now-unused `.light-card`-only grid styling. Surfaced while fixing the maximised rooms-view layout (the `#lighting-list` card grid only ever applied to this dead path).
 
@@ -748,7 +748,7 @@ mesh security-report        # one-shot snapshot of current failure counts
 
 Full design spec: `plans/coordinator-on-pi1.md`
 
-Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniLink1`) to always-on Pi 5 (`pi1`, `192.168.1.11`). Dashboard now runs 24/7 independent of laptop power state. Tailscale tunnel enables remote phone access (cellular, public WiFi, anywhere) without port forwarding or Let's Encrypt.
+Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniLink1`) to always-on Pi 5 (`pi1`, `<pi1-old>`). Dashboard now runs 24/7 independent of laptop power state. Tailscale tunnel enables remote phone access (cellular, public WiFi, anywhere) without port forwarding or Let's Encrypt.
 
 **Achieved**
 
@@ -1576,7 +1576,7 @@ last, after the basic slideshow works reliably on its own.
 > node feature flag, and coordinator `POST /api/art/show` /
 > `GET /api/art/status`. Deliberately minimal — one image, no catalogue or
 > rotation yet. Viewer choice took two corrections against the real
-> hardware (`pi2`, 10.0.0.13): `feh` doesn't work on Lite (no X server);
+> hardware (`pi2`, <pi2>): `feh` doesn't work on Lite (no X server);
 > `mpv --vo=drm` works but Debian's package drags in a 600 MB GTK/X11 stack
 > as unused dependencies, so `fbi` (a handful of small packages, writes
 > straight to `/dev/fb0`) replaced it — which itself needed a
@@ -2032,7 +2032,7 @@ currently has nowhere to fall back to.
 
 **Feasibility confirmed live 2026-07-13** (not just protocol theory): ran
 the repo's existing `capability-voice --example entities` diagnostic
-against the puck (`10.0.0.14:6053`) and it advertises a real `media_player`
+against the puck (`<puck>:6053`) and it advertises a real `media_player`
 entity, independent of any voice-assistant session:
 
 ```
@@ -2084,9 +2084,9 @@ final target when every other `Feature::Audio` node fails, using this
 The mesh router measures roughly half the throughput of the ISP router that
 feeds it. Chase where the loss actually is instead of guessing. Known
 facts from a separate domain DNS work (2026-07-15): the mesh router's WAN sits
-on `192.168.1.13` behind the ISP router box at `192.168.1.1` — so the LAN is
+on `<node-old>` behind the ISP router box at `<isp-router>` — so the LAN is
 **double-NATted** — and the mesh router's upstream DNS now points at 1.1.1.1
-(changed from `192.168.1.1` after the ISP router box served stale records; DNS
+(changed from `<isp-router>` after the ISP router box served stale records; DNS
 is latency-only, irrelevant to throughput).
 
 Test plan, in order:
@@ -2100,12 +2100,12 @@ Test plan, in order:
    meter, Netgear Armor.
 4. If double NAT turns out to be implicated, consider **the mesh router AP mode**
    (the ISP router box routes, the mesh router does Wi-Fi only) — but this re-shuffles the
-   LAN, and mesh device IPs are baked into configs (pi1 `10.0.0.10`,
-   SLZB-06 `10.0.0.12` per its z2m serial.port fix), so it needs a
+   LAN, and mesh device IPs are baked into configs (pi1 `<pi1>`,
+   SLZB-06 `<slzb-06>` per its z2m serial.port fix), so it needs a
    planned migration, not a casual toggle.
 
 Related gotcha (2026-07-16): the laptop turned up with DNS from the ISP router
-box (`192.168.1.1`) — either it hops between the ISP router's own Wi-Fi and
+box (`<isp-router>`) — either it hops between the ISP router's own Wi-Fi and
 the mesh router's, or the adapter's static DNS got reset. Devices on the ISP router
 side get its (stale-prone) DNS cache. While investigating, set the ISP router
 box's DNS forwarders to 1.1.1.1 as well, and check which SSIDs the

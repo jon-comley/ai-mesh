@@ -71,7 +71,7 @@ short code for SONOFF — see correction above):
 | `EBF_RGB_Zm` | AwoX — LED with adjustable color temp + RGB strip, sold as EGLO connect.z Rovito-Z | `Eglo Rovito-Z Ceiling Light` | 1 |
 
 Everything currently paired is Philips Hue (Signify) or SONOFF, nothing
-else (originally surveyed via `mosquitto_sub -h 10.0.0.10 -t
+else (originally surveyed via `mosquitto_sub -h <pi1> -t
 'zigbee2mqtt/bridge/devices' -C 1 -W 10`).
 
 Numbering is per product line, always appended (even for the currently

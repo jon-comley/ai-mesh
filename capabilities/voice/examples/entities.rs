@@ -4,7 +4,7 @@
 //! was diagnosed when the LED ring gave no hint — query the device's own
 //! state instead of guessing from LEDs.
 //!
-//! Usage: VOICE_DEVICE_HOST=10.0.0.14:6053 cargo run -p capability-voice --example entities
+//! Usage: VOICE_DEVICE_HOST=<puck-ip>:6053 cargo run -p capability-voice --example entities
 use esphome_client::{
     EspHomeClient,
     types::{EspHomeMessage, ListEntitiesRequest, SubscribeStatesRequest},

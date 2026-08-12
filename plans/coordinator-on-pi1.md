@@ -2,7 +2,7 @@
 
 > Status: **Draft.** Reviewed by Bing and Gemini; refinements from both reviews integrated. Implementation pending user approval.
 >
-> Goal: Relocate the coordinator role from the WSL2 laptop (`OmniLink1`) to the always-on Raspberry Pi 5 already known as `pi1` (192.168.1.11) so the laptop can be closed without taking the smart-home dashboard offline. Add Tailscale for outside-LAN phone access.
+> Goal: Relocate the coordinator role from the WSL2 laptop (`OmniLink1`) to the always-on Raspberry Pi 5 already known as `pi1` (<pi1-old>) so the laptop can be closed without taking the smart-home dashboard offline. Add Tailscale for outside-LAN phone access.
 
 ---
 
@@ -81,7 +81,7 @@ Copy order: state files first → cert/key first → DB → install unit → ena
 - Drop `/etc/systemd/system/ai-mesh-coordinator.service`:
   - `User=` set to the pi user (or a dedicated `ai-mesh` user).
   - `WorkingDirectory=/var/lib/ai-mesh`.
-  - `Environment=MDNS_ADVERTISE_IP=192.168.1.11` (pi1's LAN IP).
+  - `Environment=MDNS_ADVERTISE_IP=<pi1-old>` (pi1's LAN IP).
   - `Environment=MESH_HTTP_PORT=9001` (optional — default works).
   - `Environment=RUST_LOG=info` (default tracing level is WARN; without this you lose visibility into normal operation).
   - `Restart=on-failure`, `RestartSec=3s`.
@@ -98,7 +98,7 @@ Copy order: state files first → cert/key first → DB → install unit → ena
   1. `pi1` coordinator log shows all expected agents connected.
   2. Each agent reports the correct TLS fingerprint (no handshake retries in agent logs).
   3. Zigbee agent on pi1 publishes to Mosquitto on `localhost`.
-  4. Dashboard at `http://192.168.1.11:9001/?token=…` loads and shows live device state.
+  4. Dashboard at `http://<pi1-old>:9001/?token=…` loads and shows live device state.
   5. A test light command from the dashboard reaches the bulb.
 
 ### Phase 3 — Tailscale

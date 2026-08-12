@@ -1,7 +1,7 @@
 //! Run the real voice capability against the device: connect, subscribe,
 //! and save a clip on every wake-word trigger.
 //!
-//! Usage: VOICE_DEVICE_HOST=10.0.0.14:6053 cargo run -p capability-voice --example listen
+//! Usage: VOICE_DEVICE_HOST=<puck-ip>:6053 cargo run -p capability-voice --example listen
 use capability_core::Capability;
 use capability_voice::VoiceCapability;
 use tokio::sync::mpsc;

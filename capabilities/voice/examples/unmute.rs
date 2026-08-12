@@ -5,7 +5,7 @@
 //! muted. Verify with the `entities` example (key 2974103762 on this
 //! device, discovered via its entity listing).
 //!
-//! Usage: VOICE_DEVICE_HOST=10.0.0.14:6053 cargo run -p capability-voice --example unmute
+//! Usage: VOICE_DEVICE_HOST=<puck-ip>:6053 cargo run -p capability-voice --example unmute
 use esphome_client::{EspHomeClient, types::SwitchCommandRequest};
 
 const MUTE_SWITCH_KEY: u32 = 2974103762;

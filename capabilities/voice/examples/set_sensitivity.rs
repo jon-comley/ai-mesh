@@ -3,7 +3,7 @@
 //! sensitive", "Very sensitive". Key 666792156 discovered via the
 //! `entities` example.
 //!
-//! Usage: VOICE_DEVICE_HOST=10.0.0.14:6053 cargo run -p capability-voice \
+//! Usage: VOICE_DEVICE_HOST=<puck-ip>:6053 cargo run -p capability-voice \
 //!            --example set_sensitivity [-- "Moderately sensitive"]
 use esphome_client::{EspHomeClient, types::SelectCommandRequest};
 
