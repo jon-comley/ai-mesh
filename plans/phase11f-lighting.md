@@ -25,7 +25,7 @@ Not just "shift colour temp with the sun" — shift it *per room based on who's 
 A grab-box tool in the dashboard: load a photo (or a live screenshot), drag a selection rectangle over any region, and the average colour of that region is extracted entirely client-side via the Canvas API and sent to the selected lights as CIE XY. No server round-trip for the image — only the resulting XY values are transmitted. Useful for matching the palette of a painting, a sunset photo, or whatever's on screen. Future: live screen region capture (see Effects Engine below).
 
 ### 7. Light Games
-The 4×2 colour spot grid is a natural game board. Designed to be played with a granddaughter.
+The 4×2 colour spot grid is a natural game board. Designed for younger players.
 - **Simon Says** — coordinator generates a random colour sequence, flashes each spot in sequence; player must repeat it by tapping the corresponding card in the dashboard (or pressing physical switch buttons once F7 ships). Difficulty scales with sequence length.
 - **Colour Match** — LLM picks a "mystery" colour, splits it across two lights; player guesses which bulb matches a reference swatch shown in the UI.
 - **Disco Party** — "dance!" intent triggers a choreographed random colour sweep across all spots; stops on "stop the disco".
