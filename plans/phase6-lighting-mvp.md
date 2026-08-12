@@ -281,7 +281,7 @@ No changes to `nodes/pi1.env` — MQTT is localhost on pi1 and the defaults (`12
 **Phase D — End-to-end**
 - `mesh intent "turn the light on"` → bulb ON
 - `mesh intent "turn the light off"` → bulb OFF
-- Confirm via `mosquitto_sub -h 192.168.1.11 -t 'zigbee2mqtt/#' -v`
+- Confirm via `mosquitto_sub -h <pi1-old> -t 'zigbee2mqtt/#' -v`
 
 ---
 
@@ -296,7 +296,7 @@ cargo test -p capability-lighting
 just deploy-node pi1
 
 # Live trace (from controller)
-mosquitto_sub -h 192.168.1.11 -t 'zigbee2mqtt/#' -v
+mosquitto_sub -h <pi1-old> -t 'zigbee2mqtt/#' -v
 
 # End-to-end
 mesh intent "turn the kitchen light on"   # bulb turns on + Z2M topic shows state change

@@ -4,7 +4,7 @@ Step-by-step guide for adding a fresh Windows 11 machine to the ai-mesh cluster 
 
 > **Network note (2026-06-25 the mesh router migration).** The home subnet moved
 > `192.168.1.x` → `10.0.0.x`. Current addresses: **pi1 `pi1.local`**,
-> **beelink1 `beelink1.local`**, **SLZB-06 Zigbee `10.0.0.12`** (set the mesh router DHCP
+> **beelink1 `beelink1.local`**, **SLZB-06 Zigbee `<slzb-06>`** (set the mesh router DHCP
 > reservations so they don't move). **Any `192.168.1.x` address below is
 > historical** — substitute the current address when following the steps. The
 > troubleshooting section near the end intentionally keeps the old IPs because it
@@ -660,9 +660,9 @@ Power plan: High Performance                  ✅
 
 #### 2026-06-24/25 — the mesh router network migration + fTPM storm regression (4th) + Smart App Control discovered
 
-Context: home network migrated from the ISP router to a mesh router. Subnet changed `192.168.1.x` → `10.0.0.x` (new: pi1 `pi1.local`, beelink1 `beelink1.local`, SLZB-06 `10.0.0.12` — dynamic leases, reservations pending). Getting beelink back on the mesh surfaced three stacked problems:
+Context: home network migrated from the ISP router to a mesh router. Subnet changed `192.168.1.x` → `10.0.0.x` (new: pi1 `pi1.local`, beelink1 `beelink1.local`, SLZB-06 `<slzb-06>` — dynamic leases, reservations pending). Getting beelink back on the mesh surfaced three stacked problems:
 
-**1. Stale `COORDINATOR_IP` (network migration).** Every agent had `COORDINATOR_IP=192.168.1.11` baked in from the old network and looped `No route to host` / `os error 10060`. On beelink this lives in the nssm registry env, not a file:
+**1. Stale `COORDINATOR_IP` (network migration).** Every agent had `COORDINATOR_IP=<pi1-old>` baked in from the old network and looped `No route to host` / `os error 10060`. On beelink this lives in the nssm registry env, not a file:
 ```powershell
 # read it
 (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\ai-mesh-agent\Parameters').AppEnvironmentExtra

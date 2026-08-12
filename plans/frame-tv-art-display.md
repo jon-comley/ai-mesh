@@ -493,7 +493,7 @@ of this list anymore.
    blocking.** Book when convenient; do the Pi Zero 2 W migration (§3) at
    the same time, once both the recess and that hardware are ready.
 2. **Done** — Pi 4 (bedroom, TV on a stand) flashed with Raspberry Pi OS
-   Lite (64-bit), hardwired into the LAN at 10.0.0.13 (node name `pi2`,
+   Lite (64-bit), hardwired into the LAN at <pi2> (node name `pi2`,
    chosen hardware-agnostically so it carries over unchanged through the
    eventual Pi Zero swap), SSH key access established, `just deploy-node
    pi2` run successfully — heartbeating on the Nodes tab with `art` in its
