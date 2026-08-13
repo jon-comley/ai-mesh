@@ -1,0 +1,25 @@
+[Unit]
+Description=Push named ai-mesh sensor readings to glebefish.com
+After=network-online.target ai-mesh-coordinator.service
+Wants=network-online.target
+Requires=ai-mesh-coordinator.service
+
+[Service]
+Type=oneshot
+User=jonno
+Group=jonno
+
+WorkingDirectory=/var/lib/ai-mesh
+ExecStart=/usr/bin/python3 /var/lib/ai-mesh/push-glebefish-sensors.py
+
+# MESH_AUTH_TOKEN (to read the coordinator's own API) and TELEMETRY_PUSH_KEY
+# (to authenticate the push to glebefish.com) — see
+# scripts/push-glebefish-sensors.py for how each is used.
+EnvironmentFile=-/var/lib/ai-mesh/coordinator.state
+EnvironmentFile=-/var/lib/ai-mesh/glebefish-push.env
+
+# Security — matches ai-mesh-coordinator.service
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
