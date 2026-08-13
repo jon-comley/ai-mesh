@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically push ai-mesh sensor readings to glebefish.com
+
+[Timer]
+OnBootSec=30sec
+OnUnitActiveSec=30sec
+Persistent=true
+
+[Install]
+WantedBy=timers.target
