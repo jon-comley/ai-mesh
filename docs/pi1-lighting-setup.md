@@ -185,7 +185,7 @@ gone, use `DELETE /api/lights/{id}?force=true`, which only drops z2m's record.
 Never force-remove a live device: it keeps its network keys, stays silently
 joined, and can never re-pair on its own — recovery then means z2m
 `database.db` surgery or a point-blank Touchlink reset (see
-`docs/roadmap.md`, orphaned-bulbs incident, for the full recovery playbook).
+`../HISTORY.md:86`, orphaned-bulbs incident, for the full recovery playbook).
 
 **Rename the device** after pairing:
 

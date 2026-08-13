@@ -202,4 +202,5 @@ pair `reaper_list_fx` / `reaper_list_fx_params`. Next is Slice 3 — `reaper_set
 curated preset/mode catalog. Plugins are installed manually (see above). Work is **incremental,
 free-first, one plugin at a time**, and every slice must be verifiable **without recording audio**
 (insert + read-back) since the studio isn't built yet. First target: **Valhalla Supermassive**.
-Slice breakdown and ordering are tracked under the REAPER section of [`roadmap.md`](roadmap.md).
+Slice breakdown and ordering are tracked under the Phase 11.7 REAPER section of
+[`ROADMAP.md`](../ROADMAP.md).

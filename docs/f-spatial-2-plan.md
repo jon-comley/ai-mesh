@@ -12,7 +12,9 @@ Three phases, each independently shippable. Phase A ships as a single PR coverin
 ### Phase B — Windows & Doors
 ### Phase C — Live sun arc
 
-See [roadmap.md](roadmap.md) for full feature spec.
+See the F-Spatial-2 entries in [`../HISTORY.md`](../HISTORY.md) (Phases A, B, Rooms UX,
+D, E — shipped) and [`../ROADMAP.md`](../ROADMAP.md) (Phase C — Three.js 3D view, still
+open) for the full feature spec.
 
 ---
 

@@ -269,7 +269,7 @@ Phases 1-5 exist, since it's just "send to every sink" rather than "pick
 one."
 
 **Puck-as-broadcast-target mechanism confirmed feasible** (live incident +
-investigation, 2026-07-13): see `docs/roadmap.md`'s "Puck as Last-Resort
+investigation, 2026-07-13): see `../ROADMAP.md`'s "Puck as Last-Resort
 Announcement Target" entry for the full writeup. Short version — the puck
 exposes a stock ESPHome `media_player` entity
 (`MediaPlayerCommandRequest`/`has_announcement=true`) that accepts a

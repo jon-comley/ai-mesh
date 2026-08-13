@@ -67,7 +67,8 @@ docs/            Architecture, protocol, security, and setup documentation
 
 See [`docs/architecture.md`](docs/architecture.md) for the full design, and
 [`docs/quickstart.md`](docs/quickstart.md) for day-to-day setup and the
-`just` command reference.
+`just` command reference. Outstanding work lives in [`ROADMAP.md`](ROADMAP.md);
+finished work and the reasoning behind it is in [`HISTORY.md`](HISTORY.md).
 
 ## License
 

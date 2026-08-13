@@ -1,8 +1,9 @@
 # Backlog Audit & Implementation Plan — 2026-06-11
 
-Full sweep of `docs/roadmap.md` deferred sections, review leftovers, and phase
-backlog. Every item was verified against the current code; the roadmap has been
-corrected in place where it lagged reality. This file is the working list.
+Full sweep of the (then-single) `docs/roadmap.md` deferred sections, review leftovers,
+and phase backlog — since split into `../ROADMAP.md` and `../HISTORY.md`. Every item was
+verified against the current code; the roadmap has been corrected in place where it
+lagged reality. This file is the working list.
 
 ## Open items, ordered by effort
 

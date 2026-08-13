@@ -84,7 +84,7 @@ The `shared` crate must maintain:
 Any breaking change must be documented in:
 
 - `docs/decisions/`
-- `docs/roadmap.md`
+- `../ROADMAP.md` (if it leaves follow-up work) or `../HISTORY.md` (once finished)
 
 ---
 
