@@ -154,7 +154,7 @@ touching `SensorReport` again:
      connection test so far (`delete_device_requests_network_removal`);
      this is its first exercise against a real bridge. **Not yet exercised.**
    - On pass (all sub-items above, not just pairing): mark Phase B
-     **complete** in `docs/roadmap.md` (11.8 section) and update the focus
+     **complete** in `../ROADMAP.md` (11.8 section) and update the focus
      memory.
 
 4. **Phase C — the differentiator** — code shipped 2026-07-04
@@ -182,7 +182,7 @@ touching `SensorReport` again:
      the kitchen?"` answers from real sensor data. First run surfaced two
      real bugs, both fixed same day (commit `2c067cb`) and confirmed on
      retest: raw device ids shown instead of friendly names (sensors only —
-     see `docs/roadmap.md`'s 2026-07-05 Phase C entry for why lights were
+     see `../ROADMAP.md`'s 2026-07-05 Phase C entry for why lights were
      deliberately left alone), and the model calling the tool with
      `{"target": ...}` instead of the schema's `{"room": ...}`, silently
      returning every sensor in the house — `dispatch_get_climate` now

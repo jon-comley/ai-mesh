@@ -192,7 +192,7 @@ Defined at the top of `justfile`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `coordinator_ip` | `pi1.local` | pi1's mDNS hostname — where the coordinator runs (always-on systemd service); all nodes connect here. This is **pi1**, not the laptop. Derived from whichever `nodes/*.env` carries `NODE_COORDINATOR=true`, so change it there rather than here, then run `just provision-all`. A hostname rather than an IP deliberately: DHCP leases are not reserved and every node's address has moved at least once — see the 2026-08-08 entry in `docs/roadmap.md` |
+| `coordinator_ip` | `pi1.local` | pi1's mDNS hostname — where the coordinator runs (always-on systemd service); all nodes connect here. This is **pi1**, not the laptop. Derived from whichever `nodes/*.env` carries `NODE_COORDINATOR=true`, so change it there rather than here, then run `just provision-all`. A hostname rather than an IP deliberately: DHCP leases are not reserved and every node's address has moved at least once — see the 2026-08-08 entry in `../ROADMAP.md` |
 | `coordinator_port` | `9000` | Coordinator TCP port |
 | `MESH_HTTP_PORT` | `9001` | Dashboard HTTP port (env var, not a justfile variable) |
 

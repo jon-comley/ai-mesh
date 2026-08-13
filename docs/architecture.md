@@ -71,8 +71,10 @@ Documentation is created incrementally alongside code. The docs folder will cont
 - coordinator.md
 - cli.md
 - testing.md
-- roadmap.md
 - decisions/ (ADR-style design decisions)
+
+Outstanding and finished work live at the repo root, not in `docs/`: `../ROADMAP.md` and
+`../HISTORY.md` (split from a single `docs/roadmap.md` on 2026-08-14).
 
 Each module gets its own `.md` file explaining:
 - Purpose

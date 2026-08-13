@@ -1,6 +1,15 @@
-# ai-mesh Roadmap
+# ai-mesh — History
 
----
+Everything that is **done**, in the order it was tracked in the original `docs/roadmap.md`
+before the split on 2026-08-14 — see [`ROADMAP.md`](ROADMAP.md), which keeps that file to
+outstanding work (`ventures/strategy/documentation.md`; `ventures/PRIORITIES.md` item 7).
+
+This is not a changelog — git already has one. It is the reasoning: why something was
+built the way it was, what was tried first and rejected, and which surprising facts cost
+real time to learn. Several phases here (Phase 11 and its lettered sub-phases, Phase 11.7,
+a couple of the third-party review backlogs) had both finished and still-open parts; only
+the finished sub-sections are reproduced here under their original heading — the open
+remainder of the same heading is in ROADMAP.md.
 
 ## Bug fix — dashboard device names reverting to hex on every reconnect (2026-07-28)
 
@@ -74,96 +83,7 @@ anything shipped:**
 
 854 tests, clippy clean.
 
-## Hunts / eBay Bargain Finder — deployed, production keyset issued, not yet exercised with real data (2026-07-15)
-
-`plans/ebay-bargain-finder.md` is fully implemented and deployed to pi1:
-the `ebay` crate, registry persistence, coordinator HTTP API, background
-per-hunt timer with startup re-arm, and the Hunts dashboard tab. Full
-workspace test suite and clippy are clean; live-verified against the running
-coordinator (config round-trip, hunt CRUD, `run-now`, `analyze` validation,
-static assets/tab) and the eBay OAuth call path was genuinely exercised
-(clean auth failure with placeholder credentials, handled gracefully).
-
-A production Browse API keyset was issued 2026-07-15. Generating it required
-satisfying eBay's mandatory **Marketplace Account Deletion/Closure
-Notification** endpoint field — undocumented in `docs/ebay-hunts.md`'s
-walkthrough, and a real blocker since it demands a publicly-reachable HTTPS
-URL that pi1 (LAN/Tailscale-only) can't serve directly. Hunts never uses
-OAuth user tokens (Browse API only needs an app-level client-credentials
-token), so no eBay user PII is ever stored and the notification itself needs
-no real handling — just the verification challenge response. Solved with a
-standalone Cloudflare Worker (`your-worker.example.workers.dev`,
-deployed via `wrangler` CLI rather than the dashboard's web editor, which
-repeatedly corrupted pasted code) that computes the SHA-256 challenge
-response and 200s any deletion POST. Decoupled from home infra on purpose —
-it has to answer eBay's periodic re-verification checks regardless of
-whether pi1/Tailscale is up.
-
-**⚠ Still not exercised with real eBay data.** Next:
-1. Paste real client_id/client_secret into the Hunts tab's settings block
-   (no deploy step — same operational model as the Online AI tab's key).
-2. `POST /api/ebay/analyze` against a real listing URL, confirm term
-   suggestions look sane.
-3. Create a hunt, `run-now`, confirm real listings come back and the ticker
-   + (if an ntfy topic is set) phone push both fire.
-4. Let a hunt run unattended through a scheduled timeslot to confirm the
-   background timer's real-world timing, not just the unit-tested pure
-   scheduling logic.
-
-**Timeslot picker reworked (2026-07-15):** the original UI was a fixed
-00–23 hourly grid, and a CSS specificity bug (`.ebay-editor button` was
-unintentionally more specific than `.ebay-slot`/`.ebay-slot-on`) meant the
-"selected" highlight never actually rendered — clicking silently did
-nothing. Replaced with a `type="time"` picker + removable chip list (same
-pattern as the search-terms box), live-verified working on pi1. The
-backend already stored timeslots as arbitrary minutes-since-midnight
-(`ebay/src/schedule.rs`), so this was purely a frontend fix/upgrade — no
-API or schema change.
-
-**⚠ No cap on timeslots-per-hunt or total daily eBay calls.** Each hunt
-firing makes one Browse API call per *enabled* search term
-(`run_hunt_cycle`, `coordinator/src/http/api/ebay.rs`), so daily call
-volume ≈ hunts × active terms/hunt × timeslots/day — and now that
-timeslots are freely user-added rather than capped at 24 (one per hour),
-that product has no ceiling. eBay's Browse API typically grants ~5,000
-calls/day (exact figure depends on what the specific application was
-approved for; see `plans/ebay-bargain-finder.md`'s original risk note),
-and realistic hand-entered usage sits nowhere near that, but there is
-**no enforced guard today** beyond a log line + skip-this-cycle if eBay
-actually returns a 429 (`EbayError::RateLimited` handling, same file).
-Worth a soft cap or running-total warning if hunt/timeslot count grows.
-
----
-
-## Music / Spotify — code-complete, NOT yet live-tested (2026-07-12)
-
-All build phases of `plans/spotify-music.md` are implemented and committed
-(wire types + capability skeleton → coordinator `music_control` routing →
-Spotify Web API control plane + OAuth tooling → librespot playback engine →
-`just test-music` smoke recipe → snapcast multi-room transport). Unit tests,
-clippy, and the aarch64 cross-builds (agent + librespot 0.6.0) are green.
-
-**⚠ Nothing has run live yet — deployment is blocked on Phase 0: awaiting
-Spotify Premium membership** (playback control is Premium-only; the developer
-app + both OAuth logins come after signup — walkthrough in `docs/music.md`).
-
-Rollout once membership exists:
-1. `just deploy-coordinator pi1` + `just deploy-node pi2` — together (WIRE_VERSION 10→11; pi2 also gets snapserver installed)
-2. `just test-music` — routing asserts pass, playback warns
-3. `just spotify-auth` → `just spotify-push-creds pi2`
-4. `just deploy-librespot pi2` → `just spotify-login pi2`
-5. `just test-music` — fully green, audio from the pi2 Bluetooth amp
-
-Deploy-time verification items (assumed from docs, never exercised):
-librespot's blocking open of the snapserver FIFO, snapserver `mode=create`
-perms under the agent user, snapclient honoring `PULSE_SINK`. Fallback for
-A/B debugging: commit `f057990` still has the pre-snapcast direct-pacat
-pipeline. Deferred by design: the `music_control` `rooms` param until a
-second room speaker exists (`plans/spotify-music.md` Phase 6).
-
----
-
-## Infra note — the mesh router network migration (2026-06-25)
+## Infra note — the mesh router network migration (2026-06-25) — lighting confirmed healthy
 
 Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x` → `10.0.0.x` (pi1 `<pi1>`, beelink1 `<beelink1>`, SLZB-06 `<slzb-06>`). `nodes/*.env`, `justfile`, `README.md`, and `handover.md` updated. Follow-ups: set the mesh router DHCP reservations (leases still dynamic); re-verify beelink BIOS Pluton/fTPM golden state (crash storm regressed during the move — `docs/windows-node-setup.md`). beelink also needed Smart App Control disabled to run the self-built agent after its earlier Windows reinstall.
 
@@ -173,15 +93,13 @@ Home network migrated from the ISP router to a mesh router; subnet `192.168.1.x`
 
 *Fixed repo-side by removing the dependency rather than re-entering addresses that will rot again:* `nodes/*.env` `NODE_HOST` plus pi1's `VOICE_STT_REMOTE`/`VOICE_TTS_BASE_URL` now use `pi1.local`/`beelink1.local`/`pi2.local`; `justfile`'s `coordinator_ip` fallback, `PI_MQTT` in `pair-bulb`, and the `set-heartbeat`/model-serving comments follow; `cli/src/bin/chaos.rs`'s `MESH_COORDINATOR` default was a genuinely wrong runtime default and is now `pi1.local:9000`. Docs updated inline. mDNS verified for all three from the WSL controller — including beelink1, so Windows advertises fine. Left as historical on purpose: this log, plan docs, in-code test fixtures, and `coordinator/src/coordinator.rs`'s 2026-07-05 incident comment.
 
-**Still needs doing on the router, and it is the actual root cause:** set the DHCP reservations. Hostnames let the mesh survive a lease change; they do **not** help anything that hard-codes an IP, and one thing still does — **zigbee2mqtt's `serial.port`, which is precisely what killed the lights on 2026-06-29.**
+**Still needs doing on the router, strictly as hardening — not blocking anything today:** set the DHCP reservations. Hostnames let the mesh survive a lease change; they do **not** help anything that hard-codes an IP, and one thing still does — **zigbee2mqtt's `serial.port`, which is precisely what killed the lights on 2026-06-29.** Nothing is currently broken because of this (see next paragraph); it is a latent risk, not an open incident.
 
 **The radio moved too, but z2m was already following it — the lighting is healthy.** `ZIGBEE_HOST` was the fourth stale address here, now corrected to match where the SLZB-06 actually is, which is where z2m's `serial.port` has been pointed all along. Verified on pi1 rather than inferred: `zigbee2mqtt` active, EZSP/ASH frames flowing, live `attributeReport`s from an occupancy sensor publishing to MQTT. Nothing to fix on the lighting.
 
 Worth recording how that looked from outside, because it nearly became a false alarm: the old `ZIGBEE_HOST` address is unreachable and every other address in the repo had rotted, so the 2026-06-29 pattern appeared to be repeating and the reasonable-looking inference was that the lights were down. They were not — `ZIGBEE_HOST` is not what z2m reads. **The lesson is that a stale address in a config nothing consumes looks exactly like a stale address in a config something depends on.** `ZIGBEE_HOST` is documentation here; `serial.port` is the load-bearing copy, and only checking the service itself distinguishes them.
 
-That said, the reservation for the SLZB-06 is *still* the one that matters most, because `serial.port` hard-codes an IP and the radio answers no mDNS name (neither `slzb-06.local` nor `slzb06.local`), so a hostname cannot protect it. It has survived a lease change once by luck of being repointed; the next one breaks the lights again exactly as in 2026-06-29.
-
----
+That said, the reservation for the SLZB-06 is *still* the one that matters most, because `serial.port` hard-codes an IP and the radio answers no mDNS name (neither `slzb-06.local` nor `slzb06.local`), so a hostname cannot protect it. It has survived a lease change once by luck of being repointed; the next one breaks the lights again exactly as in 2026-06-29. **Confirmed 2026-08-14: the lights are working** — moved here from ROADMAP.md on that basis, with the DHCP-reservation hardening kept on record above rather than dropped.
 
 ## RESOLVED — kitchen bulbs orphaned from the Zigbee network (2026-07-07 → 2026-07-28)
 
@@ -214,8 +132,6 @@ Same day, two further recoveries rode on the momentum: (a) two pre-Bluetooth Hue
 **Root cause fixed (commit `2c2559e`):** `DELETE /api/lights/{id}` now defaults to a graceful network Leave; `force: true` is an explicit opt-in query parameter (`?force=true`) reserved for devices that are physically gone. The `force` flag rides on `DeviceRemoveRequest` (shared wire type — coordinator and all nodes must deploy together). `plans/device-auto-naming.md`'s live re-validation is hereby unblocked.
 
 **Follow-up (2026-07-28) — coordinator-side model capacity gate.** Cleanup of a stale `llama3.2:3b` Failed record on pi1 (the agent had refused the download 1 MB short of its 2×-size disk headroom) exposed that the scheduler's capacity check only ran for *auto-placed* loads — an explicitly targeted `POST /api/models/load` was forwarded blind and left to fail on the agent. Now every load path runs the same gate: `Scheduler::check_node_for_model` (RAM headroom = `max_model_size_gb` minus Ready/Loading models) plus a disk pre-check against the node's latest health-reported `disk_free_gb` (2× model size, matching the agent's own rule; skipped when the node already has the model on record, since a reload downloads nothing). HTTP returns 409 with the human-readable reason, which the dashboard now surfaces instead of a bare status code; the CLI mesh path refuses with a logged reason. The HF file picker passes the target node to `GET /api/models/search/files?node_id=…` and files that can't fit come back annotated with `blocked_reason`, rendered greyed-out — a model that can't load on a node is no longer offered for it.
-
----
 
 ## Code Audit — Findings to Action (2026-06-02)
 
@@ -264,8 +180,6 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - [x] **Live pi1 DB retains the purged `rooms.solar_enabled` column** — F-Effects-2 dropped `rooms.solar_enabled` (and `light_states.solar_enabled`) from the schema, but pi1's live `/var/lib/ai-mesh/ai_mesh.db` still has `rooms.solar_enabled` (verified 2026-06-02). *Fixed (2026-06-05):* Surgically dropped `solar_enabled` from both `rooms` and `light_states` via Python/SQLite on pi1; coordinator restarted and healthy.
 - [x] **beelink1 (SER8) stability — fTPM DPC_WATCHDOG storm regressed (2026-06-02)** *(Resolved 2026-06-11: BIOS work completed — fTPM re-disabled, AC power-loss recovery set, WoL disabled; node stable.)* — the `0x00000133`/`param2=0x1e00` fTPM crash signature that was fixed on 2026-05-28 has returned (5 minidumps since 2026-06-01 22:17; full writeup in `docs/windows-node-setup.md` → 2026-06-02 entry). fTPM appears to have re-enabled itself when BIOS defaults were restored (power event / suspected weak CMOS battery). Plus a household power cut from which beelink did **not** auto-recover (down ~56 min until physical reset). Node is up and serving `qwen2.5:7b` again but will storm again until fTPM is genuinely off. **Actions:** (1) re-disable fTPM in BIOS — Advanced → SOC Misc Control → Trusted Platform Modules → dTPM Level 3 without Pluton Security Processor (and Pluton Security Processor → Disabled); (2) set BIOS "Restore on AC Power Loss = Power On" + check CMOS battery; (3) longer-term, rebuild beelink on a leaner OS (Win IoT Enterprise LTSC) or move it to Linux to escape the Windows/AMD-PSP class entirely. Pi1/coordinator/lighting unaffected throughout.
 
----
-
 ## Phase 6 — Model Scheduling ✓ Complete
 
 - Model registry (`ModelAllocation` + `update_model_status`)
@@ -276,8 +190,6 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - CLI `mesh load`, `mesh nodes` Models column
 - 54 tests across all four crates
 
----
-
 ## Phase 7 — Inference Routing ✓ Complete
 
 - `RequestModelInference` routed through scheduler to selected agent
@@ -286,8 +198,6 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - `ModelUnload` forwarding; agent reports `Unloaded`
 - Oneshot channel per inference request; coordinator waits up to 300s for result
 - `model_is_loading` registry query; coordinator polls for up to 300s before dispatching inference
-
----
 
 ## Phase 8 — Production Hardening ✓ Complete
 
@@ -299,8 +209,6 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - **Agent reconnect loop** — graceful channel handling; retries TCP connection every 5s on disconnect
 - **Cross-platform agent** — conditional compilation for hardware detection (Windows: `sysinfo`; Linux/macOS: `/proc`); hostname detection (Windows: `COMPUTERNAME`; Linux: `/etc/hostname`)
 
----
-
 ## Phase 8.5 — llama-server Migration ✓ Complete
 
 - Replaced Ollama with llama-server (llama.cpp) across all nodes
@@ -311,8 +219,6 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - Linux: architecture-aware tarball download (x86_64 or ARM64)
 - `just load-model <node> <model>` replaces `change-model`; `just update-llama <node>` for llama-server updates
 
----
-
 ## Lighting MVP ✓ Complete
 
 - **Phase A — pi1 infrastructure**: Mosquitto 2.x (remote listener), Zigbee2MQTT with SLZB-06 PoE coordinator (<slzb-06-old>, EmberZNet 8.0.2 / EZSP v14, adapter `ember`), Z2M as systemd service
@@ -322,8 +228,6 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - **Pairing**: `just pair-bulb` recipe; first Hue White and Color Ambiance B22 paired (IEEE `0x00178801024c077c`, renamed `test_bulb`)
 - **Z2M groups**: `all` group created; `just intent "turn all bulbs off"` broadcasts to all members
 - **Robustness fixes**: 5s reconnect delay (prevents Mosquitto storm); truncated JSON from 0.5b models repaired; empty target falls back to Group(1); node-id in MQTT client ID avoids same-ID collision
-
----
 
 ## Lighting — Device Awareness ✓ Complete
 
@@ -336,24 +240,10 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - **Brightness clamped to 0–254** — Zigbee spec reserves 255; LLM-supplied values are clamped at dispatch
 - **Z2M coordinator filtered** — `bridge/devices` entries with `type: Coordinator` excluded from device list regardless of whether `ieee_address` is present (newer Z2M versions include it)
 
----
-
-## Phase 9 — Remaining Cluster Nodes (In Progress)
-
-- **Mac mini M4** ⚠️ _hardware not available until ~end of July 2026_ — cross-compile for `aarch64-apple-darwin`, provision as compute node, add `just deploy-node mac1`
-- **Multi-node routing validation** ✓ — `just validate-routing` confirms `qwen2.5:1.5b` → Pi and `qwen2.5:7b` → Beelink; `mesh infer` output now includes a `served-by:` line showing the serving node; load-balancing across identical-model nodes is a future concern when a second GPU node joins
-- **`just start-cluster` recipe** ✓ — starts coordinator + controller + all remote agents, then calls `auto-load-model` on every compute node; leaves mesh in a ready-to-use inference state
-- **`just auto-load-model <node>`** ✓ — SSHes into node, detects GPU VRAM or CPU RAM, selects best-fit model, loads it with hardware-filtered fallback hints
-- **Automatic model placement (coordinator side)** ✓ — `ModelLoadRequest.node_id` is now `Option<String>`; when absent the coordinator calls `select_node_for_model(mb)` and picks the node with the most headroom; `mesh load <model> <size>` works without `--node-id`; `just load-model` still passes explicit node for predictable placement
-
----
-
 ## Lighting — Phase 2 ✓ Complete
 
 - **State report debounce** — 75ms per-device `AbortHandle` debounce in the Z2M event loop; Z2M burst updates (state/brightness/colour temp) collapse to one `StateChanged` per action; map stores `AbortHandle` (not `JoinHandle`) so the task is cleanly detached
 - **`LightingCapability` node_id** — capability now receives `node_id` at construction (from `build_capabilities`) instead of reading a missing env var; device list reports correctly keyed by pi1's persistent UUID in the coordinator registry
-
----
 
 ## Intent Routing — Phase 2 ✓ Complete
 
@@ -365,27 +255,6 @@ into 15 review units; each finding independently verified by a skeptic pass).
 - **`cache_prompt=true`** — llama-server reuses KV state for a stable system prompt; back-to-back intents skip prefill after the first, cutting latency noticeably
 - **Compact schema JSON** — switched from pretty-printed to compact JSON in the system prompt; fewer prefill tokens on a cache miss
 - **`just load <model>` recipe** — coordinator auto-placement without SSH; useful when a node is registered but SSH is unavailable (e.g. Windows node after network blip)
-
----
-
-## Lighting — Deferred Improvements
-
-- **Device availability tracking** ✓ (now working end-to-end, see **F-Lighting-UX**) — per-device `online` flag flows through to the dashboard (offline cards disabled; placeholders start offline) and a bridge-level `ZigbeeStatus` drives the offline banner. *2026-06-29:* this had been silently inert — z2m's `availability` feature was disabled (so offline was never published), and the agent's `<device>/get` poll re-stamped offline bulbs as `online: true` from z2m's cached state on every reconnect. Fixed by enabling `availability.enabled: true` in z2m and stamping state reports from a per-device availability map in `capabilities/zigbee`. **Still deferred (LLM side):** suppressing/marking offline devices in the LLM system prompt, and a distinct `device 'x' is currently offline` validation error instead of the generic unknown-target error.
-- **`bridge/event` subscription** — Subscribe to `zigbee2mqtt/bridge/event` for real-time device join/leave announcements. Currently `bridge/devices` (retained) covers discovery on connect, but live pairing events require this topic. Low priority until live-pair UX is needed.
-- **ZigbeeClient lifecycle hardening** — `connect()` spawns one event loop task internally and is safe via `OnceCell`. If multiple lighting nodes or dynamic reconnect logic is added, consider an explicit `shutdown()` signal and replacing `OnceCell<Arc<ZigbeeClient>>` with `ArcSwap<ZigbeeClient>` to allow reconnect without structural changes.
-- ~~**Bounded Manual State Cache**~~ — obsolete: `last_manual_states` was deleted entirely in the F-Effects-2 legacy purge; nothing to bound.
-- **Solar Dashboard Widget** — Add a compass and elevation widget to the Topology view to visualize the real-time solar vector.
-- **Debounce map pruning** — completed debounce tasks leave a dead `AbortHandle` in the map until the same device fires again. Low impact (map stays small), but a periodic sweep or a completion callback could keep it clean in long-running deployments.
-- **Distributed lighting capability** — the `capability-lighting` crate connects to an MQTT broker by address (`MQTT_HOST`/`MQTT_PORT`). Any node (e.g. beelink1) could run the lighting capability pointed at pi1's Mosquitto broker, saving the coordinator→pi1 LightCommand mesh hop when beelink1 is already serving the intent. Estimated saving: ~1–2ms LAN RTT. Not worth building until the Zigbee RF round-trip (~300–500ms) is no longer the dominant latency.
-- **Room temperature slider — match the light-card style** — the room-level temperature slider (in the room card's colour/temp panel) should use the same warm→cool gradient temp-bar widget as the individual device cards (`buildTempBar` in `lightcontrols.js`), rather than the generic `buildSlider`. Aligns the room and device controls visually and in behaviour, consistent with how the room brightness slider already mirrors the device brightness slider.
-
-- **Bulb power-cycle detection + UI indication** — when a bulb is physically switched off and back on at the wall, it reverts to its factory/last-power-on state (typically warm white full brightness), overriding any active effect or scene. The coordinator needs to detect this transition (a bulb reporting `on:true` with default state after having been `on:false` or `online:false`) and: (1) surface it visually on the device card (e.g. a "reverted" indicator or distinct icon state); (2) optionally re-apply the active effect/scene to that bulb automatically. Detection signal is already available via the `LightingUpdate` WS path — needs a heuristic to distinguish a genuine power-cycle revert from a normal user-on command.
-
-- **Zigbee latency ceiling** — the observed ~300–500ms bulb switch time is inherent to the Zigbee protocol (RF transmission + bulb processing + optional ACK). The SLZB-06 is network-attached (Ethernet, <slzb-06-old>), so moving Z2M ownership to a different machine would not reduce this — the RF path is identical. Meaningful latency improvements would require: Zigbee direct binding (bypass Z2M for switch→bulb, not applicable to software commands), or migrating to Matter/Thread hardware (typically ~50–100ms).
-
-- **Remove the dead device-card view in `lighting.js`** — `dashboard.js` calls `setRoomsActive()` unconditionally at startup with no reset, so `roomsActive` is permanently true and `lighting.js`'s device-card `render()` (and its sibling slider-patch path) always bails: it's unreachable. The lighting tab is exclusively the rooms view (`rooms.js`). Cleanup: delete the dead `render()`/device-card builders and the `roomsActive` flag from `lighting.js`, keeping only what the rooms view still imports (e.g. `buildLightControls`, `formatDeviceName`), and drop the now-unused `.light-card`-only grid styling. Surfaced while fixing the maximised rooms-view layout (the `#lighting-list` card grid only ever applied to this dead path).
-
----
 
 ## Phase 10 — Security & Auth ✓ Complete
 
@@ -404,8 +273,6 @@ into 15 review units; each finding independently verified by a skeptic pass).
 
 - **Auth token auto-distribution** ✓ — coordinator auto-generates `MESH_AUTH_TOKEN` on first run (no env var required); token is written to `coordinator.state`; `restart-coordinator` and `start-cluster` read the state file and push credentials to all compute nodes via `set-fingerprint` before starting agents; `deploy-node` also pushes credentials immediately when the coordinator is already running.
 
----
-
 ## Phase 10.5 — HMAC Message Signing (Defence-in-Depth) ✓ Complete
 
 The existing TLS + token auth stops unauthenticated connections. HMAC goes one layer deeper: every wire message is signed with a shared secret so that even a rogue process with a valid token cannot forge arbitrary messages (e.g., a compromised agent cannot send a crafted `ModelLoad` to another node).
@@ -420,12 +287,9 @@ The existing TLS + token auth stops unauthenticated connections. HMAC goes one l
 - **Key rotation** — inherits existing dual-token rotation; HMAC key re-derived from the active token.
 - **Chaos validation** — `just chaos` fires 6 adversarial scenarios against the live coordinator (no-auth, wrong token, unsigned frame after auth, corrupted HMAC, stale timestamp, valid request sanity check); all must pass before `just validate-routing` proceeds.
 
----
-
 ## Phase 11 — Web Dashboard & Health Reporter (In Progress)
 
 Full design spec: `plans/phase11-dashboard.md`
-
 ### Phase A — axum shell + PWA ✓ Complete
 
 - `axum` 0.8 HTTP server embedded in coordinator, default port 9001 (`MESH_HTTP_PORT` to override)
@@ -434,7 +298,6 @@ Full design spec: `plans/phase11-dashboard.md`
 - `manifest.json` + service worker — installable as PWA today
 - All static assets embedded via `include_str!` (single binary, zero runtime file I/O)
 - `DashboardModule` trait in plan for per-capability panel extensibility
-
 ### Phase B ✓ Complete — WebSocket + live topology
 
 - `/ws` WebSocket endpoint with `?token=` Bearer auth; `DashboardState` wraps a `tokio::sync::broadcast` channel
@@ -443,7 +306,6 @@ Full design spec: `plans/phase11-dashboard.md`
 - Nodes panel in `topology.js` renders live node cards; health dot + role badge + IP + age
 - 9 new unit tests: `auth_ok` logic, health colour thresholds, `push_topology` no-op, WS endpoint 400
 - Chaos binary extended: scenario 7 verifies dashboard `/ws` returns 401 for a wrong token (plain TCP, no new deps)
-
 ### Phase C — Health timeline (In Progress)
 
 - **C1 ✓** — Wire protocol: `cpu_usage_pct`, `ram_used_gb`, `ram_total_gb` added to `HeartbeatPayload`; `SetHeartbeatInterval { secs }` added to `MeshMessage`; backward-compat shims subsequently removed in C2
@@ -453,39 +315,12 @@ Full design spec: `plans/phase11-dashboard.md`
 - **C5 ✓** — `health.js` ES module: SVG sparklines (CPU %, RAM %) per node in the Health panel; mini CPU sparkline in each Nodes-panel node card; "Set interval" button per node calls `POST /api/nodes/{id}/heartbeat-interval`; `get_all_health_snapshots()` on `DashboardState` pushes the full HealthStore to new WS clients on connect so sparklines populate immediately; `repaintAll()` refills mini sparklines after each `TopologyUpdate`; 5 new tests (point-in-time copy, sample values, single-sample, order, content-type); 304 tests passing
 - **C7 ✓** — GPU metrics: `gpu_usage_pct`, `gpu_vram_used_gb`, `gpu_vram_total_gb` added to `HeartbeatPayload` as `Option<f32>` with `serde(default)` (CPU-only nodes omit them; pre-C7 agents remain compatible). New `agent/src/gpu.rs`: Linux reads amdgpu sysfs (`/sys/class/drm/card0/device/gpu_busy_percent` etc.); Windows reads GPU perf counters via PowerShell subprocess (no extra crates). `HealthSample` gains matching `Option<f32>` GPU fields; `push_health()` extended to 7 params. Dashboard `health.js` renders GPU% + VRAM sparklines beneath RAM row, hidden when all samples have `None` GPU data. Live-tested on beelink1 (AMD Radeon 780M): GPU% and VRAM visible. 315 tests passing.
 - **C6 ✓** — `mesh set-heartbeat <node> <secs>` CLI command + `just set-heartbeat` recipe; health.js "Set interval" button shows current interval (`Set interval · Ns`)
-
 ### Phase D — Model management panel
 
 - **D1 ✓** — `DashboardEvent::ModelUpdate { nodes: Vec<NodeModelInfo> }` added to `DashboardState`; `NodeModelInfo` + `ModelEntry` structs carry node metadata and per-model state string; `model_snapshot` ring stores latest state; `push_model_update()` always stores, broadcasts only when WS clients exist; `get_model_snapshot()` for point-in-time copies; snapshot pushed to new WS clients on connect (mirrors health snapshot-on-connect); coordinator patches `HardwareReport` + `ModelStatus` handlers to call `push_model_update(build_model_snapshot(&registry))`; 5 new tests. 329 tests.
 - **D2 ✓** — `POST /api/models/load` + `POST /api/models/unload` HTTP endpoints in `coordinator/src/http/api.rs`; `gen_request_id()` generates `"http-{ms}"` request IDs; validates empty `node_id`, empty `model_name`, and `size_mb == 0` → 400; sends `MeshMessage::ModelLoad` / `MeshMessage::ModelUnload` via `send_to_node()`; routes registered in `mod.rs`; 10 new unit tests. 334 tests.
 - **D3 ✓** — `models.js` ES module: per-node card with VRAM + RAM capacity bars (read from `getLatestSample()` in health.js), model rows with state badges (Ready/Loading/Failed — `.toLowerCase()` fix so badges colour correctly) and Unload button, "Load model…" button with prompt dialog; `dashboard.js` wired for `ModelUpdate` + `HealthUpdate` repaint; `style.css` extended with model card layout and drag-to-reorder styles; `/static/models.js` route added. Drag-to-reorder (HTML5 DnD, `localStorage` persistence, re-render guard during drag) added to Nodes, Health, and Models panels. `run-coordinator` recipe kills any stale process and sources the state file so the auth token is preserved on restart. 1 new content-type test. 335 tests.
-
-### Phase E — Error feed + diagnostic panel
-
 ### Phase F — Lighting OS. Full spec in `plans/phase11f-lighting.md`.
-
-#### The Vision
-
-> Everyone else built a light switch you can control from your phone. We're building a lighting system that understands what's happening in your home — including inside your AI cluster — and responds to it.
-
-**Room layout context:** 3×3 grid of lights. Bottom row: 3 white-temperature-only bulbs. Main grid: 8 colour spots (4×2 arrangement). This asymmetry shapes how scenes, effects, and games are designed — colour commands must gracefully degrade to brightness-only on the CT bulbs.
-
-**The innovations:**
-1. **Telemetry Lighting** — the room is the dashboard. GPU inference running → subtle blue pulse on the desk lamp. Node offline → brief red flash. Model loading → soft green fade. No commercial system has ever tied infrastructure telemetry to ambient lighting because no commercial system runs AI inference in your home.
-2. **Intent-First Adaptive Scenes** — "cozy" at 7am means something different than at 10pm. Scenes are prompts, not presets. The LLM resolves the intent using time of day, room state, and known devices.
-3. **Temporal Scene Composer** — scenes that exist across time. A morning routine defined as a drag-and-drop timeline (warm red → cool white over 40 minutes); coordinator executes transitions as a background task.
-4. **Reactive Graph** — plain-language automation rules. *"If no motion for 5 minutes after sunset, fade to 10% over 2 minutes."* LLM parses each rule once into a structured `{ trigger, action }` pair; coordinator evaluates triggers on every event. No YAML, no Home Assistant complexity.
-5. **Presence-Weighted Circadian** — not just "shift colour temp with the sun" but per-room based on occupancy. Motion sensor active in the study at midnight → keep it cool and bright. Room empty → start wind-down regardless of global schedule.
-6. **Photo Colour Picker** — a grab-box tool in the dashboard: load a photo (or in future, a live screen capture), drag a selection box over any region, and the average colour of that region is extracted client-side via Canvas API and sent to the selected lights as CIE XY. Useful for matching artwork, a sunset photo, or the palette of whatever is on screen.
-7. **Light Games** — the 4×2 colour spot grid is a natural game board. Simon Says, Whack-a-Mole (yellow flash on a random bulb, tap before it goes out — speeds up each hit), Colour Match, Hot/Cold (motion-sensor treasure hunt), Disco Party, Strobe/Rave mode. Full game catalogue in F9.
-
-**Future — Effects Engine (F9+):**
-- **Solar / Sunset Engine** — coordinator uses device location (lat/lon) + the `sunrise` or `spa` Rust crate to derive exact sunrise/sunset times and solar elevation; drives a smooth colour-temperature curve matching the real sky throughout the day. Configurable per-group.
-- **Hue Entertainment Fast Path** — MQTT round-trip (~100ms) is too slow for fluid effects. Philips' Entertainment API uses UDP streaming at ~50 Hz. A future `capability_effects` crate would open a UDP stream directly to the Zigbee coordinator (or a Hue bridge if one is ever added) for music sync, game sync, and reactive effects that feel instantaneous.
-- **Screen / Monitor Sync** — screen capture (`scrap` or `xcap` Rust crate) → divide frame into regions → compute average colour per region → stream to the corresponding light in the grid. An Ambilight-style experience without the proprietary hardware. Requires the Hue Entertainment fast path (MQTT is too slow for 50 Hz updates).
-
----
-
 - **F1 ✓** — Live state feed. `DashboardEvent::LightingUpdate { devices }` + `light_snapshot` in `DashboardState`; `push_lighting_update()` stores per-device and broadcasts; snapshot pushed to new WS clients on connect; `server.rs` `LightState` handler wired to dashboard; new `lighting.js` renders per-device cards (on/off badge, brightness bar %, colour temp in K, XY→RGB colour swatch, drag-to-reorder); `/static/lighting.js` route + test; `dashboard.js` wired for `LightingUpdate`. Three bugs fixed during live testing: Z2M publishes device state to base topic `zigbee2mqtt/<device>` not `/state` suffix (subscription corrected); Z2M bridge status filtered out; action events (`{"action":"toggle"}`) filtered to prevent ghost entries. 342 tests.
 - **F2 ✓** — Individual device controls. `POST /api/lights/{device}/command` endpoint in `coordinator/src/http/api.rs`: `LightCommandBody { action, value?, x?, y? }` + `build_light_action()` dispatches on/off/toggle/brightness/color_temp/color_xy; `get_node_for_device()` added to `DashboardState` to resolve device→node routing; 404 for unknown device, 400 for malformed action, 503 if node not connected. `lighting.js` rewritten with interactive controls: toggle button (optimistic flip + re-render), brightness range slider (live label, send on release), colour temp slider (154–500 mireds range). Auth token read from `localStorage` and appended to all command requests. Slider drag bug fixed: `pointerdown` on input/button temporarily sets `draggable="false"` on the card. Error toast: non-2xx responses show a red pill notification above the tab bar for 4 s. 12 new tests (get_node_for_device ×2, light_command ×6, build_light_action_maps_all_variants, helpers). 354 tests.
 - **F3 ✓** — Display polish. `formatDeviceName()` in `lighting.js` converts raw Z2M device IDs to title case (`test_bulb` → `Test Bulb`, `kitchen-light` → `Kitchen Light`). Node ID shown as a small muted badge beneath the device name so it's clear which physical node owns each device. Pure JS/CSS change — no Rust changes, 354 tests.
@@ -504,11 +339,8 @@ Full design spec: `plans/phase11-dashboard.md`
   - **Colour intents (initial)** — `light_command` tool schema gains a `"color"` action; `build_light_command` routes it to `LightAction::ColorXY`. `just intent "make test bulb green"` now sends `ColorXY` instead of the old `color_temp: 7000`. (Colour encoding later superseded — see F-Colour below.)
   - **Mesh token stability** — `run-coordinator` and `restart-coordinator` source `coordinator.state` and export `MESH_AUTH_TOKEN` **before** launching the coordinator subprocess, so the same token survives restarts without requiring `source ~/.bashrc` afterwards.
   - **449 tests** across all crates.
-
 - **F-Spatial ✓** — Solar/Spatial Lighting Engine. Coordinator-side background task (`SpatialEngine`) that computes real solar position every 60 s via the `spa` crate (lat/lon from `MESH_LATITUDE`/`MESH_LONGITUDE` env vars, defaulting to London). Per-device `solar_enabled` flag persisted in `light_states` SQLite table. When enabled, the sweep calculates brightness and colour temperature from solar elevation (night −18°→bri 1/CT 500; noon 90°→bri 255/CT 153 mireds), then spatially modulates brightness per device using a dot-product of the device's physical XY position against the sun's azimuth vector (east-facing bulbs brighten as the sun rises east). Room-aware adjustments: `orientation_degrees` rotates the effective azimuth, `window_facing` boosts/dims based on how directly the sun hits the window, `has_window: false` halves intensity. New SQLite table `light_positions (device_id, x, y, z, room_id)` with in-memory `HashMap` mirror; rooms gain `orientation_degrees`, `has_window`, `window_facing` columns (with live ALTER TABLE migrations). REST: `GET/POST /api/lights/{device}/position`. `solar_mode` added to `build_light_action`; enabling saves the device's pre-solar state; disabling restores on/off + brightness + CT + XY to the node. `DashboardEvent::SolarUpdate { azimuth, elevation }` broadcast to WS clients each tick. `spa` + `chrono` added to coordinator deps. **449 tests.**
-
 - **F-Colour ✓** — Native CIE xy colour intent. Replaced the CSS-name/hex lookup table with direct CIE 1931 chromaticity coordinates output by the LLM. Tool schema now exposes `cx` and `cy` number fields with saturated-colour anchors (red=0.675/0.322, blue=0.167/0.040, green=0.409/0.518…) and white-point interpolation guidance for light/pale shades. `action` field gains an explicit description disambiguating `color` (any named hue, requires cx+cy) from `color_temp` (white-light warmth only). `rgb_to_xy` and `css_color_to_xy` helper functions removed. `build_light_command` returns `Option<Vec<LightCommandRequest>>` so bad colour calls are surfaced rather than silently falling back to `On`. New schema-structure test asserts `cx`/`cy` present and old `color` string field absent. **460 tests.**
-
 - **F-Effects ✓ (palette UI + room-level solar redesign)** — Effects/Scenes taxonomy and drag-from-palette UX. Establishes a clear design split:
   - **Scenes** (static snapshots): a saved state — specific brightness, colour, on/off per device. Recalled instantly. Already live (F6). User creates, names, and recalls them per room.
   - **Effects** (dynamic, ongoing): a coordinator-side process that continuously adjusts lighting over time. Enabled per room by dragging from a palette; the coordinator keeps running the effect until explicitly disabled.
@@ -521,13 +353,11 @@ Full design spec: `plans/phase11-dashboard.md`
   - **Engineering note — effect handler registry** *(superseded by F-Effects-2)*: The current drop handler uses a single `if (effect === 'solar')` check. F-Effects-2 generalises this past a frontend handler map to a backend `Effect` trait + registry so adding a new effect doesn't require frontend or API changes — see `plans/phase11f-effects-2.md`.
   - **Engineering note — optimistic UI**: `setSolarMode` optimistically updates `roomsData[idx].solar_enabled` before the server confirms; restore-solar optimistically marks the device solar_enabled=true and reverts on failure. The coordinator broadcasts a `LightingUpdate` on `set_solar_enabled`, so the WS event auto-corrects within milliseconds.
   - **294 tests** across all crates.
-
 - **F-Spatial-2** — Room Layout Canvas. Clicking a room name/header opens a full layout view for that room (replaces the card in-place, back button returns to the room list). The layout view is an SVG canvas — a top-down floor plan the user builds themselves.
   - **UX**: Click room header → layout view slides in. No extra buttons needed; the card IS the entry point. Back/close returns to rooms list.
   - **Phase A ✓ Complete — Bulb placement**: SVG canvas (`viewBox="0 0 1000 1000"`, scales to any screen). Bulb chips in sidebar; drag to canvas → snaps to 1/20 grid, drops to normalised (x, y, z) position. `fixture_type` (`ceiling_spot` | `pendant` | `table_lamp` | `floor_lamp` | `led_strip`) sets default Z and solar sensitivity. Canvas popover: height slider, fixture type picker, remove button. Undo/redo (Ctrl+Z/Y) via JS snapshot stack. Bulb icons reflect live state (colour swatch, brightness). `SpatialEngine` uses updated positions + Z on next sweep (3D dot-product when Z > 0, 2D fallback for legacy). `fixture_type` column added to `light_positions` table. **278 tests.**
   - **Phase B ✓ Complete — Windows & Doors**: `openings` SQLite table with full CRUD REST API (`GET/POST /api/rooms/{id}/openings`, `PATCH/DELETE /api/rooms/{id}/openings/{oid}`). Legacy migration converts `has_window=1` rooms to opening rows on startup. Canvas: drag window/door chip to wall edge (magnetic snap within 80 SVG units), midpoint snap, resize handles at each end, **move drag** (grab body → slide along wall or drag to different wall, `wall_edge` PATCH-able). Transmission popover with type-aware presets (Clear/Frosted/Blind for windows, Solid/Half-glazed/Full-glazed for doors). Live light cone SVG overlay (angle from solar azimuth, opacity from `transmission × elevation_factor`), redrawn on every `SolarUpdate` WS event. `SpatialEngine` replaced `has_window`/`window_facing` with per-opening geometry: `contribution += (1 − norm/90) × transmission × width_norm × clamp(elevation/45, 0, 1)`. `opening_scope`, `height_norm`, `height_span` fields stored for Phase C 3D geometry. Service worker cache bumped to `mesh-v3`. **280 tests.**
   - **Rooms UX (alongside Phase B) ✓**: Removed redundant rename button — hover pencil `✎` appears on room name hover. Room cards collapsible via `▾`/`▸` chevron, state persisted in `localStorage` per room. Fixed silent FK bug in `delete_room`: `light_positions.room_id` now NULLed before deleting the room so bulbs survive as unassigned devices with coordinates intact.
-  - **Phase C — Three.js 3D view**: Replace the hand-rolled SVG canvas with a **Three.js** scene (CDN importmap — no build step). An orthographic camera reproduces the current 2D floor-plan view exactly; a "3D" toggle button switches to a perspective camera + `OrbitControls` so the room can be spun and zoomed. Room geometry is a `THREE.Shape` polygon so non-rectangular rooms (L, T, etc.) are naturally supported. Openings are coloured wall patches; fixtures are emissive spheres whose brightness/colour tracks the live WS state. Prerequisites: add `width_m`, `depth_m`, `height_m` floats and optional `shape_vertices` JSON column to the `rooms` table (ALTER TABLE migration), and a UI to set them (numeric inputs in the room settings popover). Without dimensions the view defaults to a 4 × 4 × 2.5 m box. Rendering tasks: floor + ceiling quads, four extruded wall meshes with per-face UVs, opening cutouts as CSS colour patches (full boolean geometry holes deferred — hard in Three.js without BSP), fixture spheres with `PointLight` per bulb, ambient + directional sun light that tracks `SolarUpdate`. Canvas toggle preserves all placed bulbs and openings — no data reload needed. Target: 2D view is visually identical to the current SVG canvas; 3D adds spin/zoom and approximate room shape. Phase C replaces the SVG `<g>` layers entirely; the JS module (`layout.js`) is refactored but the REST API and data model are unchanged.
   - **Phase D ✓ Complete — Live sun arc + Room Compass Orientation + Light Simulation**
     - **Sun arc overlay**: A sun icon traces an arc across the canvas perimeter showing today's solar path (sunrise azimuth → sunset azimuth mapped to compass bearing around the room boundary). A pulsing dot marks the current position, driven by the existing `SolarUpdate` WS event — no new backend needed. The arc is drawn relative to `orientation_degrees` so it immediately reflects the room's real-world facing.
     - **Time scrubber**: A slider below the canvas lets the user preview "what will my lights look like at 4pm?" — dragging computes a hypothetical solar position (client-side trig, same formula as `spa` but in JS) and animates bulb brightness/CT to their predicted state. Releasing snaps back to real-time mode. Scrubber initialises to current wall-clock time (not noon). Releasing the scrubber also sends real Zigbee commands to solar-enabled bulbs in the room (brightness + CT with 1.5 s transition) so the physical lights preview the simulated state. Makes the SpatialEngine logic tangible and child-friendly.
@@ -555,7 +385,6 @@ Full design spec: `plans/phase11-dashboard.md`
     - **`fixture_type` column** added to `light_positions` table (TEXT, nullable — null treated as `ceiling_spot` for backward compat).
     - **Phase A auto-arrange** — once ≥2 anchor lights are placed, an "Auto-arrange remaining" button distributes unplaced lights of the same fixture type evenly across the canvas (ceiling spots in a uniform grid, floor/table lamps pushed toward walls). Pure JS, no backend needed.
     - **Deferred — Zigbee signal triangulation**: Z2M exposes per-link `linkquality` (LQI) in neighbour/routing tables. With ≥3 lights that can hear each other, rough relative XY positions can be inferred via trilateration. LQI is noisy (affected by obstructions and antenna orientation) so results need user confirmation, but could seed the canvas with plausible starting positions before manual refinement. Blocked on: assessing Z2M neighbour-table API stability and LQI accuracy in practice. **Note:** Philips Hue SpatialAware (Bridge Pro, shipped Apr 2026) solves this with AR camera scanning but requires the Bridge Pro hardware and bypasses Z2M — not directly usable here, though a one-time import via the local Hue API v2 entertainment_configuration endpoint is worth revisiting if users have a Bridge Pro alongside Z2M.
-
 - **F-Scenes-2 ✓** — Scene UX polish, drag reorder, toggle/revert, and stability fixes.
   - **Scene preview colours** — `SceneRecord::preview_color()` method averages CIE xy chromaticity across all snapshot devices, falling back to a colour-temperature approximation (K = 1 000 000/CT, linear xy interpolation between warm 2700 K and cool 6500 K anchors). `SceneInfo` carries `preview_color: Option<[f32; 2]>` (omitted from JSON when absent). Scene chips display a colour gradient swatch from the saved state. Warm-start propagates preview colours from SQLite on coordinator boot.
   - **Active scene indicator** — `activeSceneByRoom: Map<roomId, sceneId>` in `rooms.js` tracks which scene is live per room. Active chips show a filled dot prefix, bold weight, and a ring shadow — industry-standard "selected" treatment so the current scene is immediately obvious at a glance.
@@ -571,7 +400,6 @@ Full design spec: `plans/phase11-dashboard.md`
   - **Chaos test 6/7 fix** — Heartbeat handler returned `None` (no reply frame); changed to `Some(MeshMessage::Acknowledge)` so the "valid heartbeat is acknowledged" scenario passes.
   - **Canvas breathing fix** — `stopPulse` was called on every `pointerup`, killing the animation before the popover opened. Moved to fire only on confirmed drag end; `dismissPopover()` now calls `stopPulse` so breathing stops when the popover is dismissed.
   - **295 tests** across all crates.
-
 - **F-Effects-2 ✓ Complete** (commits `ced2c03` → `58f4c26`). Effects registry + curated catalogue. Spec lives at `plans/phase11f-effects-2.md`. Replaced the placeholder `rooms.solar_enabled` bool and the inline `if (effect === 'solar')` drop-handler with an extensible registry. Adding effect #N is a single file in `coordinator/src/effects/`.
   - **`Effect` trait** (`coordinator/src/effects/mod.rs`) — `id` / `display_name` / `category` / `cadence` / `params_schema` / `default_params` / `tick(&EffectCtx) -> Vec<EffectCommand>` plus lifecycle hooks (`on_enable`, `on_handoff`, `on_disable`), `respects_overrides`, and the opt-in persistence triad (`persist_cadence`, `serialize_internal_state`, `deserialize_internal_state`) so stochastic effects survive a coordinator restart without continuous disk writes.
   - **`SpatialHelpers`** ships with `west_to_east` + `directional_offset(bulb, Direction)` returning offsets in `[-0.5, +0.5]` for the `t_bulb = clamp(t_global + offset, 0, 1)` pattern. Other geometric helpers (`angle_to_sun`, `window_proximity`, `altitude_band`, `distance_to_wall`) listed in the plan are still TODO and will land when an effect needs them. Room-orientation rotation is also deferred until an effect requires true world-direction alignment.
@@ -585,14 +413,12 @@ Full design spec: `plans/phase11-dashboard.md`
   - **Tests landed**: scaffolding (29) + 2.1 runtime (11) + 2.2 API (8) + (10 + 4 SpatialHelpers + 3 merge_defaults + 8 Solar) + 2.5 Sunrise/Breathing/Candlelight (19) + 2.6 Aurora/Telemetry/drift (12). Total effects tests: 87. Workspace passes 572 across all crates.
   - **Engineering decisions locked**: single effect per room (Telemetry overlay revisited when F8 #1 ships); tick-driven, not reactive streams; JSON Schema params (no per-effect frontend code); seed + elapsed persistence preferred over continuous writes; **no backward-compat shims** (per memory `feedback_no_backward_compat`).
   - **Deferred to future slices**: 1 s OKLCH blend on effect→effect handoff (`blend` layer ready; runner doesn't wire it yet — no flicker observed in practice with hard transitions); `SpatialHelpers::angle_to_sun` / `window_proximity` / `altitude_band` / `distance_to_wall` (no effect needs them yet); room-orientation rotation in directional offsets; Telemetry effect real wiring (F8 #1).
-
 - **F-Lighting-UX ✓** — Casual-first room cards, unified slider model, bulb deletion, and Zigbee-down indicator. Mobile-first redesign so the three everyday actions (On/Off, Brightness, Scenes) are always visible; colour/temperature behind a single 🎨 popup; floor-plan and delete tucked away.
   - **Unified slider core** — one `attachThumbSlider()` (thumb-only grab, track click passes through to the card, value bubble, `.slider-active` guard so a WS-driven `render()` can't wipe a slider mid-drag) wraps every slider via `buildSlider` / `wireDeviceSlider`. Deduplicated `lockSliderToThumb` (was copy-pasted in `rooms.js` + `layout.js`). `patchDevice()` helper replaces repeated optimistic `devicesMap.set` boilerplate.
   - **Colour-vs-temperature mode persists** — Hue bulbs always report *both* `color_xy` and `color_temp`, so the active mode can't be inferred from state. Mode is persisted per device (`mesh-mode-<id>`) and per room (`mesh-room-mode-<id>`) in `localStorage`; adjusting a slider pins its mode. *(Single-dot toggle superseded by the icon↔dot model in **F-Lighting-UX-2** below.)*
   - **Bulb deletion** — `DELETE /api/lights/{device}` → `Registry::delete_device` removes the device from `room_devices`, `light_states`, and `light_positions` (DB + in-memory). Delete button on unassigned-strip chips.
   - **Zigbee-down indicator** — `MeshMessage::ZigbeeStatus { online }` (emitted by the lighting capability from `zigbee2mqtt/bridge/state` via `parse_bridge_online`, and from MQTT `ConnectionLost`) → `DashboardEvent::ZigbeeStatus` drives an amber offline banner and disables all light controls. Placeholder devices from `push_device_discovery` now start `online: false` (only a real `LightState` report marks a bulb online). Client-side `inferZigbeeStatus` fallback covers the case where z2m crashes before ever connecting (no Last Will): rooms exist but no devices reported ⇒ offline. Per-card: offline device cards disable light controls but keep drag + delete. *(Implements the "Device availability tracking" deferred item below.)*
   - **Tests**: `parse_bridge_online` (3), `delete_device_clears_room_membership_and_position` (1), placeholder-offline assertion. **600 tests across the workspace.**
-
 - **F-Lighting-UX-2 ✓ (2026-06-02)** — One affordance language for colour/temp and effect/scene: an **icon at rest, a marker when engaged**.
   - **Colour/temp icon↔dot** (supersedes the single-toggle dot above). Each domain shows its glyph (🎨/🌡) at rest; the domain you last *set* becomes a live dot tracking the value and **persists** — tracked in per-device `deviceDotDomain` / per-room `roomDotDomain` session maps, painted by `paintDeviceButton` / `paintRoomButton`. Brightness leaves it; setting the other domain moves it; on/off or a scene clears both back to icons. While a control is dragged it shows the live value. Kills the old state-derived flicker and the thumb-like temp dot.
   - **Consistent warm-white On** — room On *and* single-bulb On both power up to a shared `HUE_DEFAULT_ON` (brightness 200 + `color_temp` 370 ≈ 2700 K). Soft on/off remains via the brightness slider; Off is plain off.
@@ -602,25 +428,7 @@ Full design spec: `plans/phase11-dashboard.md`
   - **'all' group hidden** — the zigbee catch-all `all` group is no longer rendered as a bulb-like, undeletable card in the Lighting tab (`lighting.js`).
   - **Overflow fix** — restored `min-width:0` on the room header flex chain (`.room-card-header`, `.room-header-name-row`) and added `flex:1; min-width:0` to `.light-name-group`, so long hex device names ellipsis instead of forcing `#lighting-list` past the viewport (which had stopped the effects palette scrolling). Regression of `e6da0f6`, undone by the casual-first refactor.
   - **Tests**: `recall_scene_with_device_id_targets_only_that_device` (single-device recall). Frontend has no JS test harness. (Routing-invariant tests + `docs/coordinator.md` lighting-routing note landed in `f19b503`.)
-
-- **F7** — Switches / Input Devices. New `capability_switches` crate. Subscribes to Z2M button, remote, motion sensor, and contact sensor events. Emits `SwitchEvent { device_id, action }` to coordinator; coordinator broadcasts `DashboardEvent::SwitchEvent`. Dashboard: live switch activity feed. Foundation for the Reactive Graph.
-- **F8** — Creative Features. Delivery order: (1) Telemetry Lighting effect (GPU activity → ambient pulse); (2) Photo Colour Picker (client-side Canvas API → CIE xy); (3) Intent-First Scenes (LLM resolves "cozy" to actual device states at runtime); (4) Temporal Composer (drag-and-drop scene timeline, coordinator executes transitions); (5) Reactive Graph (plain-language automation rules parsed by LLM into `{trigger, action}` pairs); (6) 2D Room Layout (SVG floor plan, builds on F-Rooms + F-Spatial).
-- **F9** — Light Games. The bulb grid is a natural game board — game logic lives in the coordinator (Rust, deterministic, no browser needed). Each game is a coordinator-side state machine that sends `LightCommand` sequences; the dashboard renders a game UI overlay and relays player input via a new `POST /api/games/{game}/input` endpoint.
-  - **Simon Says** (MVP) — coordinator picks a random bulb, flashes it a colour, player taps the matching card in the dashboard. Sequence grows by one each round. Lives: 3. High score persisted in SQLite.
-  - **Whack-a-Mole** — coordinator lights a random bulb for 1.5 s (yellow flash). Player must tap it in the dashboard before it goes out. Miss = −1 life, hit = +1 point + speeds up by 50 ms. 3 lives, 60 s game. Bulbs turn red on miss, green on hit.
-  - **Colour Match** — coordinator sets two bulbs to slightly different CIE xy values; player picks which bulb matches a reference swatch shown in the UI. Difficulty ramps by reducing the xy delta each round.
-  - **Hot/Cold** — motion-sensor driven (requires F7). Coordinator picks a "treasure" room; player walks around, bulbs glow warmer (red) when closer, cooler (blue) when farther. Win = enter the correct room.
-  - **Disco Party** — no player input. Intent-triggered ("start a disco!"). Coordinator runs a choreographed colour sweep loop across all bulbs using the Effects engine; stops on "stop the disco" intent or after a configurable duration.
-  - **Strobe / Rave mode** — fast-path only (F10 prerequisite). Sub-100 ms colour cycling across the grid, tempo synced to a BPM set via intent ("strobe at 120 BPM").
-  - **Engineering note**: each game is a `GameSession` struct spawned as a tokio task. `GameRegistry` (similar to effect handler map) stores active sessions keyed by game ID. Dashboard game overlay is a separate JS module (`games.js`) that subscribes to a new `DashboardEvent::GameState` WS event for render updates.
-- **F10** — Effects Engine fast path. Prerequisite: evaluate SLZB-06 + Z2M latency floor. If viable: `capability_effects` crate with fast-path UDP for fluid effects at ~50 Hz. Screen sync via `getDisplayMedia` (browser API, no Rust needed for MVP) deferred until fast path confirmed.
-
-### Phase G — Security panel
-
-### Phase H — Polish, icons, desktop layout pass
-
 ### Deferred dashboard polish (raised post-C5, updated 2026-06-11)
-
 > Full backlog audit with effort estimates and recommended order: `plans/backlog-2026-06.md` (2026-06-11). Items below are kept in place for context; the plan file is the working list.
 
 - **Multi-turn chat context** ✓ (2026-06-08) — `chat.js` accumulates `conversationContext` pairs; `POST /api/chat` carries `context: Vec<IntentTurn>`; `handle_intent` prepends the turns before the current user message. New-conversation button shipped alongside. **Token-budget truncation** ✓ (2026-06-08, `c1e45d0`) — client trims to `MAX_CONTEXT_TURNS = 20` oldest-first; turn counter shown in UI.
@@ -628,13 +436,6 @@ Full design spec: `plans/phase11-dashboard.md`
 These are non-blocking UX improvements for after C6 ships:
 
 - **Dashboard preferences persistence** ✓ (2026-06-13, updated 2026-06-14) — `dashboard_preferences (user_id, key, value)` SQLite table; hybrid optimistic `localStorage` write + async server sync. `loadPrefs()` hydrates localStorage from the server on page load so panel order and collapse state look the same from any device or browser. Synced keys: `meshNodeOrder`, `meshHealthOrder`, `meshModelOrder`, `meshLightOrder`, `mesh-health-collapsed-*`, `mesh-room-collapsed-*`. New `prefs.js` module with `setPref` (instant) and `setPrefDebounced` (200 ms, used by all drag-end handlers to avoid write storms). `PUT /api/preferences/{key}` returns the full updated map (no re-fetch needed). `DELETE /api/preferences/{key}` added (returns 200 + updated map, 404 if key absent). 7 preference tests (445 coordinator total, 567 workspace).
-
-  **Deferred preferences improvements:**
-  - Schema / key allow-list — any string accepted today; enforce at write boundary when key space stabilises.
-  - `user_id` wired to auth token — currently hardcoded `"default"`; safe for single-user, must change before multi-user auth.
-  - Multi-device live sync — `loadPrefs()` on page load is sufficient for single-user; real-time cross-device push needs a WS-pushed `PrefsUpdated` event.
-  - `updated_at` / `version` columns — deferred until migration tooling exists.
-  - Consistent key naming (`dashboard.mesh.order`, `dashboard.health.collapsed.<id>` etc.) — rename sweep is a separate commit with localStorage migration.
 
 - **Metric colour thresholds** ✓ (2026-06-11) — `metricClass(pct, metric)` with per-metric bands (`METRIC_THRESHOLDS`: CPU/RAM warn 75 / crit 90, GPU 90/98, VRAM 95/99 — VRAM normally sits near full when a model is loaded) colours the value text amber/red on CPU%, RAM%, GPU%, and VRAM%.
 - **Sparkline tooltip with exact timestamp** ✓ (2026-06-11) — per-point transparent `<rect>` hit regions (Voronoi midpoint splits, no gaps) each carry a `<title>` showing `CPU: 87.3%  at 14:23:01`; falls back to `(sample N)` labels when timestamps are absent or mismatched. Mini sparklines on the Nodes tab unchanged.
@@ -663,11 +464,6 @@ These are non-blocking UX improvements for after C6 ships:
 #### Layout view — known issues / deferred fixes (2026-06-05)
 
 - **Dragging windows/doors from the popover unreliable** ✓ (2026-06-13, `3feadde`) — fixed by capturing pointer on `document.body` instead of the chip element, so `closeSidebarSheet()` hiding the chip cannot fire `pointercancel` mid-drag; move/up/cancel handlers promoted to named functions registered on `document` so `cleanup()` can remove them by reference.
-
-- **Room brightness/colour/temp controls (action bar)** — popover is correctly positioned above the action bar on desktop; mobile behaviour needs verification after the `position:fixed` + `getBoundingClientRect` approach was adopted. The centred-modal approach used for the ＋Add palette may be worth applying here too if offset issues surface on mobile.
-
-- **＋Add palette (mobile)** — switched to a centred modal (`position:fixed; top/left:50%; translate(-50%,-50%)`) to escape the dynamic-viewport toolbar issue. The `collapsed` class was found to hide all content when the sidebar had been collapsed on desktop and then opened on mobile — fixed by removing `collapsed` on open. Monitor for any remaining edge cases.
-
 ### Deferred chaos / QA scenarios (raised post-Phase B)
 
 ✓ All three scenarios covered (2026-06-13, `97eb9f7`):
@@ -675,74 +471,6 @@ These are non-blocking UX improvements for after C6 ships:
 - **WS auth edge cases** ✓ — `ws_handler_rejects_wrong_token`, `ws_handler_accepts_both_tokens_during_rotation`, `ws_handler_rejects_expired_token_during_rotation` in `ws.rs` tests; real TCP server, real HTTP upgrade requests.
 - **Lagged broadcast receiver** ✓ — `broadcast_receiver_gets_lagged_when_slow` in `state.rs` tests; 200 events overflow the 128-slot channel, receiver gets `RecvError::Lagged`.
 - **Channel closed arm** ✓ — `broadcast_receiver_gets_closed_when_state_dropped` in `state.rs` tests; dropping the last `Arc<DashboardState>` gives `RecvError::Closed`.
-
----
-
-A lightweight web interface embedded in the coordinator process (no separate service). Primary goal: **observable mesh** — operators can see the state of the cluster at a glance and drill into errors without SSHing into nodes.
-
-### Core views
-
-- **Topology** — live graph of connected nodes, their model assignments, and heartbeat latency; nodes colour-coded (green / amber / red) by health status.
-- **Health timeline** — time-series strip per node showing CPU %, GPU %, RAM %, heartbeat jitter. Data sourced from the existing heartbeat `HardwareStatus` payloads; stored in a small ring buffer in the coordinator (no extra DB writes for MVP).
-- **Error feed** — structured error log; whenever a node reports an error (inference failure, model load failure, Zigbee disconnect, etc.) an entry is created with: timestamp, node, error kind, severity.
-- **Diagnostic panel** — clicking an error entry triggers the coordinator to request a log snapshot from the affected node (`DiagRequest` mesh message); the node responds with its last N lines of stderr/stdout and the web UI renders them inline. This avoids the operator having to SSH just to read a log.
-
-### Model management UI
-
-- Load / unload models on any ready node via button; mirrors `mesh load` / `mesh unload` CLI.
-- Node capacity bars (VRAM / RAM) update live so the operator can see headroom before choosing a model.
-
-### Tech choices (tentative)
-
-- **HTTP server** — `axum` (already familiar in the Rust ecosystem; lightweight); single binary, no Node.js build step.
-- **Real-time updates** — WebSocket endpoint (`/ws`) that streams `DashboardEvent` JSON; front-end subscribes and patches the DOM.
-- **Front-end** — plain HTML + vanilla JS (no framework) for MVP; keeps build complexity at zero. A Svelte/React layer can be added later if the UI grows.
-- **Auth** — dashboard protected by the same `MESH_AUTH_TOKEN`; pass as a Bearer token in the WebSocket upgrade or a session cookie set on first visit.
-
-### Security panel (HMAC failure metrics)
-
-Surface authentication anomalies in real time — the error feed alone is not enough once the cluster grows beyond two nodes.
-
-**Coordinator-side counters (in-memory, per peer socket address):**
-
-```rust
-struct PeerSecurityStats {
-    invalid_signature: u64,   // HMAC mismatch — bad key or tampering
-    stale_frame: u64,          // timestamp skew > 30 s — likely clock drift
-    downgrade_attempt: u64,    // plain MeshMessage JSON after auth — old binary or probe
-    last_event_ts: u64,        // Unix seconds of most-recent incident
-}
-```
-
-Keyed by `SocketAddr`; evicted when the connection closes. Incremented in the existing `FrameVerifyError` match arms in `coordinator/src/server.rs`.
-
-**New wire messages (future):**
-
-- `AdminMessage::RequestSecurityMetrics` → `SecurityMetrics(Vec<PeerReport>)` — CLI/dashboard polls on demand.
-- `DashboardEvent::SecurityIncident { peer, kind, ts }` — pushed over the WebSocket on every HMAC rejection so the dashboard error feed updates without polling.
-
-**Dashboard security panel:**
-
-- Table: peer IP, node name (if registered), failure kind, count, last seen.
-- Stale-frame rows highlighted amber with a "check NTP" tooltip.
-- Downgrade-attempt rows highlighted red — indicates a node running an old binary or an active probe.
-- Row clears automatically when the peer's connection closes cleanly (expected reconnect) or stays for the session if the connection was forcibly dropped (anomaly).
-
-**CLI:**
-
-```
-mesh security-report        # one-shot snapshot of current failure counts
-```
-
-### Deferred / stretch
-
-- Alert rules (e.g., node offline > 60s → webhook / email).
-- Historical inference latency per model.
-- Live intent log (query, routed-to node, latency, response preview).
-- Mobile-friendly layout.
-- ~~**Beelink BIOS — locate Wake on LAN setting**~~ — done 2026-06-11: WoL located and disabled alongside the fTPM re-disable; node stable.
-
----
 
 ## Phase 11.6 — Always-On Coordinator + Remote Access ✓ Complete
 
@@ -784,8 +512,6 @@ Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniL
 - SQLite `journal_mode=WAL` + `synchronous=NORMAL` for SD-card wear mitigation on pi1.
 - `LimitNOFILE=4096` if cluster grows past ~100 agents.
 - Per-node TLS certs instead of single self-signed cert across all agents.
-
----
 
 ## Phase 11.7 — REAPER DAW Integration ✓ Complete (2026-06-14)
 
@@ -837,48 +563,6 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
     in capability-reaper) as a tool, keeping auto-launch non-opinionated about the session.
   - **macOS launch path** — `REAPER_EXE` defaults to the app-bundle binary but is untested; gated
     on the same Mac mini provisioning as the items below.
-- ◐ REAPER on macOS — code is macOS-ready (`default_scripts_dir()` resolves
-  `~/Library/Application Support/REAPER/Scripts` on macOS, `/mnt/c/...` on WSL2); full
-  provisioning (install script + node setup + testing) still pending the Mac mini (~end Jul 2026).
-- ◐ Multi-REAPER instances — route intents to a specific REAPER node once more than one
-  exists (e.g. OmniLink1 + Mac mini). Registry side is ready (`nodes_with_feature` returns all
-  matching nodes); intent routing currently grabs the **first connected** REAPER node (the
-  `extend this to a policy` comment in `intent.rs` is the only code concession). Needs: a target
-  (explicit `node` arg + an active/default instance, since small models can't reliably infer it
-  from the utterance), a **per-tool** selection policy (most intents hit one instance, a few like
-  "stop all" fan out), disambiguation when none is specified, and per-instance status keyed by
-  node ID in the poller + dashboard panel. Parked until a second REAPER box exists — gated on the
-  same Mac mini as the macOS work. Full design notes: `docs/reaper.md` (Deferred).
-- ◐ Plugin stack + FX automation — curated free-first third-party plugin list (vocal + guitar
-  tracking weighted: Analog Obsession, TDR Nova, Valhalla Supermassive, Youlean, …) plus a generic
-  FX-control tool layer. No plugin exposes its own API — control is uniformly via REAPER's
-  `TrackFX_*` ReaScript functions, so it extends the existing structured-tool pattern. Must guard
-  against FX index drift (resolve by name in the coordinator, never trust raw LLM indices),
-  `AddByName` format-prefix instability across OS, and lazy param-map init. Melodyne is **not**
-  automatable by us (offline/ARA). Plugin install is manual (Windows-side, not automated).
-  Execution is **incremental, free-first, one plugin at a time**, and every slice must be
-  verifiable **without recording audio** (insert + read-back) since the studio isn't built yet.
-  First target: **Valhalla Supermassive** (free reverb — famous named presets, the cleanest demo).
-  - Slice 1 — `reaper_add_fx` (◐ code + unit tests done; pending live verification): inserts an
-    FX by name on a named track, matching the bare product name (no `VST:`/`VST3:` prefix) and
-    reporting unresolved plugins instead of a silent no-op. Verify with **Valhalla Supermassive**
-    (a VST that resolves by bare name). **Note:** stock **ReaVerbate** is *not* a safe control —
-    it's a JSFX and does **not** resolve via `TrackFX_AddByName` by bare name (JS plugins need a
-    different name form), so don't use it as the "always installed" fallback.
-  - Slice 2 — `reaper_list_fx` + `reaper_list_fx_params` (◐ code + unit tests done; pending live
-    verification): discovery. `reaper_list_fx` walks a track's chain returning name + 1-based slot
-    (+ bypass flag); `reaper_list_fx_params` resolves the FX by name match (never a raw index) and
-    lists each param's name, formatted value, and raw 0–1 value. Running `reaper_list_fx_params` on
-    Supermassive answers the open question of whether its modes are REAPER presets (→ `SetPreset`)
-    or internal params — if a "mode" param appears, they're params; if not, they're presets.
-  - Slice 3 — `reaper_set_fx_preset` + a small curated preset/mode catalog: the "make it
-    spacious" payoff.
-  - Later — `reaper_set_fx_param` / `reaper_get_fx_param`, `reaper_bypass_fx`, then the next free
-    plugin (TDR Nova / Analog Obsession).
-
-  Full list, pricing, install steps, and per-plugin automation: `docs/reaper-plugins.md`.
-
----
 
 ## Phase 11.8 — Multi-Device Home + Room-Centric Control (Plan ratified 2026-07-03 — executing)
 
@@ -891,6 +575,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > E blinds (+ sun-geometry automation) → F HVAC. The design notes below stand;
 > the plan supersedes the sequencing details where they differ.
 >
+
 > **Phase A complete (2026-07-03, wire v5):** typed `devices` registry table
 > (+ `light_groups`) replacing the `light_devices` blob; z2m `exposes`
 > classification in discovery (light/sensor/cover/climate/unknown, actuators
@@ -899,7 +584,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > broadcast fan-out — lighting consumes it, sensors will subscribe beside it);
 > `DeviceListReport` with typed entries; `shared::Feature` enum replacing raw
 > feature strings across registry/intent/agent. 769 tests.
->
+
 > **Phase B software-complete (2026-07-04, wire v6):** `capability-sensors`
 > crate (thin lighting sibling: forwards `SensorChanged` + sensor availability
 > flips from the shared zigbee client as `MeshMessage::SensorState`; sensor
@@ -913,7 +598,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > `docs/pi1-lighting-setup.md`. 792 tests. **Remaining: the live gate** —
 > pair one temp/humidity + one motion sensor, verify readings + battery +
 > availability land in registry/dashboard snapshot.
->
+
 > **Pair/remove from the app (2026-07-04, wire v7)** — Phase D item 2's
 > *backend* pulled forward so the sensor live gate needs no SSH:
 > `MeshMessage::{PermitJoin, DeviceRemove, ZigbeeJoin}`; the long-deferred
@@ -925,7 +610,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > unpairs (was registry-only — the device re-announced and came back);
 > Lighting tab gains a Pair-device button + live feed (interim home until
 > Phase D's Devices tab). 805 tests.
->
+
 > **Sensor readout + illuminance (2026-07-04, wire v8)** — closed the one
 > visible gap from `plans/sensor-readout-and-completion.md` Part 1: Lighting
 > panel gains read-only sensor cards (`SensorUpdate` WS handler was the
@@ -939,7 +624,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > parser, the coordinator's field-wise merge (the easy place to silently
 > drop it), and the readout card (`💡lx`). See `docs/pi1-lighting-setup.md`
 > §9 for the model-specific note.
->
+
 > **Phase C started (2026-07-04)** — sensor tools + context (item 1) done
 > in `coordinator/src/intent.rs`, no wire change (coordinator-only, reads
 > the existing `SensorReport` snapshot): `get_climate { room? }` tool
@@ -960,7 +645,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > *closed* (reed switch made), not open — `lighting.js`'s card had it
 > backwards since the readout shipped; no contact sensors were in the
 > hardware batch yet, so it was never exercised live. 824 tests (+11).
->
+
 > **Live-verified against a real LLM (2026-07-05)** — `just intent "what
 > temperature is the kitchen?"` surfaced two real bugs on first run, both
 > fixed and confirmed working on retest: (1) readings displayed the raw
@@ -975,14 +660,14 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > with `{"target": "kitchen"}` instead of the schema's `{"room": "kitchen"}`
 > — generalizing from `light_command`'s parameter name. `dispatch_get_climate`
 > now accepts `target` as an alias for `room`. Commit `2c067cb`.
->
+
 > **Next:** the remaining Part 2 hardware-gate sub-checks — restart-
 > survival, the battery-pull offline-dim path, and the delete/unpair test
 > (see `plans/sensor-readout-and-completion.md` Part 2) — or start scoping
 > Phase E (blinds; hardware-gated) or a Switch→action binding layer (button
 > presses currently just flash on screen, per the 2026-07-05 Switches entry
 > above).
->
+
 > **Phase D shipped (2026-07-04)** — frontend-only, no wire bump (every REST
 > endpoint touched — `PATCH /api/rooms/{id}/devices`, `PATCH`/`DELETE
 > /api/lights/{id}[/name]` — was already device-type-agnostic, confirmed by
@@ -1022,7 +707,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > old `/static/lighting.js` now 404s) — **no browser on WSL2**, so the
 > actual room-card/Devices-tab rendering needs a visual check on the phone
 > (pi1:9001) after deploy, alongside the sensor live gate above.
->
+
 > **Switches + Blinds/HVAC presence + glass ceiling (2026-07-05, wire
 > unchanged, commit `84e82f9`)** — ahead of the E/F hardware, added a
 > `DeviceType::Switch` (generic action-only classification: a bare `action`
@@ -1037,7 +722,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > wall_edge) so a conservatory-style room gets sun exposure in the solar
 > effect without needing a wall-facing window. Fixed a pinned-sensor
 > double-render bug in the same pass. Full test suite + clippy clean.
->
+
 > **Hardware live gate (2026-07-05)** — deployed and confirmed live: all 7
 > sensors paired and reporting (4× SNZB-02P temp/humidity, 3× SNZB-03P R2
 > motion). Two Hue Tap Dial-style switches also paired — the first real-
@@ -1047,7 +732,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > what was pressed but trigger no action — binding a button/rotation to a
 > light or scene is the next real feature, see **Switch → Action Binding**
 > below.
->
+
 > *2026-07-07:* two more Part 2 sub-checks closed out (see
 > `plans/sensor-readout-and-completion.md`): `GET /api/sensors` curled
 > directly — all 7 sensors present with the expected fields, matching the
@@ -1057,16 +742,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > had actually already passed 2026-07-05 (`plans/sensor-readout-and-completion.md`'s
 > own Part 2 §4) — this doc's earlier note saying it "still needs a live
 > run" was itself stale.
->
-> **Still open, needs Jon physically present (destructive/hardware-in-hand):**
-> - Pull a sensor's battery (or temporarily lower z2m's
->   `availability.passive.timeout` instead of waiting ~25h) → confirm the
->   card dims to offline with readings intact.
-> - Delete a sensor from the dashboard → confirm it actually leaves the
->   Zigbee network (re-pairing required to bring it back, not just a
->   vanished registry row) — the unpair-on-delete path only has a mocked
->   connection test so far.
->
+
 > ## Switch → Action Binding ✓ Shipped and live-verified (2026-07-07)
 >
 > A physical button press or dial rotation now actually does something,
@@ -1107,7 +783,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > serving (`/static/switchbindings.js` 200, imported correctly by
 > `devices.js`) — actual phone visual check still needed (no browser on
 > WSL2).
->
+
 > **Dial rotation bound + self-populating action combo box (2026-07-07)** —
 > same Tap Dial's rotation now controls brightness: bound z2m's own
 > pre-summarized `brightness_step_up`/`brightness_step_down` actions (rather
@@ -1127,12 +803,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > next time the panel/row is rebuilt, which in practice happens often
 > anyway since most other WS events trigger a full Devices-tab re-render) —
 > a known, minor gap, not a correctness issue.
->
-> **Open question:** does the ±25 brightness step feel right on the actual
-> dial (too coarse, too fine, or about right)? Not yet checked with Jon
-> against real usage — `step_delta` is trivially adjustable per-binding via
-> the same `POST /api/switch-bindings` call if it needs tuning.
->
+
 > **Home tab tile redesign + in-room groups backend (2026-07-06, commit
 > `7e6ef30`)** — full plan at `plans/home-ui-redesign.md`, written after
 > reviewing 6 candidate UI directions plus two external appraisals (Bing,
@@ -1154,7 +825,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > code (`xyToRgb` already clamps, group members were already position-
 > sorted, etc.) or not actual regressions. **Next:** Phase 2's frontend —
 > the group cluster UI in the expanded room panel (still to build).
->
+
 > **Phase 2 frontend + Phase 2b group-scoped scenes (2026-07-06, commit
 > `8840d6c` + this commit)** — Phase 2 frontend shipped first (`8840d6c`):
 > per-group on/off + brightness cluster, inline rename/delete, `+ New
@@ -1175,7 +846,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > `"GroupName: "` prefix; each group cluster gets its own compact
 > `+ Save scene` row (factored out into `buildSceneSaveRow`, shared with
 > the room-wide one). 609 tests.
->
+
 > **Phase 4 — wall-photo layout aid (2026-07-06)** — not room scanning: a
 > manual-tracing aid for the layout editor's existing dimensions/
 > orientation/opening flow. One photo per wall (N/S/E/W — the ceiling
@@ -1193,7 +864,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > backdrop sitting just above the floor rect and below every interactive
 > layer, `pointer-events: none` so it never intercepts canvas clicks. 623
 > tests.
->
+
 > **Phase 3 — floorplan view mode, rescoped before coding (2026-07-06)** —
 > the original plan assumed `RoomRecord.origin_x`/`origin_y` were
 > whole-house world coordinates, making "assemble a real floor plan" a
@@ -1214,7 +885,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > originally rated the highest-effort/risk phase turned out low-effort
 > once the false premise was caught early. 623 tests (unchanged —
 > frontend-only).
->
+
 > **Live-testing feedback batch (2026-07-06)** — power icon: the ⏻
 > Unicode codepoint (U+23FB) has no glyph in the Samsung S22's system
 > font (confirmed live — rendered as a blank/tofu box), replaced with an
@@ -1233,7 +904,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > custom-load flow, with guards against the search UI being wiped
 > mid-interaction, stale/superseded fetch responses, and state getting
 > stuck after the tab is backgrounded. 628 tests.
->
+
 > **Wall-photo backdrop tried and removed (2026-07-06)** — Phase 4's
 > photo-backdrop aid didn't hold up in live use: a real phone photo of a
 > wall inevitably includes floor/ceiling/perspective distortion, which
@@ -1241,26 +912,6 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 > attempted fix) 3D views. Removed entirely — `room_wall_photos` table,
 > its 3 REST endpoints, and all the layout.js/layout3d.js/style.css UI for
 > it. 614 tests (-14, the removed feature's own tests).
->
-> **Room-scanning research → deferred (2026-07-06)** — the actual original
-> ask ("a proper scan of the room, like Apple do when they scan your
-> face") needed real research before any code: full findings, what was
-> tried and rejected, and the planned integration shape are all in
-> `plans/roomplan-ios-scan.md`. Short version: no automatic/AR-assisted
-> scanning path exists for the Samsung S22 (Android, no LiDAR) that beats
-> manual measurement — confirmed even Magicplan, a leading commercial
-> room-scanning app, falls back to plain tap-corners-on-a-grid for
-> non-LiDAR Android devices. The iPad Pro (M5) does have a LiDAR Scanner
-> (confirmed from Apple's own spec page) and could run Apple's real
-> RoomPlan API — but only as a native iPadOS/Swift app, which is a hard
-> platform requirement (Xcode/macOS-only, no route from this project's
-> Linux dev environment) rather than something buildable/verifiable the
-> way everything else in this project has been so far. **Deferred until
-> Jon's new Mac Studio is unboxed and set up** — plan doc has the intended
-> shape (RoomPlan capture → post wall dimensions/openings straight into
-> the existing `rooms`/`openings` REST API, syncing to every device via
-> the shared coordinator database same as everything else) ready to pick
-> up at that point.
 
 Captured 2026-06-29 from a design discussion. Nothing built yet except the first
 piece (the Zigbee bridge health card, below). The home is about to grow well past
@@ -1338,23 +989,12 @@ type-tabs to setup/management.
   (TCP drop without first sending `offline`) no longer leaves a stale "Online".
   Together these close the blind spot where light commands vanished with nothing
   on the dashboard to explain why.
-- **When blinds land** (`capability-blinds`, Z2M `cover`): join the *generalised*
-  room model, not the lighting-specific path. New `cover` widget (position + tilt).
-  Good moment to replace raw feature strings (`"lighting"`, `"reaper"`, soon
-  `"cover"`/`"climate"`) with a feature **enum** — there'll finally be enough
-  variants (`nodes_with_feature` / `node_has_feature` / capability registration)
-  to justify the type safety. Premature while only lighting exists.
-- **Defer the full room-centric view** until a second device type exists to justify
-  it; until then don't over-invest in per-domain navigation a room view will
-  replace.
 
 ### Open question (resolved)
 
 Room-centric vs device-type-centric was the tension. **Decision: room-centric
 primary for control, device-type for the data model + management** — matching HA
 and Apple. The crate boundaries are unaffected by that choice.
-
----
 
 ## OpenAI-Compatible Inbound API ✓ Complete (2026-07-02)
 
@@ -1389,8 +1029,6 @@ drop-in private AI gateway).
 - Deferred until a third model family lands: replace the hard-coded
   qwen/deepseek checks in `llama::build_messages` with a model-quirk registry
   (same premature-abstraction call as the feature enum in Phase 11.8)
-
----
 
 ## OpenAI API — SSE Streaming ✓ Complete (2026-07-02)
 
@@ -1427,8 +1065,6 @@ local and cloud routes (`docs/openai-api.md` → Streaming).
 - **Post-deploy fix (verified live)**: client hang-up now cancels generation
   on the node via `CancelInference` — measured 54s → 924ms follow-up recovery;
   node-death mid-stream → error event + `[DONE]` in 9ms
-
----
 
 ## Code Review — Refactoring Backlog (2026-07-03)
 
@@ -1507,165 +1143,6 @@ audit was bug-focused). Prioritized; none are defects.
   heavy churn); `layout.js` at 3,401 lines (dashboard is demo-frozen per
   the productization plan).
 
----
-
-## OpenAI API — Per-Key Auth, Usage Attribution & Rate Limiting (Next)
-
-The third productization step (`an internal productization plan` item 3): one
-shared mesh token is fine at home, but a client site needs per-user/team API
-keys, per-key usage accounting, and per-key rate limits. This is the feature
-that produces the monthly "here's what each team used, and what it saved you
-versus cloud pricing" report — the ongoing-value justification.
-
-Design sketch:
-
-- **`api_keys` SQLite table** (registry DB): `key_hash` (SHA-256 — never store
-  the raw key), `label` ("finance-team"), `created_ms`, `revoked` flag,
-  optional `rate_limit_per_min`. Keys minted/revoked via new dashboard
-  Security-tab UI + `/api/keys` CRUD (mesh-token-auth only, like every
-  existing `/api/*` route).
-- **/v1 auth resolution order**: mesh token (admin, as today) → `api_keys`
-  lookup by hash. The resolved key label rides the request for attribution.
-- **`usage_log` table**: `ts_ms`, `key_label`, `model`, `prompt_tokens`,
-  `completion_tokens`, `duration_ms`, `served_by` (node / cloud), `stream`.
-  Written once per completed request (terminal result / finish chunk) —
-  both /v1 paths already have every field in hand.
-- **Rate limiting**: fixed-window per key (requests/min) checked at the top of
-  `chat_completions`; over-limit → the existing 429 `rate_limit_error`
-  envelope. No token-bucket sophistication until a client needs it. Optional
-  per-key token ceiling per calendar month alongside it (same check site,
-  reads `usage_log`) — the "no runaway spend" guarantee in the pitch.
-- **Reporting**: `GET /api/usage?from=&to=` aggregates per key/model/day;
-  dashboard panel later — CSV/JSON export first (the monthly PDF is generated
-  off-mesh). Include a cloud-equivalent-cost column (tokens × configurable
-  per-model cloud price) for the money-saved line.
-- **Non-goals for this phase**: multi-tenancy isolation (all keys see all
-  models), per-key model allowlists, OAuth — all deferred until a real client
-  asks.
-
----
-
-## Phase 11.9 — Frame TV Art Display (design ratified 2026-07-05)
-
-Local, subscription-free replacement for Samsung's Art Store on a QE32LS03C
-Frame TV: a Pi Zero 2 W hidden in an in-wall recess feeds the TV a fullscreen
-HDMI slideshow sourced from public-domain art collections (WikiArt,
-Rijksmuseum, The Met, Unsplash), driven by ai-mesh — the TV's own Art Mode /
-SmartThings / cloud features are never engaged; the TV is a dumb HDMI panel
-with a local WebSocket remote-control channel for input-switch/power only.
-
-Full design + hardware/electrical notes: `plans/frame-tv-art-display.md`.
-Hands-on provisioning guide (once the recess/socket work is done):
-`docs/frame-tv-setup.md`.
-
-New domain, same shape as every other one in this mesh: a `capability-art`
-crate (mirrors `capability-reaper` — drives an external process rather than
-Zigbee/MQTT) + a coordinator `api/art.rs` module, following the existing
-domain-module recipe. Automation triggers (occupancy, ambient light,
-time-of-day) are deliberately just new *consumers* of the sensor pipeline
-already shipped in Phase 11.8 (the SNZB-03P R2 motion sensors already report
-both occupancy and illuminance) rather than new infrastructure — sequenced
-last, after the basic slideshow works reliably on its own.
-
-> **2026-07-06 — v1 slice built and verified end to end, ahead of the
-> electrician.** The recess isn't booked yet, so development started early
-> on a spare Pi 4 with the TV on a stand instead of waiting — same aarch64
-> target and mesh code either way. Shipped: `WIRE_VERSION` 9
-> (`MeshMessage::ArtShow`/`ArtStatus`), the `capability-art` crate (fetches
-> an image, shells out to `fbi` via `sudo -n`, reports status), the `art`
-> node feature flag, and coordinator `POST /api/art/show` /
-> `GET /api/art/status`. Deliberately minimal — one image, no catalogue or
-> rotation yet. Viewer choice took two corrections against the real
-> hardware (`pi2`, <pi2>): `feh` doesn't work on Lite (no X server);
-> `mpv --vo=drm` works but Debian's package drags in a 600 MB GTK/X11 stack
-> as unused dependencies, so `fbi` (a handful of small packages, writes
-> straight to `/dev/fb0`) replaced it — which itself needed a
-> `vc4-fkms-v3d`/`hdmi_force_hotplug=1` config change and running via
-> `sudo -n` (VT control needs real root) to actually work; both are now
-> automated in `scripts/install-node-linux.sh` for the next node. Live
-> end-to-end test against the running coordinator: `POST /api/art/show`
-> correctly spawned `fbi` on `pi2`, and a second call correctly killed and
-> replaced it (exactly one `fbi` process throughout, confirmed via
-> `pgrep`) — the whole coordinator → mesh → node → framebuffer chain is
-> proven, just with no TV plugged into the HDMI port yet to see it.
->
-> **Same day — on-the-fly slideshow shipped and deployed to pi1.** Rather
-> than build the batch catalogue/ingest pipeline from plan §5 first, added
-> `POST /api/art/search {query, interval_secs?}` — searches the Met
-> Museum's Open Access API live (no local catalogue, no API key needed),
-> keeps only public-domain results with a usable image, optionally asks
-> whatever local LLM is Ready to pick and order the best subset (falls back
-> to the raw Met order if no model's ready, the call errors, or its reply
-> doesn't parse — a 20s-max nice-to-have, not a dependency), shows the
-> first result, and auto-advances through the rest on a timer (default
-> 30s/floor 5s) until superseded by a new search. `POST /api/art/next` and
-> `GET /api/art/current` round it out. No new wire message needed — next/
-> auto-advance just resends the existing `ArtShow`, so `ArtNext` stays
-> unbuilt as originally planned. Deliberately kept off the LLM's critical
-> path for anything else: curation is capped to 20s (well under
-> `dispatch_local_inference`'s shared 150s ceiling) and only runs once per
-> search, not on every rotation tick — the agent's existing one-inference-
-> per-node semaphore means a real voice/chat command could still queue
-> briefly behind it if they land on the same node at the same moment, but
-> never for long. Live-tested against the real coordinator + Met API + the
-> actually-Ready `llama3.2:1b` on pi1: searching "Leonardo da Vinci" found
-> 8 public-domain candidates, got a real LLM-curated order, displayed
-> correctly on `pi2`, and both manual `/next` and the 20s auto-advance
-> timer advanced the rotation correctly (one `fbi` process maintained
-> throughout every transition). Next: wire up the TV.
-
-**Added idea (2026-07-05):** voice/chat browsing — "show me some Monet",
-"show the collection in date order" — via a new `art_show` intent tool
-copying Phase C's `get_climate` pattern exactly (coordinator answers/acts
-from its own catalogue, no node round-trip for the query itself). Needs
-per-image metadata (artist/year/movement) captured at ingest, already
-planned in the art-pipeline step for this reason. Arguably the strongest
-showcase yet for this project's actual differentiator — "talk to your
-house, and it never leaves your house."
-
-Blocking on: electrician-designed recess + socket (wall has
-tanking/shower on the other side — flagged explicitly in the plan as
-needing a qualified Part P registered electrician, not a DIY job).
-
-> **2026-07-08 — hardware decision reversed: the Pi 4 stays permanently,
-> no move to a Pi Zero 2 W.** The behind-TV node is becoming the mesh's
-> audio-output workhorse too (HDMI audio to the soundbar, see
-> `plans/audio-output-integration.md`), a job the Zero can't do. See the
-> superseded notes in `plans/frame-tv-art-display.md` and
-> `docs/frame-tv-setup.md`.
-
----
-
-## Hardware Decoupling — Investigation Queued (2026-07-06)
-
-Jon's question: how best to decouple this project from specific hardware —
-e.g. if someone wanted a different Zigbee antenna/dongle. Held for a
-dedicated conversation rather than a quick answer, since it's an
-architecture question, not a bug/feature ask. Starting point for that
-discussion, from a first look at the code:
-
-- **Zigbee already looks mostly decoupled.** `capability-zigbee` only ever
-  talks MQTT to zigbee2mqtt (`MQTT_HOST`/`MQTT_PORT`) — it has no idea what
-  radio z2m is fronting. z2m itself is the actual hardware-abstraction
-  layer here and already supports a wide range of coordinator adapters
-  (the SLZB-06 currently in use, ConBee II, Sonoff dongles, TI CC253x/
-  CC2652, Silicon Labs EFR32MG21, etc.). Swapping the physical dongle/
-  antenna looks like it would only ever touch z2m's own
-  `configuration.yaml` (adapter type + serial/network port — the exact
-  thing already hand-edited once before, see
-  `project_zigbee_bridge_stale_ip` memory) and never `capability-zigbee`
-  or coordinator code.
-- Worth checking during the real discussion: whether the same
-  domain-module boundary (capability crate ↔ `MeshMessage` protocol ↔
-  coordinator) holds up as cleanly for the *other* hardware-coupled
-  pieces of this project — inference hardware/GPU vendor
-  (`capability-llm`/llama.cpp), and REAPER (`capability-reaper`, already
-  process-based rather than hardware-based) — or whether "decouple
-  hardware" actually means something more specific that didn't come up
-  in the first pass.
-
----
-
 ## Backlog — Lighting subsystem review (2026-07-10)
 
 Another third-party review ("Lighting Subsystem — Deep Reappraisal") went
@@ -1705,84 +1182,7 @@ Two of the bug-hunting items were real and got fixed same-day:
   `http/api/effects.rs`, alongside the scene-recall equivalent) so any
   caller gets the protection, not just dashboard clicks.
 
-Genuinely open items from this review, not acted on:
-
-- **`EffectRunner` doesn't check device online/offline status at all**
-  (`runner.rs:475-497` builds each tick's bulb list from every device_id
-  in the room regardless of `LightStateReport.online`). Confirmed the gap
-  is real; didn't verify what actually happens downstream when a command
-  goes to an offline device (z2m may silently drop it, may queue it) —
-  worth checking live before deciding whether this needs a fix or is
-  already harmless in practice.
-- **No other effect shares Snake's stale-cache bug** — checked every
-  effect file; only `snake.rs` caches an ordering. Aurora and the rest
-  recompute fresh each tick. Nothing else needed the same fix.
-- **`group_light_command`** (the HTTP endpoint for a raw z2m group, not
-  an individual device) still doesn't exclude group members from an
-  active effect — scoped out of today's fix since resolving "which room
-  a group's members belong to" needs more thought than the single-device
-  case. Same bug class, smaller/rarer blast radius.
-- **`dispatch_light_command`/`dispatch_tool`/`handle_intent` are growing a
-  long, repeated parameter list** (`registry`, `connections`,
-  `pending_intents`, `device_states`, `sensor_states`, `dashboard`, ...),
-  already needing `#[allow(clippy::too_many_arguments)]`. Bundling these
-  into one `IntentExecutionContext`-style struct would be reasonable, but
-  premature today — nothing is actually painful yet, just long signatures.
-  Trigger for actually doing it: the next time a *new* piece of
-  coordinator state needs threading through this same call chain, bundle
-  instead of adding parameter #7.
-
----
-
-## Backlog — Third-party review sweep (2026-07-09)
-
-Several AI-generated reviews (Copilot, Bing, Gemini) were run against the repo
-in one session and checked claim-by-claim against the actual code — most
-turned out to already be solved, based on a stale/earlier snapshot, or
-architecturally misinformed (see the audit tables in that session's
-conversation for the full per-claim verdicts). The items below are the
-genuine, still-open findings worth keeping — not urgent enough to act on
-immediately, but real. Confirmed-real bugs from the same sweep were fixed
-same-day: the audio playback ack-loop (`AudioPlayResult`), `free_port()`
-process-ownership check, the dead `scene_load` intent tool now wired to the
-real scene system with server-side effect-cancel/reactivate, and the
-Frame TV art-display fullscreen/User-Agent fixes.
-
-- **Agent reconnect has no backoff** — fixed 5s retry on every disconnect
-  (`agent/src/main.rs`), flagged repeatedly across reviews. Real, but
-  changes reconnect/failure semantics on a live mesh — wants deliberate
-  design + testing, not a drive-by fix.
-- **No cross-field effect-parameter validation** — JSON-Schema validation
-  is already centralized and works (`coordinator/src/http/api/effects.rs`),
-  but nothing validates relationships between fields (e.g. Snake's `length`
-  vs. the room's actual bulb count). Runtime already clamps gracefully
-  (no crash), so this is a UX gap, not a reliability one.
-- **`EffectRunner` is one task, ticking rooms sequentially** — a slow
-  effect's tick can delay other rooms' ticks in the same pass. No
-  per-room/per-effect task concurrency exists. Real, but a genuine
-  architecture change to a system driving physical lights — needs testing
-  against real hardware before changing.
-- **Cadence-drift EWMA is observability-only by design** — logs a warning,
-  never corrects. Confirmed intentional (module doc says so explicitly),
-  not an oversight — revisit only if drift becomes an actual nuisance.
-- **Registry is 100% raw `rusqlite` SQL, no typed query builder** — ~30+
-  call sites across 5 files. Real, but a large mechanical migration
-  (Diesel/sqlx) that needs a deliberate decision, not urgent.
-- **`Connections` map is `Mutex<HashMap>`, not `DashMap`** — true, but no
-  evidence of actual lock contention at this mesh's scale (a handful of
-  nodes). Low value; skip unless real contention shows up.
-- **mDNS discovery falls back to `127.0.0.1:9000` silently** when
-  `COORDINATOR_IP` is unset and discovery times out. Risky for a
-  multi-node cluster in theory, but pi1's own co-located agent currently
-  relies on exactly this fallback — changing it needs care so it doesn't
-  break that setup.
-- **NSSM `STOP_PENDING` on Windows nodes** — documented manual
-  `taskkill` workaround only, no watchdog/auto-recovery. Can't build or
-  test this without hands-on access to a Windows box.
-- **Cloud gateway has no per-provider latency/success-rate metrics** in
-  the dashboard — the underlying error handling/fallback logic itself is
-  already solid and well-tested (`coordinator/src/cloud.rs`); this would
-  just be a nice-to-have observability panel.
+## Backlog — Third-party review sweep (2026-07-09) — items fixed from that sweep
 - **Cloud fallback ✓ (2026-07-13)**: a failed primary provider call
   (rate limit, auth, network) now cascades through every other preset
   with a saved API key (`cloud::fallback_providers`, preset order) before
@@ -1796,21 +1196,6 @@ Frame TV art-display fullscreen/User-Agent fixes.
   `selected_model` pref tied to whichever endpoint is currently active,
   no per-provider model memory. Low priority; would need a
   `model:<base_url>` pref plus Gateway tab UI changes.
-- **Coordinator state file has no version field** — low urgency: it's
-  parsed key-by-key (`coordinator/src/state.rs`), so unknown/missing keys
-  are already forward/backward compatible without one. Would only help
-  external tooling detect drift.
-- **No health metrics**: queue depth per room, per-command-type latency,
-  reconnect attempts per node — none of this instrumentation exists
-  today. New work, not a bug fix; worth doing only if a real metrics
-  dashboard is wanted.
-- **Traceability gap**: light commands sent via the dashboard's direct
-  click path don't carry a `request_id` through to a device-side ack,
-  unlike the TTS/audio-play/scene-recall/intent paths, which all thread
-  one through the `pending_intents` mechanism.
-- **Windows Fast Startup cold-boot issue** — still open, separate from
-  the fTPM/Pluton crash-storm fix (which resolved a different symptom).
-  See `handover.md` item 29.
 - ~~**Bluetooth pairing's `bluetoothctl` output-string matching**~~ **Resolved
   2026-07-10/11.** Superseded by the live Bluetooth pairing-hardening work
   (`81ad610` and follow-ups): every string-matching path (`connect`/`pair`/
@@ -1819,8 +1204,6 @@ Frame TV art-display fullscreen/User-Agent fixes.
   Fishman Loudbox amp — see `capabilities/audio/src/bluetooth.rs`'s module
   doc comment and its per-function "confirmed live" notes. Re-checked
   2026-07-12: pi2 is still running BlueZ 5.82, matching what was verified.
-
----
 
 ## Bluetooth Device Management — Per-Device Unpair, Live Status & Room Indicators ✓ Shipped 2026-07-11
 
@@ -1937,191 +1320,3 @@ real spoken reply. The log caught it directly: a genuinely successful,
 seconds after the 5s timeout had already given up and triggered the
 puck fallback, so the late real result was dropped
 (`no capability handles: AudioAnnounceResult`). Widened both to 45s/50s.
-
-**Follow-ups queued, not yet built:**
-- **Full Bluetooth playback control** — volume up/down and mute, not just
-  pair/unpair. No wire messages or `bluetooth.rs` functions for this exist
-  yet (today's surface is scan/pair/unpair/clear-cache only); would need a
-  `BluetoothVolumeRequest`-style message and a `pactl set-sink-volume`/
-  `set-sink-mute` call against the resolved sink name.
-- **Nudge room assignment right after a successful pair** — the Zigbee
-  light-pairing flow already does this (`pairFeedRoomPrompt` in
-  `devices.js`: "Paired: X ✓ — assign to room: [dropdown]"). Bluetooth
-  pairing has no equivalent, which is exactly why a freshly-paired speaker
-  shows no room-card badge and no room in its paired-status label until
-  someone separately uses the AV row's "+ add to room" dropdown — not a
-  bug, but a real gap in prompting for the second step.
-- **Room card mic icon** — the notable-badge row now shows a 🔊 badge for
-  an assigned Bluetooth speaker; the voice puck (`/api/av-devices`' `puck`
-  entry, room-bound via the `av-room:puck` preference) has no equivalent
-  icon yet. Same mechanism, just needs its own badge alongside the speaker
-  one in `renderRoomCard`.
-- **Coordinator-restart resync** — concrete fix for the documented
-  blind-spot (a coordinator restart loses `bluetooth_status` until the next
-  actual connect/disconnect): have the coordinator ask every connected
-  audio-capable node to report its current paired-device status once, right
-  after that node's connection is (re-)established, instead of waiting
-  passively for the next change. Small — one new request/response message
-  pair, no change to the existing push-on-change semantics.
-
----
-
-## Per-Node Comms Peripherals View (Proposed 2026-07-12)
-
-Today the dashboard's Bluetooth/HDMI controls only exist on the AV-device
-rows for whichever node has `Feature::Audio` (pi2). The ask: every node's
-comms peripherals — Bluetooth, Wi-Fi, HDMI — visible and manageable the same
-way, not just the one node that happens to run audio today. Needs a design
-pass before building: what's the inventory model for a peripheral that
-isn't a playback sink (e.g. a node's Wi-Fi link quality, or an HDMI output
-with no audio capability), whether this lives in the existing Devices tab's
-AV section or becomes its own per-node panel, and how much of
-`buildAvRoomAssignments`/`buildBluetoothScanControls` generalizes versus
-needs a parallel per-peripheral-type implementation.
-
----
-
-## Text-to-Speech Node Placement (Proposed 2026-07-12)
-
-TTS currently runs wherever it's invoked rather than being steered to the
-fastest available node. Move it to run on whichever node has the most
-headroom (mirroring `coordinator/src/scheduler.rs`'s existing model-inference
-node-selection logic) instead of a fixed/default placement. Needs the actual
-current placement mechanism identified first (voice pipeline config,
-`capability-voice`) before deciding whether this reuses the scheduler as-is
-or needs its own lighter-weight selection.
-
----
-
-## Static vs Portable Device Placement Toggle (Proposed 2026-07-12)
-
-Idea: a single-click toggle per device — "static" (fixed in place, can be
-positioned on the room floor plan in `layout.js`) vs "portable" (moves
-around, coordinates in a room don't make sense to set). Portable devices
-would be excluded from the floor-plan placement UI entirely rather than
-showing a meaningless fixed position. Needs a `RoomRecord`/device-position
-schema decision (new column? reuse of the existing light-position table
-with a null position meaning "portable"?) before implementation.
-
----
-
-## CI (Proposed 2026-07-12)
-
-Flagged as wanted "when ready" — no scope decided yet (what runs: clippy +
-test suite already enforced locally by the pre-commit hook; GitHub Actions
-vs. something else; whether it gates pushes to `main` given this is a
-solo/direct-to-main repo). Revisit and scope properly when actually picked
-up rather than guessing here.
-
----
-
-## Puck as Last-Resort Announcement Target (Proposed 2026-07-13)
-
-Triggered by a live incident: `play_announcement` fired three times for a
-reminder ("time for Sigmond and the Sea Monsters") and nothing played
-anywhere. Root cause — `broadcast_announcement`
-(`coordinator/src/audio.rs:464`) fans out only to `nodes_with_feature(Feature::Audio)`,
-which today is just pi2; when pi2's paired Bluetooth amp is down (as it was
-— `bluetooth: status update ... connected=false` right in that window) there
-is no other target, so the announcement is logged as skipped and dropped.
-The puck's own "fall back to my speaker" logic (`capability-voice`) only
-covers *its own* spoken-reply routing when a live voice session's room-sink
-delivery fails — it is not wired into `play_announcement`'s broadcast path
-at all, so a coordinator-initiated alert with no originating voice session
-currently has nowhere to fall back to.
-
-**Feasibility confirmed live 2026-07-13** (not just protocol theory): ran
-the repo's existing `capability-voice --example entities` diagnostic
-against the puck (`<puck>:6053`) and it advertises a real `media_player`
-entity, independent of any voice-assistant session:
-
-```
-ListEntitiesMediaPlayerResponse { object_id: "media_player", key: 2232357057,
-  supported_formats: [
-    { format: "flac", sample_rate: 48000, channels: 1, purpose: Announcement },
-    { format: "flac", sample_rate: 48000, channels: 2, purpose: Default },
-  ]
-}
-MediaPlayerStateResponse { key: 2232357057, state: Idle, volume: 1.0, muted: false }
-```
-
-The `purpose: Announcement` format is the same mechanism Home Assistant's
-own Voice PE integration uses for proactive announcements/timers — stock
-firmware (currently 25.5.2, update to 26.6.0 available), nothing custom to
-flash. Push it with a `MediaPlayerCommandRequest { key: 2232357057,
-has_media_url: true, media_url: <url>, has_announcement: true, announcement:
-true }` over the same ESPHome native-API connection `capability-voice`
-already holds open — no wake-word session required, ducks whatever's
-playing. The Rust types (`MediaPlayerCommandRequest`,
-`ListEntitiesMediaPlayerResponse`, `MediaPlayerStateResponse`) already exist
-in the `esphome_client` crate for free — its `build.rs` code-generates every
-message with an `option (id)` in the proto file, not a hand-picked subset,
-so no crate fork/patch is needed.
-
-Confirmed the puck's ESPHome native API accepts a second concurrent client
-without disturbing the production connection (pi1's own heartbeats to the
-coordinator were unaffected during the live test) — worth re-checking under
-real concurrent use, but not a blocker.
-
-Open item before building: the negotiated announcement format is mono FLAC
-— check whether the puck transcodes an arbitrary media URL server-side or
-whether the existing Piper TTS output (WAV, per Phase 1 of
-`plans/audio-output-integration.md`) needs converting first.
-
-This is exactly the "room speaker → puck → nothing" fallback chain
-`plans/audio-output-integration.md`'s Phase 6 already named as the target
-design (see that file for the full room-routing policy) — this entry
-narrows it to the specific, now-proven mechanism for reaching the puck
-out-of-band. Implementation: extend `broadcast_announcement`/
-`handle_audio_announce` (`coordinator/src/audio.rs`) to add the puck as a
-final target when every other `Feature::Audio` node fails, using this
-`MediaPlayerCommandRequest` path.
-
----
-
-## Home Network Throughput Investigation (Proposed 2026-07-15)
-
-The mesh router measures roughly half the throughput of the ISP router that
-feeds it. Chase where the loss actually is instead of guessing. Known
-facts from a separate domain DNS work (2026-07-15): the mesh router's WAN sits
-on `<node-old>` behind the ISP router box at `<isp-router>` — so the LAN is
-**double-NATted** — and the mesh router's upstream DNS now points at 1.1.1.1
-(changed from `<isp-router>` after the ISP router box served stale records; DNS
-is latency-only, irrelevant to throughput).
-
-Test plan, in order:
-1. **Wired test through the mesh router** vs the same test wired to the ISP router
-   box — separates routing loss from Wi-Fi limits. (Prime suspect: the
-   halving was measured over Wi-Fi on a 2×2 Wi-Fi 6 client whose
-   real-world ceiling is ~500–700 Mbps regardless of router.)
-2. **Check the mesh router WAN link rate** and the cable between the ISP router and the mesh router
-   (should negotiate ≥1 Gbps).
-3. **Audit the mesh router features** that tax the routing path: QoS, traffic
-   meter, Netgear Armor.
-4. If double NAT turns out to be implicated, consider **the mesh router AP mode**
-   (the ISP router box routes, the mesh router does Wi-Fi only) — but this re-shuffles the
-   LAN, and mesh device IPs are baked into configs (pi1 `<pi1>`,
-   SLZB-06 `<slzb-06>` per its z2m serial.port fix), so it needs a
-   planned migration, not a casual toggle.
-
-Related gotcha (2026-07-16): the laptop turned up with DNS from the ISP router
-box (`<isp-router>`) — either it hops between the ISP router's own Wi-Fi and
-the mesh router's, or the adapter's static DNS got reset. Devices on the ISP router
-side get its (stale-prone) DNS cache. While investigating, set the ISP router
-box's DNS forwarders to 1.1.1.1 as well, and check which SSIDs the
-laptop auto-joins.
-
----
-
-## Phase 12 — Distributed Execution
-
-- Multi-node inference
-- Pipeline parallelism
-- Tensor parallelism
-
----
-
-## Phase 13 — Auto-scaling
-
-- Dynamic node joining
-- Cloud integration
