@@ -11,6 +11,50 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Switch bindings — one per action, duplicates refused (2026-08-30)
+
+Reported as a missing capability: *"atm I can only seem to have a single binding on a
+switch, yet the hue tap dial switch has 4 buttons and a dial."* It was not missing. The
+`switch_bindings` table has been `UNIQUE(device_id, action)` since it was built, the Hue
+Tap Dial declares **24** actions (four buttons × press/release/hold/hold-release, six dial
+gestures, two brightness steps), and `extract_actions` has been carrying that vocabulary
+from z2m through to the dashboard since 2026-07-09. Every piece worked; nothing said so.
+
+The live database had exactly one binding on each of three switches, which is what the
+report described — and the panel showed a bare list under a collapsed toggle, which reads
+as *this switch has a binding* rather than *it can have twenty-four*. The fix was
+therefore about making an existing capability visible, not adding one:
+
+- The panel states **"N of 24 actions bound"**.
+- Already-bound actions are marked `✓ bound` and **disabled** in the picker, and the
+  default lands on the first *free* action rather than blindly on the last one pressed.
+- The add form is rebuilt with the list on every change, since which actions are still
+  free moves with each add and remove; a form built once would keep offering an action
+  the server now refuses.
+
+**Duplicates are refused rather than silently replaced** — Jon's call, asked for while
+this was being built: *"please guard against duplicate binding, i.e. do not allow them."*
+`create_switch_binding` was `ON CONFLICT DO UPDATE`, so re-binding an action overwrote the
+previous target and command with nothing said; a mis-picked action destroyed working
+configuration invisibly. It is now `ON CONFLICT DO NOTHING` returning `Ok(None)`, with the
+API answering **409** and naming the clashing action. The unique index does the guarding,
+so the check and the insert cannot race. Rebinding is delete-then-create: losing a binding
+is now always something that was asked for.
+
+**Found while checking the live data, and still outstanding:** the Hue Smart Button
+(`0x001788010801c849`) is bound to action **`button_press_1`**, which that model does not
+emit. z2m declares exactly `on`, `off`, `press`, `hold`, `release` for it. The binding is
+stored, valid-looking and **can never fire** — almost certainly typed through the
+free-text fallback before the device's action list was available. Nothing warns about an
+action outside a device's declared vocabulary; the new picker prevents it happening again
+where a vocabulary is known, but the existing row needs deleting and re-making as `press`.
+
+Nine tests added — per-action independence, refusal leaving the original untouched, delete
+freeing a pair to be rebound, 409 at the API. 858 coordinator tests green, clippy clean,
+frontend 28 green. Deployed to pi1 and verified against the running coordinator: a POST
+duplicating the Tap Dial's `button_1_press` returned 409 and the stored binding still read
+`toggle`, not the `off` the duplicate carried.
+
 ## Bug fix — dashboard device names reverting to hex on every reconnect (2026-07-28)
 
 Long-standing regression, present since device rename shipped 2026-05-26,
