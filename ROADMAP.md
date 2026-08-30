@@ -415,10 +415,16 @@ mesh security-report        # one-shot snapshot of current failure counts
 >   vanished registry row) — the unpair-on-delete path only has a mocked
 >   connection test so far.
 
-> **Open question:** does the ±25 brightness step feel right on the actual
-> dial (too coarse, too fine, or about right)? Not yet checked with Jon
-> against real usage — `step_delta` is trivially adjustable per-binding via
-> the same `POST /api/switch-bindings` call if it needs tuning.
+> **Answered 2026-08-30 — and the question was the wrong shape.** A fixed
+> step of any size is wrong for a dial, because the dial reports how far it
+> was turned and that figure scales with rotation speed. Measured off the
+> real device: the Hue Tap Dial's own `action_step_size` runs 8, 14, 20 …
+> 208 (8 + 6n), so **one detent is 8** of 254, with a 0.04 s transition.
+> Bindings now use `brightness_step_relative`, which takes its magnitude
+> from the dial itself; the binding's `step_delta` only sets direction and
+> a fallback. That also fixed the jitter Jon reported, which came from
+> computing an absolute target against a snapshot a bulb's delayed report
+> keeps rolling back. Full record in [`HISTORY.md`](HISTORY.md).
 
 > **Room-scanning research → deferred (2026-07-06)** — the actual original
 > ask ("a proper scan of the room, like Apple do when they scan your
