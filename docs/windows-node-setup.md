@@ -456,6 +456,12 @@ both already documented above:
    06-25. Disabling Pluton alone does not stop fTPM.
 2. **The board is not holding BIOS settings** across power events — the CMOS battery.
 
+**⚠️ AGAIN 2026-08-30 — `ManufacturerIdTxt = MSFT`, ~7-minute cadence, fastest on
+record.** Full evidence, the corrected regression list (the counts in this file disagree
+with each other — use the list, not a number), and the previously-unrecorded 08-20/21
+burst are in [`../ROADMAP.md`](../ROADMAP.md) under **PRIORITY 1**. Node powered off
+2026-08-30 02:15; WoL is disabled, so it returns only on the physical button.
+
 **Do not trust "TPM has been disabled" as a statement of state.** Verify it:
 `(Get-Tpm).TpmPresent` must return `False`, and no Event 1025 may appear after the
 next boot. Anything else means it is still storming.

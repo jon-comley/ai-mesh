@@ -1,8 +1,10 @@
 # ai-mesh — Roadmap
 
-Living list of **outstanding** work. Sections are kept in the order they were tracked in
-the original `docs/roadmap.md` before the split, not re-sorted by priority — read the
-whole file rather than assuming top-to-bottom urgency; entries carry their own dates.
+Living list of **outstanding** work. **The one exception to the ordering below is the
+Priority 1 block immediately after this preamble** — that is deliberately first because it
+is first. Everything after it is kept in the order it was tracked in the original
+`docs/roadmap.md` before the split, not re-sorted by priority — read the whole file rather
+than assuming top-to-bottom urgency; entries carry their own dates.
 
 **Finished work lives in [`HISTORY.md`](HISTORY.md)**, which keeps this file to what
 still needs doing. Split out of `docs/roadmap.md` on 2026-08-14 — that file mixed roughly
@@ -13,6 +15,72 @@ Where a phase had both finished and open sub-parts (Phase 11 and its sub-phases,
 HISTORY.md for the same heading's finished parts. Several entries carry a long record of
 what was investigated and rejected along the way; that reasoning is preserved
 deliberately, not padding, so read the whole entry before picking one up.
+
+## ⛔ PRIORITY 1 — beelink1 fTPM/Pluton crash storm, sixth regression (2026-08-30)
+
+**Blocked on physical access to the box. Nothing else on beelink1 is worth doing until
+this is closed — the node cannot hold an uptime long enough to serve inference.**
+
+**The box is powered off right now** (clean `shutdown /s /t 0` at 02:15:20, confirmed
+off the network by 02:15:35). **Wake-on-LAN is disabled** (`WakeOnMagicPacket = Disabled`,
+verified live, not read off a doc — it was turned off deliberately on 2026-06-11), so it
+comes back **only** on the physical power button.
+
+**Evidence pulled live before it was shut down:**
+
+| Check | Result |
+|---|---|
+| `(Get-Tpm).TpmPresent` | `True` — `TpmReady` and `TpmEnabled` also `True` |
+| `(Get-Tpm).ManufacturerIdTxt` | **`MSFT`** — Pluton is running |
+| TPM-WMI `1025` | 18 s after boot (01:49:07), plus 01:40:48 and 01:33:38 |
+| BugCheck `1001` | `0x00000133`, param2 `0x1e00` — 01:40:39 |
+| Kernel-Power `41` / EventLog `6008` | 01:33, 01:40, 01:48 |
+| GPU driver | `32.0.31007.5012` (2026-05-12) — unchanged, innocent |
+| `ai-mesh-agent` | Running / Automatic — restarting into a crashing OS |
+
+**Cadence ~7 minutes** — three boots in the fifteen minutes to 01:48. That is the fastest
+storm on record: 07-01 ran at ~22 min, 08-12 at ~11 min.
+
+**`ManufacturerIdTxt = MSFT` is the diagnosis.** It means the Trusted Platform Module is
+enabled at the level, which is precisely the trap corrected on 2026-06-25 and walked into
+again: **disabling Pluton alone has never stopped it.** It is also the third time the node
+has been *believed* fixed while the TPM was actually running.
+
+**Do not quote a regression number for this — the existing ones do not agree.** The
+2026-07-01 entry in `docs/windows-node-setup.md` is headed "5th" while its own body counts
+"4th"; both it and the 2026-08-12 banner omit 06-24/25 entirely and count 05-28, which was
+the original *fix*, not a regression. Use the list, not a count. Storms carrying the
+`0x133`/`param2=0x1e00` signature since that fix:
+
+`06-02` · `06-04` · `06-24/25` · `07-01/02` · `08-12` · `08-20/21` · `08-30`
+
+**The 08-20/21 burst was found in the event log tonight and had never been written down** —
+15 bugchecks between 15:36 on the 20th and 01:11 on the 21st, ~22 min apart. Whether it and
+08-12 are one unbroken run or two is unknowable from here: no fix was applied between them.
+
+**The fix, at the box:**
+
+1. BIOS → Advanced → SOC Misc Control → Trusted Platform Modules → set the **Trusted
+   Platform Module level itself to `Disabled`**. Not Pluton. Not "Security Device Support"
+   under Trusted Computing — that only hides the TPM from Windows while the PSP keeps
+   running.
+2. **Replace the CMOS battery.** On the sixth regression, "the board is not holding BIOS
+   settings across power events" is the standing explanation and the only durable fix;
+   everything else is re-applying a setting that will fall out again.
+3. Verify, do not assert: `(Get-Tpm).TpmPresent` must return **`False`**, and **no Event
+   1025** may appear after the next boot. Anything else means it is still storming.
+
+**If it comes back again, stop re-applying the BIOS setting** and execute the
+standing plan already recorded on 2026-06-02: rebuild beelink1 on Windows IoT Enterprise
+LTSC, or move it to Linux and leave the Windows/AMD-PSP class of fault behind entirely.
+
+**Address moved.** beelink1 is now **`IP-REDACTED`** (MAC `MAC-REDACTED`), not
+`IP-REDACTED-PREVIOUS`. `pi1` has also left `192.168.1.102` and was not on the subnet at all —
+the coordinator is unreachable independently of this. Both are downstream of the missing
+DHCP reservations in `infrastructure/network.md`, which is the thing that keeps turning
+"the node is down" into a routing hunt.
+
+Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
 ## Hunts / eBay Bargain Finder — deployed, production keyset issued, not yet exercised with real data (2026-07-15)
 
