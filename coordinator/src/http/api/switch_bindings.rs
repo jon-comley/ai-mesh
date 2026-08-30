@@ -18,7 +18,11 @@ use crate::registry::Registry;
 fn valid_command(command: &str, step_delta: Option<i32>) -> bool {
     match command {
         "on" | "off" | "toggle" => true,
-        "brightness_step" => step_delta.is_some(),
+        // Both need a step_delta, for different reasons. `brightness_step`
+        // uses it as the whole amount; `brightness_step_relative` uses only its
+        // *sign* for direction (plus its magnitude as a fallback), because the
+        // dial reports the real amount per event.
+        "brightness_step" | "brightness_step_relative" => step_delta.is_some(),
         _ => false,
     }
 }
@@ -97,7 +101,7 @@ pub async fn create_switch_binding(
     if !valid_command(&body.command, body.step_delta) {
         return (
             StatusCode::BAD_REQUEST,
-            "command must be on/off/toggle, or brightness_step with a step_delta",
+            "command must be on/off/toggle, or brightness_step / brightness_step_relative with a step_delta",
         )
             .into_response();
     }

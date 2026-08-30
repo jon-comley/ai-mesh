@@ -38,6 +38,11 @@ pub enum ZigbeeEvent {
     SwitchAction {
         device_id: String,
         action: String,
+        /// z2m's `action_step_size` — how far a dial was turned for this
+        /// event. See `shared::SwitchActionReport::step_size`.
+        step_size: Option<u16>,
+        /// z2m's `action_transition_time`, in seconds.
+        transition_secs: Option<f32>,
     },
     /// Fires when `zigbee2mqtt/bridge/state` changes — indicates whether the
     /// zigbee2mqtt process itself is up and connected to the dongle.
@@ -239,10 +244,12 @@ impl ZigbeeClient {
                                 .get_by_name(topic_device)
                                 .is_some_and(|d| d.device_type == shared::DeviceType::Switch);
                             if is_switch {
-                                if let Some(action) = parse_switch_action(p.payload.as_ref()) {
+                                if let Some(parsed) = parse_switch_action(p.payload.as_ref()) {
                                     let _ = tx_loop.send(ZigbeeEvent::SwitchAction {
                                         device_id: topic_device.to_owned(),
-                                        action,
+                                        action: parsed.action,
+                                        step_size: parsed.step_size,
+                                        transition_secs: parsed.transition_secs,
                                     });
                                 }
                                 continue;
@@ -552,12 +559,38 @@ fn parse_sensor_report(
 /// converter/model, so this passes it through as-is rather than trying to
 /// enumerate every model's action set). Returns None for publishes with no
 /// `action` field (battery-only heartbeats, linkquality-only publishes).
-fn parse_switch_action(payload: &[u8]) -> Option<String> {
+/// One switch event as z2m reports it: the action name, plus the rotation
+/// magnitude and transition where the device sends them (the Hue Tap Dial
+/// attaches both to its `brightness_step_up`/`brightness_step_down` events).
+pub(crate) struct ParsedSwitchAction {
+    pub action: String,
+    pub step_size: Option<u16>,
+    pub transition_secs: Option<f32>,
+}
+
+fn parse_switch_action(payload: &[u8]) -> Option<ParsedSwitchAction> {
     let json: serde_json::Value = serde_json::from_slice(payload).ok()?;
-    json.get("action")
+    let action = json
+        .get("action")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(String::from)
+        .map(String::from)?;
+    // Both are absent on a plain button press, and on dials that don't report
+    // them — missing must stay None rather than becoming 0, or a caller cannot
+    // tell "no step reported" from "a step of nothing".
+    let step_size = json
+        .get("action_step_size")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok());
+    let transition_secs = json
+        .get("action_transition_time")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+    Some(ParsedSwitchAction {
+        action,
+        step_size,
+        transition_secs,
+    })
 }
 
 fn parse_state_report(topic: &str, payload: &[u8], node_id: &str) -> Option<LightStateReport> {
@@ -890,13 +923,37 @@ mod tests {
     #[test]
     fn parse_switch_action_extracts_action() {
         let a = parse_switch_action(br#"{"action":"button_1_press","linkquality":95}"#).unwrap();
-        assert_eq!(a, "button_1_press");
+        assert_eq!(a.action, "button_1_press");
+        assert_eq!(a.step_size, None, "a button press reports no rotation");
+        assert_eq!(a.transition_secs, None);
     }
 
     #[test]
     fn parse_switch_action_rotation() {
         let a = parse_switch_action(br#"{"action":"1_rotate_left","battery":88}"#).unwrap();
+        let a = a.action;
         assert_eq!(a, "1_rotate_left");
+    }
+
+    #[test]
+    fn parse_switch_action_reads_the_dials_own_step_size() {
+        // A real Hue Tap Dial payload, taken verbatim from pi1's z2m log.
+        let a = parse_switch_action(
+            br#"{"action":"brightness_step_up","action_step_size":44,"action_transition_time":0.04,"battery":100,"linkquality":116}"#,
+        )
+        .unwrap();
+        assert_eq!(a.action, "brightness_step_up");
+        assert_eq!(a.step_size, Some(44));
+        assert_eq!(a.transition_secs, Some(0.04));
+    }
+
+    #[test]
+    fn parse_switch_action_smallest_detent_is_eight() {
+        let a = parse_switch_action(
+            br#"{"action":"brightness_step_up","action_step_size":8,"action_transition_time":0.04}"#,
+        )
+        .unwrap();
+        assert_eq!(a.step_size, Some(8));
     }
 
     #[test]

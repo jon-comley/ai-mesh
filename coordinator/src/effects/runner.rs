@@ -756,6 +756,11 @@ fn apply_action_to_les(prev: LastEmittedState, action: &LightAction) -> LastEmit
             next.brightness = *b;
             next.on = *b > 0;
         }
+        LightAction::BrightnessStep { delta, .. } => {
+            let stepped = (i32::from(next.brightness) + i32::from(*delta)).clamp(1, 254);
+            next.brightness = stepped as u8;
+            next.on = true;
+        }
         LightAction::ColorTemp(ct) | LightAction::ColorTempTransition { value: ct, .. } => {
             next.color = ColorState::Ct(*ct);
         }

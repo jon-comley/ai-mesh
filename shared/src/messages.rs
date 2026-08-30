@@ -186,6 +186,23 @@ pub enum LightAction {
         value: u8,
         transition_secs: f32,
     },
+    /// **Relative** brightness change, applied by the bulb itself: signed
+    /// delta on the 0–254 scale, with a transition time in seconds.
+    ///
+    /// Unlike `Brightness`/`BrightnessTransition` this needs no knowledge of
+    /// the bulb's current level, which is the whole point. Computing an
+    /// absolute target means reading the last reported brightness, and that
+    /// report is a Zigbee round trip behind (~300–500 ms). A dial emitting up
+    /// to 4 events/second therefore has several events in a row read the same
+    /// stale base, so the level lurches forward and snaps back — the jitter
+    /// Jon reported on 2026-08-30. A relative step has no such race: the bulb
+    /// applies each one to whatever it is actually at.
+    BrightnessStep {
+        /// Signed, on the 0–254 brightness scale. The Hue Tap Dial's own
+        /// smallest detent is 8; it scales to ~208 on a fast spin.
+        delta: i16,
+        transition_secs: f32,
+    },
     ColorXY {
         x: f32,
         y: f32,
@@ -600,6 +617,17 @@ pub struct SwitchActionReport {
     pub device_id: String,
     /// Raw z2m `action` value, e.g. "button_1_press" or "1_rotate_left".
     pub action: String,
+    /// z2m's `action_step_size` where the device sends one: how far the dial
+    /// was turned for *this* event, on the 0–255 brightness scale. The Hue Tap
+    /// Dial reports 8 for one detent and scales up with rotation speed (8, 14,
+    /// 20, … observed to 208), which is the magnitude Hue's own system applies.
+    /// `None` for plain button presses and for dials that do not report it.
+    #[serde(default)]
+    pub step_size: Option<u16>,
+    /// z2m's `action_transition_time` in seconds (the Hue Tap Dial sends
+    /// 0.04). `None` when absent; callers pick their own default.
+    #[serde(default)]
+    pub transition_secs: Option<f32>,
 }
 
 /// Full device inventory for a node's Zigbee bridge, sent on every MQTT
@@ -1545,9 +1573,51 @@ mod tests {
             node_id: "pi1".into(),
             device_id: "tap_dial".into(),
             action: "button_1_press".into(),
+            step_size: None,
+            transition_secs: None,
         });
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn switch_action_roundtrip_with_dial_step() {
+        let msg = MeshMessage::SwitchAction(SwitchActionReport {
+            node_id: "pi1".into(),
+            device_id: "tap_dial".into(),
+            action: "brightness_step_up".into(),
+            step_size: Some(44),
+            transition_secs: Some(0.04),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<MeshMessage>(&json).unwrap(), msg);
+    }
+
+    /// An older node sends no step fields at all. They must decode as `None`
+    /// rather than failing the whole message — a mixed-version mesh has to keep
+    /// working, and button presses carry neither field even on a current node.
+    #[test]
+    fn switch_action_decodes_without_the_step_fields() {
+        let json = r#"{"SwitchAction":{"node_id":"pi1","device_id":"tap_dial","action":"button_1_press"}}"#;
+        let msg: MeshMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            MeshMessage::SwitchAction(r) => {
+                assert_eq!(r.action, "button_1_press");
+                assert_eq!(r.step_size, None);
+                assert_eq!(r.transition_secs, None);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn brightness_step_roundtrip() {
+        let msg = LightAction::BrightnessStep {
+            delta: -44,
+            transition_secs: 0.04,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(serde_json::from_str::<LightAction>(&json).unwrap(), msg);
     }
 
     #[test]

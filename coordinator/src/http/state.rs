@@ -944,6 +944,17 @@ impl DashboardState {
                 entry.brightness = Some(*value);
                 entry.on = true;
             }
+            // Relative: apply the delta to whatever we last knew, so the UI
+            // tracks a dial in real time. This is optimism only — the bulb is
+            // the authority and its next report replaces this outright. That
+            // is exactly why the *command* must stay relative: if the dispatch
+            // computed an absolute target from this value, a delayed report
+            // carrying an older level would roll it back mid-rotation.
+            LightAction::BrightnessStep { delta, .. } => {
+                let base = i32::from(entry.brightness.unwrap_or(128));
+                entry.brightness = Some((base + i32::from(*delta)).clamp(1, 254) as u8);
+                entry.on = true;
+            }
             LightAction::ColorTemp(ct) => entry.color_temp = Some(*ct),
             LightAction::ColorTempTransition { value, .. } => entry.color_temp = Some(*value),
             LightAction::ColorXY { x, y } => entry.color_xy = Some((*x, *y)),

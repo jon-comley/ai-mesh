@@ -17,6 +17,13 @@ pub fn action_payload(action: &LightAction) -> serde_json::Value {
             value,
             transition_secs,
         } => serde_json::json!({"brightness": value, "transition": transition_secs}),
+        // z2m's `brightness_step` is the relative Level Control Step command:
+        // the bulb adds the signed value to its own current level. Nothing here
+        // needs to know what that level is.
+        LightAction::BrightnessStep {
+            delta,
+            transition_secs,
+        } => serde_json::json!({"brightness_step": delta, "transition": transition_secs}),
         LightAction::ColorTemp(mireds) => serde_json::json!({"color_temp": mireds}),
         LightAction::ColorTempTransition {
             value,
@@ -38,6 +45,30 @@ pub fn action_payload(action: &LightAction) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brightness_step_is_relative_and_signed() {
+        let up = action_payload(&LightAction::BrightnessStep {
+            delta: 8,
+            transition_secs: 0.04,
+        });
+        assert_eq!(up["brightness_step"], serde_json::json!(8));
+        // f32 0.04 does not survive a widening to f64 exactly, so compare with
+        // a tolerance rather than pinning the decimal expansion.
+        assert!(
+            (up["transition"].as_f64().unwrap() - 0.04).abs() < 1e-6,
+            "transition: {}",
+            up["transition"]
+        );
+
+        // Negative steps must survive as negative — z2m dims on a signed value,
+        // and an unsigned type here would silently turn every dim into a raise.
+        let down = action_payload(&LightAction::BrightnessStep {
+            delta: -44,
+            transition_secs: 0.04,
+        });
+        assert_eq!(down["brightness_step"], serde_json::json!(-44));
+    }
 
     #[test]
     fn group_topic() {

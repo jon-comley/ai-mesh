@@ -2698,6 +2698,12 @@ body {
   align-items: center;
   gap: 6px;
 }
+/* Says what the number next to it means — it is a fixed amount for
+   `brightness_step` and only a direction for `brightness_step_relative`. */
+.switch-binding-delta-hint {
+  font-size: 11px;
+  white-space: nowrap;
+}
 .switch-binding-action-input,
 .switch-binding-delta-input {
   background: var(--surface-2);

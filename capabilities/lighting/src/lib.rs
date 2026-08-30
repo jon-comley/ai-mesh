@@ -127,11 +127,18 @@ impl Capability for LightingCapability {
                             };
                             let _ = Self::send_via_ctx(&ctx, MeshMessage::ZigbeeJoin(report)).await;
                         }
-                        Ok(ZigbeeEvent::SwitchAction { device_id, action }) => {
+                        Ok(ZigbeeEvent::SwitchAction {
+                            device_id,
+                            action,
+                            step_size,
+                            transition_secs,
+                        }) => {
                             let report = shared::SwitchActionReport {
                                 node_id: node_id.clone(),
                                 device_id,
                                 action,
+                                step_size,
+                                transition_secs,
                             };
                             let _ =
                                 Self::send_via_ctx(&ctx, MeshMessage::SwitchAction(report)).await;

@@ -861,9 +861,21 @@ fn handle_light_state(
 /// brightness from the live snapshot and nudges it by the binding's signed
 /// `step_delta`, clamped to 1..=254 — computed per-device (not once for the
 /// whole target) since a group's members can be at different levels.
+/// The Hue Tap Dial's smallest detent on the 0–254 brightness scale, measured
+/// from its own `action_step_size` reports. Used only as a fallback for a
+/// device that reports no step size — a sane default that matches what Hue
+/// itself does, rather than an invented number.
+const HUE_DETENT_STEP: i32 = 8;
+
+/// The transition the Hue Tap Dial asks for on every rotation event. Used when
+/// the event carries none, so a step ramps rather than snapping.
+const HUE_TRANSITION_SECS: f32 = 0.04;
+
 fn dispatch_switch_binding(
     device_id: &str,
     action: &str,
+    step_size: Option<u16>,
+    event_transition_secs: Option<f32>,
     registry: &Arc<Mutex<Registry>>,
     dash: &DashboardState,
 ) {
@@ -924,6 +936,39 @@ fn dispatch_switch_binding(
                     &shared::LightAction::Brightness(new_value),
                 );
             }
+        }
+        // Relative step — the bulb does the arithmetic, so nothing here reads a
+        // brightness that is a Zigbee round trip out of date. Preferred over
+        // `brightness_step` for anything driven by a dial; see
+        // `shared::LightAction::BrightnessStep` for why the absolute form
+        // jitters under fast rotation.
+        "brightness_step_relative" => {
+            // The binding's step_delta carries the *direction*, and a fallback
+            // magnitude for devices that report no step size of their own. The
+            // dial's own figure wins when present: it is what Hue applies, and
+            // it already scales with how fast the dial is being turned, which a
+            // fixed number cannot do.
+            let configured = binding.step_delta.unwrap_or(0);
+            let sign = if configured < 0 { -1 } else { 1 };
+            let magnitude = match step_size {
+                Some(reported) if reported > 0 => i32::from(reported),
+                _ => configured.abs().max(HUE_DETENT_STEP),
+            };
+            let delta = (sign * magnitude).clamp(-254, 254) as i16;
+            let transition_secs = event_transition_secs.unwrap_or(HUE_TRANSITION_SECS);
+            // One fan-out for the whole target, not one command per device:
+            // the absolute path has to go per-device because members sit at
+            // different levels, but a relative step is the same instruction for
+            // every bulb. On a room of eight at 4 dial events/second that is 4
+            // commands instead of 32.
+            crate::http::api::rooms::dispatch_light_command(
+                dash,
+                &targets,
+                &shared::LightAction::BrightnessStep {
+                    delta,
+                    transition_secs,
+                },
+            );
         }
         other => {
             warn!(command = %other, binding_id = %binding.id, "unknown switch binding command")
@@ -1482,7 +1527,14 @@ async fn process_message(
                 "zigbee: switch action"
             );
             if let Some(dash) = dashboard {
-                dispatch_switch_binding(&report.device_id, &report.action, registry, dash);
+                dispatch_switch_binding(
+                    &report.device_id,
+                    &report.action,
+                    report.step_size,
+                    report.transition_secs,
+                    registry,
+                    dash,
+                );
                 dash.push_switch_action(report.device_id, report.action);
             }
             None
@@ -1984,6 +2036,8 @@ mod tests {
                 node_id: "switch-node".into(),
                 device_id: "dial1".into(),
                 action: "button_1_press".into(),
+                step_size: None,
+                transition_secs: None,
             }),
             &registry,
             &connections,
@@ -2038,6 +2092,8 @@ mod tests {
                 node_id: "switch-node".into(),
                 device_id: "dial1".into(),
                 action: "button_1_press".into(),
+                step_size: None,
+                transition_secs: None,
             }),
             &registry,
             &connections,
@@ -2104,6 +2160,8 @@ mod tests {
                 node_id: "switch-node".into(),
                 device_id: "dial1".into(),
                 action: "brightness_step_up".into(),
+                step_size: None,
+                transition_secs: None,
             }),
             &registry,
             &connections,
@@ -2124,6 +2182,179 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    /// Helper: run one SwitchAction through the dispatcher and return the
+    /// LightAction the node received.
+    async fn dispatch_one_switch_action(
+        command: &str,
+        configured_delta: Option<i32>,
+        action: &str,
+        step_size: Option<u16>,
+        transition_secs: Option<f32>,
+        starting_brightness: u8,
+    ) -> shared::LightAction {
+        let (registry, connections, pi, pin, ps, tx, tokens, dashboard) = test_deps();
+        {
+            let mut reg = registry.lock().unwrap();
+            let room = reg.create_room("Larder");
+            reg.add_device_to_room(&room.id, "bulb1");
+            reg.create_switch_binding("dial1", action, "room", &room.id, command, configured_delta)
+                .unwrap();
+        }
+        dashboard.push_lighting_update(LightStateReport {
+            node_id: "node-1".into(),
+            device_id: "bulb1".into(),
+            on: true,
+            brightness: Some(starting_brightness),
+            color_xy: None,
+            color_temp: None,
+            online: true,
+        });
+        let (node_tx, mut node_rx) = mpsc::channel(4);
+        dashboard
+            .connections
+            .lock()
+            .unwrap()
+            .insert("node-1".into(), node_tx);
+        let mut node_id = Some("switch-node".to_string());
+
+        process_message(
+            MeshMessage::SwitchAction(shared::SwitchActionReport {
+                node_id: "switch-node".into(),
+                device_id: "dial1".into(),
+                action: action.into(),
+                step_size,
+                transition_secs,
+            }),
+            &registry,
+            &connections,
+            &pi,
+            &pin,
+            &ps,
+            &tx,
+            &mut node_id,
+            &tokens,
+            Some(&dashboard),
+            "no auth",
+        )
+        .await;
+
+        match node_rx.try_recv().unwrap() {
+            MeshMessage::LightCommand(cmd) => cmd.command,
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    /// The whole point of the relative path: the command carries the dial's own
+    /// magnitude and never mentions an absolute level, so the bulb's current
+    /// brightness — 220 here — is irrelevant to what gets sent.
+    #[tokio::test]
+    async fn relative_step_uses_the_dials_reported_step_size() {
+        let cmd = dispatch_one_switch_action(
+            "brightness_step_relative",
+            Some(8),
+            "brightness_step_up",
+            Some(44),
+            Some(0.04),
+            220,
+        )
+        .await;
+        match cmd {
+            shared::LightAction::BrightnessStep {
+                delta,
+                transition_secs,
+            } => {
+                assert_eq!(delta, 44, "the dial's figure wins over the configured 8");
+                assert!((transition_secs - 0.04).abs() < 1e-6);
+            }
+            other => panic!("expected a relative step, got {other:?}"),
+        }
+    }
+
+    /// A negative configured delta means "this binding dims", whatever
+    /// magnitude the dial reports.
+    #[tokio::test]
+    async fn relative_step_takes_its_direction_from_the_binding() {
+        let cmd = dispatch_one_switch_action(
+            "brightness_step_relative",
+            Some(-8),
+            "brightness_step_down",
+            Some(44),
+            Some(0.04),
+            220,
+        )
+        .await;
+        match cmd {
+            shared::LightAction::BrightnessStep { delta, .. } => assert_eq!(delta, -44),
+            other => panic!("expected a relative step, got {other:?}"),
+        }
+    }
+
+    /// A device that reports no step size still works: the configured
+    /// magnitude is the fallback.
+    #[tokio::test]
+    async fn relative_step_falls_back_to_the_configured_magnitude() {
+        let cmd = dispatch_one_switch_action(
+            "brightness_step_relative",
+            Some(-25),
+            "button_1_press",
+            None,
+            None,
+            220,
+        )
+        .await;
+        match cmd {
+            shared::LightAction::BrightnessStep {
+                delta,
+                transition_secs,
+            } => {
+                assert_eq!(delta, -25);
+                assert!(
+                    (transition_secs - 0.04).abs() < 1e-6,
+                    "falls back to Hue's own transition"
+                );
+            }
+            other => panic!("expected a relative step, got {other:?}"),
+        }
+    }
+
+    /// A binding saved with no delta at all must not send a step of zero,
+    /// which would be a command that does nothing.
+    #[tokio::test]
+    async fn relative_step_never_sends_a_zero_delta() {
+        let cmd = dispatch_one_switch_action(
+            "brightness_step_relative",
+            Some(0),
+            "button_1_press",
+            None,
+            None,
+            220,
+        )
+        .await;
+        match cmd {
+            shared::LightAction::BrightnessStep { delta, .. } => {
+                assert_eq!(delta, HUE_DETENT_STEP as i16, "falls back to one Hue detent")
+            }
+            other => panic!("expected a relative step, got {other:?}"),
+        }
+    }
+
+    /// The absolute path is unchanged and still reads live brightness — kept
+    /// because existing bindings use it and it is right for a button that
+    /// should step by a fixed amount.
+    #[tokio::test]
+    async fn absolute_step_still_reads_live_brightness() {
+        let cmd = dispatch_one_switch_action(
+            "brightness_step",
+            Some(-20),
+            "button_1_press",
+            None,
+            None,
+            100,
+        )
+        .await;
+        assert_eq!(cmd, shared::LightAction::Brightness(80));
     }
 
     #[tokio::test]
@@ -2163,6 +2394,8 @@ mod tests {
                 node_id: "switch-node".into(),
                 device_id: "dial1".into(),
                 action: "button_1_press".into(),
+                step_size: None,
+                transition_secs: None,
             }),
             &registry,
             &connections,

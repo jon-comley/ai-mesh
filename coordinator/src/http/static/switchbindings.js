@@ -41,6 +41,9 @@ function targetLabel(binding) {
 }
 
 function commandLabel(binding) {
+  if (binding.command === 'brightness_step_relative') {
+    return binding.step_delta < 0 ? 'dim (dial-scaled)' : 'brighten (dial-scaled)';
+  }
   if (binding.command === 'brightness_step') {
     const sign = binding.step_delta > 0 ? '+' : '';
     return `brightness ${sign}${binding.step_delta}`;
@@ -207,7 +210,8 @@ function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
     ['toggle', 'Toggle'],
     ['on', 'On'],
     ['off', 'Off'],
-    ['brightness_step', 'Brightness step'],
+    ['brightness_step_relative', 'Dim / brighten (dial)'],
+    ['brightness_step', 'Brightness step (fixed)'],
   ]) {
     const o = document.createElement('option');
     o.value = value;
@@ -222,7 +226,7 @@ function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
   // can't accept a negative step no matter what's typed.
   deltaInput.min = '-254';
   deltaInput.max = '254';
-  deltaInput.placeholder = 'e.g. 25 or -25';
+  deltaInput.placeholder = 'e.g. 8 or -8';
   deltaInput.className = 'switch-binding-delta-input';
   deltaInput.autocomplete = 'off';
   deltaInput.name = 'switch-binding-step-delta';
@@ -232,9 +236,32 @@ function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
   deltaInput.setAttribute('data-1p-ignore', '');
   deltaInput.setAttribute('data-bwignore', 'true');
   deltaInput.hidden = true;
-  commandSelect.addEventListener('change', () => {
-    deltaInput.hidden = commandSelect.value !== 'brightness_step';
-  });
+
+  // What the number means differs between the two brightness commands, so say
+  // so rather than leaving one bare box to cover both.
+  const deltaHint = document.createElement('span');
+  deltaHint.className = 'switch-binding-delta-hint placeholder';
+  deltaHint.hidden = true;
+
+  const paintCommand = () => {
+    const cmd = commandSelect.value;
+    const isRelative = cmd === 'brightness_step_relative';
+    const isFixed = cmd === 'brightness_step';
+    deltaInput.hidden = !(isRelative || isFixed);
+    deltaHint.hidden = deltaInput.hidden;
+    if (isRelative) {
+      // Only the sign matters here: the dial reports how far it was turned and
+      // that figure is used, scaling with rotation speed the way Hue's own
+      // system does. The number is just the fallback for a device that reports
+      // nothing — 8 is the Hue Tap Dial's own smallest detent.
+      deltaHint.textContent = 'sign sets direction; the dial supplies the amount';
+      if (!deltaInput.value) deltaInput.value = '8';
+    } else if (isFixed) {
+      deltaHint.textContent = 'fixed amount per press, 1–254';
+    }
+  };
+  commandSelect.addEventListener('change', paintCommand);
+  paintCommand();
 
   const addBtn = document.createElement('button');
   addBtn.className = 'device-row-btn';
@@ -254,7 +281,7 @@ function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
     const [targetKind, targetId] = targetSelect.value.split(':');
     const command = commandSelect.value;
     let stepDelta;
-    if (command === 'brightness_step') {
+    if (command === 'brightness_step' || command === 'brightness_step_relative') {
       stepDelta = parseInt(deltaInput.value, 10);
       if (Number.isNaN(stepDelta)) {
         showToast('Enter a step amount (e.g. 25 or -25)', true);
@@ -275,7 +302,7 @@ function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
     }
   });
 
-  form.append(actionInput, targetSelect, commandSelect, deltaInput, addBtn);
+  form.append(actionInput, targetSelect, commandSelect, deltaInput, deltaHint, addBtn);
   return form;
 }
 
