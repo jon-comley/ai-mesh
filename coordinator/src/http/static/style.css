@@ -2036,7 +2036,24 @@ body {
   margin-bottom: 12px;
 }
 
-.room-list.zigbee-offline button,
+/* Bridge down: disable the controls that send a light command, and nothing
+   else. This used to match every `button` in the room list, which took out
+   room admin too — remove-from-room, collapse, rename, pin, delete — none of
+   which touch Zigbee. Worse, a disabled button is not hit-tested, so the
+   cursor fell through to the draggable card behind it and the ✕ showed a grab
+   hand that did nothing (2026-08-30; see ROADMAP.md).
+   Keep this list in step with any new admin button added to a room card. */
+.room-list.zigbee-offline button:not(
+  .room-remove-btn,
+  .device-row-btn,
+  .room-collapse-btn,
+  .room-view-mode-btn,
+  .room-new-btn,
+  .room-group-add-btn,
+  .room-group-delete-btn,
+  .room-layout-btn,
+  .room-action-delete
+),
 .room-list.zigbee-offline input[type="range"] {
   opacity: 0.35;
   pointer-events: none;

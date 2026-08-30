@@ -15,6 +15,7 @@ import {
   createRoomGroup, renameRoomGroup, deleteRoomGroup, setDeviceGroup,
 } from '/static/actions.js';
 import { esc, showToast } from '/static/util.js';
+import { deriveZigbeeStatus } from '/static/zigbee-status.js';
 import { setPref } from '/static/prefs.js';
 import { tok, api } from '/static/api.js';
 import {
@@ -407,29 +408,25 @@ function patchDeviceCards() {
 
 let zigbeeOnline = true;
 
+// What the coordinator last reported: true online, false offline, null unknown
+// (no lighting node has reported yet — the wire type is Option<bool> and
+// serialises to null, see DashboardEvent::ZigbeeStatus). Held separately from
+// zigbeeOnline because inferZigbeeStatus() runs on every render and would
+// otherwise overwrite a real report with a guess.
+let zigbeeReported = null;
+
 export function handleZigbeeStatus(online) {
-  zigbeeOnline = online;
+  zigbeeReported = online ?? null;
+  inferZigbeeStatus();
   render();
 }
 
 function inferZigbeeStatus() {
   // Lights only: z2m marks a mains-powered light unreachable within ~10 min,
   // but battery sensors get a ~25h passive timeout (see docs/pi1-lighting-setup.md
-  // §9) — a bridge that just went down would still show sensors "online" for
-  // hours, making this heuristic less reliable if sensors were included.
+  // §9), so sensors say little about bridge health either way.
   const lights = [...devicesMap.values()].filter(d => d.device_type === 'light');
-  // If we have rooms but zero lights have ever arrived, zigbee2mqtt never
-  // connected — treat as offline.
-  if (model.rooms.length > 0 && lights.length === 0) {
-    zigbeeOnline = false;
-    return;
-  }
-  // If every known light is offline, the bridge is almost certainly down.
-  if (lights.length > 0 && lights.every(d => !d.online)) {
-    zigbeeOnline = false;
-    return;
-  }
-  zigbeeOnline = true;
+  zigbeeOnline = deriveZigbeeStatus(zigbeeReported, model.rooms.length, lights.length);
 }
 
 // The Home tab's room-card Bluetooth badge reads devices.js' getAvDevices()

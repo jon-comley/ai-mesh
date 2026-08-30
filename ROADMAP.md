@@ -82,52 +82,61 @@ DHCP reservations in `infrastructure/network.md`, which is the thing that keeps 
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
-## Bug — the ✕ on a switch card does not remove it from the room (2026-08-30)
+## Fixed in tree, not yet deployed — the ✕ on a switch card did nothing (2026-08-30)
 
-**Reported by Jon:** clicking the ✕ to take a switch out of a room does nothing, and
-**the cursor stays as a grab over the button** rather than becoming a pointer.
+**Reported by Jon:** clicking the ✕ to take a switch out of a room did nothing, and the
+cursor stayed a grab over the button instead of a pointer. Reproduced on a fresh page
+load with no drag involved, which ruled out a stuck drag and left only one explanation
+for the cursor: the button was not being hit-tested at all.
 
-**Not reproduced or root-caused yet** — the code path below was read, not run. The cursor
-detail is the most useful clue in the report and any candidate cause has to explain it:
-a grab cursor over the ✕ means the browser is not hit-testing the button, because
-`.device-row-btn` sets `cursor: pointer` on itself (`style.css`) and `cursor` only falls
-through to the card's `[draggable="true"] { cursor: grab }` if the button is not the
-target.
+**Two defects, one behind the other.**
 
-**The path a switch takes.** `'switch'` is in `READ_ONLY_DEVICE_TYPES`
-(`rooms.js:283`), so a switch in a room renders through the read-only branch at
-`rooms.js:1598` → `buildSensorCard(dev, { draggable: true, onRemoveFromRoom })`
-(`devicewidgets.js:239`) → `wireDeviceDrag(card, …)` (`rooms.js:1825`). The ✕ itself is
-a real `<button class="device-row-btn">` with a plain `click` listener
-(`devicewidgets.js:289-296`). There is only this one path — no switch-specific card.
+**1. `style.css` disabled every button in the room list, not just the light controls.**
 
-**Hypotheses, most likely first:**
+```css
+.room-list.zigbee-offline button,
+.room-list.zigbee-offline input[type="range"] { opacity: 0.35; pointer-events: none; }
+```
 
-1. **A stuck HTML5 drag.** `wireDeviceDrag` disables dragging on `pointerdown` when the
-   target is inside `input, button` and re-enables it on `pointerup`/`pointercancel`. If
-   a drag aborts without `dragend` — and `rooms.js:1838` already documents Chrome
-   aborting a drag outright when the source card reflows during `dragstart` — the card
-   is left mid-drag, which would explain both the grabbing cursor and clicks going
-   nowhere. Test: does the ✕ work on a freshly loaded page, before any drag is attempted?
-2. **The offline `pointer-events` trap, by inconsistency.** `style.css:218-225` kills
-   `pointer-events` on every `button` inside a `.device-offline` card and exempts only
-   `.room-remove-btn`. The light card's ✕ is a `.room-remove-btn` and is therefore safe;
-   the sensor/switch card's ✕ is a `.device-row-btn` and would not be. **As read, this
-   does not fire** — sensor cards get `is-offline`, not `device-offline`
-   (`devicewidgets.js:242`; `patchDeviceCards` only ever touches `.room-device-card`,
-   `rooms.js:350-362`) — but the two card types disagreeing about both the class name and
-   the button class is exactly the shape of this bug, and every switch in the house
-   currently reads offline, so it is worth proving rather than assuming.
-3. **The click is being swallowed higher up.** Unlike its siblings — the pin button
-   (`devicewidgets.js:272`) and both light-card remove paths (`rooms.js:1710`, `1819`) —
-   the sensor card's ✕ handler is the one that does **not** call `e.stopPropagation()`.
-   That alone should not stop the removal, since the inner handler runs first, but it
-   would matter if an ancestor handler re-renders the card list on the same click.
+`pointer-events: none` takes the button out of hit-testing, so the pointer resolved to
+the draggable card behind it — `[draggable="true"] { cursor: grab }` — giving a grab hand
+over a ✕ that could not be clicked. It caught room admin that has nothing to do with
+Zigbee: remove-from-room, collapse, rename, pin, group add/delete, delete room. Note the
+sibling rule for offline *devices* (`style.css:218`) already got this right, exempting
+`.room-remove-btn` — the two just disagreed, and the sensor/switch card's ✕ is a
+`.device-row-btn`, which nothing exempted. Now scoped with a `:not(...)` list of the
+admin buttons; **keep that list in step when a new admin button is added to a room card.**
 
-**To reproduce properly:** open a room holding a switch, try the ✕ before touching
-anything else, then again after dragging any card, and watch whether the `PATCH
-/rooms/{id}/devices` call in `actions.js:47` is ever issued. If the request goes out and
-the switch stays put, it is a backend/render problem and none of the above applies.
+**2. `zigbeeOnline` was being guessed wrong, so the rule fired when it should not have.**
+
+`inferZigbeeStatus()` held: *"if every known light is offline, the bridge is almost
+certainly down."* Every Hue light in the house was offline — because it was 3am and they
+were **switched off at the wall**. The bridge was fine: zigbee2mqtt was running and all
+27 devices answered. A bulb switched off at the wall is unreachable to z2m in exactly the
+same way as one behind a dead bridge, so that inference cannot be made from device state
+and has been dropped.
+
+Worse, the heuristic ran on **every render** (`rooms.js:253`, `305`, `466`) and therefore
+**overwrote the coordinator's real `ZigbeeStatus` report** each time. The report is now
+authoritative and the fallback only covers the window before one arrives — matching what
+`health.js` already did with the same event. The wire type is `Option<bool>` and
+serialises to `null`, so the tri-state is now handled rather than collapsed to falsy.
+
+The decision moved to its own leaf module, `static/zigbee-status.js`, following the
+`drag.js` / `colormath.js` / `solar.js` pattern — `rooms.js` cannot be imported under
+vitest, since it reaches `layout3d.js`'s dynamic `import('three')`. Seven tests in
+`frontend/zigbee-status.test.js` pin the tri-state and the regression; the frontend suite
+is 28 green and `cargo check -p coordinator` is clean.
+
+**⚠ Not live.** The dashboard assets are compiled into the binary with `include_str!`, so
+pi1 keeps serving the old JS and CSS until the coordinator is rebuilt and redeployed
+(`just deploy-coordinator pi1`). Nothing changes on Jon's screen before that. Confirmation
+that the ✕ actually works is still outstanding, and the banner disappearing is the
+first thing to look for.
+
+**Worth keeping:** the false positive only became visible at night. Any heuristic that
+reads "everything is off" as "everything is broken" will look correct all day and be
+wrong every evening.
 
 ## Hunts / eBay Bargain Finder — deployed, production keyset issued, not yet exercised with real data (2026-07-15)
 

@@ -39,6 +39,7 @@ const ERRORS_JS: &str = include_str!("static/errors.js");
 const SECURITY_JS: &str = include_str!("static/security.js");
 const CHAT_JS: &str = include_str!("static/chat.js");
 const SOLAR_JS: &str = include_str!("static/solar.js");
+const ZIGBEE_STATUS_JS: &str = include_str!("static/zigbee-status.js");
 const LAYOUTSTATE_JS: &str = include_str!("static/layoutstate.js");
 const LAYOUT3D_JS: &str = include_str!("static/layout3d.js");
 const SUNMODELS_JS: &str = include_str!("static/sunmodels.js");
@@ -271,6 +272,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/security.js", SECURITY_JS, JS),
         ("/static/chat.js", CHAT_JS, JS),
         ("/static/solar.js", SOLAR_JS, JS),
+        ("/static/zigbee-status.js", ZIGBEE_STATUS_JS, JS),
         ("/static/layoutstate.js", LAYOUTSTATE_JS, JS),
         ("/static/layout3d.js", LAYOUT3D_JS, JS),
         ("/static/sunmodels.js", SUNMODELS_JS, JS),
