@@ -16,7 +16,7 @@ HISTORY.md for the same heading's finished parts. Several entries carry a long r
 what was investigated and rejected along the way; that reasoning is preserved
 deliberately, not padding, so read the whole entry before picking one up.
 
-## ⛔ PRIORITY 1 — beelink1 fTPM/Pluton crash storm, sixth regression (2026-08-30)
+## ⛔ PRIORITY 1 — beelink1 fTPM/Pluton crash storm, active again (2026-08-30)
 
 **Blocked on physical access to the box. Nothing else on beelink1 is worth doing until
 this is closed — the node cannot hold an uptime long enough to serve inference.**
@@ -81,6 +81,53 @@ DHCP reservations in `infrastructure/network.md`, which is the thing that keeps 
 "the node is down" into a routing hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
+
+## Bug — the ✕ on a switch card does not remove it from the room (2026-08-30)
+
+**Reported by Jon:** clicking the ✕ to take a switch out of a room does nothing, and
+**the cursor stays as a grab over the button** rather than becoming a pointer.
+
+**Not reproduced or root-caused yet** — the code path below was read, not run. The cursor
+detail is the most useful clue in the report and any candidate cause has to explain it:
+a grab cursor over the ✕ means the browser is not hit-testing the button, because
+`.device-row-btn` sets `cursor: pointer` on itself (`style.css`) and `cursor` only falls
+through to the card's `[draggable="true"] { cursor: grab }` if the button is not the
+target.
+
+**The path a switch takes.** `'switch'` is in `READ_ONLY_DEVICE_TYPES`
+(`rooms.js:283`), so a switch in a room renders through the read-only branch at
+`rooms.js:1598` → `buildSensorCard(dev, { draggable: true, onRemoveFromRoom })`
+(`devicewidgets.js:239`) → `wireDeviceDrag(card, …)` (`rooms.js:1825`). The ✕ itself is
+a real `<button class="device-row-btn">` with a plain `click` listener
+(`devicewidgets.js:289-296`). There is only this one path — no switch-specific card.
+
+**Hypotheses, most likely first:**
+
+1. **A stuck HTML5 drag.** `wireDeviceDrag` disables dragging on `pointerdown` when the
+   target is inside `input, button` and re-enables it on `pointerup`/`pointercancel`. If
+   a drag aborts without `dragend` — and `rooms.js:1838` already documents Chrome
+   aborting a drag outright when the source card reflows during `dragstart` — the card
+   is left mid-drag, which would explain both the grabbing cursor and clicks going
+   nowhere. Test: does the ✕ work on a freshly loaded page, before any drag is attempted?
+2. **The offline `pointer-events` trap, by inconsistency.** `style.css:218-225` kills
+   `pointer-events` on every `button` inside a `.device-offline` card and exempts only
+   `.room-remove-btn`. The light card's ✕ is a `.room-remove-btn` and is therefore safe;
+   the sensor/switch card's ✕ is a `.device-row-btn` and would not be. **As read, this
+   does not fire** — sensor cards get `is-offline`, not `device-offline`
+   (`devicewidgets.js:242`; `patchDeviceCards` only ever touches `.room-device-card`,
+   `rooms.js:350-362`) — but the two card types disagreeing about both the class name and
+   the button class is exactly the shape of this bug, and every switch in the house
+   currently reads offline, so it is worth proving rather than assuming.
+3. **The click is being swallowed higher up.** Unlike its siblings — the pin button
+   (`devicewidgets.js:272`) and both light-card remove paths (`rooms.js:1710`, `1819`) —
+   the sensor card's ✕ handler is the one that does **not** call `e.stopPropagation()`.
+   That alone should not stop the removal, since the inner handler runs first, but it
+   would matter if an ancestor handler re-renders the card list on the same click.
+
+**To reproduce properly:** open a room holding a switch, try the ✕ before touching
+anything else, then again after dragging any card, and watch whether the `PATCH
+/rooms/{id}/devices` call in `actions.js:47` is ever issued. If the request goes out and
+the switch stays put, it is a backend/render problem and none of the above applies.
 
 ## Hunts / eBay Bargain Finder — deployed, production keyset issued, not yet exercised with real data (2026-07-15)
 
