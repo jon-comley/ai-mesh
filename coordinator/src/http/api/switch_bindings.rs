@@ -48,8 +48,13 @@ pub struct CreateSwitchBindingBody {
 }
 
 /// `POST /api/switch-bindings` — bind a switch's exact (device_id, action)
-/// pair to a room/group command. Re-posting the same (device_id, action)
-/// replaces the existing binding (see `Registry::create_switch_binding`).
+/// pair to a room/group command. A switch holds one binding per action, so a
+/// Hue Tap Dial can drive all four buttons and both dial directions at once.
+///
+/// Re-posting a (device_id, action) that is already bound returns **409
+/// Conflict** and changes nothing; remove the existing binding first. It used
+/// to overwrite silently, which let a mis-picked action destroy a working
+/// binding without saying so.
 pub async fn create_switch_binding(
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
     _: Authed,
@@ -96,7 +101,12 @@ pub async fn create_switch_binding(
         &body.command,
         body.step_delta,
     ) {
-        Ok(id) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Ok(Some(id)) => (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response(),
+        Ok(None) => (
+            StatusCode::CONFLICT,
+            format!("'{action}' is already bound on this switch — remove that binding first"),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "create_switch_binding failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -207,6 +217,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duplicate_action_on_the_same_switch_is_refused_with_409() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Larder");
+        let body = format!(
+            r#"{{"device_id":"dial1","action":"button_1_press","target_kind":"room","target_id":"{room_id}","command":"toggle"}}"#
+        );
+        let status = send(
+            router(registry.clone()),
+            "POST",
+            "/api/switch-bindings?token=",
+            &body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Same pair again, with a different command — must not overwrite.
+        let clashing = format!(
+            r#"{{"device_id":"dial1","action":"button_1_press","target_kind":"room","target_id":"{room_id}","command":"off"}}"#
+        );
+        let status = send(
+            router(registry.clone()),
+            "POST",
+            "/api/switch-bindings?token=",
+            &clashing,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let (_, body) =
+            send_with_body(router(registry), "GET", "/api/switch-bindings?token=", "").await;
+        assert!(body.contains("toggle"), "original survives: {body}");
+        assert!(!body.contains(r#""command":"off""#), "not overwritten: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_switch_takes_one_binding_per_action() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Larder");
+        for action in ["button_1_press", "button_2_press", "dial_rotate_left_step"] {
+            let status = send(
+                router(registry.clone()),
+                "POST",
+                "/api/switch-bindings?token=",
+                &format!(
+                    r#"{{"device_id":"dial1","action":"{action}","target_kind":"room","target_id":"{room_id}","command":"toggle"}}"#
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{action} should bind");
+        }
+        let (_, body) =
+            send_with_body(router(registry), "GET", "/api/switch-bindings?token=", "").await;
+        for action in ["button_1_press", "button_2_press", "dial_rotate_left_step"] {
+            assert!(body.contains(action), "{action} missing from: {body}");
+        }
+    }
+
+    #[tokio::test]
     async fn create_then_list_roundtrip() {
         let registry = make_registry();
         let room_id = make_room(&registry, "Larder");
@@ -267,6 +335,7 @@ mod tests {
             let mut reg = registry.lock().unwrap();
             reg.create_switch_binding("dial1", "button_1_press", "room", &room_id, "toggle", None)
                 .unwrap()
+                .expect("a first binding is always created")
         };
         let status = send(
             router(registry),

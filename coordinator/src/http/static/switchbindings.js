@@ -132,23 +132,39 @@ function buildBindingRow(binding, onRemoved) {
 // not just what's fired since the dashboard loaded. When z2m has given us
 // that list, a real <select> replaces the old guess-and-press combo box
 // entirely: no need to physically press a button before you can bind it.
-function buildActionPicker(deviceId, declaredActions) {
+function buildActionPicker(deviceId, declaredActions, boundActions) {
   if (declaredActions.length > 0) {
     const select = document.createElement('select');
     select.className = 'switch-binding-action-input switch-binding-action-select';
     const seen = new Set(getSeenActions(deviceId));
     const lastSeen = getLastSeenAction(deviceId);
+    // Prefer the action just pressed, but never land on one that is already
+    // bound — a switch takes one binding per action, and picking a bound one
+    // is now refused by the server (409) rather than silently overwriting.
+    let defaulted = false;
     for (const action of declaredActions) {
       const opt = document.createElement('option');
       opt.value = action;
+      const isBound = boundActions.has(action);
       // A ● marks actions this switch has actually fired at least once —
       // reassurance the binding will really trigger, without hiding the
-      // rest of the (equally real) vocabulary.
-      opt.textContent = seen.has(action) ? `${action} ●` : action;
-      if (action === lastSeen) opt.selected = true;
+      // rest of the (equally real) vocabulary. ✓ marks one already bound.
+      opt.textContent = isBound
+        ? `${action} ✓ bound`
+        : (seen.has(action) ? `${action} ●` : action);
+      opt.disabled = isBound;
+      if (!isBound && !defaulted && action === lastSeen) {
+        opt.selected = true;
+        defaulted = true;
+      }
       select.appendChild(opt);
     }
-    return { input: select, getValue: () => select.value };
+    if (!defaulted) {
+      const firstFree = [...select.options].find(o => !o.disabled);
+      if (firstFree) firstFree.selected = true;
+    }
+    const allBound = [...select.options].every(o => o.disabled);
+    return { input: select, getValue: () => select.value, exhausted: allBound };
   }
 
   // Fallback for a device z2m hasn't given us an action enum for (older
@@ -171,15 +187,28 @@ function buildActionPicker(deviceId, declaredActions) {
     opt.value = action;
     actionList.appendChild(opt);
   }
-  return { input: actionInput, extra: actionList, getValue: () => actionInput.value.trim() };
+  return {
+    input: actionInput,
+    extra: actionList,
+    getValue: () => actionInput.value.trim(),
+    exhausted: false,
+  };
 }
 
-function buildAddForm(deviceId, declaredActions, onAdded) {
+function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
   const form = document.createElement('div');
   form.className = 'switch-binding-form';
 
-  const { input: actionInput, extra: actionList, getValue: getAction } =
-    buildActionPicker(deviceId, declaredActions);
+  const { input: actionInput, extra: actionList, getValue: getAction, exhausted } =
+    buildActionPicker(deviceId, declaredActions, boundActions);
+
+  if (exhausted) {
+    const note = document.createElement('p');
+    note.className = 'placeholder';
+    note.textContent = 'Every action on this switch is bound. Remove one to rebind it.';
+    form.appendChild(note);
+    return form;
+  }
 
   const targetSelect = buildTargetSelect();
 
@@ -227,6 +256,12 @@ function buildAddForm(deviceId, declaredActions, onAdded) {
       showToast('Enter the switch action first (press the button once to see it above)', true);
       return;
     }
+    // The server refuses a duplicate with 409; catching it here as well keeps
+    // the free-text fallback path honest and gives a better message.
+    if (boundActions.has(action)) {
+      showToast(`'${action}' is already bound on this switch — remove that binding first`, true);
+      return;
+    }
     const [targetKind, targetId] = targetSelect.value.split(':');
     const command = commandSelect.value;
     let stepDelta;
@@ -272,17 +307,35 @@ export function buildBindingsPanel(deviceId, declaredActions = []) {
   list.className = 'switch-bindings-list';
   panel.appendChild(list);
 
-  const renderList = () => {
-    list.innerHTML = '';
+  // The add form is rebuilt alongside the list, not once: which actions are
+  // still free changes every time a binding is added or removed, and a stale
+  // picker would offer one that the server now refuses.
+  const formWrap = document.createElement('div');
+  panel.appendChild(formWrap);
+
+  const renderAll = () => {
     const mine = bindingsForDevice(deviceId);
+    list.innerHTML = '';
     if (mine.length === 0) {
       list.innerHTML = '<p class="placeholder">No bindings yet.</p>';
     } else {
-      for (const binding of mine) list.appendChild(buildBindingRow(binding, renderList));
+      // Say the count out loud: a switch holds one binding per action, and a
+      // Hue Tap Dial has 24 of them — four buttons and both dial directions
+      // bind independently. The panel used to show a bare list, which read as
+      // "this switch has a binding" rather than "it can have many".
+      const count = document.createElement('p');
+      count.className = 'switch-bindings-count placeholder';
+      const total = declaredActions.length;
+      count.textContent = total > 0
+        ? `${mine.length} of ${total} actions bound`
+        : `${mine.length} binding${mine.length === 1 ? '' : 's'}`;
+      list.appendChild(count);
+      for (const binding of mine) list.appendChild(buildBindingRow(binding, renderAll));
     }
+    const boundActions = new Set(mine.map(b => b.action));
+    formWrap.innerHTML = '';
+    formWrap.appendChild(buildAddForm(deviceId, declaredActions, boundActions, renderAll));
   };
-
-  panel.appendChild(buildAddForm(deviceId, declaredActions, renderList));
 
   const toggle = document.createElement('button');
   toggle.className = 'device-row-btn switch-bindings-toggle';
@@ -292,7 +345,7 @@ export function buildBindingsPanel(deviceId, declaredActions = []) {
     const opening = panel.hidden;
     if (opening) {
       await loadBindings();
-      renderList();
+      renderAll();
     }
     panel.hidden = !opening;
   });

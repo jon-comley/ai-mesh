@@ -21,10 +21,18 @@ const SELECT_COLS: &str = "id, device_id, action, target_kind, target_id, comman
 
 impl Registry {
     /// One binding per (device_id, action) — a given button press or dial
-    /// rotation direction does exactly one thing. Re-binding the same pair
-    /// replaces the previous target/command outright (same "last save
-    /// wins" shape as re-saving a scene under an existing name). Returns
-    /// the binding's id.
+    /// rotation direction does exactly one thing. A switch may hold as many
+    /// bindings as it has actions: the Hue Tap Dial declares 24, so all four
+    /// buttons and both dial directions can be bound independently.
+    ///
+    /// **A duplicate (device_id, action) is refused, not overwritten** —
+    /// returns `Ok(None)`. It used to silently replace the previous row, which
+    /// meant a mis-picked action quietly destroyed a working binding with no
+    /// way to notice (Jon, 2026-08-30: "please guard against duplicate
+    /// binding, i.e. do not allow them"). Rebinding is delete-then-create, so
+    /// losing a binding is always something you asked for.
+    ///
+    /// `Ok(Some(id))` on success.
     pub fn create_switch_binding(
         &mut self,
         device_id: &str,
@@ -33,26 +41,20 @@ impl Registry {
         target_id: &str,
         command: &str,
         step_delta: Option<i32>,
-    ) -> rusqlite::Result<String> {
+    ) -> rusqlite::Result<Option<String>> {
         let new_id = uuid::Uuid::new_v4().to_string();
-        self.conn.execute(
+        // DO NOTHING rather than DO UPDATE: the UNIQUE(device_id, action)
+        // index is the guard, so the check and the insert cannot race.
+        let inserted = self.conn.execute(
             "INSERT INTO switch_bindings (id, device_id, action, target_kind, target_id, command, step_delta)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(device_id, action) DO UPDATE SET
-                 target_kind = excluded.target_kind,
-                 target_id   = excluded.target_id,
-                 command     = excluded.command,
-                 step_delta  = excluded.step_delta",
+             ON CONFLICT(device_id, action) DO NOTHING",
             params![new_id, device_id, action, target_kind, target_id, command, step_delta],
         )?;
-        // On a conflict the freshly-generated `new_id` is discarded in
-        // favour of the pre-existing row's id — read back whichever one is
-        // actually stored rather than assuming it's `new_id`.
-        self.conn.query_row(
-            "SELECT id FROM switch_bindings WHERE device_id = ?1 AND action = ?2",
-            params![device_id, action],
-            |row| row.get(0),
-        )
+        if inserted == 0 {
+            return Ok(None);
+        }
+        Ok(Some(new_id))
     }
 
     pub fn list_switch_bindings(&self) -> rusqlite::Result<Vec<SwitchBindingRecord>> {
@@ -124,7 +126,8 @@ mod tests {
         let room_id = make_room(&mut reg);
         let id = reg
             .create_switch_binding("dial1", "button_1_press", "room", &room_id, "toggle", None)
-            .unwrap();
+            .unwrap()
+            .expect("a first binding is always created");
         let found = reg.find_switch_binding("dial1", "button_1_press").unwrap();
         assert_eq!(found.id, id);
         assert_eq!(found.command, "toggle");
@@ -138,22 +141,72 @@ mod tests {
     }
 
     #[test]
-    fn rebinding_same_device_and_action_replaces_the_previous_one() {
+    fn rebinding_same_device_and_action_is_refused_not_replaced() {
         let mut reg = Registry::new();
         let room_id = make_room(&mut reg);
         let first_id = reg
             .create_switch_binding("dial1", "button_1_press", "room", &room_id, "on", None)
-            .unwrap();
-        let second_id = reg
+            .unwrap()
+            .expect("first binding should be created");
+        let second = reg
             .create_switch_binding("dial1", "button_1_press", "room", &room_id, "off", None)
             .unwrap();
-        assert_eq!(
-            first_id, second_id,
-            "same (device_id, action) should keep the same row id"
-        );
+        assert!(second.is_none(), "duplicate (device_id, action) is refused");
         let found = reg.find_switch_binding("dial1", "button_1_press").unwrap();
-        assert_eq!(found.command, "off");
+        assert_eq!(found.id, first_id, "the original row survives untouched");
+        assert_eq!(found.command, "on", "the original command is not overwritten");
         assert_eq!(reg.list_switch_bindings().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn one_switch_holds_a_binding_per_action() {
+        let mut reg = Registry::new();
+        let room_id = make_room(&mut reg);
+        // The Hue Tap Dial's four buttons and both dial directions, on one device.
+        for action in [
+            "button_1_press",
+            "button_2_press",
+            "button_3_press",
+            "button_4_press",
+            "dial_rotate_left_step",
+            "dial_rotate_right_step",
+        ] {
+            assert!(
+                reg.create_switch_binding("dial1", action, "room", &room_id, "toggle", None)
+                    .unwrap()
+                    .is_some(),
+                "{action} should bind independently"
+            );
+        }
+        assert_eq!(reg.list_switch_bindings().unwrap().len(), 6);
+        // A different switch is unaffected by the first one's actions.
+        assert!(
+            reg.create_switch_binding("dial2", "button_1_press", "room", &room_id, "on", None)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(reg.list_switch_bindings().unwrap().len(), 7);
+    }
+
+    #[test]
+    fn deleting_a_binding_frees_its_action_to_be_rebound() {
+        let mut reg = Registry::new();
+        let room_id = make_room(&mut reg);
+        let id = reg
+            .create_switch_binding("dial1", "button_1_press", "room", &room_id, "on", None)
+            .unwrap()
+            .unwrap();
+        assert!(reg.delete_switch_binding(&id).unwrap());
+        let again = reg
+            .create_switch_binding("dial1", "button_1_press", "room", &room_id, "off", None)
+            .unwrap();
+        assert!(again.is_some(), "the pair is bindable again once removed");
+        assert_eq!(
+            reg.find_switch_binding("dial1", "button_1_press")
+                .unwrap()
+                .command,
+            "off"
+        );
     }
 
     #[test]
@@ -181,7 +234,8 @@ mod tests {
         let room_id = make_room(&mut reg);
         let id = reg
             .create_switch_binding("dial1", "button_1_press", "room", &room_id, "toggle", None)
-            .unwrap();
+            .unwrap()
+            .expect("a first binding is always created");
         assert!(reg.delete_switch_binding(&id).unwrap());
         assert!(reg.find_switch_binding("dial1", "button_1_press").is_none());
     }
