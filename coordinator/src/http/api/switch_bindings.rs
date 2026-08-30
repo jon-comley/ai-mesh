@@ -4,7 +4,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 
 use crate::http::auth::Authed;
+use crate::http::state::DashboardState;
 use crate::registry::Registry;
 
 fn valid_command(command: &str, step_delta: Option<i32>) -> bool {
@@ -57,6 +58,7 @@ pub struct CreateSwitchBindingBody {
 /// binding without saying so.
 pub async fn create_switch_binding(
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    State(state): State<Arc<DashboardState>>,
     _: Authed,
     Json(body): Json<CreateSwitchBindingBody>,
 ) -> impl IntoResponse {
@@ -73,6 +75,22 @@ pub async fn create_switch_binding(
         return (
             StatusCode::BAD_REQUEST,
             "target_kind must be 'room' or 'group'",
+        )
+            .into_response();
+    }
+    // Reject an action the device cannot emit. A binding on a made-up action
+    // stores fine, lists fine and never fires — exactly what happened to the
+    // Hue Smart Button bound to `button_press_1`, a string that model has no
+    // concept of (it declares on/off/press/hold/release). An empty vocabulary
+    // means we cannot check, not that nothing is valid, so it skips the test.
+    let declared = state.get_device_actions(device_id);
+    if !declared.is_empty() && !declared.iter().any(|a| a == action) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "'{action}' is not an action this switch emits. It declares: {}",
+                declared.join(", ")
+            ),
         )
             .into_response();
     }
@@ -138,7 +156,26 @@ mod tests {
     use axum::routing::{get, post};
 
     fn router(registry: Arc<Mutex<Registry>>) -> Router {
+        router_with_state(registry, make_state(vec![], empty_connections()))
+    }
+
+    /// A state that knows one switch and the actions it declares — so the
+    /// vocabulary check has something to check against. An empty state (what
+    /// `router` builds) means "cannot check", and validation is skipped.
+    fn state_knowing(device_id: &str, actions: &[&str]) -> Arc<DashboardState> {
         let state = make_state(vec![], empty_connections());
+        state.push_other_devices(
+            "pi1",
+            &[shared::DeviceEntry {
+                id: device_id.to_string(),
+                device_type: shared::DeviceType::Switch,
+                actions: actions.iter().map(|a| a.to_string()).collect(),
+            }],
+        );
+        state
+    }
+
+    fn router_with_state(registry: Arc<Mutex<Registry>>, state: Arc<DashboardState>) -> Router {
         Router::new()
             .route(
                 "/api/switch-bindings",
@@ -214,6 +251,61 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_an_action_the_device_cannot_emit() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Larder");
+        // The real fault this guards: a Hue Smart Button bound to
+        // `button_press_1`, which it has no concept of.
+        let state = state_knowing("button1", &["on", "off", "press", "hold", "release"]);
+        let (status, body) = send_with_body(
+            router_with_state(registry, state),
+            "POST",
+            "/api/switch-bindings?token=",
+            &format!(
+                r#"{{"device_id":"button1","action":"button_press_1","target_kind":"room","target_id":"{room_id}","command":"toggle"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("press"), "should list what it does emit: {body}");
+    }
+
+    #[tokio::test]
+    async fn create_accepts_a_declared_action() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Larder");
+        let state = state_knowing("button1", &["on", "off", "press", "hold", "release"]);
+        let status = send(
+            router_with_state(registry, state),
+            "POST",
+            "/api/switch-bindings?token=",
+            &format!(
+                r#"{{"device_id":"button1","action":"press","target_kind":"room","target_id":"{room_id}","command":"toggle"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_vocabulary_skips_the_check_rather_than_blocking() {
+        let registry = make_registry();
+        let room_id = make_room(&registry, "Larder");
+        // Device not in the snapshot at all — z2m may not have reported it yet.
+        // It must stay bindable, or a slow discovery makes the switch unusable.
+        let status = send(
+            router(registry),
+            "POST",
+            "/api/switch-bindings?token=",
+            &format!(
+                r#"{{"device_id":"mystery","action":"whatever_it_emits","target_kind":"room","target_id":"{room_id}","command":"toggle"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]

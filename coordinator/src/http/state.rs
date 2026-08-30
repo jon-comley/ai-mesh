@@ -1023,6 +1023,21 @@ impl DashboardState {
             .collect()
     }
 
+    /// The declared action vocabulary for one device, or empty when the device
+    /// is unknown to us or z2m never reported an `action` enum for its model.
+    ///
+    /// Empty means *cannot be checked*, never *no actions are valid* — callers
+    /// must skip validation rather than reject, or a device whose vocabulary
+    /// has not arrived yet becomes unbindable.
+    pub fn get_device_actions(&self, device_id: &str) -> Vec<String> {
+        self.other_device_snapshot
+            .lock()
+            .unwrap()
+            .get(device_id)
+            .map(|(_, entry)| entry.actions.clone())
+            .unwrap_or_default()
+    }
+
     /// Return all known group friendly names — used to warm-start new WS clients.
     pub fn get_group_snapshot(&self) -> Vec<String> {
         self.group_snapshot

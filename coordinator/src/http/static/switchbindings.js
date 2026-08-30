@@ -9,13 +9,6 @@ import { esc, showToast } from '/static/util.js';
 import { model } from '/static/state.js';
 import { getLastSeenAction, getSeenActions } from '/static/devicewidgets.js';
 
-// A device id can contain characters that aren't safe in an HTML `id`
-// attribute (mostly moot for the "0x..." Zigbee ids in practice, but a
-// user-renamed or manually-entered device_id could contain anything).
-function safeListId(deviceId) {
-  return `switch-actions-${deviceId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-}
-
 let allBindings = [];
 let loaded = false;
 
@@ -127,81 +120,77 @@ function buildBindingRow(binding, onRemoved) {
   return row;
 }
 
-// declaredActions is this switch model's full z2m action vocabulary (see
-// shared::DeviceEntry.actions) — every button/gesture it can ever emit,
-// not just what's fired since the dashboard loaded. When z2m has given us
-// that list, a real <select> replaces the old guess-and-press combo box
-// entirely: no need to physically press a button before you can bind it.
+// Build the action <select>.
+//
+// `declaredActions` is the switch model's full z2m action vocabulary (see
+// shared::DeviceEntry.actions) — every button/gesture it can ever emit, not
+// just what has fired since the dashboard loaded. Where z2m has not given us
+// one, fall back to the actions this switch has actually been *seen* emitting.
+//
+// **There is deliberately no free-text entry.** It used to accept any string,
+// and a typed action that the device does not emit stores fine, lists fine and
+// never fires — the Hue Smart Button spent an unknown length of time bound to
+// `button_press_1`, which that model has no concept of (it declares
+// on/off/press/hold/release). Nothing surfaced it. A binding you can only pick
+// from a list cannot be wrong in that way. The server enforces the same rule.
+//
+// Returns `{ input, getValue, exhausted, empty }` — `empty` when there is no
+// vocabulary to offer at all, which is a "press a button first" state, not an
+// error.
 function buildActionPicker(deviceId, declaredActions, boundActions) {
-  if (declaredActions.length > 0) {
-    const select = document.createElement('select');
-    select.className = 'switch-binding-action-input switch-binding-action-select';
-    const seen = new Set(getSeenActions(deviceId));
-    const lastSeen = getLastSeenAction(deviceId);
-    // Prefer the action just pressed, but never land on one that is already
-    // bound — a switch takes one binding per action, and picking a bound one
-    // is now refused by the server (409) rather than silently overwriting.
-    let defaulted = false;
-    for (const action of declaredActions) {
-      const opt = document.createElement('option');
-      opt.value = action;
-      const isBound = boundActions.has(action);
-      // A ● marks actions this switch has actually fired at least once —
-      // reassurance the binding will really trigger, without hiding the
-      // rest of the (equally real) vocabulary. ✓ marks one already bound.
-      opt.textContent = isBound
-        ? `${action} ✓ bound`
-        : (seen.has(action) ? `${action} ●` : action);
-      opt.disabled = isBound;
-      if (!isBound && !defaulted && action === lastSeen) {
-        opt.selected = true;
-        defaulted = true;
-      }
-      select.appendChild(opt);
-    }
-    if (!defaulted) {
-      const firstFree = [...select.options].find(o => !o.disabled);
-      if (firstFree) firstFree.selected = true;
-    }
-    const allBound = [...select.options].every(o => o.disabled);
-    return { input: select, getValue: () => select.value, exhausted: allBound };
+  const seen = getSeenActions(deviceId);
+  const options = declaredActions.length > 0 ? declaredActions : seen;
+  if (options.length === 0) {
+    return { input: null, getValue: () => '', exhausted: false, empty: true };
   }
 
-  // Fallback for a device z2m hasn't given us an action enum for (older
-  // z2m, or a device type this crate hasn't seen exposes for yet): the
-  // original combo box, built from whatever's actually fired so far.
-  const listId = safeListId(deviceId);
-  const actionInput = document.createElement('input');
-  actionInput.type = 'text';
-  actionInput.setAttribute('list', listId);
-  actionInput.placeholder = 'z2m action, e.g. button_1_press';
-  actionInput.className = 'switch-binding-action-input';
-  actionInput.autocomplete = 'off';
+  const select = document.createElement('select');
+  select.className = 'switch-binding-action-input switch-binding-action-select';
+  const seenSet = new Set(seen);
   const lastSeen = getLastSeenAction(deviceId);
-  if (lastSeen) actionInput.value = lastSeen;
-
-  const actionList = document.createElement('datalist');
-  actionList.id = listId;
-  for (const action of getSeenActions(deviceId)) {
+  // Prefer the action just pressed, but never land on one already bound — a
+  // switch takes one binding per action, and the server refuses a duplicate.
+  let defaulted = false;
+  for (const action of options) {
     const opt = document.createElement('option');
     opt.value = action;
-    actionList.appendChild(opt);
+    const isBound = boundActions.has(action);
+    // ● marks an action this switch has actually fired at least once —
+    // reassurance the binding will really trigger, without hiding the rest of
+    // the (equally real) vocabulary. ✓ marks one already bound.
+    opt.textContent = isBound
+      ? `${action} ✓ bound`
+      : (seenSet.has(action) ? `${action} ●` : action);
+    opt.disabled = isBound;
+    if (!isBound && !defaulted && action === lastSeen) {
+      opt.selected = true;
+      defaulted = true;
+    }
+    select.appendChild(opt);
   }
-  return {
-    input: actionInput,
-    extra: actionList,
-    getValue: () => actionInput.value.trim(),
-    exhausted: false,
-  };
+  if (!defaulted) {
+    const firstFree = [...select.options].find(o => !o.disabled);
+    if (firstFree) firstFree.selected = true;
+  }
+  const allBound = [...select.options].every(o => o.disabled);
+  return { input: select, getValue: () => select.value, exhausted: allBound, empty: false };
 }
 
 function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
   const form = document.createElement('div');
   form.className = 'switch-binding-form';
 
-  const { input: actionInput, extra: actionList, getValue: getAction, exhausted } =
+  const { input: actionInput, getValue: getAction, exhausted, empty } =
     buildActionPicker(deviceId, declaredActions, boundActions);
 
+  if (empty) {
+    const note = document.createElement('p');
+    note.className = 'placeholder';
+    note.textContent =
+      'No actions known for this switch yet — press one of its buttons once and it will appear here.';
+    form.appendChild(note);
+    return form;
+  }
   if (exhausted) {
     const note = document.createElement('p');
     note.className = 'placeholder';
@@ -253,7 +242,7 @@ function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
   addBtn.addEventListener('click', async () => {
     const action = getAction();
     if (!action) {
-      showToast('Enter the switch action first (press the button once to see it above)', true);
+      showToast('Pick the switch action first', true);
       return;
     }
     // The server refuses a duplicate with 409; catching it here as well keeps
@@ -286,9 +275,7 @@ function buildAddForm(deviceId, declaredActions, boundActions, onAdded) {
     }
   });
 
-  form.append(actionInput);
-  if (actionList) form.append(actionList);
-  form.append(targetSelect, commandSelect, deltaInput, addBtn);
+  form.append(actionInput, targetSelect, commandSelect, deltaInput, addBtn);
   return form;
 }
 

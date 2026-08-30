@@ -41,13 +41,29 @@ API answering **409** and naming the clashing action. The unique index does the 
 so the check and the insert cannot race. Rebinding is delete-then-create: losing a binding
 is now always something that was asked for.
 
-**Found while checking the live data, and still outstanding:** the Hue Smart Button
+**Free text removed entirely, and the vocabulary enforced server-side (same day).** Jon's
+call once the dead binding below came to light: *"lets get rid of freetext
+funyioality."* The action field was a combo box that accepted any string, which is how a
+binding on an action the device cannot emit came to exist in the first place. Now:
+
+- **The picker is a `<select>` and nothing else.** Where z2m has declared a vocabulary it
+  lists that; where it has not, it lists the actions the switch has actually been *seen*
+  emitting. With neither, it says "press one of its buttons once and it will appear here"
+  — a wait-for-discovery state, not an error, and never a text box.
+- **`POST /api/switch-bindings` validates the action** against
+  `DashboardState::get_device_actions`, returning **400** and naming what the device does
+  declare. An empty vocabulary means *cannot check*, not *nothing is valid*, so an
+  undiscovered device stays bindable rather than becoming unusable — covered by its own
+  test, because getting that backwards would be worse than the bug being fixed.
+
+**The dead binding this came from:** the Hue Smart Button
 (`0x001788010801c849`) is bound to action **`button_press_1`**, which that model does not
 emit. z2m declares exactly `on`, `off`, `press`, `hold`, `release` for it. The binding is
 stored, valid-looking and **can never fire** — almost certainly typed through the
 free-text fallback before the device's action list was available. Nothing warns about an
-action outside a device's declared vocabulary; the new picker prevents it happening again
-where a vocabulary is known, but the existing row needs deleting and re-making as `press`.
+action outside a device's declared vocabulary — until now: both the picker and the API
+refuse it. The stored row was deleted and re-made as `press`, against the same room and
+the same `toggle` command, restoring the intent it never had.
 
 Nine tests added — per-action independence, refusal leaving the original untouched, delete
 freeing a pair to be rebound, 409 at the API. 858 coordinator tests green, clippy clean,
