@@ -45,6 +45,35 @@ pools memory with the Studio you already have instead of stranding it.
 | A secondhand, **pre-shortage** M3 Ultra (256GB or 512GB — no longer orderable new) | Used-market only, price not established | ~320–576GB | The actual DeepSeek-V4/Kimi-K2.6/GLM-5.2 "frontier" tier — the only home-hardware path that gets there |
 | AMD Strix Halo 128GB mini PC (standalone, not part of the Thunderbolt pool) | $2,600–4,000 | N/A — separate node, doesn't combine with the Studio | Its own Qwen3-Coder-30B-A3B-class inference (~90–135 tok/s), useful as an `ai-mesh` node but not a memory-pooling partner |
 
+## The refresh landed — checked 2026-09-07
+
+**Point 1 below said to check before committing, so this is that check.** Apple
+announced the **M5 Max and M5 Ultra Mac Studio on 2026-08-25**, shipping
+**22 September**; 512GB follows in late October, so 256GB is the ceiling until
+then. **The DRAM cap that shaped every row above is lifted.**
+
+| | Memory | Bandwidth | From |
+|---|---|---|---|
+| M4 Max (owned) | 64GB | 546 GB/s | — |
+| **M5 Max** | up to **128GB** | 614 GB/s | $2,499 base |
+| **M5 Ultra** | up to **512GB** (256GB until late Oct) | **1.2 TB/s** | $5,499 base |
+
+**Two rows above are now obsolete and should not be bought.**
+
+- **"A second M4 Max (64GB), ~$2,000–2,500, pool ~120GB"** — an **M5 Max at
+  128GB is a better version of this in one box**: more memory than the pair,
+  faster, no Thunderbolt hop, no second machine to power or house. Buy that
+  instead if the goal is headroom.
+- **"A secondhand pre-shortage M3 Ultra, used-market only"** — the frontier tier
+  is orderable new again. That row existed only because the shortage made it the
+  sole path.
+
+**The prices are base configurations and the memory is the expensive part.**
+256GB on the M5 Ultra is **$10,799** with 1TB storage, against the $5,499
+headline. Apple does not publish the 128GB M5 Max price on its configurator page
+in a form worth quoting, so **get it from the configurator before planning
+around it** rather than inferring it from the base.
+
 ## Two things to know before buying
 
 1. **Apple's whole desktop lineup is memory-capped by a DRAM shortage right
