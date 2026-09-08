@@ -74,10 +74,56 @@ headline. Apple does not publish the 128GB M5 Max price on its configurator page
 in a form worth quoting, so **get it from the configurator before planning
 around it** rather than inferring it from the base.
 
+## The UK configurator, read off the page — 2026-09-08
+
+**Jon pasted the live Apple Store UK page**, so these are actual orderable
+options and prices rather than launch-day reporting. **The pound figures equal
+the dollar ones** — £2,499 and £5,499 against the $2,499/$5,499 above, which is
+Apple's usual UK pricing rather than a conversion.
+
+| Option | M5 Max | M5 Ultra |
+|---|---|---|
+| From | **£2,499** | **£5,499** |
+| Neural Engine | 16-core | 32-core |
+| CPU / GPU | — | 30-core/64-core base, **36-core/80-core +£1,300** |
+| Memory | — | 96GB base, **256GB +£4,000**; 512GB **late October** |
+
+**Storage ladder, same on both:** 1TB included, 2TB **+£500**, 4TB **+£1,500**,
+8TB **+£3,500**, 16TB **+£7,500**.
+
+**So the £10,799 figure above decomposes exactly**: £5,499 base + £1,300 for the
+36-core/80-core + £4,000 for 256GB, at 1TB storage. **Memory is 79% of the
+upgrade spend.** (The configurator's summary also had a Final Cut Pro licence
+selected at £299.99 and Logic Pro at +£199.99 — neither is part of that number
+and neither is wanted here.)
+
+**The £1,300 CPU/GPU step is the one worth thinking about rather than reflexively
+taking.** Token *generation* on Apple silicon is memory-bandwidth-bound, and
+bandwidth is a property of the Ultra die — 1.2 TB/s on both variants — so the
+extra 16 GPU cores mostly buy **prefill**: prompt processing, long-context reads,
+the first token. For a coding agent chewing through large files that is not
+nothing, but it is a different axis from "can it hold the model". **Worth a
+benchmark before spending**, and 30-core/64-core with 256GB at **£9,499** is the
+same capacity for £1,300 less.
+
+**The number that actually changes planning: dispatch is 16–18 weeks.** Ordered
+today that is **late December to mid-January**, not September. Anything that
+depends on this machine existing needs to assume the current hardware until then,
+and the 512GB option arriving in late October **lands inside that window** — so
+ordering 256GB now to get in the queue means committing to 256GB while a 512GB
+option becomes orderable before the 256GB machine ships.
+
+**Ports, for completeness.** Front: two Thunderbolt 5, SDXC. Back: four
+Thunderbolt 5, two USB-A, HDMI, **10Gb Ethernet**, 3.5mm headphone. Up to eight
+external displays. The 10Gb Ethernet is the one that matters here — it is the
+link to `pi1` and to any second box in an MLX pairing.
+
 ## Two things to know before buying
 
-1. **Apple's whole desktop lineup is memory-capped by a DRAM shortage right
-   now, not by chip design.** The 128/256/512GB Mac Studio configs were
+1. **STALE — the refresh landed and this item is superseded by the two sections
+   above.** Kept because the reasoning still explains why the old options looked
+   the way they did. **Apple's whole desktop lineup is memory-capped by a DRAM
+   shortage right now, not by chip design.** The 128/256/512GB Mac Studio configs were
    pulled in 2026. The single highest-RAM Mac Apple sells today is actually
    a *laptop* — the M5 Pro/M5 Max MacBook Pro at 128GB — which is backwards
    from normal. A Mac Studio refresh (M5 Max/M5 Ultra) is reported in the
