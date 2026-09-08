@@ -74,11 +74,62 @@ the original *fix*, not a regression. Use the list, not a count. Storms carrying
 standing plan already recorded on 2026-06-02: rebuild beelink1 on Windows IoT Enterprise
 LTSC, or move it to Linux and leave the Windows/AMD-PSP class of fault behind entirely.
 
-**Address moved.** beelink1 is now **`IP-REDACTED`** (MAC `MAC-REDACTED`), not
-`IP-REDACTED-PREVIOUS`. `pi1` has also left `192.168.1.102` and was not on the subnet at all —
-the coordinator is unreachable independently of this. Both are downstream of the missing
-DHCP reservations in `infrastructure/network.md`, which is the thing that keeps turning
-"the node is down" into a routing hunt.
+### It came back — 2026-09-08, and the plan is narrowed rather than executed
+
+**Jon: beelink1 stays on Windows.** *"i do want to run this on windows because i want
+to prove ai-mesh is cross platform."* That is a product reason, not a preference, and it
+settles half the standing plan: **moving it to Linux is off the table.** Windows IoT
+Enterprise LTSC is not — it is still Windows, still the same agent and NSSM service, and
+still proves the same point, while removing feature updates permanently rather than by
+policy. Kept in the pocket, not being done yet.
+
+**Order of work agreed with Jon: everything that does not need the case open, first.**
+The BIOS golden state, blocking updates, and verification. **The CMOS battery is
+deferred until that has been given a chance** — *"lets do the other things first before
+i start taking the beelink apart and see how it goes."*
+
+**Worth stating plainly: the battery has never actually been replaced.** It has been the
+leading durable fix since 2026-07-01 and appears in this file, `infrastructure/roadmap.md`
+and `docs/windows-node-setup.md` as the thing to do. No entry anywhere records it being
+done. Three months of re-applying a setting instead.
+
+**A second mechanism, and it has never been written down.** Every reversion has been
+explained as the board losing its settings, which is why the battery is the standing fix.
+But **AMD PSP and Pluton firmware can be delivered through Windows Update as a firmware
+update**, and that can re-enable the TPM level. That would explain the thing the battery
+theory exists to explain — settings reverting with no CMOS reset — while the battery is
+perfectly healthy. It also makes Jon's own instinct right: *"I think we must of had a
+system update that screwed it."*
+
+**The discriminator, and this is the part that keeps getting destroyed.** Three cheap
+checks separate the two explanations, and **all three have to be taken before the golden
+state is re-applied**, because re-applying it is what has erased the evidence at every
+previous recurrence:
+
+1. **Does the clock hold?** Note the BIOS clock, pull the power at the wall for five
+   minutes, boot back into the BIOS. Lost time means the battery. **Time held means the
+   battery is probably innocent** and four recurrences were blamed on the wrong thing.
+2. **Is the BIOS still AMI `v2.22.1293`?** Anything else means firmware moved, which is
+   the mechanism above and the smoking gun.
+3. **Cell voltage, if a multimeter is to hand.** Under ~2.8 V settles it outright, and
+   unlike the clock test it works even if the clock has been holding.
+
+**Photograph the Trusted Platform Modules page before changing it.** Nobody has ever
+captured what it actually read at the moment of a storm — only what it read after being
+fixed.
+
+**And block updates regardless of which explanation wins**, because it is free and it
+covers mechanism two: Group Policy → Windows Update → *Configure Automatic Updates =
+Disabled*, ***Do not include drivers with Windows Updates = Enabled*** (Adrenalin and
+firmware both arrive that way), and *Select the target Feature Update version* pinned to
+the current build. Disabling `wuauserv` is not durable — Windows re-enables it.
+
+**Address moved.** beelink1 has a new LAN address and `pi1` was not on the subnet at
+all — the coordinator is unreachable independently of this. **The addresses and MACs live
+in `infrastructure/network.md`, which is a private repo, and are deliberately not quoted
+here: this one is public.** Both moves are downstream of the missing DHCP reservations
+recorded there, which is the thing that keeps turning "the node is down" into a routing
+hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
