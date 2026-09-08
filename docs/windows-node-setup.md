@@ -437,8 +437,8 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 **⚠️ REGRESSED 2026-07-01/02 — worst storm on record.** The 06-11 stable state regressed again. Live event-log pull: **20× `0x133`/`param2=0x1e00` bugchecks in 24h** (07-01 03:57 → 07-02 01:28), accelerating into a **crash every ~22 min** since ~21:46 on 07-01 (11 in a row on a near-exact 22-min cadence); uptime never exceeded ~40 min → node effectively unusable. Kernel-Power 41/6008 + minidumps (`070126-*.dmp`) confirm. Fix unchanged (TPM level = Disabled), but this is the **fourth regression** (05-28, 06-02, 06-04, 07-01) → the board clearly isn't holding BIOS settings across power events: **replace the CMOS battery** is now the prime durable fix, else execute the standing move-to-Linux/LTSC plan. Fallout while crashing: constant model loss, `deploy-node` hangs, TLS-fingerprint crash-loop, coordinator read-timeout closes — all downstream of the reboots, not ai-mesh bugs.
 
 **⚠️ REGRESSED AGAIN 2026-08-12 — fTPM is ON, despite being believed disabled.** Live pull
-from the box (reachable at `IP-REDACTED-PREVIOUS` after the network merge — see
-`infrastructure/network.md`):
+from the box (reachable at its then-current address after the network merge — addresses
+are in the private `infrastructure/network.md`, not here):
 
 - **`(Get-Tpm).TpmPresent` = `True`.** The fix is *not* in place, whatever the BIOS was
   last set to.
@@ -762,6 +762,14 @@ These are the exact settings required for stable 24/7 operation. **Every CMOS re
 **⚠️ Trusted Platform Modules — CORRECTED 2026-06-25 (earlier guidance here was wrong):**
 Disabling **only** "Pluton Security Processor" is **NOT enough** — the fTPM keeps running via the TPM level and re-provisions on **every boot** (TPM-WMI Event 1025), so the `0x133` storm continues even with Pluton off. This was misdiagnosed for four recurrences as "the golden state got wiped"; in fact Pluton was disabled the whole time and fTPM was still active. **You must also set "Trusted Platform Module" itself to `Disabled`.** Verified menu (`Advanced → AMD CBS → SOC Misc Control → Trusted Platform Modules`): Trusted Platform Module = **Disabled**, Pluton Security Processor = **Disabled** (Microsoft Security Levels then reads "Customized" — that's a status, leave it). Confirm it took: `Get-Tpm` should show `TpmPresent=False`, and **no** new Event 1025 after boot.
 Do **not** use "dTPM Level 3" — that caused an "Automatic Repair" boot loop (it tries to enable a discrete TPM chip the SER8 doesn't have). `Disabled` boots fine; nothing on this box uses the TPM (no BitLocker / Windows Hello).
+
+**⚠️ Take the evidence BEFORE re-applying any of this — added 2026-09-08.** Every
+recurrence since 05-28 has been closed by re-applying the golden state, which is also what
+destroys the only evidence of *why* it reverted. Before touching a setting: note the BIOS
+clock, note the BIOS version (recorded as AMI `v2.22.1293` — anything else means firmware
+moved), and photograph the Trusted Platform Modules page as it currently reads. Then do
+the five-minute power-pull clock test. See `ROADMAP.md` for what each answer rules out —
+including the firmware-via-Windows-Update mechanism this doc has never carried.
 
 **After BIOS — run the software hardening script:**
 ```
