@@ -32,6 +32,19 @@ off the BIOS screen.**
 **Do not read "no crashes since 30 August" as stability — the box was switched off for
 that entire period.** The only evidence that counts is uptime from 2026-09-09 onwards.
 
+**It survived a reboot, which is the first real test — 2026-09-09 01:29.** The BIOS
+setting held across a power cycle: `TpmPresent` still `False`, and strictly since boot
+**0 × Event 1025, 0 × BugCheck 1001** out of 268 System events. Clock correct, and it came
+back on **the reserved address** rather than a new one, so the DHCP reservation is working
+— made against the **Wi-Fi** MAC, since the wired NIC is unplugged.
+
+**One trap for anyone reading this event log.** A single Event 41 appears inside a
+"since boot" filter and is *not* a new crash: it is the earlier hard power-off, stamped
+**02:26:58 on the pre-fix clock**, which sorts as later than a boot stamped 01:29 on the
+corrected one. **The clock correction makes time-filtered event queries unreliable across
+that boundary** — read the timestamp against which clock was running, not against the
+boot time.
+
 **Windows Update is now locked down**, which is the mechanism this file added on 09-08:
 `NoAutoUpdate=1`, `AUOptions=2`, **`ExcludeWUDriversInQualityUpdate=1`** (the one that
 protects both GPU offload and the TPM level, since Adrenalin and PSP firmware arrive as
