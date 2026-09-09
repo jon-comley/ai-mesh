@@ -16,7 +16,74 @@ HISTORY.md for the same heading's finished parts. Several entries carry a long r
 what was investigated and rejected along the way; that reasoning is preserved
 deliberately, not padding, so read the whole entry before picking one up.
 
-## ⛔ PRIORITY 1 — beelink1 fTPM/Pluton crash storm, active again (2026-08-30)
+## ⚠️ PRIORITY 1 — beelink1 fTPM: golden state re-applied and VERIFIED (2026-09-09)
+
+**The fix is in, and for the first time it was checked from the OS rather than believed
+off the BIOS screen.**
+
+| Check | Result |
+|---|---|
+| `(Get-Tpm).TpmPresent` | **`False`** |
+| `(Get-Tpm).ManufacturerIdTxt` | **blank** — not `MSFT` |
+| TPM-WMI `1025` since boot | **none**; last one 2026-08-30 02:11:29 |
+| BugCheck `1001` since boot | **none**; last one 2026-08-30 02:11:20 |
+| `EnableUlps` / `PP_SclkDeepSleepDisable` | `0x0` / `0x1` — `just fix-node` applied |
+
+**Do not read "no crashes since 30 August" as stability — the box was switched off for
+that entire period.** The only evidence that counts is uptime from 2026-09-09 onwards.
+
+**Windows Update is now locked down**, which is the mechanism this file added on 09-08:
+`NoAutoUpdate=1`, `AUOptions=2`, **`ExcludeWUDriversInQualityUpdate=1`** (the one that
+protects both GPU offload and the TPM level, since Adrenalin and PSP firmware arrive as
+driver updates), and the feature release pinned — `TargetReleaseVersion=1`,
+`TargetReleaseVersionInfo=25H2` on build 26200.
+
+### What tonight cost us, and what it taught
+
+**The clock test was never valid on this box, and that is worth knowing before it is
+suggested again.** `w32time` was **Stopped** and set to **Manual** — it has never been
+keeping time. So a drifting RTC was expected with or without a healthy CMOS cell, and the
+"does the clock hold" discriminator proposed on 09-08 could not have answered anything.
+Now fixed: service **Automatic**, `time.windows.com` + `uk.pool.ntp.org`, and the clock
+went from **70 minutes fast** to correct.
+
+**A CMOS reset was needed to get a picture at all**, which resets the RTC and therefore
+destroyed the other half of that evidence anyway. The board came up with no display on
+either HDMI and nothing on the network; the reset on the back recovered it, and Windows
+then needed its own recovery ("continue and boot to Windows") after the run of dirty
+shutdowns.
+
+**BIOS version, recorded as a baseline rather than a finding:**
+`HPT.8xxx.SER8.V035.P8C0M0C15.14.Link`. **This is not evidence of a firmware change** —
+the `AMI v2.22.1293` in `docs/windows-node-setup.md` is the AMI setup-utility version,
+which is a different label from the OEM firmware string. Nobody recorded this string
+before, so it is the baseline from now on and a future change to `V035` *is* checkable.
+
+**The battery is still untested and still deferred**, per Jon: *"lets do the other things
+first before i start taking the beelink apart and see how it goes."* Nothing tonight
+either confirmed or cleared it.
+
+### It is on Wi-Fi now, deliberately, and that changes the risk
+
+**Jon, 2026-09-09: it has moved upstairs, away from the router — the wired 2.5GbE is
+gone.** So the MAC recorded in `infrastructure/network.md` is the *wired* NIC and no
+longer the one that matters, and **a DHCP reservation has to be made against the Wi-Fi
+MAC or it will do nothing.**
+
+**The consequence worth carrying:** the 2026-08-12 note that "everything wired stayed up"
+during a Wi-Fi outage no longer protects this node. Wi-Fi is now its only link, which
+makes the AX200 power-management fix in `fix-node` load-bearing rather than
+belt-and-braces, and means a dropped link is indistinguishable from a crashed box until
+someone walks upstairs.
+
+**Papercut, not yet fixed:** `nodes/beelink1.env` holds `NODE_HOST=beelink1.local`, and
+`.local` does not resolve from WSL — so every remote command needs the IP passed by hand.
+The address is deliberately **not** committed here because this repo is public. The proper
+fix is to let `NODE_HOST` be overridden from the environment.
+
+---
+
+## Superseded — the 2026-08-30 storm entry, kept for the record
 
 **Blocked on physical access to the box. Nothing else on beelink1 is worth doing until
 this is closed — the node cannot hold an uptime long enough to serve inference.**
