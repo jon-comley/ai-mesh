@@ -50,6 +50,14 @@ default to just the item's own title (no misspelling suggestions), and every
 new match is treated as notify-worthy with no bargain/not-a-bargain
 reasoning — the ticker shows "not yet judged" instead of a verdict.
 
+> **Hunts does not need the Online AI toggle — only a saved key and a model.**
+> `get_verdicts` reads `GatewayConfig::load(...).provider()`, and `provider()`
+> checks `is_configured()` alone: a non-empty key for the selected endpoint plus
+> a chosen model. The **Enabled** toggle governs whether *chat* goes to the
+> cloud and nothing else. So if a key was ever saved on the Online AI tab, hunts
+> are already being judged — checked against the code on 2026-09-09 after this
+> page was read the other way round.
+
 ## Using it
 
 1. **New hunt** → paste an eBay item URL → **Analyze**. This looks the item
@@ -76,5 +84,5 @@ reasoning — the ticker shows "not yet judged" instead of a verdict.
 | "could not find an eBay item id in that URL" | The pasted URL isn't a recognisable eBay listing link (`.../itm/<id>` or `.../itm/<slug>/<id>`) — copy the URL straight from eBay's own share/address bar, not a shortened link |
 | Terms are just the plain title, no misspellings | Online AI isn't configured (step 3) — this is the heuristic fallback, not an error |
 | Finds show "not yet judged" for everything | Same as above, or the LLM's reply omitted that item from its batch verdict — it's still a real match, just unscored |
-| No phone push even though matches appear in the ticker | ntfy topic not set (step 2), or the LLM judged the match as *not* a bargain (pushes only fire for judged bargains or in heuristic mode — see `plans/ebay-bargain-finder.md`) |
+| No phone push even though matches appear in the ticker | ntfy topic not set (step 2), or the LLM returned an explicit *not a bargain* verdict — that is the only thing that suppresses a push. **An unjudged match still pushes** (`None => (true, None)` in `process_hunt_results`), so heuristic mode notifies on everything rather than nothing. Corrected 2026-09-09: this row previously read "pushes only fire for judged bargains", which is the opposite of what the code does. |
 | A hunt seems to have stopped checking | Confirm it's still enabled (sidebar shows "on"/"off"); a coordinator restart re-arms every enabled hunt automatically, so this should be self-healing |
