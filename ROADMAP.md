@@ -356,7 +356,17 @@ second room speaker exists (`plans/spotify-music.md` Phase 6).
 
 ## Phase 9 — Remaining Cluster Nodes (In Progress)
 
-- **Mac mini M4** ⚠️ _hardware not available until ~end of July 2026_ — cross-compile for `aarch64-apple-darwin`, provision as compute node, add `just deploy-node mac1`
+- **Mac Studio M4 Max (`mac1`)** — **the hardware is here and running as of 2026-09-09**, with an iPhone attached to it. Not on the mesh yet, and the line below used to say the wrong thing about how to get it there.
+
+  ~~cross-compile for `aarch64-apple-darwin`~~ — **that is not possible from this machine and the plan should stop saying it is.** Checked 2026-09-09: `rustup target list` offers `aarch64-apple-darwin` but it is **not installed**, there is **no osxcross** at `/opt/osxcross`, and **no `o64-clang`/`oa64-clang`** on `PATH`. Cross-compiling Rust to macOS from Linux needs osxcross *plus* an Apple SDK, which is a licensing and setup rabbit hole for one binary.
+
+  **Build the agent on the Mac instead.** It costs a `rustup` install there and nothing else, and that machine needs Xcode tooling regardless because it is also becoming the iOS device-lab host for `guv`/`vanround`. This makes `deploy-node mac1` a build-on-target flow rather than a build-here-and-upload one — the first node that works that way, so the recipe needs a genuine third branch rather than a copy of the Linux one.
+
+  **And there is no macOS support in this repo at all yet.** `deploy-node` has `linux` and `windows` branches and falls through to `Unknown NODE_OS` for anything else (`justfile`, the `esac` around line 428); `scripts/` holds `install-node-linux.sh` and `install-node-windows.ps1` and nothing for macOS. `docs/cross-platform.md` describes the intended macOS shape (launchd, macOS llama-server tarball, zsh/bash provisioning) but none of it is written.
+
+  **What it needs, in order:** `scripts/install-node-macos.sh` (launchd rather than systemd, llama-server from the macOS release tarball), a `macos` branch in `deploy-node` that builds on the target, `nodes/mac1.env`, and the docs updated to match. The wire protocol and scheduler already treat every OS identically, so none of that is protocol work.
+
+  ⚠ **Not yet established:** the Mac's hostname, its SSH user, and whether Remote Login is on. This WSL shell has **no LAN path at all** — `pi1.local` does not answer from here either — so nothing about the Mac's reachability can be concluded from this machine. Ask Jon to run it in his own shell.
 - **Multi-node routing validation** ✓ — `just validate-routing` confirms `qwen2.5:1.5b` → Pi and `qwen2.5:7b` → Beelink; `mesh infer` output now includes a `served-by:` line showing the serving node; load-balancing across identical-model nodes is a future concern when a second GPU node joins
 - **`just start-cluster` recipe** ✓ — starts coordinator + controller + all remote agents, then calls `auto-load-model` on every compute node; leaves mesh in a ready-to-use inference state
 - **`just auto-load-model <node>`** ✓ — SSHes into node, detects GPU VRAM or CPU RAM, selects best-fit model, loads it with hardware-filtered fallback hints
