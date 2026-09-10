@@ -554,6 +554,56 @@ mesh security-report        # one-shot snapshot of current failure counts
 
   Full list, pricing, install steps, and per-plugin automation: `docs/reaper-plugins.md`.
 
+## Mastering — a master chain for finished songs (Proposed 2026-09-10)
+
+Jon's ask, and it sits deliberately **after** Phase 11.7's per-track FX work
+rather than inside it: that layer puts a reverb on a vocal, this one is the last
+stage on the whole mix — the 2-bus. Same mechanism (`TrackFX_*` via ReaScript,
+resolve by name never by index), different job.
+
+**What it would cover.** A named master chain on REAPER's master track, built and
+recalled by intent: corrective EQ, glue compression, a limiter, and a loudness
+meter reading the result. **Youlean and TDR Nova are already on the curated
+plugin list** in `docs/reaper-plugins.md` — Youlean *is* a loudness meter, so the
+measurement half of this needs no new plugin choices, only the automation.
+
+**The obvious tools, all free, all named there or adjacent:** TDR Nova for
+dynamic EQ, Youlean Loudness Meter for LUFS/true-peak readout, and a limiter
+still to pick — REAPER's stock ReaLimit is the zero-install option and worth
+trying before adding a dependency.
+
+**Loudness targets are the one thing worth writing down, because they are the
+only objective part of mastering.** Streaming services normalise on playback, so
+mastering far past their target buys nothing but lost dynamics. Confirm current
+figures before coding against them rather than trusting this line: roughly
+**−14 LUFS integrated for Spotify and YouTube, −16 for Apple Music**, with true
+peak kept at or under **−1 dBTP** so lossy encoders do not clip on decode.
+
+**Two honest limits, both of which shape what this can be.**
+
+- **This repo's own rule bites hardest here.** Phase 11.7 requires every slice be
+  verifiable *without recording audio*, because the studio is not built. That
+  works for "insert a plugin and read the parameter back". It does not work for
+  "does this master sound good" — which is the actual question. So the buildable
+  part is **chain setup, parameter recall and measurement**; the judgement stays
+  Jon's, at the desk, with ears.
+- **Measurement needs signal.** A loudness reading is meaningless until something
+  plays through it, so any verification slice has to render or play an existing
+  mix rather than assert on a static chain. Worth designing for from the start —
+  it is the difference between this and the per-track FX slices.
+
+**Open, and Jon's calls rather than defaults:** whether this targets his own
+songs specifically (a small set, where a hand-tuned chain recalled by name beats
+anything generic) or is meant to be reusable; whether a reference-track workflow
+is wanted (match a target song's spectrum and loudness) or is scope creep; and
+whether the mesh should ever *render* a master, which is a long CPU job on
+whichever node owns REAPER.
+
+**Depends on:** Phase 11.7's Slice 1/2 landing live verification first. Both are
+code-complete and unverified, and the FX-by-name resolution they prove is exactly
+what a master chain is built on — there is no point automating the 2-bus before
+`reaper_add_fx` is known to work on a real instance.
+
 ## Phase 11.8 — Multi-Device Home + Room-Centric Control (Plan ratified 2026-07-03 — executing)
 
 > **Still open, needs Jon physically present (destructive/hardware-in-hand):**
