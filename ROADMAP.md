@@ -579,18 +579,54 @@ figures before coding against them rather than trusting this line: roughly
 **−14 LUFS integrated for Spotify and YouTube, −16 for Apple Music**, with true
 peak kept at or under **−1 dBTP** so lossy encoders do not clip on decode.
 
-**Two honest limits, both of which shape what this can be.**
+**Analyse the audio directly with FFTs — Jon's steer, 2026-09-10, and it is the
+better half of this item.** It removes the dependency that made the rest awkward:
+a rendered WAV can be analysed in Rust with no plugin, no ReaScript and no REAPER
+running at all. The chain-building above becomes the *acting* half; this is the
+*seeing* half, and it can be built and tested first, against files that already
+exist.
 
-- **This repo's own rule bites hardest here.** Phase 11.7 requires every slice be
-  verifiable *without recording audio*, because the studio is not built. That
-  works for "insert a plugin and read the parameter back". It does not work for
-  "does this master sound good" — which is the actual question. So the buildable
-  part is **chain setup, parameter recall and measurement**; the judgement stays
-  Jon's, at the desk, with ears.
-- **Measurement needs signal.** A loudness reading is meaningless until something
-  plays through it, so any verification slice has to render or play an existing
-  mix rather than assert on a static chain. Worth designing for from the start —
-  it is the difference between this and the per-track FX slices.
+**What it measures, and why each choice matters.**
+
+- **Long-term average spectrum, not one big FFT.** Welch's method — overlapping
+  Hann-windowed frames, magnitudes averaged across the song. A single transform
+  over a whole track answers a question nobody asked; the window matters because
+  an unwindowed frame leaks energy across bins and smears exactly the tonal
+  balance being measured.
+- **Banded to 1/3-octave before anything is compared.** Raw bins are too fine and
+  too noisy to read, and they do not match how tonal balance is actually judged.
+  Third-octave is the convention for this and turns a spectrum into about thirty
+  numbers a model or a human can reason about.
+- **Loudness-normalise both sides first, or the comparison is about volume rather
+  than tone** — the single easiest way to get a confident, meaningless answer out
+  of a reference match.
+- **LUFS and true peak from the same render**, per ITU-R BS.1770 (K-weighting,
+  gated integration; true peak with 4× oversampling). Worth taking a crate rather
+  than hand-rolling — the gating rules are fiddly and getting them subtly wrong
+  produces numbers that look plausible.
+
+**The payoff is a claim that is objective and actionable**: *"200–400 Hz is 4 dB
+hotter than the reference, the top end above 8 kHz is 2 dB shy, and you are at
+−11 LUFS against a −14 target."* That is a real finding about a mix, arrived at
+without ears, and it is the kind of thing worth handing to an LLM to turn into a
+suggested EQ move that the chain half then applies.
+
+**Crates, none of which are in the tree yet:** `rustfft` for the transform,
+`hound` for WAV in (or `symphonia` if anything other than WAV needs reading), and
+an `ebur128` binding for loudness. **`capabilities/audio` already exists but is
+Bluetooth-only** — no DSP dependencies at all — so this is a new module in that
+crate rather than a new capability.
+
+**What it still cannot do, and this is the honest bit.** It can say a master is
+*different* from a reference and by how much. It cannot say it is *good*. Every
+number above is a comparison, and the target is a choice — so this narrows
+Jon's judgement down to something worth listening for, rather than replacing it.
+
+**It also sidesteps the constraint that shaped the rest of the plan.** Phase 11.7
+requires each slice be verifiable without recording audio, because the studio is
+not built. Analysis needs no studio at all: point it at an existing bounce and
+the whole path is testable today, with a synthesised tone as a unit-test fixture
+where the right answer is known in advance.
 
 **Open, and Jon's calls rather than defaults:** whether this targets his own
 songs specifically (a small set, where a hand-tuned chain recalled by name beats
@@ -599,10 +635,12 @@ is wanted (match a target song's spectrum and loudness) or is scope creep; and
 whether the mesh should ever *render* a master, which is a long CPU job on
 whichever node owns REAPER.
 
-**Depends on:** Phase 11.7's Slice 1/2 landing live verification first. Both are
-code-complete and unverified, and the FX-by-name resolution they prove is exactly
-what a master chain is built on — there is no point automating the 2-bus before
-`reaper_add_fx` is known to work on a real instance.
+**Depends on:** the *chain* half waits on Phase 11.7's Slice 1/2 landing live
+verification — both are code-complete and unverified, and the FX-by-name
+resolution they prove is what a master chain is built on. **The analysis half
+depends on nothing** and is the sensible first slice: it needs no REAPER, no
+plugin and no studio, and it is the part that tells you whether the chain did
+anything worth doing.
 
 ## Phase 11.8 — Multi-Device Home + Room-Centric Control (Plan ratified 2026-07-03 — executing)
 
