@@ -20,8 +20,32 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
     // Compile-time constant — the binary is always built for a specific target.
     let ane_inference = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
-    // Max model size = 50% of RAM (simple heuristic).
-    let max_model_size_gb = hw.ram_gb * 0.5;
+    // Max model size = 50% of RAM (simple heuristic), overridable per node.
+    //
+    // **The heuristic is actively wrong on a box with a UMA iGPU — 2026-09-12.**
+    // `beelink1` carves 16 GB of its 32 GB out for the Radeon 780M, so Windows
+    // reports 15.8 GB and this line advertises a **7.9 GB** ceiling. The
+    // coordinator then refuses every 14B — `model needs 8573 MB but node has
+    // only 7900 MB of model headroom left` — which reaches the dashboard as
+    // "not enough memory".
+    //
+    // The refusal is backwards: the model does not live in system RAM on that
+    // node at all. Vulkan reports **24.4 GB, 23.2 GB free** on the same box, and
+    // `DeepSeek-R1-Distill-Qwen-14B-Q4_K_M` loads there in six seconds and runs
+    // at 9.0 tok/s. So the very carve-out that makes the model loadable is what
+    // halves the number the mesh judges it by.
+    //
+    // Properly fixing the heuristic needs VRAM in `HardwareInfo`, which only
+    // carries `gpu: Option<String>` today — that is the real fix and it is
+    // bigger than this. `MAX_MODEL_SIZE_GB` is the escape hatch in the
+    // meantime, set per node beside `LLAMA_SERVER_BIN` and the rest, and it
+    // stays useful afterwards for any node whose ceiling is a judgement rather
+    // than a formula.
+    let max_model_size_gb = std::env::var("MAX_MODEL_SIZE_GB")
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| *v > 0.0)
+        .unwrap_or(hw.ram_gb * 0.5);
 
     let features: Vec<shared::Feature> = vec![
         #[cfg(feature = "llm")]
@@ -61,6 +85,25 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One test, not two: `cargo test` runs a module's tests on parallel
+    /// threads and the environment is per-process, so a second test touching
+    /// the same variable races this one and both fail intermittently. Asking
+    /// for `--test-threads=1` to keep them separate would be a worse trade.
+    #[test]
+    fn max_model_size_takes_the_env_override_when_it_is_a_number() {
+        unsafe { std::env::set_var("MAX_MODEL_SIZE_GB", "14") };
+        let overridden = detect_capabilities().unwrap();
+        assert_eq!(overridden.max_model_size_gb, 14.0);
+
+        // Rubbish falls back to the RAM heuristic rather than to zero, which
+        // would advertise a node that can hold nothing.
+        unsafe { std::env::set_var("MAX_MODEL_SIZE_GB", "not-a-number") };
+        let fallback = detect_capabilities().unwrap();
+        assert!(fallback.max_model_size_gb > 0.0);
+
+        unsafe { std::env::remove_var("MAX_MODEL_SIZE_GB") };
+    }
 
     #[test]
     fn test_detect_capabilities() {
