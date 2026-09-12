@@ -9,6 +9,24 @@
 
 ---
 
+## The 16 GB is fixed, and the KV cache lives in it — 2026-09-12
+
+**The BIOS offers 16 GB or 32 GB of UMA and nothing in between**, per Jon. On a
+32 GB box the second option leaves the OS with nothing, so **16 GB is the
+ceiling and there is no 20/12 compromise to reach for**. Confirmed from Windows:
+32 GB installed, **15.8 GB visible to the OS**. (`Win32_VideoController` reports
+`AdapterRAM 4 GB` — the usual signed-32-bit WMI quirk on UMA parts. Ignore it.)
+
+**Every size below is weights only.** The KV cache sits in the same 16 GB and
+grows with context, and every measured figure in this document was taken at
+`--ctx-size 4096`. A coding agent wants 32k+, which is several GB on top — so
+read the table as "weights, plus whatever context you asked for".
+
+That makes the practical ceiling lower than the VRAM number suggests:
+`qwen3:14b` at 9 GB leaves ~7 GB for context and is the comfortable pick, while
+anything around 14 GB of weights strands you near 4k. The lever for more context
+is a **quantised KV cache** (`q8_0` roughly halves it), not the BIOS.
+
 ## Models that fit in 16 GB UMA
 
 Sizes are Q4_K_M quantisation (Ollama default). tok/s estimates are derived from
