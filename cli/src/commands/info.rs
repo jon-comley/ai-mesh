@@ -104,6 +104,7 @@ mod tests {
             os: "linux".into(),
             arch: "aarch64".into(),
             gpu: None,
+            gpu_vram_gb: None,
         }
     }
 

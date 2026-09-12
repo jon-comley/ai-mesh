@@ -20,32 +20,13 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
     // Compile-time constant — the binary is always built for a specific target.
     let ane_inference = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
-    // Max model size = 50% of RAM (simple heuristic), overridable per node.
-    //
-    // **The heuristic is actively wrong on a box with a UMA iGPU — 2026-09-12.**
-    // `beelink1` carves 16 GB of its 32 GB out for the Radeon 780M, so Windows
-    // reports 15.8 GB and this line advertises a **7.9 GB** ceiling. The
-    // coordinator then refuses every 14B — `model needs 8573 MB but node has
-    // only 7900 MB of model headroom left` — which reaches the dashboard as
-    // "not enough memory".
-    //
-    // The refusal is backwards: the model does not live in system RAM on that
-    // node at all. Vulkan reports **24.4 GB, 23.2 GB free** on the same box, and
-    // `DeepSeek-R1-Distill-Qwen-14B-Q4_K_M` loads there in six seconds and runs
-    // at 9.0 tok/s. So the very carve-out that makes the model loadable is what
-    // halves the number the mesh judges it by.
-    //
-    // Properly fixing the heuristic needs VRAM in `HardwareInfo`, which only
-    // carries `gpu: Option<String>` today — that is the real fix and it is
-    // bigger than this. `MAX_MODEL_SIZE_GB` is the escape hatch in the
-    // meantime, set per node beside `LLAMA_SERVER_BIN` and the rest, and it
-    // stays useful afterwards for any node whose ceiling is a judgement rather
-    // than a formula.
-    let max_model_size_gb = std::env::var("MAX_MODEL_SIZE_GB")
-        .ok()
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .filter(|v| *v > 0.0)
-        .unwrap_or(hw.ram_gb * 0.5);
+    // See `model_ceiling_gb` below for what this number means and why it is
+    // not simply half the RAM.
+    let max_model_size_gb = model_ceiling_gb(
+        hw.ram_gb,
+        hw.gpu_vram_gb,
+        std::env::var("MAX_MODEL_SIZE_GB").ok().as_deref(),
+    );
 
     let features: Vec<shared::Feature> = vec![
         #[cfg(feature = "llm")]
@@ -82,27 +63,84 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
     })
 }
 
+/// How large a model this node should admit, in GB.
+///
+/// **Why this is not simply half the RAM.** The old line was `ram_gb * 0.5`. On
+/// `beelink1` — 32 GB with 16 GB given to a UMA Radeon 780M — Windows reports
+/// 15.8 GB, so the node advertised a 7.9 GB ceiling and the coordinator refused
+/// every 14B: *"model needs 8573 MB but node has only 7900 MB of model headroom
+/// left"*, which reached the dashboard as "not enough memory". Backwards,
+/// because on that node the model does not live in system RAM at all: Vulkan
+/// reports 24.4 GB with 23.2 free, and `DeepSeek-R1-Distill-Qwen-14B-Q4_K_M`
+/// loads there in six seconds and runs at 9.0 tok/s. **The carve-out that makes
+/// the model loadable was halving the number the mesh judged it by.**
+///
+/// So take whichever is larger:
+///
+/// * **half of system RAM** — the CPU-inference case, unchanged, and still
+///   right for a node with no usable GPU.
+/// * **90% of VRAM** — the GPU case. Not all of it, because the KV cache and the
+///   runtime's own buffers share that memory with the weights, and a ceiling
+///   that admits a model with nothing left for context admits a model that
+///   cannot answer.
+///
+/// `max` rather than a GPU-only branch, because a discrete card is usually
+/// *smaller* than half its host's RAM (a 24 GB card in a 64 GB box) and a node
+/// that can hold a big model in RAM should not be told it cannot merely because
+/// its GPU is modest.
+///
+/// `MAX_MODEL_SIZE_GB` overrides both, and stays because a ceiling is sometimes
+/// a judgement — "nothing bigger than this on that machine" — rather than a
+/// property of the hardware. Rubbish in the variable is ignored rather than
+/// obeyed: parsing `""` as zero would advertise a node that can hold nothing.
+fn model_ceiling_gb(ram_gb: f32, gpu_vram_gb: Option<f32>, override_env: Option<&str>) -> f32 {
+    if let Some(v) = override_env
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| *v > 0.0)
+    {
+        return v;
+    }
+    let ram_ceiling = ram_gb * 0.5;
+    match gpu_vram_gb.filter(|v| *v > 0.0).map(|v| v * 0.9) {
+        Some(vram_ceiling) if vram_ceiling > ram_ceiling => vram_ceiling,
+        _ => ram_ceiling,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One test, not two: `cargo test` runs a module's tests on parallel
-    /// threads and the environment is per-process, so a second test touching
-    /// the same variable races this one and both fail intermittently. Asking
-    /// for `--test-threads=1` to keep them separate would be a worse trade.
     #[test]
-    fn max_model_size_takes_the_env_override_when_it_is_a_number() {
-        unsafe { std::env::set_var("MAX_MODEL_SIZE_GB", "14") };
-        let overridden = detect_capabilities().unwrap();
-        assert_eq!(overridden.max_model_size_gb, 14.0);
+    fn ceiling_prefers_vram_when_the_gpu_is_the_bigger_half() {
+        // beelink1 as it actually reports: 15.8 GB visible to Windows because
+        // 16 GB went to the iGPU. Half the RAM is 7.9 and refuses every 14B;
+        // 90% of the carve-out is 14.4 and admits them.
+        let c = model_ceiling_gb(15.8, Some(16.0), None);
+        assert!((c - 14.4).abs() < 0.01, "got {c}");
+    }
 
-        // Rubbish falls back to the RAM heuristic rather than to zero, which
-        // would advertise a node that can hold nothing.
-        unsafe { std::env::set_var("MAX_MODEL_SIZE_GB", "not-a-number") };
-        let fallback = detect_capabilities().unwrap();
-        assert!(fallback.max_model_size_gb > 0.0);
+    #[test]
+    fn ceiling_keeps_the_ram_half_when_the_card_is_the_smaller_one() {
+        // A 24 GB card in a 64 GB box: 21.6 against 32, so RAM wins and a node
+        // that can hold a big model is not told otherwise by a modest GPU.
+        assert_eq!(model_ceiling_gb(64.0, Some(24.0), None), 32.0);
+    }
 
-        unsafe { std::env::remove_var("MAX_MODEL_SIZE_GB") };
+    #[test]
+    fn ceiling_falls_back_to_ram_with_no_gpu_or_a_nonsense_one() {
+        assert_eq!(model_ceiling_gb(16.0, None, None), 8.0);
+        assert_eq!(model_ceiling_gb(16.0, Some(0.0), None), 8.0);
+    }
+
+    #[test]
+    fn ceiling_lets_the_override_win_but_ignores_rubbish() {
+        assert_eq!(model_ceiling_gb(15.8, Some(16.0), Some("20")), 20.0);
+        assert_eq!(model_ceiling_gb(15.8, Some(16.0), Some(" 20 ")), 20.0);
+        // Neither of these may become a zero ceiling.
+        assert!((model_ceiling_gb(15.8, Some(16.0), Some("not-a-number")) - 14.4).abs() < 0.01);
+        assert!((model_ceiling_gb(15.8, Some(16.0), Some("")) - 14.4).abs() < 0.01);
+        assert!((model_ceiling_gb(15.8, Some(16.0), Some("-5")) - 14.4).abs() < 0.01);
     }
 
     #[test]
