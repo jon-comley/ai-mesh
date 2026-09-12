@@ -9,6 +9,22 @@ pub struct HardwareSpec {
     pub os: String,
     pub arch: String,
     pub gpu: Option<String>,
+    /// GPU memory in GB, when the platform will say.
+    ///
+    /// **Added 2026-09-12, and the reason is `beelink1`.** Its capability
+    /// ceiling was `ram_gb * 0.5`, which on a box that gives 16 GB of its 32 to
+    /// a UMA iGPU means Windows reports 15.8 GB and the node advertises 7.9 GB —
+    /// so the coordinator refused every 14B as "not enough memory" while Vulkan
+    /// sat there with 23.2 GB free and ran the same model at 9 tok/s. The model
+    /// never goes in system RAM on that node, so system RAM was the wrong number
+    /// to judge it by.
+    ///
+    /// `None` where the platform does not report it, or on Apple Silicon where
+    /// the memory is unified and `ram_gb` is already the honest figure.
+    /// `#[serde(default)]` so an older agent that does not send the field still
+    /// deserialises against a newer coordinator.
+    #[serde(default)]
+    pub gpu_vram_gb: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -234,6 +250,7 @@ mod tests {
             os: "Linux".into(),
             arch: "x86_64".into(),
             gpu: Some("NVIDIA RTX 3080".into()),
+            gpu_vram_gb: None,
         };
 
         let json = serde_json::to_string(&hw).unwrap();

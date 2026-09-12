@@ -1143,6 +1143,7 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
             gpu: None,
+            gpu_vram_gb: None,
         };
 
         let caps = NodeCapabilities {

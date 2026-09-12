@@ -52,6 +52,7 @@ pub fn detect_hardware() -> Result<HardwareSpec, HardwareError> {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         gpu: detect_gpu_windows(),
+        gpu_vram_gb: detect_vram_gb_windows(),
     })
 }
 
@@ -89,6 +90,44 @@ fn detect_gpu_windows() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "windows")]
+fn detect_vram_gb_windows() -> Option<f32> {
+    // **Not `Win32_VideoController.AdapterRAM`.** That field is a signed 32-bit
+    // value, so it saturates at ~4.29 GB and reports exactly that on a 16 GB
+    // UMA carve-out — the reading that made `beelink1` look like a 4 GB card.
+    //
+    // `HardwareInformation.qwMemorySize` under the display class key is the
+    // 64-bit one and gives the real figure. NVIDIA is asked first because
+    // nvidia-smi is authoritative and already trusted for the adapter name.
+    if let Ok(out) = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
+        && out.status.success()
+        && let Some(first) = String::from_utf8_lossy(&out.stdout).lines().next()
+        && let Ok(mb) = first.trim().parse::<f32>()
+        && mb > 0.0
+    {
+        return Some(mb / 1024.0);
+    }
+
+    let ps_cmd = "$k = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\\
+{4d36e968-e325-11ce-bfc1-08002be10318}'; \
+Get-ChildItem $k -ErrorAction SilentlyContinue | ForEach-Object { \
+  (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).'HardwareInformation.qwMemorySize' \
+} | Where-Object { $_ } | Sort-Object -Descending | Select-Object -First 1";
+    if let Ok(out) = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+        .output()
+        && out.status.success()
+        && let Ok(bytes) = String::from_utf8_lossy(&out.stdout).trim().parse::<f64>()
+        && bytes > 0.0
+    {
+        return Some((bytes / 1_073_741_824.0) as f32);
+    }
+
+    None
+}
+
 // ── macOS ─────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
@@ -107,6 +146,11 @@ pub fn detect_hardware() -> Result<HardwareSpec, HardwareError> {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         gpu: detect_gpu_macos(),
+        // **`None` on purpose on Apple Silicon.** The memory is unified, so
+        // there is no separate VRAM figure to report and `ram_gb` is already
+        // the honest ceiling — reporting RAM again as "VRAM" would just
+        // double-count it in whatever consumes both.
+        gpu_vram_gb: None,
     })
 }
 
@@ -187,6 +231,7 @@ pub fn detect_hardware() -> Result<HardwareSpec, HardwareError> {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         gpu: detect_gpu_linux(),
+        gpu_vram_gb: detect_vram_gb_linux(),
     })
 }
 
@@ -231,6 +276,45 @@ fn detect_ram_gb() -> Result<f32, HardwareError> {
         }
     }
     Err(HardwareError::MemParseError)
+}
+
+/// GPU memory on Linux, from the kernel where possible.
+///
+/// `mem_info_vram_total` is amdgpu's own byte count and needs no tools
+/// installed; `nvidia-smi` covers NVIDIA. Intel exposes nothing equivalent for
+/// integrated graphics, which stays `None` — and `None` is the honest answer
+/// there rather than a guess, because the capability ceiling falls back to the
+/// RAM heuristic when it sees one.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn detect_vram_gb_linux() -> Option<f32> {
+    use std::fs;
+    if let Ok(entries) = fs::read_dir("/sys/class/drm") {
+        let mut best: u64 = 0;
+        for entry in entries.flatten() {
+            let path = entry.path().join("device/mem_info_vram_total");
+            if let Ok(text) = fs::read_to_string(&path)
+                && let Ok(bytes) = text.trim().parse::<u64>()
+            {
+                best = best.max(bytes);
+            }
+        }
+        if best > 0 {
+            return Some(best as f32 / 1_073_741_824.0);
+        }
+    }
+
+    if let Ok(out) = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
+        && out.status.success()
+        && let Some(first) = String::from_utf8_lossy(&out.stdout).lines().next()
+        && let Ok(mb) = first.trim().parse::<f32>()
+        && mb > 0.0
+    {
+        return Some(mb / 1024.0);
+    }
+
+    None
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
