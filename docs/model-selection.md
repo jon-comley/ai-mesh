@@ -39,6 +39,42 @@ text instead of emitting a structured call is useless no matter how clever or fa
 
 ¹ decode tok/s on beelink1's 780M (see `beelink-model-guide.md`). ✅ runs well · ⚠️ runs but slow/marginal · ❌ won't fit / impractical.
 
+## Measured on beelink1, 2026-09-12 — and the 14B lost on *correctness*
+
+The ranking above was argued from model-family behaviour. It has now been run.
+`reaper-bench.ps1` posts the real `build_system_prompt` shape — the twelve
+REAPER tools, `light_command`, a device list — and checks whether the reply
+parses as JSON, not merely how fast it arrives.
+
+| Case | `qwen2.5:7b` | `qwen2.5:14b` |
+|---|---|---|
+| "turn the studio lights off" | 3.3 s, valid | 9.0 s, **invalid JSON** |
+| "start recording" | 1.9 s, valid | 2.2 s, valid |
+| "add a guitar track, arm it, and set the tempo to 96" | 3.2 s, valid | 4.7 s, **wrong key** |
+| "dim the studio lamp to 20% and stop playback" | 3.1 s, valid | 6.2 s, invented target |
+| Decode | **17.5 tok/s** | 9.1 tok/s |
+
+**The 14B's multi-step failure is fatal rather than cosmetic.** It emitted
+`{"name":"reaper_add_track", …}` where `intent.rs:376` reads `call["tool"]` and
+`is_tool_call` requires `v.get("tool")` — so the reply is discarded and the
+command silently does nothing. It also produced `"Studio Lamp [Studio]"`,
+inventing a target by folding the room tag into the name, which the system
+prompt forbids in as many words, and `"20%"` where the schema wants a number.
+
+**So "bump to a 14b Qwen for trickier multi-step intents", above, is wrong on
+this hardware and stays only as the record of what we believed.** The 7B went
+four for four including the compound cross-domain case, at half the latency.
+Bigger is not more obedient: Qwen2.5-7B-Instruct is tuned hard for this exact
+format, and the 14B spends its extra parameters on reasoning this task does not
+need while losing the schema discipline it does.
+
+**The one drift worth knowing** is the 7B answering "stop playback" with
+`reaper_action: "stop"` rather than `reaper_transport`. It works —
+`named_action_id` maps `stop` to 1007 — but it is the place to look first if
+transport ever behaves oddly.
+
+Harness: `C:\Users\jonno\reaper-bench.ps1` on beelink1, `-ModelFile <name.gguf>`.
+
 ## Practical picks per machine
 
 - **beelink1** (main compute) → **`qwen2.5:7b`** for control. Drop to **`qwen3:4b`** for
