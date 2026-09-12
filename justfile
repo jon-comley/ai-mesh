@@ -275,7 +275,13 @@ run-controller:
     cargo build -p agent
     LOG="$HOME/.local/share/ai-mesh/agent.log"
     mkdir -p "$(dirname "$LOG")"
-    COORDINATOR_IP={{coordinator_ip}} COORDINATOR_PORT={{coordinator_port}} AGENT_ROLE=compute \
+    # **`AGENT_ROLE=controller`, not `compute` — corrected 2026-09-12.** This
+    # recipe is named `run-controller` and `nodes/omnilink1.env` says
+    # `NODE_ROLE=controller`, but it started the agent as **compute**, which
+    # registers this machine as an inference node and lets the scheduler send it
+    # work. `agent/src/main.rs` accepts "controller" and falls back to Compute for
+    # everything else, so the wrong value was silently the default.
+    COORDINATOR_IP={{coordinator_ip}} COORDINATOR_PORT={{coordinator_port}} AGENT_ROLE=controller \
         nohup target/debug/agent >> "$LOG" 2>&1 &
     echo ">>> Controller agent started (PID $!) — logs at $LOG"
 
