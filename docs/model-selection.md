@@ -88,6 +88,7 @@ alongside Qwen3-8B with thinking off — the way `llama.rs` actually runs it.
 | `qwen3:8b` (`/no_think`) | 4/4 | 4/4 | yes | `reaper_transport` ✅ | 16.8 t/s |
 | `xLAM-2-8b-fc-r` | 3/4 | 3/4 | **invented `"Studio"`** | `reaper_transport` ✅ | 17.2 t/s |
 | `watt-tool-8B` | **1/4** | — | invented `"Studio"` | `reaper_transport` ✅ | 17.5 t/s |
+| `Hammer2.1-7b` | 4/4 | 4/4 | invented once, real once | `reaper_transport` ✅ | 17.7 t/s |
 | `qwen2.5:14b` (2026-09-12) | 2/4 | 3/4 | invented | — | 9.1 t/s |
 
 **Every specialist reverted to the format it was trained on, and that is the
@@ -111,8 +112,19 @@ rediscovered:
   that routes to the correct transport tool, but if that flag ever regresses,
   command latency quadruples silently.
 
-`qwen2.5:7b` stays the pick, and it is already `DEFAULT_MODEL` on beelink1.
-Hammer2.1-7b is still to run.
+**Hammer2.1-7b is the exception that proves the pattern.** It is a fine-tune of
+Qwen2.5-7B — the same base as the winner — so it already speaks the format the
+prompt describes: all four replies valid, all four using `"tool"`, nesting
+correct, and it routes "stop playback" to `reaper_transport` where `qwen2.5:7b`
+drifts to `reaper_action`. Its two slips are the ones that matter more,
+though: it sent `"Studio"` as the target for "turn the studio lights off" — a
+room name, not a device, so that command has nowhere to go — and it sent `arm`
+as the string `"true"` where the schema says boolean.
+
+`qwen2.5:7b` stays the pick, and it is already `DEFAULT_MODEL` on beelink1: its
+only miss, `reaper_action: "stop"`, still reaches REAPER because
+`named_action_id` maps it, whereas an invented target reaches nothing. Hammer is
+the one to retry if the prompt ever moves to a native tools API.
 
 ## Practical picks per machine
 
