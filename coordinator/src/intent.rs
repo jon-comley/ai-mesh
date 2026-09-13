@@ -1015,7 +1015,7 @@ async fn dispatch_art_search(
     let Some(node_id) = crate::http::api::art::art_node_id(registry) else {
         return "no art display connected".into();
     };
-    let by_artist = args["by_artist"].as_bool().unwrap_or(false);
+    let by_artist = json_bool(&args["by_artist"]).unwrap_or(false);
     let interval_secs = args["interval_secs"].as_u64();
     match crate::http::api::art::perform_art_search(
         query,
@@ -1201,7 +1201,7 @@ async fn dispatch_tool(
             }
         }
         "soundbar_mute" => {
-            let mute = args["mute"].as_bool().unwrap_or(false);
+            let mute = json_bool(&args["mute"]).unwrap_or(false);
             match crate::soundbar::set_mute(mute, registry).await {
                 Ok(msg) => msg,
                 Err(e) => e,
@@ -1223,7 +1223,7 @@ async fn dispatch_tool(
         },
         "tv_audio_output" => crate::tv::audio_output_unsupported(),
         "art_narration" => {
-            let Some(enabled) = args["enabled"].as_bool() else {
+            let Some(enabled) = json_bool(&args["enabled"]) else {
                 return "art_narration requires a boolean 'enabled' value".into();
             };
             registry.lock().unwrap().set_preference(
@@ -1271,9 +1271,7 @@ async fn dispatch_tool(
                     .as_str()
                     .and_then(|s| s.trim().parse().ok())
             });
-            // New tracks default to armed (and exclusively so) — adding a track is
-            // almost always a prelude to recording into it.
-            let arm = args["arm"].as_bool().unwrap_or(true);
+            let arm = add_track_arm(&args["arm"]);
             let code = build_add_track_lua(&name, rec_input, arm);
             run_reaper_lua(request_id, code, registry, connections, pending_intents).await
         }
@@ -1530,6 +1528,33 @@ fn title_case(name: &str) -> String {
 /// (appending ` 2`, ` 3`, … if the requested name is already taken), arms exclusively
 /// when asked, and `return`s a human-readable summary the daemon relays back so the
 /// chat reports the *actual* name/position.
+/// A boolean argument from the model, which may send `true` or the string
+/// `"true"`. Models stringify booleans (Hammer2.1-7b did, 2026-09-13), and a
+/// bare `as_bool()` reads every string as absent — so `"false"` fell through to
+/// whatever default the caller chose.
+fn json_bool(v: &serde_json::Value) -> Option<bool> {
+    match v {
+        serde_json::Value::Bool(b) => Some(*b),
+        serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `reaper_add_track` arms the new track. Absent means armed (and
+/// exclusively so) — adding a track is almost always a prelude to recording into
+/// it. Present but unreadable means NOT armed: arming disarms every other track,
+/// so guessing yes is the destructive guess.
+fn add_track_arm(v: &serde_json::Value) -> bool {
+    if v.is_null() {
+        return true;
+    }
+    json_bool(v).unwrap_or(false)
+}
+
 fn build_add_track_lua(name: &str, rec_input: Option<i64>, arm: bool) -> String {
     let base = lua_escape(&title_case(name));
     let mut lua = String::new();
@@ -4260,6 +4285,39 @@ mod tests {
         assert!(lua.contains(
             "return \"Added '\" .. name .. \"' as track \" .. (idx + 1) .. \" (armed)\""
         ));
+    }
+
+    #[test]
+    fn json_bool_reads_booleans_and_their_strings() {
+        use serde_json::json;
+        assert_eq!(json_bool(&json!(true)), Some(true));
+        assert_eq!(json_bool(&json!(false)), Some(false));
+        assert_eq!(json_bool(&json!("true")), Some(true));
+        assert_eq!(json_bool(&json!("false")), Some(false));
+        assert_eq!(json_bool(&json!(" False ")), Some(false));
+        assert_eq!(json_bool(&json!("yes")), None);
+        assert_eq!(json_bool(&json!(1)), None);
+        assert_eq!(json_bool(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn add_track_arm_string_false_does_not_arm() {
+        // The bug: `"arm": "false"` read as absent and defaulted to armed.
+        use serde_json::json;
+        assert!(!add_track_arm(&json!("false")));
+        assert!(!add_track_arm(&json!(false)));
+    }
+
+    #[test]
+    fn add_track_arm_defaults() {
+        use serde_json::json;
+        // Absent keeps the designed default: armed.
+        assert!(add_track_arm(&serde_json::Value::Null));
+        assert!(add_track_arm(&json!(true)));
+        assert!(add_track_arm(&json!("true")));
+        // Present but unreadable is not armed — arming disarms every other track.
+        assert!(!add_track_arm(&json!("maybe")));
+        assert!(!add_track_arm(&json!(1)));
     }
 
     #[test]
