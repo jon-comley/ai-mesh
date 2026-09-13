@@ -431,8 +431,20 @@ deploy-node node:
         # separate step needed here.
         ;;
 
+      macos)
+        # Built ON the node: Linux can't cross-compile a macOS binary without
+        # Apple's SDK. install-node-macos.sh installs Rust and llama.cpp if
+        # missing, builds, and keeps the agent up with a cron watchdog (no
+        # sudo; launchd jobs are blocked by macOS Local Network privacy).
+        echo ">>> Syncing source to ${NODE_HOST}..."
+        rsync -a --delete --exclude target --exclude node_modules --exclude .git --exclude 'ai_mesh.db*' \
+            -e "ssh {{ssh_opts}}" ./ ${NODE_USER}@${NODE_HOST}:ai-mesh-src/
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
+            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}'"
+        ;;
+
       *)
-        echo "Unknown NODE_OS: $NODE_OS (expected linux or windows)"
+        echo "Unknown NODE_OS: $NODE_OS (expected linux, windows or macos)"
         exit 1
         ;;
     esac
@@ -518,6 +530,9 @@ restart-node node:
             Start-Sleep 1;\
             sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
             exit 0\""
+        ;;
+      macos)
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "~/ai-mesh/agentctl.sh restart"
         ;;
     esac
     echo ">>> Node {{node}} agent restarted."
@@ -623,6 +638,17 @@ update-node node:
             exit 0\
         \""
         ;;
+      macos)
+        # Built ON the node: Linux can't cross-compile a macOS binary without
+        # Apple's SDK. install-node-macos.sh installs Rust and llama.cpp if
+        # missing, builds, and keeps the agent up with a cron watchdog (no
+        # sudo; launchd jobs are blocked by macOS Local Network privacy).
+        echo ">>> Syncing source to ${NODE_HOST}..."
+        rsync -a --delete --exclude target --exclude node_modules --exclude .git --exclude 'ai_mesh.db*' \
+            -e "ssh {{ssh_opts}}" ./ ${NODE_USER}@${NODE_HOST}:ai-mesh-src/
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
+            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}'"
+        ;;
     esac
     echo ">>> Node {{node}} updated."
 
@@ -679,6 +705,17 @@ _push-node-env node fp token:
             sc.exe start ai-mesh-agent 2>&1 | Out-Null;\
             exit 0\
         \""
+        ;;
+      macos)
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "
+            set -e
+            f=\$HOME/ai-mesh/agent.env
+            touch \$f && chmod 600 \$f
+            grep -v -E '^(MESH_TLS_FINGERPRINT|MESH_AUTH_TOKEN)=' \$f > \$f.new || true
+            printf 'MESH_TLS_FINGERPRINT=%s\\nMESH_AUTH_TOKEN=%s\\n' '${FP}' '${MESH_AUTH_TOKEN}' >> \$f.new
+            mv \$f.new \$f
+            ~/ai-mesh/agentctl.sh restart
+        "
         ;;
     esac
 
@@ -1149,6 +1186,9 @@ load-model node model:
       windows)
         HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
         ;;
+      macos)
+        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'echo "$(( $(sysctl -n hw.memsize) / 1048576 )):1"' 2>/dev/null || echo "0:0")
+        ;;
       *) HW_INFO="0:0" ;;
     esac
     HW_MB=$(echo "$HW_INFO" | cut -d: -f1 | tr -d '[:space:]'); HW_MB="${HW_MB:-0}"
@@ -1212,6 +1252,11 @@ auto-load-model node:
       windows)
         HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
         ;;
+      macos)
+        # Unified memory: leave a quarter for macOS and whatever else runs
+        # (mac1 is also the iOS simulator runner).
+        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'echo "$(( $(sysctl -n hw.memsize) / 1048576 * 3 / 4 )):1"')
+        ;;
       *)
         echo "Unknown NODE_OS: $NODE_OS"; exit 1 ;;
     esac
@@ -1227,6 +1272,10 @@ auto-load-model node:
       windows)
         DISK_FREE_MB=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             'powershell -NoProfile -Command "[int]((Get-PSDrive C).Free/1MB)"' 2>/dev/null || echo 0)
+        ;;
+      macos)
+        DISK_FREE_MB=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
+            "df -m ~/.ai-mesh/models 2>/dev/null | awk 'NR==2{print \$4}'" 2>/dev/null || echo 0)
         ;;
       *) DISK_FREE_MB=0 ;;
     esac
@@ -1277,6 +1326,9 @@ logs-node node:
         ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             "powershell -Command \"Get-Content '${WIN_PATH}\\logs\\agent.log' -Tail 20 -Wait\""
         ;;
+      macos)
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "tail -n 40 -f ~/ai-mesh/logs/agent.log"
+        ;;
     esac
 
 # Check service state on a node and show the node table.
@@ -1295,6 +1347,10 @@ sanity-node node:
       windows)
         ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
             "powershell -Command \"(Get-Service -Name ai-mesh-agent).Status\""
+        ;;
+      macos)
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
+            "[ \"\$(~/ai-mesh/agentctl.sh status)\" = running ] && echo 'Service: RUNNING' || echo 'Service: NOT RUNNING'"
         ;;
     esac
 
@@ -2859,6 +2915,27 @@ deploy-coordinator target_host:
     echo "  2. Repoint agents at the new coordinator: just start-agents"
     echo "  3. Check health: http://${NODE_HOST}:{{coordinator_port}}/?token=..."
     echo ""
+
+# Update only the coordinator binary on its host: build, keep the running
+# binary as ai-mesh-coordinator.prev, install, restart. Unlike deploy-coordinator
+# it never touches state files, the database, the unit or its drop-ins, so it
+# is the safe way to ship a code change to a live pi1.
+# Roll back with:  ssh pi1 'sudo cp -p /usr/local/bin/ai-mesh-coordinator.prev /usr/local/bin/ai-mesh-coordinator && sudo systemctl restart ai-mesh-coordinator'
+# Usage: just update-coordinator pi1
+update-coordinator target_host:
+    #!/usr/bin/env bash
+    set -e
+    source "nodes/{{target_host}}.env"
+    cargo build --target aarch64-unknown-linux-gnu --release -p coordinator 2>&1 | grep -E "^error|Finished"
+    scp {{ssh_opts}} -q target/aarch64-unknown-linux-gnu/release/coordinator ${NODE_USER}@${NODE_HOST}:/tmp/ai-mesh-coordinator.new
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "set -e
+        sudo cp -p /usr/local/bin/ai-mesh-coordinator /usr/local/bin/ai-mesh-coordinator.prev
+        sudo install -m 755 /tmp/ai-mesh-coordinator.new /usr/local/bin/ai-mesh-coordinator
+        rm /tmp/ai-mesh-coordinator.new
+        sudo systemctl restart ai-mesh-coordinator
+        sleep 5
+        systemctl is-active ai-mesh-coordinator"
+    echo ">>> Coordinator on {{target_host}} updated (previous binary kept as ai-mesh-coordinator.prev)."
 
 # Verify coordinator health on the target host (Phase 2 health check).
 # Checks: connectivity, log output, agent connections, Zigbee → MQTT, dashboard access.

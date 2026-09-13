@@ -242,6 +242,36 @@ can be noise. Repeat runs are the next check before choosing a default.
 being processed once). After it, the first real case took 2.1–2.9 s instead
 of the 5–7.5 s seen without it.
 
+## mac1 (M4 Max) on the real prompt — 2026-09-13
+
+Same bench (`scripts/bench/reaper_bench_real.py`, the Python port), same
+inputs, same llama.cpp build (b9444, Metal), warm-up first, one run each.
+Model files are byte-identical to beelink1's (SHA-256 checked).
+
+| Model | Native | Prompt | Avg per command | Decode |
+|---|---|---|---|---|
+| **`qwen2.5:14b`** | **7/7** | **7/7** | 1.2 s | ~44 t/s |
+| `qwen3:8b` | 7/7 | 6/7 ("what's on?" → three `get_climate` calls) | 0.7–0.8 s | ~73 t/s |
+| `qwen2.5:7b` | 5/7 (same two failures as beelink1) | 7/7 | 0.5–0.6 s | ~77–85 t/s |
+| `xLAM-2-8b-fc-r` | 1/7 | 6/7 | 0.7–0.8 s | — |
+| `Hammer2.1-7b` | 1/7 | 5/7 | 0.6 s | — |
+| `watt-tool-8B` | 1/7 | 2/7 | 0.3–0.4 s | — |
+
+**`qwen2.5:14b` is the pick for mac1, and the only model with no failures in
+either mode.** Its state answer was also factually right, where
+`qwen2.5:7b`'s prompt-mode answer said the Kitchen Pendant was off when it was
+on. At 1.2 s a command on the Mac it is still faster than any 7–8B on
+beelink1 (2.5–3.6 s). It is loaded on mac1 as of 2026-09-13; the coordinator
+picks the largest Ready model, so intents route to it.
+
+**This overturns the four-case result for the 14B** ("invented targets, half
+speed"): on the real prompt, with real device lines, it chose real targets every
+time. The cut-down bench was too small to judge it.
+
+**mac1 is 4–6× beelink1 per command** for the same model (qwen3:8b native
+0.8 s against 3.6 s; warm-up 5 s against 16 s), in line with its memory
+bandwidth (546 GB/s).
+
 ## Practical picks per machine
 
 - **beelink1** (main compute) → **`qwen2.5:7b`** for control. Drop to **`qwen3:4b`** for

@@ -51,9 +51,24 @@ fn detect_hostname() -> Result<String, IdentityError> {
 
 #[cfg(not(target_os = "windows"))]
 fn detect_hostname() -> Result<String, IdentityError> {
-    std::fs::read_to_string("/etc/hostname")
-        .map(|s| s.trim().to_string())
-        .map_err(|_| IdentityError::HostnameError)
+    // Linux keeps it in /etc/hostname; macOS has no such file, which made the
+    // whole identity fail there and the node register as "unknown". The
+    // `hostname` command works on both, so it's the fallback.
+    if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
+        let s = s.trim();
+        if !s.is_empty() {
+            return Ok(s.to_string());
+        }
+    }
+    let out = std::process::Command::new("hostname")
+        .output()
+        .map_err(|_| IdentityError::HostnameError)?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !name.is_empty() {
+        Ok(name)
+    } else {
+        Err(IdentityError::HostnameError)
+    }
 }
 
 fn detect_local_ip() -> Result<String, IdentityError> {
