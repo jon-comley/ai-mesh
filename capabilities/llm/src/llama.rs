@@ -389,7 +389,10 @@ fn free_bytes_for(_path: &Path) -> u64 {
         let rc = unsafe { libc::statvfs(c_path.as_ptr(), buf.as_mut_ptr()) };
         if rc == 0 {
             let s = unsafe { buf.assume_init() };
-            return s.f_bavail.saturating_mul(s.f_bsize);
+            // statvfs field widths differ by platform: both u64 on Linux, but
+            // f_bavail is u32 on macOS. Widen both so one line builds on both.
+            #[allow(clippy::unnecessary_cast)]
+            return (s.f_bavail as u64).saturating_mul(s.f_bsize as u64);
         }
     }
     u64::MAX

@@ -69,6 +69,7 @@ NODE_ROLE=compute    # or controller
 | Command | Description |
 |---------|-------------|
 | `just deploy-node <node>` | First-time provision or full re-provision. Builds the correct binary, uploads it, installs llama-server, and registers the agent service. If the coordinator is already running, pushes TLS fingerprint + auth token to the node automatically at the end |
+| `just update-coordinator <host>` | Ship a coordinator code change to a live host: cross-build, keep the running binary as `ai-mesh-coordinator.prev`, install, restart. Never touches state, database, unit or drop-ins (unlike `deploy-coordinator`). The recipe comment has the one-line rollback |
 | `just update-node <node>` | OTA binary update only — rebuild, upload, restart. No reprovisioning |
 | `just load-model <node> <model>` | Load a specific model on a live node (e.g. `just load-model pi1 qwen2.5:1.5b`). Prints hardware-filtered fallback options if the model fails to load |
 | `just auto-load-model <node>` | Detect node hardware and automatically load the best-fit model |

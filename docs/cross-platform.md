@@ -32,9 +32,37 @@ required — only the compute nodes must match the platform-specific agent.
 | pi1         | Ubuntu (ARM64)    | **Coordinator** + Compute | Runs the always-on coordinator (systemd) + Linux ARM64 agent + llama-server |
 | OmniBook7   | WSL Ubuntu        | Controller            | Local agent + CLI; connects to the coordinator on pi1 |
 | beelink1    | Windows 11 Pro    | Compute               | Windows agent + llama-server (Vulkan, AMD Radeon 780M) |
-| mac1        | macOS (Apple)     | Compute (planned)     | Not yet configured — targeted ~end of July 2026 |
+| mac1        | macOS (Apple M4 Max, 64GB) | Compute         | Joined 2026-09-13. Agent built on the Mac, kept up by a cron watchdog, reaches the coordinator through a loopback relay (see "macOS: Local Network privacy") |
 
 This mixed-OS cluster is **intentional** and fully supported.
+
+---
+
+## macOS: Local Network privacy — found 2026-09-13
+
+**The first macOS node hit a wall no other platform has.** macOS blocks an
+unsigned binary from reaching LAN addresses until someone clicks **Allow** on
+the Mac itself (System Settings > Privacy & Security > Local Network). The
+agent logged `No route to host (os error 65)` to the coordinator while `nc`
+from the same shell connected, and ping and ARP were clean. It is not a
+network fault, and it shows up however the agent is started: launchd, cron
+and ssh all failed for the agent binary at some point.
+
+**What runs unattended instead** (`scripts/install-node-macos.sh`):
+
+- **The agent is built on the Mac** — Linux can't cross-compile a macOS binary
+  without Apple's SDK.
+- **A cron watchdog**, `~/ai-mesh/agentctl.sh start` every minute, not a
+  LaunchAgent; it also covers reboots.
+- **A loopback relay**, `scripts/mesh-relay.py` under Apple's `/usr/bin/python3`,
+  which *is* allowed LAN access from cron (tested). The agent dials
+  `127.0.0.1:19000`; the relay forwards to the coordinator. TLS still runs
+  agent-to-coordinator and the agent pins the certificate fingerprint, so the
+  relay changes nothing about trust.
+
+**To retire the relay:** click Allow for the agent on the Mac, then set
+`COORDINATOR_IP` back to the coordinator and remove `COORDINATOR_PORT` and
+`RELAY_TARGET` from `~/ai-mesh/agent.env`.
 
 ---
 
