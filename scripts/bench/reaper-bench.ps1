@@ -58,6 +58,16 @@ $cases = @(
   @{ name='cross-domain';     q='dim the studio lamp to 20% and stop playback' }
 )
 
+
+# Warm-up: one throwaway request with the same system prompt, so the first
+# timed case doesn't pay llama-server's first-request cost (2-3 s on beelink1,
+# 2026-09-13). The coordinator sends the same kind of request when a model
+# becomes Ready, so this matches what a real first command sees.
+$wbody = @{ model='bench'; messages=@(@{role='system';content=$system}, @{role='user';content='Warm-up request: reply with the single word OK.'}); max_tokens=8; temperature=0; stream=$false } | ConvertTo-Json -Depth 8
+$ww = [Diagnostics.Stopwatch]::StartNew()
+try { $null = Invoke-RestMethod "http://127.0.0.1:$Port/v1/chat/completions" -Method Post -Body $wbody -ContentType 'application/json' -TimeoutSec 180 } catch {}
+Write-Host ("  (warm-up {0:N1}s)" -f $ww.Elapsed.TotalSeconds)
+
 foreach ($c in $cases) {
   $body = @{
     model='bench'

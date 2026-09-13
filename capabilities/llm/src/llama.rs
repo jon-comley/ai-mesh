@@ -650,6 +650,11 @@ struct ChatRequest<'a> {
     repeat_penalty: f32,
     temperature: f32,
     cache_prompt: bool,
+    /// Native tool definitions (OpenAI `tools`). llama-server renders them with
+    /// the model's own chat template; `--jinja` is on by default in the builds
+    /// ai-mesh runs, so no server flag is needed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [serde_json::Value]>,
 }
 
 #[derive(Serialize)]
@@ -659,7 +664,54 @@ struct StreamOptionsOut {
 
 #[derive(Deserialize)]
 struct ChatMessageResponse {
-    content: String,
+    /// `null` when the model replied only with tool calls.
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCallResponse>,
+}
+
+#[derive(Deserialize)]
+struct ToolCallResponse {
+    function: ToolFunctionResponse,
+}
+
+#[derive(Deserialize)]
+struct ToolFunctionResponse {
+    name: String,
+    /// A JSON-encoded string per the OpenAI API; an object is tolerated too.
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+/// llama-server's `tool_calls` in ai-mesh's `{"tool": name, "args": {...}}`
+/// shape, the same shape the coordinator parses out of text replies. A call
+/// whose arguments don't decode to an object is dropped with a warning rather
+/// than dispatched with its arguments missing.
+fn to_mesh_tool_calls(calls: Vec<ToolCallResponse>) -> Vec<serde_json::Value> {
+    calls
+        .into_iter()
+        .filter_map(|c| {
+            let name = c.function.name;
+            let args = match c.function.arguments {
+                serde_json::Value::Null => serde_json::json!({}),
+                serde_json::Value::String(s) if s.trim().is_empty() => serde_json::json!({}),
+                serde_json::Value::String(s) => match serde_json::from_str(&s) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(tool = %name, error = %e, "tool call arguments are not valid JSON; dropping the call");
+                        return None;
+                    }
+                },
+                other => other,
+            };
+            if !args.is_object() {
+                tracing::warn!(tool = %name, "tool call arguments are not an object; dropping the call");
+                return None;
+            }
+            Some(serde_json::json!({ "tool": name, "args": args }))
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -711,6 +763,8 @@ fn is_deepseek_r1(model_name: &str) -> bool {
 /// Outcome of a completed generation.
 pub struct GenerateResult {
     pub output: String,
+    /// Structured tool calls (native tool calling), in ai-mesh's shape.
+    pub tool_calls: Vec<serde_json::Value>,
     pub tokens_generated: u32,
     pub prompt_tokens: u32,
     pub duration_ms: u64,
@@ -804,6 +858,7 @@ pub async fn generate_stream(
         max_tokens,
         temperature,
         true,
+        None,
     )
     .await?;
 
@@ -860,6 +915,7 @@ pub async fn generate_stream(
 
     Ok(GenerateResult {
         output,
+        tool_calls: Vec::new(),
         // llama.cpp builds vary on whether the final chunk carries usage —
         // fall back to counting the deltas we actually forwarded.
         tokens_generated: completion_tokens.unwrap_or(deltas_sent),
@@ -877,6 +933,7 @@ async fn post_chat(
     max_tokens: u32,
     temperature: f32,
     stream: bool,
+    tools: Option<&[serde_json::Value]>,
 ) -> Result<reqwest::Response, String> {
     let resp = client
         .post(format!("{}/v1/chat/completions", llama_host()))
@@ -891,6 +948,7 @@ async fn post_chat(
             repeat_penalty: 1.1,
             temperature,
             cache_prompt: true,
+            tools,
         })
         .send()
         .await
@@ -903,12 +961,14 @@ async fn post_chat(
     Ok(resp)
 }
 
-/// Run inference over a full conversation.
+/// Run inference over a full conversation. `tools`, when given, go in the
+/// request's `tools` field and structured calls come back in `tool_calls`.
 pub async fn generate(
     model_name: &str,
     turns: &[shared::ChatTurn],
     max_tokens: u32,
     temperature: f32,
+    tools: Option<&[serde_json::Value]>,
 ) -> Result<GenerateResult, String> {
     let wall_start = Instant::now();
     let resp = post_chat(
@@ -918,6 +978,7 @@ pub async fn generate(
         max_tokens,
         temperature,
         false,
+        tools,
     )
     .await?;
 
@@ -926,12 +987,13 @@ pub async fn generate(
         .await
         .map_err(|e| format!("failed to parse completion response: {e}"))?;
 
-    let output = body
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .unwrap_or_default();
+    let (output, tool_calls) = match body.choices.into_iter().next() {
+        Some(c) => (
+            c.message.content.unwrap_or_default(),
+            to_mesh_tool_calls(c.message.tool_calls),
+        ),
+        None => (String::new(), Vec::new()),
+    };
     let duration_ms = if body.timings.predicted_ms > 0.0 {
         body.timings.predicted_ms as u64
     } else {
@@ -940,6 +1002,7 @@ pub async fn generate(
 
     Ok(GenerateResult {
         output,
+        tool_calls,
         tokens_generated: body.usage.completion_tokens,
         prompt_tokens: body.usage.prompt_tokens,
         duration_ms,
@@ -951,6 +1014,35 @@ pub async fn generate(
 mod tests {
     use super::*;
     use shared::ChatTurn;
+
+    // ── native tool calls ─────────────────────────────────────────────────────
+
+    #[test]
+    fn chat_response_tool_calls_convert_to_mesh_shape() {
+        let body = r#"{"choices":[{"message":{"content":null,"tool_calls":[
+            {"type":"function","function":{"name":"light_command","arguments":"{\"target\":\"Studio Lamp\",\"action\":\"off\"}"}},
+            {"type":"function","function":{"name":"reaper_get_project","arguments":""}},
+            {"type":"function","function":{"name":"broken","arguments":"{not json"}}
+        ]}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
+        let msg = parsed.choices.into_iter().next().unwrap().message;
+        assert!(msg.content.is_none());
+        let calls = to_mesh_tool_calls(msg.tool_calls);
+        assert_eq!(calls.len(), 2, "the call with bad arguments is dropped");
+        assert_eq!(calls[0]["tool"], "light_command");
+        assert_eq!(calls[0]["args"]["target"], "Studio Lamp");
+        assert_eq!(calls[1]["tool"], "reaper_get_project");
+        assert!(calls[1]["args"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chat_response_text_only_still_parses() {
+        let body = r#"{"choices":[{"message":{"content":"The kitchen is on."}}]}"#;
+        let parsed: ChatResponse = serde_json::from_str(body).unwrap();
+        let msg = parsed.choices.into_iter().next().unwrap().message;
+        assert_eq!(msg.content.as_deref(), Some("The kitchen is on."));
+        assert!(msg.tool_calls.is_empty());
+    }
 
     // ── build_messages ────────────────────────────────────────────────────────
 
@@ -1196,7 +1288,10 @@ mod tests {
             "timings": {"predicted_ms": 42.5}
         }"#;
         let resp: ChatResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.choices[0].message.content, "hello world");
+        assert_eq!(
+            resp.choices[0].message.content.as_deref(),
+            Some("hello world")
+        );
         assert_eq!(resp.usage.completion_tokens, 3);
         assert!((resp.timings.predicted_ms - 42.5).abs() < f64::EPSILON);
     }

@@ -55,6 +55,7 @@ fn build_infer_request(
         stream,
         max_tokens,
         temperature,
+        tools: None,
         wire_version: WIRE_VERSION,
     }
 }
@@ -75,8 +76,37 @@ pub async fn dispatch_local_inference(
     connections: &Connections,
     pending_inferences: &PendingInferences,
 ) -> Result<shared::InferenceResult, String> {
+    dispatch_local_inference_with_tools(
+        request_id,
+        model_name,
+        messages,
+        max_tokens,
+        temperature,
+        None,
+        registry,
+        connections,
+        pending_inferences,
+    )
+    .await
+}
+
+/// [`dispatch_local_inference`] with native tool definitions for llama-server's
+/// `tools` field. An agent that predates wire v12 drops them silently and its
+/// result comes back with `native_tools: false`, which the caller must check.
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_local_inference_with_tools(
+    request_id: &str,
+    model_name: &str,
+    messages: Vec<ChatTurn>,
+    max_tokens: u32,
+    temperature: Option<f32>,
+    tools: Option<Vec<serde_json::Value>>,
+    registry: &Arc<Mutex<Registry>>,
+    connections: &Connections,
+    pending_inferences: &PendingInferences,
+) -> Result<shared::InferenceResult, String> {
     let (llm_node_id, agent_tx) = select_connected_node(model_name, registry, connections)?;
-    let infer_req = build_infer_request(
+    let mut infer_req = build_infer_request(
         request_id,
         model_name,
         messages,
@@ -84,6 +114,7 @@ pub async fn dispatch_local_inference(
         max_tokens,
         temperature,
     );
+    infer_req.tools = tools;
 
     let (otx, orx) = oneshot::channel();
     pending_inferences

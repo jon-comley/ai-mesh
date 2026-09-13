@@ -3,7 +3,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 11;
+pub const WIRE_VERSION: u32 = 12;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -69,6 +69,12 @@ pub struct InferenceRequest {
     /// Set to `0.0` for greedy/deterministic output (faster, better for JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Native tool calling (wire v12): OpenAI-style tool definitions for
+    /// llama-server's `tools` field. `None` means the tool list, if any, lives
+    /// in the system prompt as before. An agent that predates v12 ignores this
+    /// field; see [`InferenceResult::native_tools`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
     #[serde(default = "default_wire_version")]
     pub wire_version: u32,
 }
@@ -101,6 +107,16 @@ pub struct InferenceResult {
     #[serde(default)]
     pub prompt_eval_ms: u64,
     pub error: Option<String>,
+    /// Structured tool calls from native tool calling, already in ai-mesh's
+    /// `{"tool": name, "args": {...}}` shape. Empty when the model replied in
+    /// text (wire v12).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<serde_json::Value>,
+    /// True when the agent passed the request's `tools` to the model. An agent
+    /// that predates wire v12 never sets it, which is the coordinator's cue to
+    /// retry with the tool list in the prompt.
+    #[serde(default)]
+    pub native_tools: bool,
     #[serde(default = "default_wire_version")]
     pub wire_version: u32,
 }
@@ -1281,6 +1297,7 @@ mod tests {
             stream: false,
             max_tokens: 128,
             temperature: None,
+            tools: None,
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -1305,6 +1322,7 @@ mod tests {
             stream: true,
             max_tokens: 128,
             temperature: Some(0.0),
+            tools: None,
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -1324,6 +1342,40 @@ mod tests {
     }
 
     #[test]
+    fn inference_result_from_pre_v12_agent_has_no_native_tools() {
+        // A v11 agent sends neither field; the coordinator must read that as
+        // "tools were not used" so it can retry in prompt mode.
+        let json = r#"{"request_id":"r","node_id":"n","model_name":"m","output":"hi","tokens_generated":1,"duration_ms":1,"error":null}"#;
+        let res: InferenceResult = serde_json::from_str(json).unwrap();
+        assert!(!res.native_tools);
+        assert!(res.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn inference_request_tools_roundtrip_and_omitted_when_none() {
+        let mut req = InferenceRequest {
+            request_id: "req-t".into(),
+            node_id: None,
+            model_name: "qwen2.5:7b".into(),
+            messages: vec![ChatTurn::user("lights off")],
+            stream: false,
+            max_tokens: 64,
+            temperature: None,
+            tools: None,
+            wire_version: WIRE_VERSION,
+        };
+        assert!(!serde_json::to_string(&req).unwrap().contains("tools"));
+        req.tools = Some(vec![
+            serde_json::json!({"type": "function", "function": {"name": "light_command"}}),
+        ]);
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InferenceRequest>(&json).unwrap(),
+            req
+        );
+    }
+
+    #[test]
     fn inference_result_roundtrip() {
         let res = InferenceResult {
             request_id: "req-1".into(),
@@ -1335,6 +1387,8 @@ mod tests {
             duration_ms: 42,
             prompt_eval_ms: 0,
             error: None,
+            tool_calls: Vec::new(),
+            native_tools: false,
             wire_version: WIRE_VERSION,
         };
         let json = serde_json::to_string(&res).unwrap();

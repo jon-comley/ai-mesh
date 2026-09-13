@@ -186,6 +186,18 @@ pub async fn handle_intent(
         .map(|s| s.name)
         .collect();
     let system_prompt = build_system_prompt(&schemas);
+    // Native tool calling is the default for local inference (the
+    // `native-tool-calling` preference switches it off). Cloud providers keep
+    // the prompt format, and so does the retry below for an agent or server
+    // that can't take tools.
+    let native_request = (!schemas.is_empty()
+        && native_tool_calling_enabled(&registry.lock().unwrap()))
+    .then(|| {
+        (
+            build_native_system_prompt(&schemas),
+            native_tool_defs(&schemas),
+        )
+    });
     let device_ctx = build_device_context(
         &known_devices,
         &known_groups,
@@ -234,10 +246,47 @@ pub async fn handle_intent(
         let pending_inferences = pending_inferences.clone();
         let request_id = format!("intent-{}", request.request_id);
         let messages = intent_messages();
+        let native = native_request.clone().map(|(system, tools)| {
+            (
+                vec![
+                    ChatTurn::system(system),
+                    ChatTurn::user(user_prompt.clone()),
+                ],
+                tools,
+            )
+        });
         async move {
             let model = model.ok_or_else(|| "no LLM model is ready on any node".to_string())?;
+            let mut prompt_request_id = request_id.clone();
+            if let Some((native_messages, tools)) = native {
+                let res = crate::inference::dispatch_local_inference_with_tools(
+                    &request_id,
+                    &model,
+                    native_messages,
+                    2048,
+                    Some(0.4),
+                    Some(tools),
+                    &registry,
+                    &connections,
+                    &pending_inferences,
+                )
+                .await?;
+                if res.native_tools && res.error.is_none() {
+                    return Ok(res);
+                }
+                // An agent that predates wire v12 drops the tools, and a
+                // llama-server that can't template them errors. Either way the
+                // prompt format still works, so try that before giving up.
+                warn!(
+                    request_id = %request_id,
+                    node_id = %res.node_id,
+                    error = ?res.error,
+                    "native tool calling not available on this node; retrying with tools in the prompt"
+                );
+                prompt_request_id = format!("{request_id}-prompt");
+            }
             dispatch_local_inference(
-                &request_id,
+                &prompt_request_id,
                 &model,
                 messages,
                 2048,
@@ -250,7 +299,7 @@ pub async fn handle_intent(
         }
     };
 
-    let llm_result = if let Some(gw) = &gateway {
+    let mut llm_result = if let Some(gw) = &gateway {
         let messages = intent_messages();
         // Every attempt's failure is warn!-logged as it happens; `attempted`
         // additionally collects them so the final "all providers failed"
@@ -321,6 +370,8 @@ pub async fn handle_intent(
                     duration_ms: 0,
                     prompt_eval_ms: 0,
                     error: None,
+                    tool_calls: Vec::new(),
+                    native_tools: false,
                     wire_version: WIRE_VERSION,
                 }
             }
@@ -352,6 +403,12 @@ pub async fn handle_intent(
     let duration_ms = llm_result.duration_ms;
     let tokens_generated = llm_result.tokens_generated;
     let prompt_eval_ms = llm_result.prompt_eval_ms;
+    let structured_calls = std::mem::take(&mut llm_result.tool_calls);
+    let tool_calling = if llm_result.native_tools {
+        "native"
+    } else {
+        "prompt"
+    };
     if let Some(e) = llm_result.error {
         let hostname = registry
             .lock()
@@ -364,12 +421,23 @@ pub async fn handle_intent(
     info!(
         request_id = %request.request_id,
         node_id = %node_id,
+        tool_calling,
+        structured_calls = structured_calls.len(),
         "intent LLM output: {:?}",
         raw
     );
 
-    // 6. Parse as tool call(s) or return as free text
-    if let Some(calls) = try_parse_tool_calls(&raw) {
+    // 6. Parse as tool call(s) or return as free text. Structured calls from
+    //    native tool calling come first; the text is still parsed when there
+    //    are none, so a model that writes its calls as text loses nothing.
+    let parsed_calls = if structured_calls.is_empty() {
+        try_parse_tool_calls(&raw)
+    } else {
+        let mut calls = Vec::new();
+        collect_tool_calls(serde_json::Value::Array(structured_calls), &mut calls);
+        (!calls.is_empty()).then_some(calls)
+    };
+    if let Some(calls) = parsed_calls {
         let mut records: Vec<ToolCallRecord> = Vec::new();
 
         for call in &calls {
@@ -2446,12 +2514,98 @@ fn tool_schemas_for_feature(feature: shared::Feature) -> Vec<serde_json::Value> 
     }
 }
 
+/// One throwaway inference, shaped like a real intent, sent when a model
+/// becomes Ready. The first request after llama-server starts pays a one-off
+/// cost (2–3 s on beelink1 with native tool calling, measured 2026-09-13); this
+/// pays it before anyone is waiting. It carries the same system prompt and
+/// tools a real intent would, so the prompt cache also holds that prefix. The
+/// reply is discarded — nothing is dispatched — and a failure is only logged.
+pub async fn warm_up_intent_model(
+    model_name: String,
+    registry: Arc<Mutex<Registry>>,
+    connections: Connections,
+    pending_inferences: PendingInferences,
+) {
+    let schemas = collect_tool_schemas(&registry);
+    let native = !schemas.is_empty() && native_tool_calling_enabled(&registry.lock().unwrap());
+    let (system, tools) = if native {
+        (
+            build_native_system_prompt(&schemas),
+            Some(native_tool_defs(&schemas)),
+        )
+    } else {
+        (build_system_prompt(&schemas), None)
+    };
+    let request_id = format!("warmup-{}", uuid::Uuid::new_v4());
+    let started = std::time::Instant::now();
+    let result = crate::inference::dispatch_local_inference_with_tools(
+        &request_id,
+        &model_name,
+        vec![
+            ChatTurn::system(system),
+            ChatTurn::user("Warm-up request: reply with the single word OK."),
+        ],
+        8,
+        Some(0.0),
+        tools,
+        &registry,
+        &connections,
+        &pending_inferences,
+    )
+    .await;
+    match result {
+        Ok(res) if res.error.is_none() => info!(
+            model_name = %model_name,
+            node_id = %res.node_id,
+            native_tools = res.native_tools,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "model warm-up done"
+        ),
+        Ok(res) => warn!(model_name = %model_name, error = ?res.error, "model warm-up failed"),
+        Err(e) => warn!(model_name = %model_name, error = %e, "model warm-up not sent"),
+    }
+}
+
+/// Preference that switches native tool calling off. Anything but `"false"`,
+/// including unset, means native: local inference sends the tool list in
+/// llama-server's `tools` field and reads structured `tool_calls` back.
+/// `"false"` restores the prompt format exactly — tool list and JSON reply
+/// format in the system prompt, reply parsed as text. It is read per request,
+/// so flipping it needs no restart.
+pub(crate) const NATIVE_TOOLS_PREF: &str = "native-tool-calling";
+
+fn native_tool_calling_enabled(reg: &Registry) -> bool {
+    reg.get_preference(crate::http::api::prefs::PREF_USER_ID, NATIVE_TOOLS_PREF)
+        .as_deref()
+        != Some("false")
+}
+
+/// Tool schemas as OpenAI-style `tools` entries.
+fn native_tool_defs(schemas: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    schemas
+        .iter()
+        .map(|s| serde_json::json!({ "type": "function", "function": s }))
+        .collect()
+}
+
+/// The system prompt for the prompt format: tool list and JSON reply format
+/// written into the prompt, reply parsed as text. Cloud providers always use
+/// this, and so does local inference with native tool calling switched off.
 pub fn build_system_prompt(schemas: &[serde_json::Value]) -> String {
+    system_prompt(schemas, false)
+}
+
+/// The system prompt for native tool calling: the same rules as
+/// [`build_system_prompt`], minus what the `tools` field replaces — the JSON
+/// reply format and the tool list.
+pub fn build_native_system_prompt(schemas: &[serde_json::Value]) -> String {
+    system_prompt(schemas, true)
+}
+
+fn system_prompt(schemas: &[serde_json::Value], native: bool) -> String {
     if schemas.is_empty() {
         return "You are a helpful assistant. Answer the user's question directly.".into();
     }
-
-    let schema_json = serde_json::to_string(schemas).unwrap_or_default();
 
     // Conditional so the prompt never cites a tool that isn't offered: the
     // state-question rule above would otherwise steer "what's playing?" into
@@ -2462,28 +2616,55 @@ pub fn build_system_prompt(schemas: &[serde_json::Value]) -> String {
         ""
     };
 
+    // The wording that names the reply format. With native tool calling the
+    // model writes no JSON, so those rules talk about tool calls instead. The
+    // prompt-format branch must stay byte-identical to what it replaced.
+    let (how_to_call, all_rule, compound_rule, state_rule, climate_rule, only_rule, tool_list) =
+        if native {
+            (
+                "To control devices, call the provided tools.".to_string(),
+                "otherwise call the tool once per online device in that room",
+                "call a tool once per command — one tool call per distinct action",
+                "do NOT call tools for these questions",
+                "the climate part MUST be a get_climate tool call alongside the others — a single reply cannot mix free text with tool calls",
+                "Only call tools when",
+                String::new(),
+            )
+        } else {
+            (
+                r#"To control one device, reply with ONLY this JSON (no extra text):
+{"tool": "<name>", "args": { ... }}
+
+To control multiple devices in one request, reply with ONLY a JSON array (no extra text):
+[{"tool": "<name>", "args": { ... }}, {"tool": "<name>", "args": { ... }}]"#
+                    .to_string(),
+                "otherwise emit one array element per online device in that room",
+                "emit one array element per command — one tool call per distinct action",
+                "do NOT output JSON for these questions",
+                "the climate part MUST be a get_climate call inside the JSON array — a single reply cannot mix free text with JSON tool calls",
+                "Only output JSON when",
+                format!(
+                    "\n\nAvailable tools:\n{}",
+                    serde_json::to_string(schemas).unwrap_or_default()
+                ),
+            )
+        };
+
     format!(
         r#"You are a helpful smart home assistant embedded in ai-mesh. You have direct control of and live state for all listed devices.
 
-To control one device, reply with ONLY this JSON (no extra text):
-{{"tool": "<name>", "args": {{ ... }}}}
-
-To control multiple devices in one request, reply with ONLY a JSON array (no extra text):
-[{{"tool": "<name>", "args": {{ ... }}}}, {{"tool": "<name>", "args": {{ ... }}}}]
+{how_to_call}
 
 Rules:
 - The "target" field must be an exact device or group name from the known list. Never invent a target name.
 - When the user names a room (e.g. "kitchen lights", "the bedroom"), find devices tagged [RoomName]. If no group for that room exists, pick the first online device in that room.
 - If the user says "one of", "just one", or "a single", always pick the FIRST online device listed for that room.
-- If the user says "all" or "everything", use a group if one exists; otherwise emit one array element per online device in that room.
-- For compound requests (e.g. "dim warm light", or requests spanning different tools like lighting + REAPER), emit one array element per command — one tool call per distinct action.
+- If the user says "all" or "everything", use a group if one exists; {all_rule}.
+- For compound requests (e.g. "dim warm light", or requests spanning different tools like lighting + REAPER), {compound_rule}.
 - Never issue a command to a device shown as [OFFLINE — not responding].
-- For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists. Count devices sharing a [RoomName] tag to answer "how many". do NOT output JSON for these questions.
-- Sensor/climate questions (temperature, humidity, motion, contact, light level — e.g. "what's the office temperature?", "is anyone in the living room?", "is the office warm?") are the one exception: answer directly from the sensor readings below OR call get_climate — either is fine for a sensor-only question. But if the request COMBINES a climate question with a real action ("turn off the lights and tell me the bedroom temperature"), the climate part MUST be a get_climate call inside the JSON array — a single reply cannot mix free text with JSON tool calls.
-- Only output JSON when the user is explicitly asking you to CHANGE or CONTROL something, or asking a sensor/climate question per the rule above.{music_rule}
-
-Available tools:
-{schema_json}"#
+- For ANY question about state, count, names, or available scenes — answer directly in plain text from the device and scene lists. Count devices sharing a [RoomName] tag to answer "how many". {state_rule}.
+- Sensor/climate questions (temperature, humidity, motion, contact, light level — e.g. "what's the office temperature?", "is anyone in the living room?", "is the office warm?") are the one exception: answer directly from the sensor readings below OR call get_climate — either is fine for a sensor-only question. But if the request COMBINES a climate question with a real action ("turn off the lights and tell me the bedroom temperature"), {climate_rule}.
+- {only_rule} the user is explicitly asking you to CHANGE or CONTROL something, or asking a sensor/climate question per the rule above.{music_rule}{tool_list}"#
     )
 }
 
@@ -4007,6 +4188,91 @@ mod tests {
         );
         assert!(ctx.contains("test_bulb"));
         assert!(ctx.contains("all"));
+    }
+
+    #[test]
+    fn native_system_prompt_drops_json_format_and_tool_list() {
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
+        let p = build_native_system_prompt(&schemas);
+        assert!(p.contains("call the provided tools"));
+        assert!(p.contains("do NOT call tools"));
+        assert!(p.contains("Never invent a target name"));
+        assert!(!p.contains("Available tools"));
+        assert!(!p.contains(r#"{"tool""#));
+        assert!(!p.contains("JSON"));
+        assert!(!p.contains("/no_think"));
+    }
+
+    #[test]
+    fn native_system_prompt_keeps_every_rule() {
+        // Only the reply-format wording may differ between the two prompts.
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
+        let rules = |p: &str| p.lines().filter(|l| l.starts_with("- ")).count();
+        assert_eq!(
+            rules(&build_native_system_prompt(&schemas)),
+            rules(&build_system_prompt(&schemas))
+        );
+    }
+
+    #[test]
+    fn native_tool_defs_wrap_schemas_as_functions() {
+        let schemas = tool_schemas_for_feature(shared::Feature::Lighting);
+        let defs = native_tool_defs(&schemas);
+        assert_eq!(defs.len(), schemas.len());
+        assert_eq!(defs[0]["type"], "function");
+        assert_eq!(defs[0]["function"], schemas[0]);
+    }
+
+    #[test]
+    fn native_tool_calling_is_on_unless_switched_off() {
+        let reg = Registry::new();
+        assert!(native_tool_calling_enabled(&reg), "default is native");
+        reg.set_preference(
+            crate::http::api::prefs::PREF_USER_ID,
+            NATIVE_TOOLS_PREF,
+            "false",
+        );
+        assert!(!native_tool_calling_enabled(&reg));
+        reg.set_preference(
+            crate::http::api::prefs::PREF_USER_ID,
+            NATIVE_TOOLS_PREF,
+            "true",
+        );
+        assert!(native_tool_calling_enabled(&reg));
+    }
+
+    /// Writes the real intent prompts and tool set for
+    /// `scripts/bench/reaper-bench-real.ps1`, so the bench tests what ai-mesh
+    /// actually sends rather than a hand-copied approximation:
+    /// `AI_MESH_BENCH_OUT=/tmp/intent-bench.json cargo test -p coordinator dump_intent_bench_inputs -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_intent_bench_inputs() {
+        let mut seen = std::collections::HashSet::new();
+        let mut schemas = Vec::new();
+        for feature in [
+            shared::Feature::Lighting,
+            shared::Feature::Reaper,
+            shared::Feature::Sensors,
+            shared::Feature::Audio,
+            shared::Feature::Music,
+            shared::Feature::Art,
+        ] {
+            for schema in tool_schemas_for_feature(feature) {
+                if seen.insert(schema["name"].as_str().unwrap_or("").to_string()) {
+                    schemas.push(schema);
+                }
+            }
+        }
+        let out = std::env::var("AI_MESH_BENCH_OUT").expect("set AI_MESH_BENCH_OUT");
+        let json = serde_json::json!({
+            "prompt_system": build_system_prompt(&schemas),
+            "native_system": build_native_system_prompt(&schemas),
+            "tools": native_tool_defs(&schemas),
+            "schema_json": serde_json::to_string(&schemas).unwrap(),
+            "tool_names": schemas.iter().map(|s| s["name"].clone()).collect::<Vec<_>>(),
+        });
+        std::fs::write(out, serde_json::to_string_pretty(&json).unwrap()).unwrap();
     }
 
     #[test]

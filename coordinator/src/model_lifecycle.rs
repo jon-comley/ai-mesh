@@ -89,6 +89,8 @@ impl ModelHandle<Ready> {
             duration_ms: started.elapsed().as_millis() as u64,
             prompt_eval_ms: 0,
             error: Some("inference not yet implemented — Phase 6".into()),
+            tool_calls: Vec::new(),
+            native_tools: false,
             wire_version: WIRE_VERSION,
         }
     }
@@ -152,6 +154,7 @@ mod tests {
             stream: false,
             max_tokens: 64,
             temperature: None,
+            tools: None,
             wire_version: WIRE_VERSION,
         };
         let result = h.execute_inference(&req);

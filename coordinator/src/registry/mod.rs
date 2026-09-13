@@ -854,6 +854,14 @@ impl Registry {
         }
     }
 
+    /// The recorded state of `model_name` on node `id`, if the registry has one.
+    pub fn model_state(&self, id: &str, model_name: &str) -> Option<ModelLifecycleState> {
+        self.nodes
+            .get(id)
+            .and_then(|n| n.models.get(model_name))
+            .map(|m| m.state.clone())
+    }
+
     pub fn update_model_status(
         &mut self,
         id: &str,
@@ -2102,6 +2110,24 @@ mod tests {
     fn get_node_full_missing_returns_none() {
         let reg = Registry::new();
         assert!(reg.get_node_full("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn model_state_reads_back_the_recorded_state() {
+        let mut reg = Registry::new();
+        reg.update_heartbeat(make_identity("n1"));
+        assert_eq!(reg.model_state("n1", "qwen"), None);
+        reg.update_model_status("n1", "qwen", 1024, ModelLifecycleState::Loading);
+        assert_eq!(
+            reg.model_state("n1", "qwen"),
+            Some(ModelLifecycleState::Loading)
+        );
+        reg.update_model_status("n1", "qwen", 1024, ModelLifecycleState::Ready);
+        assert_eq!(
+            reg.model_state("n1", "qwen"),
+            Some(ModelLifecycleState::Ready)
+        );
+        assert_eq!(reg.model_state("missing", "qwen"), None);
     }
 
     #[test]

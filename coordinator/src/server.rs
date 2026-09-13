@@ -1118,18 +1118,37 @@ async fn process_message(
                 state      = ?report.state,
                 "model status update received"
             );
-            let snapshot = {
+            let (snapshot, became_ready) = {
                 let mut reg = registry.lock().unwrap();
+                let became_ready = report.state == ModelLifecycleState::Ready
+                    && reg.model_state(&report.node_id, &report.model_name)
+                        != Some(ModelLifecycleState::Ready);
                 reg.update_model_status(
                     &report.node_id,
                     &report.model_name,
                     report.size_mb,
                     report.state,
                 );
-                dashboard.map(|_| build_model_snapshot(&reg))
+                (dashboard.map(|_| build_model_snapshot(&reg)), became_ready)
             };
             if let (Some(dash), Some(snap)) = (dashboard, snapshot) {
                 dash.push_model_update(snap);
+            }
+            if became_ready {
+                // Pay llama-server's first-request cost now rather than on
+                // the first real command. Spawned, NOT awaited: the warm-up's
+                // result arrives on this same connection (see IntentRequest
+                // below for the deadlock that awaiting here causes).
+                let registry = registry.clone();
+                let connections = connections.clone();
+                let pending_inferences = pending_inferences.clone();
+                let model_name = report.model_name.clone();
+                tokio::spawn(crate::intent::warm_up_intent_model(
+                    model_name,
+                    registry,
+                    connections,
+                    pending_inferences,
+                ));
             }
             None
         }
@@ -2334,7 +2353,10 @@ mod tests {
         .await;
         match cmd {
             shared::LightAction::BrightnessStep { delta, .. } => {
-                assert_eq!(delta, HUE_DETENT_STEP as i16, "falls back to one Hue detent")
+                assert_eq!(
+                    delta, HUE_DETENT_STEP as i16,
+                    "falls back to one Hue detent"
+                )
             }
             other => panic!("expected a relative step, got {other:?}"),
         }

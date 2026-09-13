@@ -172,6 +172,7 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                     stream: false,
                     max_tokens: 64,
                     temperature: None,
+                    tools: None,
                     wire_version: WIRE_VERSION,
                 }),
             )
@@ -194,6 +195,8 @@ async fn test_coordinator_forwards_inference_request_to_agent() {
                         duration_ms: 50,
                         prompt_eval_ms: 0,
                         error: None,
+                        tool_calls: Vec::new(),
+                        native_tools: false,
                         wire_version: WIRE_VERSION,
                     }),
                 )

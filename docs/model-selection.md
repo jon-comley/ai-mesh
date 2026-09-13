@@ -212,6 +212,36 @@ instead of searching text, and turning the switch off must restore exactly
 today's behaviour. Hammer and xLAM are worth re-running only after a llama.cpp
 upgrade.
 
+## Native tool calling on the REAL prompt — 2026-09-13
+
+The four-case bench above used a cut-down prompt and twelve tools. Before
+making native tool calling the default, `scripts/bench/reaper-bench-real.ps1`
+ran what ai-mesh actually sends: the system prompts and full tool set exported
+from `intent.rs` (`dump_intent_bench_inputs`), real-format device and sensor
+lines, a warm-up request first (as the coordinator now does on Ready), and
+seven cases. Scored as the coordinator would act: right tools, real targets,
+and **plain text with no calls** for a state question.
+
+| Model | Mode | Score | Failures | Avg time (7 cases) |
+|---|---|---|---|---|
+| **`qwen3:8b`** | **native** | **7/7** | — | 3.6 s |
+| `qwen3:8b` | prompt | 6/7 | "what's on?" → **toggled all six lights** | 4.0 s |
+| `qwen2.5:7b` | native | 5/7 | "stop playback" → `music_control` pause; "what's on?" → **turned a light on** | 2.9 s |
+| `qwen2.5:7b` | prompt | **7/7** | — | 2.5 s |
+
+**This reverses the four-case result for `qwen2.5:7b`.** With the full prompt
+it is the better model in prompt mode and the worse one natively, and its
+native failure on a state question *acts* — a light switches on — rather than
+just answering badly. **`qwen3:8b` native is the only combination with no
+failures**, and the only one that answered "what's on?" correctly and fully.
+
+**One run each, at production sampling (temperature 0.4).** A single failure
+can be noise. Repeat runs are the next check before choosing a default.
+
+**Warm-up:** the throwaway request takes 12–16 s (the full prompt and tools
+being processed once). After it, the first real case took 2.1–2.9 s instead
+of the 5–7.5 s seen without it.
+
 ## Practical picks per machine
 
 - **beelink1** (main compute) → **`qwen2.5:7b`** for control. Drop to **`qwen3:4b`** for
