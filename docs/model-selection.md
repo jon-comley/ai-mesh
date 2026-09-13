@@ -172,10 +172,36 @@ tools help, and the specialists are the ones they fail:
   `reaper_action`. "Studio lights" turns off both studio lights instead of one.
   Booleans stay booleans, and args come back flat, so `normalize_tool_args` has
   nothing to lift.
-- **The cost is on the lights case only:** 7.5 s against 2.8 s, because it now
-  emits two calls instead of one. The other three cases are within 0.3 s.
+- **The cost is a first-request overhead, not the second call.** The lights case
+  took 7.5 s against 2.8 s. But it's the first request after each model loads,
+  and it was 2–3 s slower in native mode for **every** model, including Hammer
+  and xLAM, whose native reply was a single call as text. After that first
+  request, native and prompt are within about 0.5 s on every case, for every
+  model except watt-tool, and generation speed is unchanged. A long-running
+  server pays that cost once, not per command. That part is inferred from this
+  run, not measured separately.
 - **The 14B still invents targets** and still decodes at half speed. Nothing here
   revives it.
+
+**Speeds, same night, beelink1.** Seconds per case. Decode is the average
+generation speed. The lights case is the first request after each model loads.
+
+| Model | Mode | lights | transport | multi-step | cross-domain | avg | decode t/s | load |
+|---|---|---|---|---|---|---|---|---|
+| `qwen2.5:7b` | native | 7.5 | 1.5 | 3.3 | 3.5 | 4.0 | 16.6 | 3 s |
+| `qwen2.5:7b` | prompt | 2.8 | 1.3 | 3.2 | 3.1 | 2.6 | 17.6 | 3 s |
+| `qwen3:8b` | native | 5.1 | 1.6 | 3.7 | 3.9 | 3.6 | 16.4 | 4 s |
+| `qwen3:8b` | prompt | 3.2 | 1.4 | 3.6 | 3.5 | 2.9 | 16.7 | 4 s |
+| `xLAM-2-8b` | native | 5.9 | 1.4 | 3.9 | 3.2 | 3.6 | 16.7 | 3 s |
+| `xLAM-2-8b` | prompt | 2.9 | 1.3 | 3.1 | 3.1 | 2.6 | 17.2 | 3 s |
+| `watt-tool-8B` | native | 1.7 | 2.0 | 5.8 | 2.5 | 3.0 | 17.1 | 3 s |
+| `watt-tool-8B` | prompt | 2.5 | 1.3 | 2.1 | 2.2 | 2.0 | 17.3 | 3 s |
+| `Hammer2.1-7b` | native | 5.2 | 1.5 | 3.2 | 3.3 | 3.3 | 17.4 | 3 s |
+| `Hammer2.1-7b` | prompt | 2.8 | 1.3 | 3.2 | 3.1 | 2.6 | 17.6 | 3 s |
+| `qwen2.5:14b` | native | 12.1 | 2.7 | 6.3 | 6.7 | 7.0 | 8.8 | 8 s |
+| `qwen2.5:14b` | prompt | 9.1 | 2.2 | 4.7 | 6.2 | 5.5 | 9.2 | 7 s |
+
+watt-tool's native times are for prose, not calls, so they don't compare.
 
 **Four cases is a small sample.** This says native tools are worth trying for
 Qwen. It isn't proof on real voice traffic.
