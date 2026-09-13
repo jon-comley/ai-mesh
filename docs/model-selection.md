@@ -121,6 +121,15 @@ though: it sent `"Studio"` as the target for "turn the studio lights off" — a
 room name, not a device, so that command has nowhere to go — and it sent `arm`
 as the string `"true"` where the schema says boolean.
 
+**That string works only by accident, and the accident is a latent bug.**
+`intent.rs:1276` reads `args["arm"].as_bool().unwrap_or(true)`: a string is not a
+bool, `as_bool()` returns `None`, and the default happens to be `true`. So the
+same line turns `"arm": "false"` — "add a track but don't arm it" — into an
+**armed** track, silently, for any model that stringifies booleans. Worth
+fixing in the parser regardless of which model is loaded: accept `"true"` and
+`"false"` as strings, and default to *not* arming when the value is present but
+unreadable.
+
 `qwen2.5:7b` stays the pick, and it is already `DEFAULT_MODEL` on beelink1: its
 only miss, `reaper_action: "stop"`, still reaches REAPER because
 `named_action_id` maps it, whereas an invented target reaches nothing. Hammer is
