@@ -75,6 +75,45 @@ transport ever behaves oddly.
 
 Harness: `C:\Users\jonno\reaper-bench.ps1` on beelink1, `-ModelFile <name.gguf>`.
 
+## The function-calling specialists, measured — 2026-09-13
+
+Jon asked for the obvious follow-up: if a general instruct model follows the
+schema this well, would a model *built* for tool calling do better? Three were
+pulled from HuggingFace and run through the same `reaper-bench.ps1` cases,
+alongside Qwen3-8B with thinking off — the way `llama.rs` actually runs it.
+
+| Model | Valid JSON | Right key (`"tool"`) | Real targets | "stop playback" | Decode |
+|---|---|---|---|---|---|
+| **`qwen2.5:7b`** | **4/4** | **4/4** | **yes** | `reaper_action` ⚠️ | 17.5 t/s |
+| `qwen3:8b` (`/no_think`) | 4/4 | 4/4 | yes | `reaper_transport` ✅ | 16.8 t/s |
+| `xLAM-2-8b-fc-r` | 3/4 | 3/4 | **invented `"Studio"`** | `reaper_transport` ✅ | 17.2 t/s |
+| `watt-tool-8B` | **1/4** | — | invented `"Studio"` | `reaper_transport` ✅ | 17.5 t/s |
+| `qwen2.5:14b` (2026-09-12) | 2/4 | 3/4 | invented | — | 9.1 t/s |
+
+**Every specialist reverted to the format it was trained on, and that is the
+whole result.** xLAM slid back to OpenAI-style `{"name": …, "arguments": …}` on
+the multi-call reply — the same `"name"` key that sank the 14B, which
+`intent.rs:376` discards — and produced malformed JSON doing it. watt-tool
+answered three of four in Python call syntax, `light_command(args={…})`, which
+is how BFCL scores function calling and not what this prompt asks for. Neither
+is a bad model. Both are fighting a custom JSON shape written into a system
+prompt, and a heavily instruction-tuned generalist follows *the prompt's* format
+better than a specialist follows its own.
+
+**Two things that would change this ranking**, recorded so they are not
+rediscovered:
+
+- **Moving ai-mesh to a native tools API** — structured `tools` in the request
+  rather than a JSON shape described in prose. That is the format the
+  specialists were trained on, and the table could invert.
+- **Qwen3-8B depends on `/no_think` being applied.** Without it the same
+  multi-step case took 18.6 s and returned nothing. It is the one model here
+  that routes to the correct transport tool, but if that flag ever regresses,
+  command latency quadruples silently.
+
+`qwen2.5:7b` stays the pick, and it is already `DEFAULT_MODEL` on beelink1.
+Hammer2.1-7b is still to run.
+
 ## Practical picks per machine
 
 - **beelink1** (main compute) → **`qwen2.5:7b`** for control. Drop to **`qwen3:4b`** for
