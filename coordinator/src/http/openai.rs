@@ -968,6 +968,8 @@ mod tests {
                     duration_ms: 5,
                     prompt_eval_ms: 1,
                     error: None,
+                    tool_calls: Vec::new(),
+                    native_tools: false,
                     wire_version: WIRE_VERSION,
                 };
                 *seen2.lock().unwrap() = Some(req.clone());
@@ -1325,6 +1327,8 @@ mod tests {
             duration_ms: 5,
             prompt_eval_ms: 1,
             error: None,
+            tool_calls: Vec::new(),
+            native_tools: false,
             wire_version: WIRE_VERSION,
         }
     }

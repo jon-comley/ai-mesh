@@ -63,6 +63,7 @@ async fn send_infer(
         stream: false,
         max_tokens: 256,
         temperature: None,
+        tools: None,
         wire_version: WIRE_VERSION,
     });
 

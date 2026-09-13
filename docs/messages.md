@@ -191,6 +191,16 @@ Older agents that do not send `wire_version` will still deserialize safely.
 > degrades to a single-delta stream), but a v4 agent cannot parse a v3
 > coordinator's requests (missing `stream`).
 
+> **Wire v12 (native tool calling, 2026-09-13):** `InferenceRequest` gains
+> an optional `tools` (OpenAI-style tool definitions for llama-server's
+> `tools` field). `InferenceResult` gains `tool_calls` (structured calls,
+> already in ai-mesh's `{"tool", "args"}` shape) and `native_tools` (true when
+> the agent passed the tools to the model). All three are `#[serde(default)]`,
+> so either side can deploy first: a v11 agent ignores `tools` and never sets
+> `native_tools`, and the coordinator reads that as "retry with the tool list
+> in the prompt". The intent pipeline uses native tools by default; the
+> `native-tool-calling` preference set to `"false"` switches back.
+
 > **Wire v5 (multi-domain, Phase A):** `LightDeviceListReport` →
 > `DeviceListReport { node_id, devices: Vec<DeviceEntry { id, device_type }>,
 > groups }` — the inventory is typed per device (`light` / `sensor` / `cover`
@@ -232,6 +242,7 @@ Fields:
 - `stream: bool` — stream `ModelInferenceChunk`s before the terminal result
 - `max_tokens: u32`
 - `temperature: Option<f32>` — `None` = agent default (0.8)
+- `tools: Option<Vec<Value>>` — native tool definitions for llama-server (v12, `#[serde(default)]`, omitted when `None`)
 - `wire_version: u32`
 
 ### `ModelInferenceResult`
@@ -247,6 +258,8 @@ Fields:
 - `prompt_tokens: u32` — from the backend's `usage.prompt_tokens` (`#[serde(default)]`)
 - `duration_ms: u64`
 - `error: Option<String>`
+- `tool_calls: Vec<Value>` — structured tool calls as `{"tool", "args"}` (v12, `#[serde(default)]`, omitted when empty)
+- `native_tools: bool` — the agent passed `tools` to the model (v12, `#[serde(default)]`; `false` from older agents)
 - `wire_version: u32`
 
 ### `ModelLoad`

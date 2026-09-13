@@ -72,6 +72,17 @@ $cases = @(
   @{ name='cross-domain';     q='dim the studio lamp to 20% and stop playback' }
 )
 
+
+# Warm-up: one throwaway request with the same system prompt and tools, so the first
+# timed case doesn't pay llama-server's first-request cost (2-3 s on beelink1,
+# 2026-09-13). The coordinator sends the same kind of request when a model
+# becomes Ready, so this matches what a real first command sees.
+$wmsgs = ConvertTo-Json -Depth 5 -Compress -InputObject @(@{role='system';content=$system}, @{role='user';content='Warm-up request: reply with the single word OK.'})
+$wbody = '{"model":"bench","messages":' + $wmsgs + ',"tools":' + $toolsJson + ',"max_tokens":8,"temperature":0,"stream":false}'
+$ww = [Diagnostics.Stopwatch]::StartNew()
+try { $null = Invoke-RestMethod "http://127.0.0.1:$Port/v1/chat/completions" -Method Post -Body ([Text.Encoding]::UTF8.GetBytes($wbody)) -ContentType 'application/json' -TimeoutSec 180 } catch {}
+Write-Host ("  (warm-up {0:N1}s)" -f $ww.Elapsed.TotalSeconds)
+
 foreach ($c in $cases) {
   $userText = $(if ($NoThink) { $c.q + ' /no_think' } else { $c.q })
   # -InputObject, not a pipe: a pipe unrolls arrays in PowerShell 5.1.

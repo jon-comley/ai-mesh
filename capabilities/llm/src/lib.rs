@@ -21,6 +21,10 @@ async fn run_inference(
     tx: Sender<MeshMessage>,
 ) -> InferenceResult {
     let temperature = req.temperature.unwrap_or(0.8);
+    // Tools are only passed on the non-streamed path, which is what the intent
+    // pipeline uses. Reporting it lets the coordinator tell "used natively"
+    // apart from a stream that ignored them.
+    let native_tools = req.tools.is_some() && !req.stream;
     let res = if req.stream {
         let (dtx, mut drx) = mpsc::channel::<String>(32);
         let fwd_tx = tx;
@@ -54,7 +58,14 @@ async fn run_inference(
         let _ = forwarder.await;
         res
     } else {
-        llama::generate(&req.model_name, &req.messages, req.max_tokens, temperature).await
+        llama::generate(
+            &req.model_name,
+            &req.messages,
+            req.max_tokens,
+            temperature,
+            req.tools.as_deref(),
+        )
+        .await
     };
     match res {
         Ok(outcome) => InferenceResult {
@@ -67,6 +78,8 @@ async fn run_inference(
             duration_ms: outcome.duration_ms,
             prompt_eval_ms: outcome.prompt_eval_ms,
             error: None,
+            tool_calls: outcome.tool_calls,
+            native_tools,
             wire_version: WIRE_VERSION,
         },
         Err(e) => {
@@ -81,6 +94,8 @@ async fn run_inference(
                 duration_ms: 0,
                 prompt_eval_ms: 0,
                 error: Some(e),
+                tool_calls: Vec::new(),
+                native_tools,
                 wire_version: WIRE_VERSION,
             }
         }
@@ -399,6 +414,7 @@ mod tests {
             stream: false,
             max_tokens: 64,
             temperature: None,
+            tools: None,
             wire_version: WIRE_VERSION,
         });
         assert!(make_cap().handles(&msg));

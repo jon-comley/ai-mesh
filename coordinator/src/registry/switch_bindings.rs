@@ -154,7 +154,10 @@ mod tests {
         assert!(second.is_none(), "duplicate (device_id, action) is refused");
         let found = reg.find_switch_binding("dial1", "button_1_press").unwrap();
         assert_eq!(found.id, first_id, "the original row survives untouched");
-        assert_eq!(found.command, "on", "the original command is not overwritten");
+        assert_eq!(
+            found.command, "on",
+            "the original command is not overwritten"
+        );
         assert_eq!(reg.list_switch_bindings().unwrap().len(), 1);
     }
 
