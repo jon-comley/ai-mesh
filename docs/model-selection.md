@@ -132,8 +132,59 @@ unreadable.
 
 `qwen2.5:7b` stays the pick, and it is already `DEFAULT_MODEL` on beelink1: its
 only miss, `reaper_action: "stop"`, still reaches REAPER because
-`named_action_id` maps it, whereas an invented target reaches nothing. Hammer is
-the one to retry if the prompt ever moves to a native tools API.
+`named_action_id` maps it, whereas an invented target reaches nothing. Hammer was
+the one to retry under a native tools API — done 2026-09-13, below: it failed
+there, at the parser.
+
+## Native tool calling, measured — 2026-09-13
+
+The follow-up recorded above: does passing tools in the request's `tools`
+field, instead of describing them in the system prompt, change the ranking?
+`scripts/bench/reaper-bench-tools.ps1` sends the same four cases, the same
+twelve tools as JSON Schema, and the same devices to `llama-server` b9444 with
+`--jinja`, and scores only **structured `tool_calls`**. Text that looks like a
+call is a fail, because ai-mesh couldn't use it. The prompt-mode bench
+(`reaper-bench.ps1`) was re-run the same night on the same build, so the two
+columns compare directly. `run-reaper-bench.ps1 -Mode tools|prompt` repeats
+either.
+
+| Model | Native: structured calls | Native detail | Prompt mode, same night |
+|---|---|---|---|
+| **`qwen2.5:7b`** | **4/4** | both studio lights; "stop playback" → `reaper_transport` ✅; `arm` a real boolean; real targets | parses 4/4, but one light only, "stop" → `reaper_action` ⚠️, add-track args nested under `properties` |
+| `qwen3:8b` (`/no_think`) | 4/4 | one lamp; stop → `reaper_transport`; real targets | 4/4, same choices |
+| `qwen2.5:14b` | 4/4 | **invented `"Studio Lamp [Studio]"`**; 8.8 t/s | 3/4; `"name"` key; same invented target |
+| `Hammer2.1-7b` | **0/4** | calls came back as text in a code fence, unparsed; `"Studio"` target invented | 4/4 parse; `"Studio"`; `arm` as `"true"` |
+| `xLAM-2-8b-fc-r` | **0/4** | calls as text `[{"name","arguments"}]`, unparsed; invented a `reaper_arm_track` tool and `"Studio"` | 3/4; `"name"` key; `"Studio"` |
+| `watt-tool-8B` | **0/4** | no calls at all; answered in prose, twice refusing ("no devices listed that can record") | 1/4; Python call syntax |
+
+**The ranking does not flip. It sharpens.** The Qwen models are the ones native
+tools help, and the specialists are the ones they fail:
+
+- **The specialists fail in `llama-server`'s parser, not in their answers.**
+  Hammer's text was the right calls in the right order apart from the invented
+  target, and xLAM's was nearly so. Both write their calls in their own trained
+  formats, which b9444 doesn't recognise for those chat templates, so nothing
+  reaches `tool_calls`. That's a llama.cpp support gap, and a newer build could
+  change it. watt-tool is a template mismatch more broadly: it stopped calling
+  tools at all.
+- **`qwen2.5:7b` is better natively, on exactly its known weak point.** "Stop
+  playback" now routes to `reaper_transport` instead of drifting to
+  `reaper_action`. "Studio lights" turns off both studio lights instead of one.
+  Booleans stay booleans, and args come back flat, so `normalize_tool_args` has
+  nothing to lift.
+- **The cost is on the lights case only:** 7.5 s against 2.8 s, because it now
+  emits two calls instead of one. The other three cases are within 0.3 s.
+- **The 14B still invents targets** and still decodes at half speed. Nothing here
+  revives it.
+
+**Four cases is a small sample.** This says native tools are worth trying for
+Qwen. It isn't proof on real voice traffic.
+
+**If ai-mesh adopts it, it goes behind a switch**, with the prompt format staying
+the default. `llama-server` needs `--jinja`, `intent.rs` reads `tool_calls`
+instead of searching text, and turning the switch off must restore exactly
+today's behaviour. Hammer and xLAM are worth re-running only after a llama.cpp
+upgrade.
 
 ## Practical picks per machine
 
