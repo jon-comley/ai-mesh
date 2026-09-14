@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // and testing them through the panel they actually build is the point: the
 // three bugs this file covers were all "the DOM does not have the thing in it".
 const apiCalls = [];
-let hunts, finds, runNowResolve;
+let hunts, finds, runNowResolve, rankReply;
 
 vi.mock('/static/api.js', () => ({
   api: (path, opts) => {
@@ -13,6 +13,7 @@ vi.mock('/static/api.js', () => ({
     if (path === '/ebay/finds') return Promise.resolve(json(finds));
     if (path === '/ebay/config') return Promise.resolve(json({ ntfy_topic: '' }));
     if (path.endsWith('/run-now')) return new Promise(r => { runNowResolve = () => r(json({ new_listings: 2 })); });
+    if (path.endsWith('/rank')) return Promise.resolve(json(rankReply));
     if (path.endsWith('/reviewed')) return Promise.resolve(json({}));
     return Promise.resolve(json({}));
   },
@@ -29,12 +30,12 @@ const { init, keywordCoverage } = await import('/static/ebay.js');
 const DAY = 86_400_000;
 const T = Date.UTC(2026, 8, 14, 6, 0); // 14 Sep 2026, 06:00 UTC
 
-function find(id, { ageDays = 0, reviewed = false, verdict = null, title = null, term = 'thinkcentre' } = {}) {
+function find(id, { ageDays = 0, reviewed = false, verdict = null, title = null, term = 'thinkcentre', score = null } = {}) {
   return {
     id, hunt_id: 'h1', item_id: `item-${id}`, title: title ?? `Find ${id}`,
     price_minor: 12_345, currency: 'GBP', image_url: null,
     item_web_url: `https://example.test/${id}`, matched_term: term,
-    verdict, found_ms: T - ageDays * DAY, reviewed,
+    verdict, score, found_ms: T - ageDays * DAY, reviewed,
   };
 }
 
@@ -52,8 +53,10 @@ async function mount() {
 beforeEach(() => {
   document.body.innerHTML = '';
   apiCalls.length = 0;
-  hunts = [{ id: 'h1', name: 'M920q', enabled: true, terms: [], timeslots: [] }];
+  hunts = [{ id: 'h1', name: 'M920q', enabled: true, terms: [], timeslots: [], goal: 'headless CI runner' }];
   finds = [];
+  rankReply = { scored: 2, considered: 2, refresh_error: null };
+  window.confirm = () => true;
 });
 
 describe('hunt sidebar', () => {
@@ -235,5 +238,103 @@ describe('keyword matching', () => {
     expect(rows[0].querySelector('.ebay-match-pct')).toBeNull();
     expect(rows[1].classList.contains('ebay-find-exact')).toBe(false);
     expect(rows[1].querySelector('.ebay-match-pct').textContent).toBe('33% match');
+  });
+});
+
+describe('ranking', () => {
+  const titles = panel => [...panel.querySelectorAll('.ebay-find-body a')].map(a => a.textContent);
+  const openHunt = async panel => { panel.querySelector('.ebay-hunt-open').click(); await settle(); };
+
+  it('carries the hunt goal into the editor and back out on save', async () => {
+    const panel = await mount();
+    await openHunt(panel);
+    expect(panel.querySelector('#ebay-goal').value).toBe('headless CI runner');
+
+    panel.querySelector('#ebay-goal').value = 'cores first, then RAM';
+    panel.querySelector('#ebay-save').click();
+    await settle();
+    const patch = apiCalls.find(c => c.opts?.method === 'PATCH');
+    expect(patch.opts.body.goal).toBe('cores first, then RAM');
+  });
+
+  it('posts rank and holds a busy state while it runs', async () => {
+    const panel = await mount();
+    await openHunt(panel);
+    const btn = panel.querySelector('#ebay-rank');
+    btn.click();
+    await settle();
+    expect(apiCalls.some(c => c.path === '/ebay/hunts/h1/rank' && c.opts.method === 'POST')).toBe(true);
+    // Resolved by now, so the button must be back — the failure mode is a
+    // control stuck on its busy label.
+    expect(btn.disabled).toBe(false);
+    expect(btn.textContent).toBe('Rank');
+  });
+
+  it('warns before ranking a hunt with no goal, and obeys a refusal', async () => {
+    hunts = [{ id: 'h1', name: 'M920q', enabled: true, terms: [], timeslots: [], goal: '' }];
+    window.confirm = () => false;
+    const panel = await mount();
+    await openHunt(panel);
+    panel.querySelector('#ebay-rank').click();
+    await settle();
+    expect(apiCalls.some(c => c.path.endsWith('/rank'))).toBe(false);
+  });
+
+  it('switches to best-fit order after a rank', async () => {
+    finds = [find('a', { ageDays: 0, score: 10 }), find('b', { ageDays: 4, score: 95 })];
+    const panel = await mount();
+    // The chosen order is module state and deliberately survives a re-mount —
+    // it is the user's choice, not a property of the panel — so start from a
+    // known one rather than assuming the default.
+    panel.querySelector('.ebay-sort[data-sort="newest"]').click();
+    await settle();
+    expect(titles(panel)).toEqual(['Find a', 'Find b']); // newest first
+    await openHunt(panel);
+    panel.querySelector('#ebay-rank').click();
+    await settle();
+    expect(titles(panel)).toEqual(['Find b', 'Find a']);
+    expect(panel.querySelector('.ebay-sort[data-sort="score"]').classList.contains('is-active')).toBe(true);
+  });
+
+  it('sorts unscored finds below scored ones rather than treating them as zero', async () => {
+    finds = [
+      find('unscored-newest', { ageDays: 0 }),
+      find('scored-low', { ageDays: 5, score: 3 }),
+      find('scored-high', { ageDays: 6, score: 90 }),
+    ];
+    const panel = await mount();
+    panel.querySelector('.ebay-sort[data-sort="score"]').click();
+    await settle();
+    expect(titles(panel)).toEqual(['Find scored-high', 'Find scored-low', 'Find unscored-newest']);
+  });
+
+  it('keeps dismissed at the bottom in best-fit order too', async () => {
+    finds = [find('top', { ageDays: 0, score: 99, reviewed: true }), find('live', { ageDays: 9, score: 1 })];
+    const panel = await mount();
+    panel.querySelector('.ebay-sort[data-sort="score"]').click();
+    await settle();
+    expect(titles(panel)).toEqual(['Find live', 'Find top']);
+  });
+
+  it('shows the score on a scored row and nothing on an unscored one', async () => {
+    finds = [find('a', { score: 72 }), find('b', { ageDays: 1 })];
+    const panel = await mount();
+    panel.querySelector('.ebay-sort[data-sort="newest"]').click();
+    await settle();
+    const rows = panel.querySelectorAll('.ebay-find');
+    expect(rows[0].querySelector('.ebay-score').textContent).toBe('72/100');
+    expect(rows[1].querySelector('.ebay-score')).toBeNull();
+  });
+
+  it('says so when the pre-rank eBay refresh failed', async () => {
+    const { showToast } = await import('/static/util.js');
+    rankReply = { scored: 3, considered: 3, refresh_error: 'eBay rate limited' };
+    const panel = await mount();
+    await openHunt(panel);
+    panel.querySelector('#ebay-rank').click();
+    await settle();
+    const [msg, isError] = showToast.mock.calls.at(-1);
+    expect(msg).toContain('may include sold listings');
+    expect(isError).toBe(true);
   });
 });

@@ -223,6 +223,7 @@ pub fn router(
             patch(api::ebay::update_hunt).delete(api::ebay::delete_hunt),
         )
         .route("/api/ebay/hunts/{id}/run-now", post(api::ebay::run_now))
+        .route("/api/ebay/hunts/{id}/rank", post(api::ebay::rank_hunt))
         .route("/api/ebay/finds", get(api::ebay::list_finds))
         .route(
             "/api/ebay/finds/{id}/reviewed",

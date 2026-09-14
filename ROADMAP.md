@@ -269,7 +269,7 @@ first thing to look for.
 reads "everything is off" as "everything is broken" will look correct all day and be
 wrong every evening.
 
-## Hunts / eBay Bargain Finder — live on real eBay data since 2026-09-09; verdicts working since 2026-09-14
+## Hunts / eBay Bargain Finder — live on real eBay data since 2026-09-09; verdicts working, goal-aware ranking built (undeployed) since 2026-09-14
 
 `plans/ebay-bargain-finder.md` is fully implemented and deployed to pi1:
 the `ebay` crate, registry persistence, coordinator HTTP API, background
@@ -302,12 +302,47 @@ used to be listed here as "next" are all done.
 **Verdicts were silently failing until 2026-09-14** — every call 404'd on a
 retired OpenRouter `:free` slug and was logged as a bare "HTTP 404". Fixed by
 switching pi1 to Groq `openai/gpt-oss-120b` and logging the provider's message;
-see HISTORY.md. The finds list now puts bargains first.
+see HISTORY.md.
+
+**Bargains-first was reverted the same day — it hid every recent find.** 74 of
+212 finds came back `bargain:`, against a 50-row response cap, so the list was
+50 bargains and nothing newer than four days old. Ordering is now newest-first
+with exact keyword matches on top; the cap is 300 and `SEARCH_LIMIT` is 100.
+See HISTORY.md.
+
+**Hunts now know what they are FOR (2026-09-14).** `ebay_hunts.goal` is free
+text fed to both prompts, and `POST /api/ebay/hunts/{id}/rank` refreshes from
+eBay then scores every undismissed find 0-100 against that goal in one call,
+with a Best fit order in the ticker. All built, tested and committed — **not
+yet deployed to pi1, and not yet exercised against the real Groq endpoint.**
 
 **Open:**
-- The 210 finds from before the switch are still unjudged — only new listings
-  get a verdict. A one-off "judge the unjudged" pass would sort any bargains in
-  them to the top.
+- **Deploy to pi1** (`just update-coordinator pi1`) — everything since
+  2026-09-14 09:00 is committed but not running. The dashboard assets are
+  `include_str!`'d, so no JS change is live until the binary is replaced.
+- **Set a `goal` on the three live hunts.** The feature does nothing until
+  they have one; the M920q hunts' goal is a headless Playwright CI runner,
+  core count first. Until then ranking still scores against the hunt name.
+- **The M920q hunts may be pointed at the wrong model.** The `01AJ940` riser
+  hunt running alongside them is for M920x/M720q/P330 — the M920q is not on
+  that list. Decide whether the riser matters before buying.
+- **First real `rank` call is unproven.** ~200 listings in one prompt against
+  Groq `openai/gpt-oss-120b`; the parse tolerates prose and fences, but the
+  batch size has only been exercised in tests.
+- **Ask questions about hunts in the Chat tab — Jon, 2026-09-14, not started.**
+  "I would like to be able to ask questions about the hunts in the chat tab."
+  Wants natural-language queries over stored finds ("what's the cheapest
+  six-core I've seen", "has anything better than X turned up") rather than
+  reading the ticker. Shape is not decided: the two candidates are (a) a tool
+  the chat path can call, which needs whatever tool-calling the coordinator's
+  chat already has, and (b) stuffing a compact digest of the current finds
+  into the chat system prompt, which is cruder but needs no tool wiring.
+  `unreviewed_finds` already returns the uncapped set a digest would be built
+  from. Note finds carry titles only — no descriptions, no photos — so the
+  answers are bounded by what an eBay title says.
+- The 212 finds from before the Groq switch are still unjudged — only new
+  listings get a verdict. A one-off "judge the unjudged" pass would give them
+  verdicts; `rank` already scores them regardless of verdict.
 - Watch the next few cycles' journal for `ebay bargain-verdict LLM call failed`
   to confirm Groq holds up on a real batch, not just the test prompt.
 

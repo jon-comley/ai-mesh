@@ -69,21 +69,41 @@ reasoning — the ticker shows "not yet judged" instead of a verdict.
 3. **Create hunt**. It's armed immediately and re-arms itself on every
    coordinator restart from what's persisted in SQLite — you don't need to
    keep anything open for it to keep checking.
-4. **Run** on any hunt row in the sidebar checks eBay immediately, without
+4. **What it's for** (optional, on the hunt) is the single biggest lever on how
+   useful the verdicts are. Without it the LLM is given only the hunt's *name*
+   — which is the title of the listing you pasted — so it is really answering
+   "does this title resemble that string". That is why an M920q hunt returned
+   *"not a bargain: different model (M720q)"* for machines that were a better
+   buy for the job. Write the purpose instead: *"headless CI runner — core
+   count matters most, then RAM; storage secondary."*
+5. **Run** on any hunt row in the sidebar checks eBay immediately, without
    waiting for the next timeslot or opening the hunt. The button holds a
    "Checking…" state for the whole run — a few seconds, since each new listing
    is judged by the LLM — and cannot be pressed twice into the same run. The
    editor's **Check now** does the same thing for the hunt being edited.
-5. Inside a hunt: the enable/disable button pauses it without deleting it, and
+6. **Rank** (inside a hunt) refreshes from eBay and then scores every
+   undismissed find 0–100 for how well it serves *What it's for*, in a single
+   LLM call, and switches the ticker to **Best fit**. It refreshes first on
+   purpose: the Browse API only returns live listings, so this is what keeps a
+   ranking from being led by something that sold days ago. If the refresh
+   fails the ranking still runs and the toast says so. Ranking is a deliberate
+   action, not something the nightly does — verdicts are issued per listing as
+   it arrives, so the model never sees two candidates together and cannot
+   compare them; ranking needs the whole set in one prompt.
+7. Inside a hunt: the enable/disable button pauses it without deleting it, and
    **Delete** removes it along with its history.
-6. The ticker (main panel) shows every match with **the date it was found**,
+8. The ticker (main panel) shows every match with **the date it was found**,
    its price, how much of the matched term the title actually carries, which
    term matched, and the LLM's verdict if judged. A title containing **every**
    keyword of the term that found it is badged `exact` and floated to the top;
    everything else reads **newest first**, with anything dismissed below every
    live find. Exact matches are rare by construction — 2 of 212 finds the day
    this went in — so the top of the list stays short rather than becoming a
-   second wall in front of recent finds. A judged
+   second wall in front of recent finds. The **Order** toggle above the ticker
+   switches between **Newest** and **Best fit**; in Best fit, unscored finds
+   sort below scored ones rather than being treated as zero, because a find the
+   model never mentioned has not been judged badly. Dismissed stays at the
+   bottom in both. A judged
    bargain is marked with a `bargain` badge and a highlighted border rather
    than being sorted to the top — it used to be sorted there, and once the
    backlog of bargains passed the response limit that meant the newest finds

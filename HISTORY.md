@@ -11,6 +11,49 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Hunts learned what they are FOR, and can rank on it (2026-09-14)
+
+Asked as *"is there a chance of getting grok to do this analysis and perhaps rank them in
+situ?"* — after a by-hand comparison of the stored finds beat the built-in verdicts badly
+enough to be worth explaining.
+
+**The judge was never losing to a better analyst; it was answering a different question.**
+`get_verdicts` was given `hunt.name` and nothing else — and a hunt's name is the title of
+the listing it was created from. So *"M920q · i5-8500T · 16GB · 512GB"* was the entire
+brief, and the model dutifully returned *"not a bargain: different model (M720q)"* for
+machines that were a better buy for the job, and *"not a bargain"* for a £120 six-core
+while calling a £229 M920q one. It was scoring string similarity to a title because that
+is all anyone had told it about.
+
+**`goal` is the missing sentence.** Free text on the hunt — *"headless CI runner, core
+count matters most, then RAM; storage secondary"* — folded into both prompts via
+`goal_clause`, which also says in as many words: judge fitness for THAT, not similarity to
+the hunt name. Empty is normal and preserves the old behaviour exactly.
+
+**Ranking is a separate call, not a number bolted onto the verdict, and that is
+structural.** Verdicts are issued per new listing as it arrives, so the model has never
+seen two candidates side by side — it can say "this is cheap", never "this is the better
+of those two". Comparison needs the whole set in one prompt, which is why `POST
+/api/ebay/hunts/{id}/rank` exists and why it is a button rather than something the nightly
+does: a ranking is only as good as the set it ranked, and the set changes every cycle.
+
+**It runs a search cycle before ranking, deliberately.** eBay's Browse API returns only
+live listings, so refreshing first is what stops the ranking being led by something that
+sold days ago — the exact failure this feature would otherwise have shipped with, given
+that the £156.70 M920q at the top of the morning's by-hand shortlist had already gone by
+lunchtime. A refresh failure is reported rather than fatal: a stale ranking beats none,
+but the toast says it may include sold listings.
+
+**Scores are nullable and stay that way.** `set_find_scores` writes by `item_id` (what the
+model is given and echoes back — a find's uuid has no business in a prompt) and skips
+anything the reply omitted. An item the model did not mention has not been scored zero, so
+Best fit sorts unscored finds *below* scored ones rather than interleaving them with
+apparent bottom rankings. Scoring is per hunt, so one listing under two hunts can score
+differently against each one's goal, which is the whole point of scoring against a goal.
+
+Schema: `ebay_hunts.goal TEXT NOT NULL DEFAULT ''` and `ebay_finds.score INTEGER`, both by
+the existing `PRAGMA table_info` + `ALTER TABLE` pattern in `registry/mod.rs`.
+
 ## Bargains-first hid every recent find, and the run button had nowhere to live (2026-09-14)
 
 Same day, hours after the entry below put the ordering in. Asked as *"can you add the
