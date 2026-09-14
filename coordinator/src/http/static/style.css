@@ -4396,14 +4396,42 @@ body {
   font-size: 14px; cursor: pointer;
 }
 #ebay-hunt-list { display: flex; flex-direction: column; gap: 6px; }
+/* The row is a container now, not a button: it holds "open this hunt" and
+   "run it" side by side, and a button cannot legally contain another one. */
 .ebay-hunt-row {
-  display: flex; justify-content: space-between; align-items: center; gap: 8px;
-  background: var(--surface); color: var(--text);
-  border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px;
-  font-size: 14px; cursor: pointer; text-align: left;
+  display: flex; align-items: stretch; gap: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px;
+  overflow: hidden;
 }
 .ebay-hunt-row:hover { border-color: var(--accent); }
 .ebay-hunt-off { opacity: .55; }
+.ebay-hunt-open {
+  flex: 1; min-width: 0;
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  background: none; color: var(--text); border: none;
+  padding: 9px 12px; font-size: 14px; cursor: pointer; text-align: left;
+}
+.ebay-hunt-open > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ebay-hunt-run {
+  flex: 0 0 auto;
+  background: var(--surface-2); color: var(--text);
+  border: none; border-left: 1px solid var(--border);
+  padding: 9px 12px; font-size: 13px; cursor: pointer;
+}
+.ebay-hunt-run:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, var(--surface-2)); }
+
+/* Pressed/held feedback. `:active` covers the press itself; `.is-busy` holds
+   the changed state for the seconds the request actually takes, which is the
+   part that was missing — the button looked inert for the whole run. */
+.ebay-hunt-run:active,
+.ebay-editor button:active { transform: translateY(1px); }
+.ebay-hunt-run.is-busy,
+.ebay-editor button.is-busy {
+  background: color-mix(in srgb, var(--accent) 30%, var(--surface-2));
+  color: var(--text-muted); cursor: progress;
+}
+.ebay-hunt-run:disabled, .ebay-editor button:disabled { cursor: progress; }
 .ebay-settings summary { cursor: pointer; color: var(--text-muted); font-size: 13px; padding: 4px 0; }
 
 .ebay-main { display: flex; flex-direction: column; gap: 16px; }
@@ -4442,6 +4470,16 @@ body {
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px;
 }
 .ebay-find-reviewed { opacity: .6; }
+/* Bargains used to be sorted to the top, which hid everything recent behind
+   them. The signal stays, as a mark on the row instead of a position in it. */
+.ebay-find-bargain { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.ebay-badge {
+  display: inline-block; border-radius: 4px; padding: 1px 6px; margin-right: 2px;
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+  color: var(--accent); font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .04em; vertical-align: 1px;
+}
+.ebay-find-when { color: var(--text); font-variant-numeric: tabular-nums; }
 .ebay-find-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: 0 0 auto; background: var(--surface-2); }
 .ebay-find-body { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .ebay-find-body a { color: var(--accent); font-weight: 600; text-decoration: none; }

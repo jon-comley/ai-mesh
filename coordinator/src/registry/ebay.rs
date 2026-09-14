@@ -199,20 +199,31 @@ impl Registry {
         }
     }
 
-    /// Bargains first, then newest first within each group, optionally scoped to
-    /// one hunt. A bargain is a verdict written as `bargain: …` by
-    /// `process_hunt_results`; unjudged and "not a bargain" finds sort together
-    /// below them. `ebay.js` sorts the same way so a live find cannot land above
-    /// a bargain.
+    /// Undismissed first, then newest first within each group, optionally scoped
+    /// to one hunt. `ebay.js` sorts the same way, so the ticker reads
+    /// newest-first and dismissed finds sink as they are pressed.
+    ///
+    /// **This used to put bargains first, and with a LIMIT that hid the newest
+    /// finds outright — 2026-09-14.** Jon: *"can you add the latest hunts to the
+    /// top."* The cause was not the sort but its interaction with the cap: of
+    /// 212 finds, 74 were judged `bargain:`, against a default limit of 50. So
+    /// the response was 50 bargains and nothing else, the newest of which was
+    /// four days old — every find from the last two days was below the cut and
+    /// could not be seen at all. Ordering by recency puts the limit on the axis
+    /// the user actually reads the list by, and the cap is raised (see
+    /// `default_finds_limit`) so a judged bargain is not lost off the end either.
+    ///
+    /// Bargains are not demoted by this, only un-promoted: `ebay.js` badges them
+    /// in place, which is what the old ordering was really for.
     pub fn list_finds(&self, hunt_id: Option<&str>, limit: u32) -> Vec<EbayFindRecord> {
         let sql = if hunt_id.is_some() {
             "SELECT id, hunt_id, item_id, title, price_minor, currency, image_url, item_web_url, matched_term, verdict, found_ms, reviewed
              FROM ebay_finds WHERE hunt_id = ?1
-             ORDER BY COALESCE(verdict LIKE 'bargain:%', 0) DESC, found_ms DESC LIMIT ?2"
+             ORDER BY reviewed ASC, found_ms DESC LIMIT ?2"
         } else {
             "SELECT id, hunt_id, item_id, title, price_minor, currency, image_url, item_web_url, matched_term, verdict, found_ms, reviewed
              FROM ebay_finds
-             ORDER BY COALESCE(verdict LIKE 'bargain:%', 0) DESC, found_ms DESC LIMIT ?1"
+             ORDER BY reviewed ASC, found_ms DESC LIMIT ?1"
         };
         let map_row = |row: &rusqlite::Row| -> rusqlite::Result<EbayFindRecord> {
             Ok(EbayFindRecord {
@@ -369,11 +380,13 @@ mod tests {
     }
 
     #[test]
-    fn list_finds_puts_bargains_first_then_newest() {
+    fn list_finds_puts_newest_first_and_dismissed_last() {
         let reg = Registry::new();
         let hunt_id = sample_hunt(&reg);
         let tick = || std::thread::sleep(std::time::Duration::from_millis(2));
-        reg.insert_find(
+        // A bargain, deliberately the OLDEST, so a reordering back to
+        // bargains-first fails this rather than passing by coincidence.
+        let oldest = reg.insert_find(
             &hunt_id,
             &sample_listing("1"),
             "fender strat",
@@ -389,7 +402,7 @@ mod tests {
             Some("not a bargain: fairly priced"),
         );
         tick();
-        reg.insert_find(
+        let newest = reg.insert_find(
             &hunt_id,
             &sample_listing("4"),
             "fender strat",
@@ -400,15 +413,26 @@ mod tests {
             .into_iter()
             .map(|f| f.item_id)
             .collect();
-        // Both bargains on top, newest first; then the rest, newest first —
-        // "not a bargain" must not match the `bargain:` prefix.
-        assert_eq!(order, vec!["4", "1", "3", "2"]);
+        // Purely newest first. A bargain verdict buys no position — the ticker
+        // badges them instead.
+        assert_eq!(order, vec!["4", "3", "2", "1"]);
         let scoped: Vec<String> = reg
             .list_finds(Some(&hunt_id), 10)
             .into_iter()
             .map(|f| f.item_id)
             .collect();
         assert_eq!(scoped, order);
+
+        // Dismissing sinks a find below every undismissed one, even the newest.
+        assert!(reg.mark_find_reviewed(&newest.id));
+        let after: Vec<String> = reg
+            .list_finds(None, 10)
+            .into_iter()
+            .map(|f| f.item_id)
+            .collect();
+        assert_eq!(after, vec!["3", "2", "1", "4"]);
+        // And the oldest, still undismissed, stays above it.
+        assert!(!reg.mark_find_reviewed(&format!("{}-nope", oldest.id)));
     }
 
     #[test]

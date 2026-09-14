@@ -109,15 +109,26 @@ function renderHuntList() {
     box.innerHTML = '<p class="placeholder">No hunts yet.</p>';
     return;
   }
+  // Two buttons per hunt, not one. "Check now" used to exist only inside the
+  // editor, so running a hunt meant opening it for editing first and the
+  // sidebar looked like it had no run control at all (Jon, 2026-09-14: "I
+  // don't see a run button"). A row cannot stay a single <button> with another
+  // button inside it — nested buttons are invalid and the inner one's clicks
+  // are the outer one's — so the row is a div holding both.
   box.innerHTML = state.hunts.map(h => `
-    <button type="button" class="ebay-hunt-row${h.enabled ? '' : ' ebay-hunt-off'}" data-id="${escapeHtml(h.id)}">
-      <span>${escapeHtml(h.name)}</span>
-      <span class="gw-hint">${h.enabled ? 'on' : 'off'}</span>
-    </button>`).join('');
-  box.querySelectorAll('.ebay-hunt-row').forEach(btn => btn.addEventListener('click', () => {
+    <div class="ebay-hunt-row${h.enabled ? '' : ' ebay-hunt-off'}">
+      <button type="button" class="ebay-hunt-open" data-id="${escapeHtml(h.id)}">
+        <span>${escapeHtml(h.name)}</span>
+        <span class="gw-hint">${h.enabled ? 'on' : 'off'}</span>
+      </button>
+      <button type="button" class="ebay-hunt-run" data-id="${escapeHtml(h.id)}" title="Check eBay for this hunt now">Run</button>
+    </div>`).join('');
+  box.querySelectorAll('.ebay-hunt-open').forEach(btn => btn.addEventListener('click', () => {
     const hunt = state.hunts.find(h => h.id === btn.dataset.id);
     if (hunt) openEditor(hunt);
   }));
+  box.querySelectorAll('.ebay-hunt-run').forEach(btn =>
+    btn.addEventListener('click', () => runNow(btn.dataset.id, btn)));
 }
 
 // ── editor ───────────────────────────────────────────────────────────────
@@ -185,7 +196,8 @@ function openEditor(hunt) {
   if (!hunt) {
     editor.querySelector('#ebay-analyze').addEventListener('click', analyzeUrl);
   } else {
-    editor.querySelector('#ebay-run-now').addEventListener('click', () => runNow(hunt.id));
+    const runBtn = editor.querySelector('#ebay-run-now');
+    runBtn.addEventListener('click', () => runNow(hunt.id, runBtn));
     editor.querySelector('#ebay-toggle-enabled').addEventListener('click', () => toggleEnabled(hunt));
     editor.querySelector('#ebay-delete').addEventListener('click', () => deleteHunt(hunt.id));
   }
@@ -312,14 +324,41 @@ async function saveHunt() {
   refreshHunts();
 }
 
-async function runNow(id) {
-  const res = await api(`/ebay/hunts/${encodeURIComponent(id)}/run-now`, { method: 'POST' });
-  if (res.ok) {
-    const data = await res.json();
-    showToast(`Checked — ${data.new_listings} new listing(s)`);
-    refreshFinds();
-  } else {
-    showToast(`Check failed: ${await res.text()}`, true);
+// A run is several seconds of eBay search plus an LLM verdict per new
+// listing. Without a busy state the button did nothing visible for that whole
+// time and read as broken (Jon, 2026-09-14: "the button doesn't do the pressed
+// change colour thing and doesn't look like it has been pressed"). Disabling
+// it also makes double-clicking a hunt impossible, which previously fired two
+// concurrent searches against a rate-limited API.
+//
+// `btn` is optional so a caller without one still works; the toast is the
+// feedback in that case.
+async function runNow(id, btn) {
+  const restore = btn ? btn.textContent : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('is-busy');
+    btn.textContent = 'Checking…';
+  }
+  try {
+    const res = await api(`/ebay/hunts/${encodeURIComponent(id)}/run-now`, { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      showToast(`Checked — ${data.new_listings} new listing(s)`);
+      refreshFinds();
+    } else {
+      showToast(`Check failed: ${await res.text()}`, true);
+    }
+  } catch (err) {
+    showToast(`Check failed: ${err}`, true);
+  } finally {
+    // In `finally` so a thrown request cannot leave the button stuck on
+    // "Checking…" with no way back short of a reload.
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove('is-busy');
+      btn.textContent = restore;
+    }
   }
 }
 
@@ -346,15 +385,32 @@ async function refreshFinds() {
   } catch { /* dashboard shows disconnected state elsewhere */ }
 }
 
-// Bargains first, newest first within each group. The server orders the same
-// way (`list_finds`); this keeps a live find from landing above a bargain.
+// Newest first, with dismissed finds below every live one. The server orders
+// the same way (`list_finds`), so a reload and a live push agree.
+//
+// **This used to sort bargains to the top and that was actively hiding the
+// newest finds** — the server applies a LIMIT after ordering, and once the
+// bargain count passed the limit nothing recent came back at all. The verdict
+// still matters, so it moved from position to a badge: see `renderTicker`.
 // `process_hunt_results` writes verdicts as "bargain: …" / "not a bargain: …".
 function isBargain(f) {
   return typeof f.verdict === 'string' && f.verdict.startsWith('bargain:');
 }
 
 function sortFinds(finds) {
-  return finds.sort((a, b) => (isBargain(b) - isBargain(a)) || (b.found_ms - a.found_ms));
+  return finds.sort((a, b) => (!!a.reviewed - !!b.reviewed) || (b.found_ms - a.found_ms));
+}
+
+// "14 Sep, 06:00" — short enough for the hint line, unambiguous about which
+// day, and local time because that is the clock the person reading it is on.
+// A find with no usable timestamp says so rather than rendering "Invalid Date".
+function formatFound(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return 'date unknown';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return 'date unknown';
+  return d.toLocaleString(undefined, {
+    day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
 }
 
 // Called from dashboard.js's WS handler map on a live `EbayFind` event.
@@ -375,15 +431,16 @@ function renderTicker() {
     return;
   }
   box.innerHTML = state.finds.map(f => `
-    <div class="ebay-find${f.reviewed ? ' ebay-find-reviewed' : ''}">
+    <div class="ebay-find${f.reviewed ? ' ebay-find-reviewed' : ''}${isBargain(f) ? ' ebay-find-bargain' : ''}">
       ${f.image_url ? `<img class="ebay-find-thumb" src="${escapeHtml(f.image_url)}" alt="">` : '<div class="ebay-find-thumb ebay-find-thumb-empty"></div>'}
       <div class="ebay-find-body">
         <a href="${escapeHtml(f.item_web_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(f.title)}</a>
         <div class="gw-hint">
-          ${f.price_minor != null ? `${(f.price_minor / 100).toFixed(2)} ${escapeHtml(f.currency ?? '')}` : 'price unknown'}
+          <time datetime="${escapeHtml(new Date(f.found_ms).toISOString?.() ?? '')}" class="ebay-find-when">${escapeHtml(formatFound(f.found_ms))}</time>
+          · ${f.price_minor != null ? `${(f.price_minor / 100).toFixed(2)} ${escapeHtml(f.currency ?? '')}` : 'price unknown'}
           · matched "${escapeHtml(f.matched_term)}"
         </div>
-        <div class="ebay-verdict${f.verdict ? '' : ' gw-hint'}">${f.verdict ? escapeHtml(f.verdict) : 'not yet judged'}</div>
+        <div class="ebay-verdict${f.verdict ? '' : ' gw-hint'}">${isBargain(f) ? '<span class="ebay-badge">bargain</span> ' : ''}${f.verdict ? escapeHtml(f.verdict) : 'not yet judged'}</div>
       </div>
       <button type="button" class="ebay-dismiss" data-id="${escapeHtml(f.id)}" ${f.reviewed ? 'disabled' : ''}>${f.reviewed ? '✓' : 'Dismiss'}</button>
     </div>`).join('');
@@ -395,6 +452,9 @@ async function markReviewed(id) {
   if (res.ok) {
     const f = state.finds.find(x => x.id === id);
     if (f) f.reviewed = true;
+    // Re-sort before rendering, so a dismissed find drops to the bottom on the
+    // press rather than only after the next reload.
+    sortFinds(state.finds);
     renderTicker();
   }
 }
