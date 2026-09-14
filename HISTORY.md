@@ -11,6 +11,31 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Deleting a hunt left its finds on screen (2026-09-14)
+
+Reported as wanting the finds to go when the hunt does. **They already did** — `ebay_finds`
+and `ebay_seen_listings` both carry `hunt_id … REFERENCES ebay_hunts(id) ON DELETE CASCADE`
+and `PRAGMA foreign_keys = ON` is set on the connection, so the rows were gone the moment
+the DELETE returned. Checked against the live database on `pi1`: no orphaned finds, no
+orphaned seen-listings.
+
+**The bug was in the dashboard.** `deleteHunt()` called `refreshHunts()` and not
+`refreshFinds()`, so the sidebar updated and the ticker did not. Every find belonging to the
+just-deleted hunt stayed on screen until some unrelated event happened to reload them —
+which looks exactly like a delete that only half worked, and is why the cascade was the
+first suspect rather than the renderer.
+
+**Worth keeping in mind for the next one of these:** a foreign key with `ON DELETE CASCADE`
+added to an existing table by `CREATE TABLE IF NOT EXISTS` never takes effect, because the
+table already exists and the new clause is silently ignored. That is the failure this looked
+like, and it is worth ruling out by reading `sqlite_master` on the live database rather than
+the schema in the source — here the live schema did carry the constraint.
+
+**Still true and not fixed:** a second connected dashboard hears nothing about the deletion.
+Only `EbayFind` is pushed over the websocket, so there is no delete event to react to. One
+browser in a home lab makes that theoretical, and a delete event is a bigger change than the
+missing call it would have masked.
+
 ## Hunts learned what they are FOR, and can rank on it (2026-09-14)
 
 Asked as *"is there a chance of getting grok to do this analysis and perhaps rank them in
