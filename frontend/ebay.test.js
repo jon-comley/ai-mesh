@@ -23,17 +23,17 @@ function json(body) {
   return { ok: true, json: () => Promise.resolve(body), text: () => Promise.resolve('') };
 }
 
-const { init } = await import('/static/ebay.js');
+const { init, keywordCoverage } = await import('/static/ebay.js');
 
 // Fixed timestamps so the assertions are about order, not about "now".
 const DAY = 86_400_000;
 const T = Date.UTC(2026, 8, 14, 6, 0); // 14 Sep 2026, 06:00 UTC
 
-function find(id, { ageDays = 0, reviewed = false, verdict = null } = {}) {
+function find(id, { ageDays = 0, reviewed = false, verdict = null, title = null, term = 'thinkcentre' } = {}) {
   return {
-    id, hunt_id: 'h1', item_id: `item-${id}`, title: `Find ${id}`,
+    id, hunt_id: 'h1', item_id: `item-${id}`, title: title ?? `Find ${id}`,
     price_minor: 12_345, currency: 'GBP', image_url: null,
-    item_web_url: `https://example.test/${id}`, matched_term: 'thinkcentre',
+    item_web_url: `https://example.test/${id}`, matched_term: term,
     verdict, found_ms: T - ageDays * DAY, reviewed,
   };
 }
@@ -176,5 +176,64 @@ describe('find ticker', () => {
     const panel = await mount();
     expect(panel.querySelector('.ebay-badge')).toBeNull();
     expect(panel.querySelector('.ebay-find').classList.contains('ebay-find-bargain')).toBe(false);
+  });
+});
+
+describe('keyword matching', () => {
+  it('scores a title by how much of the matched term it carries', () => {
+    const term = 'Lenovo ThinkCentre M920q i5 8500T';
+    expect(keywordCoverage({ title: 'Lenovo ThinkCentre M920q i5 8500T Tiny', matched_term: term })).toBe(1);
+    // Punctuation must not count against it: "i5-8500T" is the same machine.
+    expect(keywordCoverage({ title: 'Lenovo ThinkCentre M920q, i5-8500T!', matched_term: term })).toBe(1);
+    // Word order in an eBay title means nothing.
+    expect(keywordCoverage({ title: '8500T i5 M920q ThinkCentre Lenovo', matched_term: term })).toBe(1);
+    // 5 keywords in the term; the title carries Lenovo and ThinkCentre only.
+    expect(keywordCoverage({ title: 'Lenovo ThinkCentre M710q i3', matched_term: term })).toBeCloseTo(2 / 5);
+    expect(keywordCoverage({ title: 'Dell Optiplex', matched_term: term })).toBe(0);
+  });
+
+  it('scores 0 rather than dividing by zero on an empty term', () => {
+    expect(keywordCoverage({ title: 'anything', matched_term: '' })).toBe(0);
+    expect(keywordCoverage({})).toBe(0);
+  });
+
+  it('floats an exact keyword match above newer, looser ones', async () => {
+    const term = 'ThinkCentre M920q 8500T';
+    finds = [
+      find('loose-newest', { ageDays: 0, title: 'ThinkCentre M710q i3', term }),
+      find('exact-oldest', { ageDays: 6, title: 'Lenovo ThinkCentre M920q 8500T 16GB', term }),
+      find('loose-older', { ageDays: 1, title: 'ThinkCentre M900 i5', term }),
+    ];
+    const panel = await mount();
+    const titles = [...panel.querySelectorAll('.ebay-find-body a')].map(a => a.textContent);
+    expect(titles[0]).toBe('Lenovo ThinkCentre M920q 8500T 16GB');
+    // Everything below the exact tier stays newest-first.
+    expect(titles.slice(1)).toEqual(['ThinkCentre M710q i3', 'ThinkCentre M900 i5']);
+  });
+
+  it('still keeps a dismissed exact match at the bottom', async () => {
+    const term = 'ThinkCentre M920q';
+    finds = [
+      find('exact-dismissed', { ageDays: 0, title: 'Lenovo ThinkCentre M920q', term, reviewed: true }),
+      find('live', { ageDays: 8, title: 'Dell Optiplex', term }),
+    ];
+    const panel = await mount();
+    const titles = [...panel.querySelectorAll('.ebay-find-body a')].map(a => a.textContent);
+    expect(titles).toEqual(['Dell Optiplex', 'Lenovo ThinkCentre M920q']);
+  });
+
+  it('badges an exact match and gives everything else its percentage', async () => {
+    const term = 'ThinkCentre M920q 8500T';
+    finds = [
+      find('exact', { ageDays: 0, title: 'ThinkCentre M920q 8500T', term }),
+      find('partial', { ageDays: 1, title: 'ThinkCentre M710q i3', term }),
+    ];
+    const panel = await mount();
+    const rows = panel.querySelectorAll('.ebay-find');
+    expect(rows[0].classList.contains('ebay-find-exact')).toBe(true);
+    expect(rows[0].querySelector('.ebay-badge-exact').textContent).toBe('exact');
+    expect(rows[0].querySelector('.ebay-match-pct')).toBeNull();
+    expect(rows[1].classList.contains('ebay-find-exact')).toBe(false);
+    expect(rows[1].querySelector('.ebay-match-pct').textContent).toBe('33% match');
   });
 });

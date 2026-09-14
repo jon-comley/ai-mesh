@@ -30,6 +30,26 @@ what it was really for.
 Dismissed finds now sort below every live one, server-side and client-side, and sink on
 the press rather than at the next reload.
 
+**Then: exact keyword matches on top, and a wider net to find them in.** Asked as *"lets
+have matches that match the keywords exactly at the top"* and *"increase the list level to
+say 100"*. eBay's search joins a hunt's terms with `OR` and matches fuzzily — which is why
+an M920q hunt keeps returning M900s — and the Browse API hands back no relevance score, so
+`ebay.js` recomputes one: the words of `matched_term` as a set against the words of the
+title, punctuation-insensitive (`i5-8500T` and `i5 8500T` are one machine) and order-free.
+A title carrying every keyword is badged `exact` and floated above recency; everything else
+shows its percentage and stays newest-first.
+
+**Measured before it was designed, and the measurement changed the design.** Requiring
+every keyword matched just **2 of the 212 stored finds**. That is the whole reason it was
+safe to put above recency — an exact tier is a couple of rows, not the 74-row wall the
+bargain sort turned into. The near-misses (the 0.8–0.9 band, 24 finds) carry the number
+instead of a position, the same trade the bargain badge makes.
+
+`Client::search` fetched 50 listings per cycle; now 100 (`SEARCH_LIMIT`, Browse API caps
+at 200). That is the ceiling on what a hunt can *notice* — past it, listings are never
+fetched rather than shown later — and it costs nothing: one request either way, and
+`ebay_seen_listings` dedupe means a bigger page does not mean more LLM verdicts.
+
 **"Check now" existed only inside the editor**, so running a hunt meant opening it for
 editing first and the sidebar genuinely had no run control. Each hunt row now carries its
 own **Run**. That forced a restructure rather than an addition: the row *was* a single

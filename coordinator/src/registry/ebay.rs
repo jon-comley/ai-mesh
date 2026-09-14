@@ -200,8 +200,14 @@ impl Registry {
     }
 
     /// Undismissed first, then newest first within each group, optionally scoped
-    /// to one hunt. `ebay.js` sorts the same way, so the ticker reads
-    /// newest-first and dismissed finds sink as they are pressed.
+    /// to one hunt.
+    ///
+    /// `ebay.js` applies one extra tier on top of this that SQL cannot express
+    /// cheaply: a title carrying every keyword of the term that matched it is
+    /// floated above the rest. That is a set comparison between two strings per
+    /// row, so it lives in the renderer. It only reorders within what this
+    /// method already returned — which is why the LIMIT here has to be generous
+    /// enough that nothing interesting is truncated before the client sees it.
     ///
     /// **This used to put bargains first, and with a LIMIT that hid the newest
     /// finds outright — 2026-09-14.** Jon: *"can you add the latest hunts to the
