@@ -269,7 +269,7 @@ first thing to look for.
 reads "everything is off" as "everything is broken" will look correct all day and be
 wrong every evening.
 
-## Hunts / eBay Bargain Finder — deployed, production keyset issued, not yet exercised with real data (2026-07-15)
+## Hunts / eBay Bargain Finder — live on real eBay data since 2026-09-09; verdicts working since 2026-09-14
 
 `plans/ebay-bargain-finder.md` is fully implemented and deployed to pi1:
 the `ebay` crate, registry persistence, coordinator HTTP API, background
@@ -294,16 +294,22 @@ response and 200s any deletion POST. Decoupled from home infra on purpose —
 it has to answer eBay's periodic re-verification checks regardless of
 whether pi1/Tailscale is up.
 
-**⚠ Still not exercised with real eBay data.** Next:
-1. Paste real client_id/client_secret into the Hunts tab's settings block
-   (no deploy step — same operational model as the Online AI tab's key).
-2. `POST /api/ebay/analyze` against a real listing URL, confirm term
-   suggestions look sane.
-3. Create a hunt, `run-now`, confirm real listings come back and the ticker
-   + (if an ntfy topic is set) phone push both fire.
-4. Let a hunt run unattended through a scheduled timeslot to confirm the
-   background timer's real-world timing, not just the unit-tested pure
-   scheduling logic.
+**Exercised with real eBay data (updated 2026-09-14).** Three hunts have run
+unattended on their timeslots on pi1 since 2026-09-09, producing 210 finds and
+ntfy pushes — the credentials, search, scheduled timer and push steps that
+used to be listed here as "next" are all done.
+
+**Verdicts were silently failing until 2026-09-14** — every call 404'd on a
+retired OpenRouter `:free` slug and was logged as a bare "HTTP 404". Fixed by
+switching pi1 to Groq `openai/gpt-oss-120b` and logging the provider's message;
+see HISTORY.md. The finds list now puts bargains first.
+
+**Open:**
+- The 210 finds from before the switch are still unjudged — only new listings
+  get a verdict. A one-off "judge the unjudged" pass would sort any bargains in
+  them to the top.
+- Watch the next few cycles' journal for `ebay bargain-verdict LLM call failed`
+  to confirm Groq holds up on a real batch, not just the test prompt.
 
 **Timeslot picker reworked (2026-07-15):** the original UI was a fixed
 00–23 hourly grid, and a CSS specificity bug (`.ebay-editor button` was
