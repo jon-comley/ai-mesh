@@ -444,7 +444,12 @@ async function toggleEnabled(hunt) {
 async function deleteHunt(id) {
   if (!window.confirm('Delete this hunt?')) return;
   const res = await api(`/ebay/hunts/${encodeURIComponent(id)}`, { method: 'DELETE' });
-  if (res.ok) { closeEditor(); refreshHunts(); }
+  // The finds go with the hunt server-side (`ebay_finds.hunt_id` is ON DELETE
+  // CASCADE), so the ticker has to be re-fetched too — refreshing only the
+  // sidebar left every find of a just-deleted hunt sitting on screen until
+  // some unrelated event happened to reload them, which reads as the delete
+  // having half worked.
+  if (res.ok) { closeEditor(); refreshHunts(); refreshFinds(); }
 }
 
 // ── ticker ───────────────────────────────────────────────────────────────

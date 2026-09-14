@@ -241,6 +241,35 @@ describe('keyword matching', () => {
   });
 });
 
+describe('deleting a hunt', () => {
+  const openHunt = async panel => { panel.querySelector('.ebay-hunt-open').click(); await settle(); };
+
+  it('clears the deleted hunt\'s finds from the ticker', async () => {
+    finds = [find('a'), find('b')];
+    const panel = await mount();
+    expect(panel.querySelectorAll('.ebay-find-body').length).toBe(2);
+
+    await openHunt(panel);
+    // The server cascades the finds away with the hunt, so the reload sees none.
+    finds = [];
+    hunts = [];
+    panel.querySelector('#ebay-delete').click();
+    await settle();
+
+    expect(apiCalls.some(c => c.path === '/ebay/hunts/h1' && c.opts.method === 'DELETE')).toBe(true);
+    expect(panel.querySelectorAll('.ebay-find-body').length).toBe(0);
+  });
+
+  it('obeys a refusal at the confirm', async () => {
+    window.confirm = () => false;
+    const panel = await mount();
+    await openHunt(panel);
+    panel.querySelector('#ebay-delete').click();
+    await settle();
+    expect(apiCalls.some(c => c.opts?.method === 'DELETE')).toBe(false);
+  });
+});
+
 describe('ranking', () => {
   const titles = panel => [...panel.querySelectorAll('.ebay-find-body a')].map(a => a.textContent);
   const openHunt = async panel => { panel.querySelector('.ebay-hunt-open').click(); await settle(); };
