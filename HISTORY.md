@@ -11,6 +11,38 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Hunts were never judged — a retired free model, hidden behind "HTTP 404" (2026-09-14)
+
+Asked as *"why is ai mesh not judging hunts?"*. Every one of the 210 finds since hunts
+started running on 2026-09-09 had `verdict = NULL`, and pi1's journal carried one line per
+cycle: `ebay bargain-verdict LLM call failed error=HTTP 404`.
+
+**Configuration was not the problem.** A key was saved and a model chosen, so
+`GatewayConfig::provider()` returned a provider and the call was made — against
+OpenRouter with `openai/gpt-oss-120b:free`. Replaying that exact request from pi1 got the
+body the coordinator had thrown away: *"This model is unavailable for free. The paid
+version is available now - use this slug instead: openai/gpt-oss-120b"*. `complete()`
+collapsed every non-2xx into `CloudError::Status(u16)`, so days of a self-explanatory
+error read as a bare code. Unjudged finds still push (`None => (true, None)`), which is
+why nothing looked broken from the phone.
+
+**What was measured before choosing.** On OpenRouter, `qwen3-next-80b` and
+`llama-3.3-70b` had lost their `:free` versions the same way; `gemma-4-31b:free` was
+rate-limited upstream; `nvidia/nemotron-3.5-lightning:free` returned correct verdicts but
+took 93s against the 60s `DEFAULT_TIMEOUT_SECS`. Groq's first attempt came back `403 error
+code: 1010`, which was Cloudflare rejecting the test script's default user agent, not the
+key — with a normal UA its `/models` listed `openai/gpt-oss-120b`, and the verdict prompt
+came back correct (bargain for a £18 GBC, not a bargain for a £9.99 "for parts" one) in
+3s. Its `llama-3.x` ids, still in the preset menu, are gone.
+
+**Changes.** pi1's gateway switched to Groq `openai/gpt-oss-120b` through `POST
+/api/gateway` (the test call answered "pong"). `CloudError::Status` now carries the
+provider's `error.message`, capped at 300 characters, on both the plain and streaming
+paths. Both preset menus were refreshed to models that exist. The finds list sorts
+bargains first, newest within each group — in `list_finds` and in `ebay.js`, so a live
+find cannot land above a bargain. Finds stored before the switch stay unjudged; only new
+listings are sent for a verdict.
+
 ## Dial dimming made relative — the jitter was a read-modify-write race (2026-08-30)
 
 Reported as *"when using the rotate dial the lights seem i bit jittery, what values do hue

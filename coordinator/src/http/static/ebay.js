@@ -342,13 +342,25 @@ async function deleteHunt(id) {
 async function refreshFinds() {
   try {
     const res = await api('/ebay/finds');
-    if (res.ok) { state.finds = await res.json(); renderTicker(); }
+    if (res.ok) { state.finds = sortFinds(await res.json()); renderTicker(); }
   } catch { /* dashboard shows disconnected state elsewhere */ }
+}
+
+// Bargains first, newest first within each group. The server orders the same
+// way (`list_finds`); this keeps a live find from landing above a bargain.
+// `process_hunt_results` writes verdicts as "bargain: …" / "not a bargain: …".
+function isBargain(f) {
+  return typeof f.verdict === 'string' && f.verdict.startsWith('bargain:');
+}
+
+function sortFinds(finds) {
+  return finds.sort((a, b) => (isBargain(b) - isBargain(a)) || (b.found_ms - a.found_ms));
 }
 
 // Called from dashboard.js's WS handler map on a live `EbayFind` event.
 export function handleFind(evt) {
   state.finds.unshift(evt.find);
+  sortFinds(state.finds);
   renderTicker();
   if (!document.getElementById('panel-ebay')?.classList.contains('active')) {
     showToast(`eBay: new find for "${evt.hunt_name}" — ${evt.find.title}`);

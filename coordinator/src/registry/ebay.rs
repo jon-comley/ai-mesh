@@ -199,14 +199,20 @@ impl Registry {
         }
     }
 
-    /// Most recent finds, newest first, optionally scoped to one hunt.
+    /// Bargains first, then newest first within each group, optionally scoped to
+    /// one hunt. A bargain is a verdict written as `bargain: …` by
+    /// `process_hunt_results`; unjudged and "not a bargain" finds sort together
+    /// below them. `ebay.js` sorts the same way so a live find cannot land above
+    /// a bargain.
     pub fn list_finds(&self, hunt_id: Option<&str>, limit: u32) -> Vec<EbayFindRecord> {
         let sql = if hunt_id.is_some() {
             "SELECT id, hunt_id, item_id, title, price_minor, currency, image_url, item_web_url, matched_term, verdict, found_ms, reviewed
-             FROM ebay_finds WHERE hunt_id = ?1 ORDER BY found_ms DESC LIMIT ?2"
+             FROM ebay_finds WHERE hunt_id = ?1
+             ORDER BY COALESCE(verdict LIKE 'bargain:%', 0) DESC, found_ms DESC LIMIT ?2"
         } else {
             "SELECT id, hunt_id, item_id, title, price_minor, currency, image_url, item_web_url, matched_term, verdict, found_ms, reviewed
-             FROM ebay_finds ORDER BY found_ms DESC LIMIT ?1"
+             FROM ebay_finds
+             ORDER BY COALESCE(verdict LIKE 'bargain:%', 0) DESC, found_ms DESC LIMIT ?1"
         };
         let map_row = |row: &rusqlite::Row| -> rusqlite::Result<EbayFindRecord> {
             Ok(EbayFindRecord {
@@ -363,23 +369,46 @@ mod tests {
     }
 
     #[test]
-    fn insert_and_list_finds_newest_first() {
+    fn list_finds_puts_bargains_first_then_newest() {
         let reg = Registry::new();
         let hunt_id = sample_hunt(&reg);
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(2));
         reg.insert_find(
             &hunt_id,
             &sample_listing("1"),
             "fender strat",
             Some("bargain: rare colour"),
         );
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        tick();
         reg.insert_find(&hunt_id, &sample_listing("2"), "fender strat", None);
-        let finds = reg.list_finds(None, 10);
-        assert_eq!(finds.len(), 2);
-        assert_eq!(finds[0].item_id, "2");
-        assert_eq!(finds[0].verdict, None);
-        assert_eq!(finds[1].item_id, "1");
-        assert_eq!(finds[1].verdict.as_deref(), Some("bargain: rare colour"));
+        tick();
+        reg.insert_find(
+            &hunt_id,
+            &sample_listing("3"),
+            "fender strat",
+            Some("not a bargain: fairly priced"),
+        );
+        tick();
+        reg.insert_find(
+            &hunt_id,
+            &sample_listing("4"),
+            "fender strat",
+            Some("bargain: mis-listed"),
+        );
+        let order: Vec<String> = reg
+            .list_finds(None, 10)
+            .into_iter()
+            .map(|f| f.item_id)
+            .collect();
+        // Both bargains on top, newest first; then the rest, newest first —
+        // "not a bargain" must not match the `bargain:` prefix.
+        assert_eq!(order, vec!["4", "1", "3", "2"]);
+        let scoped: Vec<String> = reg
+            .list_finds(Some(&hunt_id), 10)
+            .into_iter()
+            .map(|f| f.item_id)
+            .collect();
+        assert_eq!(scoped, order);
     }
 
     #[test]

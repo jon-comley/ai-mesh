@@ -35,7 +35,7 @@ export function init(panel) {
 
       <div class="gw-field gw-inline">
         <label for="gw-model-custom">…or custom</label>
-        <input id="gw-model-custom" type="text" autocomplete="off" placeholder="any model id, e.g. openai/gpt-oss-120b:free">
+        <input id="gw-model-custom" type="text" autocomplete="off" placeholder="any model id, e.g. openai/gpt-oss-120b">
         <button id="gw-model-custom-save" type="button">Use</button>
       </div>
 

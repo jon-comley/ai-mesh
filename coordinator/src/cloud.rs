@@ -41,14 +41,12 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             // Free slugs rotate often — these are a starting menu; the model box
             // is type-in editable, so any current slug from openrouter.ai/models
             // works too.
-            models: &[
-                "openai/gpt-oss-120b:free",
-                "qwen/qwen3-next-80b-a3b-instruct:free",
-                "meta-llama/llama-3.3-70b-instruct:free",
-                "qwen/qwen3-coder:free",
-                "nvidia/nemotron-3-super-120b-a12b:free",
-                "google/gemma-4-31b-it:free",
-            ],
+            // Refreshed 2026-09-14 after gpt-oss-120b, qwen3-next-80b and
+            // llama-3.3-70b all lost their `:free` versions (404, "use the paid
+            // slug"). nemotron-3.5-lightning answered a verdict prompt correctly
+            // but took 93s against the 60s default timeout — raise
+            // CLOUD_TIMEOUT_SECS before relying on it.
+            models: &["nvidia/nemotron-3.5-lightning:free"],
         },
         ProviderPreset {
             id: "anthropic",
@@ -66,7 +64,9 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             id: "groq",
             label: "Groq (free)",
             base_url: "https://api.groq.com/openai/v1",
-            models: &["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+            // Off Groq's own /models, 2026-09-14 — the llama-3.x ids are gone.
+            // gpt-oss-120b is what pi1 judges hunts with: correct verdicts in 3s.
+            models: &["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"],
         },
         ProviderPreset {
             id: "gemini",
@@ -115,8 +115,11 @@ pub enum CloudError {
     RateLimited,
     /// Request timed out.
     Timeout,
-    /// Other non-success HTTP status.
-    Status(u16),
+    /// Other non-success HTTP status, with the provider's own explanation.
+    /// The body is kept because the code alone hides the cause: OpenRouter
+    /// answers a retired free slug with a 404 whose body names the paid slug to
+    /// use instead, and hunts went unjudged for days logging only "HTTP 404".
+    Status(u16, String),
     /// Transport-level failure (DNS, TLS, connection).
     Network(String),
     /// Response could not be parsed / had no content.
@@ -130,7 +133,8 @@ impl std::fmt::Display for CloudError {
             CloudError::Unauthorized => write!(f, "unauthorized (check API key)"),
             CloudError::RateLimited => write!(f, "rate limited (free-tier quota?)"),
             CloudError::Timeout => write!(f, "request timed out"),
-            CloudError::Status(s) => write!(f, "HTTP {s}"),
+            CloudError::Status(s, detail) if detail.is_empty() => write!(f, "HTTP {s}"),
+            CloudError::Status(s, detail) => write!(f, "HTTP {s}: {detail}"),
             CloudError::Network(e) => write!(f, "network error: {e}"),
             CloudError::Empty => write!(f, "empty or unparseable response"),
         }
@@ -138,6 +142,21 @@ impl std::fmt::Display for CloudError {
 }
 
 impl std::error::Error for CloudError {}
+
+/// The provider's error body, trimmed and capped for a log line. Prefers the
+/// OpenAI-style `error.message` when the body is that shape.
+async fn error_detail(resp: reqwest::Response) -> String {
+    let text = resp.text().await.unwrap_or_default();
+    let message = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
+        .unwrap_or(text);
+    let message = message.trim();
+    match message.char_indices().nth(300) {
+        Some((cut, _)) => format!("{}…", &message[..cut]),
+        None => message.to_string(),
+    }
+}
 
 /// A successful completion plus the provider-reported token usage.
 #[derive(Debug, Clone)]
@@ -339,7 +358,7 @@ impl OpenAiCompatProvider {
             return Err(match status.as_u16() {
                 401 | 403 => CloudError::Unauthorized,
                 429 => CloudError::RateLimited,
-                other => CloudError::Status(other),
+                other => CloudError::Status(other, error_detail(resp).await),
             });
         }
 
@@ -407,7 +426,7 @@ impl OpenAiCompatProvider {
             return Err(match status.as_u16() {
                 401 | 403 => CloudError::Unauthorized,
                 429 => CloudError::RateLimited,
-                other => CloudError::Status(other),
+                other => CloudError::Status(other, error_detail(resp).await),
             });
         }
         Ok(resp)
@@ -542,7 +561,7 @@ mod tests {
         assert_eq!(fb.len(), 1);
         assert_eq!(fb[0].base_url(), "https://openrouter.ai/api/v1");
         assert_eq!(fb[0].api_key, "or-key");
-        assert_eq!(fb[0].model, "openai/gpt-oss-120b:free");
+        assert_eq!(fb[0].model, "nvidia/nemotron-3.5-lightning:free");
     }
 
     #[test]
