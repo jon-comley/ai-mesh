@@ -11,6 +11,44 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Bargains-first hid every recent find, and the run button had nowhere to live (2026-09-14)
+
+Same day, hours after the entry below put the ordering in. Asked as *"can you add the
+latest hunts to the top… I don't see a run button… the button doesn't do the pressed
+change colour thing"*, plus dates on the finds and dismissed items sinking to the bottom.
+
+**The ordering change was correct in isolation and wrong against the LIMIT.** `list_finds`
+sorted `bargain:` verdicts first, then newest, and `default_finds_limit` was 50. Once
+Groq started judging, 74 of the 212 stored finds came back `bargain:` — more bargains than
+the cap. So the response was 50 bargains and nothing else, the newest of them four days
+old: **every find from the previous two days was below the cut and could not be reached
+from the UI at all.** Sorting by the axis the reader actually scans (recency) puts the
+truncation somewhere harmless, and the cap went to 300 so it is not normally reached. The
+bargain signal moved from position to a `bargain` badge and a highlighted border, which is
+what it was really for.
+
+Dismissed finds now sort below every live one, server-side and client-side, and sink on
+the press rather than at the next reload.
+
+**"Check now" existed only inside the editor**, so running a hunt meant opening it for
+editing first and the sidebar genuinely had no run control. Each hunt row now carries its
+own **Run**. That forced a restructure rather than an addition: the row *was* a single
+`<button>`, and a button cannot contain a button — the inner one's clicks are the outer
+one's — so the row is a `div` holding an "open" button and a "run" button.
+
+**A run takes seconds and the button showed nothing for all of it**, which reads as a dead
+control. It now disables, goes `.is-busy`, and says "Checking…" until the request settles,
+restored in a `finally` so a thrown request cannot strand it. Disabling also stops a
+double-click firing two concurrent searches at a rate-limited API.
+
+**`frontend/` could only test dependency-free modules before this.** The served assets
+import each other by the URL they are served at (`/static/api.js`), which no test runner
+resolves; `vitest.config.js` now aliases that prefix at the directory. `ebay.test.js` (11
+tests) drives the real `init()` with a mocked `api`, so the assertions are about what is
+in the DOM — that two hunts produce two run buttons, that no button nests inside another,
+that the busy state is held mid-flight, that a 5-day-old bargain sorts below a find from
+today, and that a dismissed row moves on the press.
+
 ## Hunts were never judged — a retired free model, hidden behind "HTTP 404" (2026-09-14)
 
 Asked as *"why is ai mesh not judging hunts?"*. Every one of the 210 finds since hunts

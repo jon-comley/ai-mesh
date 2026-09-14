@@ -69,14 +69,22 @@ reasoning — the ticker shows "not yet judged" instead of a verdict.
 3. **Create hunt**. It's armed immediately and re-arms itself on every
    coordinator restart from what's persisted in SQLite — you don't need to
    keep anything open for it to keep checking.
-4. From an existing hunt: **Check now** runs one cycle immediately (doesn't
-   wait for the next timeslot), the enable/disable button pauses it without
-   deleting it, and **Delete** removes it along with its history.
-5. The ticker (main panel) shows every new match with its price, which term
-   matched, and the LLM's verdict if judged. **Bargains always sit at the top**,
-   newest first; everything else (not a bargain, or not yet judged) follows,
-   newest first. Live finds are slotted into the same order. **Dismiss** just
-   marks it reviewed — it doesn't delete anything.
+4. **Run** on any hunt row in the sidebar checks eBay immediately, without
+   waiting for the next timeslot or opening the hunt. The button holds a
+   "Checking…" state for the whole run — a few seconds, since each new listing
+   is judged by the LLM — and cannot be pressed twice into the same run. The
+   editor's **Check now** does the same thing for the hunt being edited.
+5. Inside a hunt: the enable/disable button pauses it without deleting it, and
+   **Delete** removes it along with its history.
+6. The ticker (main panel) shows every match with **the date it was found**,
+   its price, which term matched, and the LLM's verdict if judged. It reads
+   **newest first**, with anything dismissed below every live find. A judged
+   bargain is marked with a `bargain` badge and a highlighted border rather
+   than being sorted to the top — it used to be sorted there, and once the
+   backlog of bargains passed the response limit that meant the newest finds
+   could not be seen at all (fixed 2026-09-14). **Dismiss** marks a find
+   reviewed and sinks it to the bottom on the press; it doesn't delete
+   anything.
 
 ## Troubleshooting
 

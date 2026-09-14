@@ -663,8 +663,17 @@ pub struct FindsQuery {
     limit: u32,
 }
 
+// **Raised from 50 to 300 — 2026-09-14.** The old cap was set when a hunt was
+// new and 50 was more than anyone had. With three hunts running four times a
+// day it is now smaller than the backlog (212 finds by 09-14), which combined
+// with the old bargains-first ordering meant the newest two days of finds sat
+// below the cut and could not be seen at all — see `Registry::list_finds`.
+// Ordering by recency fixes which end gets truncated; this makes sure the
+// truncation is not reached in normal use. A find is a title, a URL and a
+// verdict, so 300 of them is a small payload, and the ticker is the one screen
+// where "show me everything" is the whole point.
 fn default_finds_limit() -> u32 {
-    50
+    300
 }
 
 pub async fn list_finds(
