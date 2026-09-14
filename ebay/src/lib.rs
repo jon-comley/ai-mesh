@@ -23,6 +23,14 @@ pub struct HuntSpec {
     pub id: String,
     pub name: String,
     pub source_url: String,
+    /// What the hunt is actually for, in the user's own words — "headless CI
+    /// runner, core count matters most, storage secondary". Free text, fed to
+    /// the LLM alongside the listings so its verdict and score are about
+    /// fitness for a purpose rather than similarity to `name`. Empty is normal
+    /// and means "judge it against the name alone", which is what every hunt
+    /// did before 2026-09-14.
+    #[serde(default)]
+    pub goal: String,
     pub terms: Vec<TermEntry>,
     /// Minutes-since-midnight, e.g. 510 = 08:30.
     pub timeslots: Vec<u16>,

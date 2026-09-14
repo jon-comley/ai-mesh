@@ -291,6 +291,9 @@ pub struct CreateHuntBody {
     timeslots: Vec<u16>,
     #[serde(default = "default_marketplace")]
     marketplace: String,
+    /// What the hunt is for, in the user's words. See `HuntSpec::goal`.
+    #[serde(default)]
+    goal: String,
 }
 
 pub async fn create_hunt(
@@ -309,6 +312,7 @@ pub async fn create_hunt(
         body.terms,
         body.timeslots,
         &body.marketplace,
+        body.goal.trim(),
     );
     if hunt.enabled {
         arm_hunt_timer(state.clone(), registry.clone(), hunt.clone());
@@ -323,6 +327,7 @@ pub struct UpdateHuntBody {
     timeslots: Option<Vec<u16>>,
     marketplace: Option<String>,
     enabled: Option<bool>,
+    goal: Option<String>,
 }
 
 pub async fn update_hunt(
@@ -339,6 +344,7 @@ pub async fn update_hunt(
         body.timeslots,
         body.marketplace.as_deref(),
         body.enabled,
+        body.goal.as_deref().map(str::trim),
     );
     let Some(hunt) = updated else {
         return (StatusCode::NOT_FOUND, "hunt not found").into_response();
@@ -455,6 +461,91 @@ pub async fn run_now(
         Ok(count) => Json(serde_json::json!({ "new_listings": count })).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
     }
+}
+
+/// `POST /api/ebay/hunts/{id}/rank` — score this hunt's live finds against its
+/// goal, in one call, so they can be ordered by fitness.
+///
+/// **Why this is not just the verdict step with a number bolted on.** Verdicts
+/// are issued per new listing as it arrives, so the model has never seen two
+/// candidates side by side and cannot say which is better — it can only say
+/// whether each is cheap. Ranking is inherently comparative, so it needs the
+/// whole set in one prompt. That is also why it is an explicit action rather
+/// than something the nightly does: a ranking is only as good as the set it
+/// ranked, and the set changes every cycle.
+///
+/// **It refreshes first, deliberately.** eBay's Browse API only returns live
+/// listings, so running a cycle before ranking is what keeps sold items out of
+/// the top of the list — the failure this feature would otherwise walk into on
+/// day one is a beautifully ordered ranking led by something that sold days
+/// ago. A refresh failure is not fatal: we say so and rank what we have, since
+/// a stale ranking still beats no ranking.
+pub async fn rank_hunt(
+    Path(id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+) -> impl IntoResponse {
+    let hunt = registry.lock().unwrap().get_hunt(&id);
+    let Some(hunt) = hunt else {
+        return (StatusCode::NOT_FOUND, "hunt not found").into_response();
+    };
+    let refresh_error = run_hunt_cycle(&hunt, &registry, &state)
+        .await
+        .err()
+        .inspect(|e| tracing::warn!(hunt_id = %hunt.id, error = %e, "rank: refresh cycle failed, ranking the stored set"));
+
+    let finds = registry.lock().unwrap().unreviewed_finds(&hunt.id);
+    if finds.is_empty() {
+        return Json(serde_json::json!({ "scored": 0, "refresh_error": refresh_error })).into_response();
+    }
+
+    let cfg = crate::cloud::GatewayConfig::load(&registry.lock().unwrap());
+    let Some(provider) = cfg.provider() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no AI provider configured — set a key and model on the Online AI tab",
+        )
+            .into_response();
+    };
+
+    let listing = listing_lines(finds.iter().map(|f| {
+        (
+            f.item_id.as_str(),
+            f.title.as_str(),
+            f.price_minor,
+            f.currency.as_deref(),
+        )
+    }));
+    let prompt = format!(
+        "A user is choosing between the eBay listings below. They searched for \"{}\".{} \
+         Score EVERY listing from 0 to 100 for how well it serves that purpose, where 100 is \
+         the best available choice here and 0 is useless for it. Judge on the specification and \
+         the price together — the cheapest is not automatically the best, and neither is the \
+         most expensive. Titles are all you have; do not invent details they do not state. \
+         Reply with ONLY a JSON array like [{{\"item_id\":\"...\",\"score\":87}}]. No other text.\n\n{listing}",
+        hunt.name,
+        goal_clause(&hunt.goal),
+    );
+
+    let reply = match provider
+        .complete(&[shared::ChatTurn::user(prompt)], 0.2)
+        .await
+    {
+        Ok(r) => r.text,
+        Err(e) => {
+            tracing::warn!(error = %e, "ebay ranking LLM call failed");
+            return (StatusCode::BAD_GATEWAY, format!("ranking failed: {e}")).into_response();
+        }
+    };
+    let scores = parse_scores(&reply);
+    let scored = registry.lock().unwrap().set_find_scores(&hunt.id, &scores);
+    Json(serde_json::json!({
+        "scored": scored,
+        "considered": finds.len(),
+        "refresh_error": refresh_error,
+    }))
+    .into_response()
 }
 
 /// One search cycle for `hunt`: search each enabled term, diff against
@@ -582,6 +673,54 @@ fn process_hunt_results(
     results
 }
 
+/// The hunt's purpose as a prompt sentence, or nothing when it has none.
+///
+/// Without this the model only ever saw `hunt.name` — the title of the listing
+/// the hunt was created from — so it was scoring similarity to that string.
+/// That is why an M920q hunt kept returning "not a bargain: different model
+/// (M720q)" for machines that were a better buy for what the user actually
+/// wanted. The name says what was searched for; this says why.
+fn goal_clause(goal: &str) -> String {
+    let goal = goal.trim();
+    if goal.is_empty() {
+        String::new()
+    } else {
+        format!(" They want it for: \"{goal}\". Judge fitness for THAT, not similarity to the hunt name.")
+    }
+}
+
+/// One line per listing, as the prompt sees it.
+fn listing_lines<'a>(items: impl Iterator<Item = (&'a str, &'a str, Option<i64>, Option<&'a str>)>) -> String {
+    let mut out = String::new();
+    for (item_id, title, price_minor, currency) in items {
+        let price = price_minor
+            .map(|p| format!("{:.2} {}", p as f64 / 100.0, currency.unwrap_or_default()))
+            .unwrap_or_else(|| "price unknown".into());
+        out.push_str(&format!("- item_id {item_id}: \"{title}\" — {price}\n"));
+    }
+    out
+}
+
+#[derive(Deserialize)]
+struct RankEntry {
+    item_id: String,
+    #[serde(default)]
+    score: i64,
+}
+
+/// Parse the ranking reply, tolerating a bare array or one wrapped in prose.
+/// Same shape of tolerance as `parse_verdicts`, and for the same reason: the
+/// models reach for a markdown fence however firmly you ask them not to.
+fn parse_scores(reply: &str) -> Vec<(String, i64)> {
+    let slice = match (reply.find('['), reply.rfind(']')) {
+        (Some(a), Some(b)) if b > a => &reply[a..=b],
+        _ => return vec![],
+    };
+    serde_json::from_str::<Vec<RankEntry>>(slice)
+        .map(|v| v.into_iter().map(|e| (e.item_id, e.score)).collect())
+        .unwrap_or_default()
+}
+
 async fn get_verdicts(
     hunt: &HuntSpec,
     term_matches: &[(String, Listing)],
@@ -613,13 +752,14 @@ async fn get_verdicts(
         ));
     }
     let prompt = format!(
-        "A user is hunting for bargains related to \"{}\". Below are newly found eBay listings \
+        "A user is hunting for bargains related to \"{}\".{} Below are newly found eBay listings \
          matching their search terms. For each, decide if it looks like a genuine bargain \
          (underpriced, mis-listed, or a rare find) versus a normal-priced listing — a \
          suspiciously low price on a \"for parts/not working\" item is NOT a bargain. Reply with \
          ONLY a JSON array like [{{\"item_id\":\"...\",\"is_bargain\":true,\"reason\":\"...\"}}]. \
          No other text.\n\n{listing}",
         hunt.name,
+        goal_clause(&hunt.goal),
     );
     let reply = match provider
         .complete(&[shared::ChatTurn::user(prompt)], 0.2)
@@ -716,6 +856,7 @@ mod tests {
                 patch(update_hunt).delete(delete_hunt),
             )
             .route("/api/ebay/hunts/{id}/run-now", post(run_now))
+            .route("/api/ebay/hunts/{id}/rank", post(rank_hunt))
             .route("/api/ebay/finds", get(list_finds))
             .route("/api/ebay/finds/{id}/reviewed", post(mark_reviewed))
             .route("/api/ebay/config", get(get_config).post(set_config))
@@ -790,6 +931,7 @@ mod tests {
             vec![],
             vec![480],
             "EBAY_GB",
+            "",
         );
         let state = make_state(vec![], empty_connections());
         let (status, body) = send_with_body(
@@ -824,7 +966,7 @@ mod tests {
             registry
                 .lock()
                 .unwrap()
-                .create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB");
+                .create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB", "");
         let state = make_state(vec![], empty_connections());
         let status = send(
             ebay_router(state, registry.clone()),
@@ -921,7 +1063,7 @@ mod tests {
             registry
                 .lock()
                 .unwrap()
-                .create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB");
+                .create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB", "");
         registry
             .lock()
             .unwrap()
@@ -954,6 +1096,51 @@ mod tests {
 
     // ── run_now ──────────────────────────────────────────────────────────
 
+    #[test]
+    fn goal_clause_is_empty_when_there_is_no_goal() {
+        assert_eq!(goal_clause(""), "");
+        assert_eq!(goal_clause("   "), "");
+        let c = goal_clause("headless CI runner; cores matter most");
+        assert!(c.contains("headless CI runner"));
+        // The instruction is the point: without it the model keeps scoring
+        // similarity to the hunt name.
+        assert!(c.contains("not similarity to the hunt name"));
+    }
+
+    #[test]
+    fn parse_scores_reads_an_array_and_survives_prose_around_it() {
+        assert_eq!(
+            parse_scores(r#"[{"item_id":"a","score":87},{"item_id":"b","score":12}]"#),
+            vec![("a".to_string(), 87), ("b".to_string(), 12)]
+        );
+        assert_eq!(
+            parse_scores("Sure! ```json\n[{\"item_id\":\"a\",\"score\":50}]\n``` Hope that helps"),
+            vec![("a".to_string(), 50)]
+        );
+        assert_eq!(parse_scores("no json here"), Vec::<(String, i64)>::new());
+        assert_eq!(parse_scores("[]"), Vec::<(String, i64)>::new());
+        // A missing score is 0 rather than a parse failure that discards the
+        // whole batch — one malformed entry must not lose the other forty.
+        assert_eq!(
+            parse_scores(r#"[{"item_id":"a"}]"#),
+            vec![("a".to_string(), 0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn rank_returns_404_for_unknown_hunt() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            ebay_router(state, registry),
+            "POST",
+            "/api/ebay/hunts/nope/rank?token=",
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn run_now_returns_404_for_unknown_hunt() {
         let registry = make_registry();
@@ -981,6 +1168,7 @@ mod tests {
             }],
             vec![],
             "EBAY_GB",
+            "",
         );
         let state = make_state(vec![], empty_connections());
         let status = send(
@@ -998,7 +1186,7 @@ mod tests {
     // independent of eBay/LLM timing.
 
     fn test_hunt(reg: &Registry) -> HuntSpec {
-        reg.create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB")
+        reg.create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB", "")
     }
 
     #[test]

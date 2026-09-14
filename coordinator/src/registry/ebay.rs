@@ -20,6 +20,10 @@ pub struct EbayFindRecord {
     pub item_web_url: String,
     pub matched_term: String,
     pub verdict: Option<String>,
+    /// 0-100 fitness for the hunt's `goal`, from the ranking pass. `None` until
+    /// a hunt has been ranked — every find stored before 2026-09-14, and every
+    /// find on a hunt with no LLM configured, stays `None`.
+    pub score: Option<i64>,
     pub found_ms: i64,
     pub reviewed: bool,
 }
@@ -27,7 +31,7 @@ pub struct EbayFindRecord {
 impl Registry {
     pub fn list_hunts(&self) -> Vec<HuntSpec> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, name, source_url, terms_json, timeslots_json, marketplace, enabled
+            "SELECT id, name, source_url, terms_json, timeslots_json, marketplace, enabled, goal
              FROM ebay_hunts ORDER BY created_ms ASC",
         ) {
             Ok(s) => s,
@@ -47,6 +51,7 @@ impl Registry {
                 timeslots: serde_json::from_str(&timeslots_json).unwrap_or_default(),
                 marketplace: row.get(5)?,
                 enabled: row.get::<_, i64>(6)? != 0,
+                goal: row.get(7)?,
             })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -57,6 +62,7 @@ impl Registry {
         self.list_hunts().into_iter().find(|h| h.id == id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_hunt(
         &self,
         name: &str,
@@ -64,14 +70,15 @@ impl Registry {
         terms: Vec<TermEntry>,
         timeslots: Vec<u16>,
         marketplace: &str,
+        goal: &str,
     ) -> HuntSpec {
         let id = gen_uuid();
         let terms_json = serde_json::to_string(&terms).unwrap_or_else(|_| "[]".into());
         let timeslots_json = serde_json::to_string(&timeslots).unwrap_or_else(|_| "[]".into());
         if let Err(e) = self.conn.execute(
-            "INSERT INTO ebay_hunts (id, name, source_url, terms_json, timeslots_json, marketplace, enabled, created_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
-            params![id, name, source_url, terms_json, timeslots_json, marketplace, now_unix_millis()],
+            "INSERT INTO ebay_hunts (id, name, source_url, terms_json, timeslots_json, marketplace, enabled, created_ms, goal)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
+            params![id, name, source_url, terms_json, timeslots_json, marketplace, now_unix_millis(), goal],
         ) {
             warn!(error = %e, "create_hunt failed");
         }
@@ -83,6 +90,7 @@ impl Registry {
             timeslots,
             marketplace: marketplace.to_owned(),
             enabled: true,
+            goal: goal.to_owned(),
         }
     }
 
@@ -96,6 +104,7 @@ impl Registry {
         timeslots: Option<Vec<u16>>,
         marketplace: Option<&str>,
         enabled: Option<bool>,
+        goal: Option<&str>,
     ) -> Option<HuntSpec> {
         let mut hunt = self.get_hunt(id)?;
         if let Some(name) = name {
@@ -113,15 +122,53 @@ impl Registry {
         if let Some(enabled) = enabled {
             hunt.enabled = enabled;
         }
+        if let Some(goal) = goal {
+            hunt.goal = goal.to_owned();
+        }
         let terms_json = serde_json::to_string(&hunt.terms).unwrap_or_else(|_| "[]".into());
         let timeslots_json = serde_json::to_string(&hunt.timeslots).unwrap_or_else(|_| "[]".into());
         if let Err(e) = self.conn.execute(
-            "UPDATE ebay_hunts SET name = ?2, terms_json = ?3, timeslots_json = ?4, marketplace = ?5, enabled = ?6 WHERE id = ?1",
-            params![id, hunt.name, terms_json, timeslots_json, hunt.marketplace, hunt.enabled as i64],
+            "UPDATE ebay_hunts SET name = ?2, terms_json = ?3, timeslots_json = ?4, marketplace = ?5, enabled = ?6, goal = ?7 WHERE id = ?1",
+            params![id, hunt.name, terms_json, timeslots_json, hunt.marketplace, hunt.enabled as i64, hunt.goal],
         ) {
             warn!(error = %e, "update_hunt failed");
         }
         Some(hunt)
+    }
+
+    /// Write ranking scores for a hunt's finds, by `item_id`.
+    ///
+    /// Keyed on `item_id` rather than the find's own id because that is what
+    /// the LLM is given and what it echoes back — a find id is an internal uuid
+    /// that has no business in a prompt. Scored per hunt, so the same listing
+    /// surfacing under two hunts can score differently against each one's goal,
+    /// which is the point of scoring against a goal at all.
+    ///
+    /// Anything absent from `scores` keeps whatever it had, including `NULL` —
+    /// a model that omits an item has said nothing about it, which is not the
+    /// same as scoring it zero.
+    pub fn set_find_scores(&self, hunt_id: &str, scores: &[(String, i64)]) -> usize {
+        let mut written = 0;
+        for (item_id, score) in scores {
+            match self.conn.execute(
+                "UPDATE ebay_finds SET score = ?3 WHERE hunt_id = ?1 AND item_id = ?2",
+                params![hunt_id, item_id, score.clamp(&0, &100)],
+            ) {
+                Ok(n) => written += n,
+                Err(e) => warn!(error = %e, item_id, "set_find_scores failed"),
+            }
+        }
+        written
+    }
+
+    /// Every find for a hunt that has not been dismissed, newest first — the
+    /// set a ranking pass compares against each other. Unlike `list_finds`
+    /// this is uncapped: ranking half a list produces a ranking of half a list.
+    pub fn unreviewed_finds(&self, hunt_id: &str) -> Vec<EbayFindRecord> {
+        self.list_finds(Some(hunt_id), u32::MAX)
+            .into_iter()
+            .filter(|f| !f.reviewed)
+            .collect()
     }
 
     /// Returns true if a hunt existed and was deleted.
@@ -194,6 +241,7 @@ impl Registry {
             item_web_url: listing.item_web_url.clone(),
             matched_term: matched_term.to_owned(),
             verdict: verdict.map(|s| s.to_owned()),
+            score: None,
             found_ms,
             reviewed: false,
         }
@@ -223,11 +271,11 @@ impl Registry {
     /// in place, which is what the old ordering was really for.
     pub fn list_finds(&self, hunt_id: Option<&str>, limit: u32) -> Vec<EbayFindRecord> {
         let sql = if hunt_id.is_some() {
-            "SELECT id, hunt_id, item_id, title, price_minor, currency, image_url, item_web_url, matched_term, verdict, found_ms, reviewed
+            "SELECT id, hunt_id, item_id, title, price_minor, currency, image_url, item_web_url, matched_term, verdict, found_ms, reviewed, score
              FROM ebay_finds WHERE hunt_id = ?1
              ORDER BY reviewed ASC, found_ms DESC LIMIT ?2"
         } else {
-            "SELECT id, hunt_id, item_id, title, price_minor, currency, image_url, item_web_url, matched_term, verdict, found_ms, reviewed
+            "SELECT id, hunt_id, item_id, title, price_minor, currency, image_url, item_web_url, matched_term, verdict, found_ms, reviewed, score
              FROM ebay_finds
              ORDER BY reviewed ASC, found_ms DESC LIMIT ?1"
         };
@@ -245,6 +293,7 @@ impl Registry {
                 verdict: row.get(9)?,
                 found_ms: row.get(10)?,
                 reviewed: row.get::<_, i64>(11)? != 0,
+                score: row.get(12)?,
             })
         };
         let result = if let Some(hunt_id) = hunt_id {
@@ -306,6 +355,7 @@ mod tests {
             sample_terms(),
             vec![480, 1080],
             "EBAY_GB",
+            "a working example, not a project",
         );
         let hunts = reg.list_hunts();
         assert_eq!(hunts.len(), 1);
@@ -324,6 +374,7 @@ mod tests {
             sample_terms(),
             vec![480],
             "EBAY_GB",
+            "",
         );
         let updated = reg
             .update_hunt(
@@ -333,18 +384,34 @@ mod tests {
                 Some(vec![600, 720]),
                 None,
                 Some(false),
+                None,
             )
             .unwrap();
         assert_eq!(updated.name, "Strat");
         assert_eq!(updated.timeslots, vec![600, 720]);
         assert!(!updated.enabled);
+        assert_eq!(updated.goal, "", "goal must survive an update that omits it");
+
+        let with_goal = reg
+            .update_hunt(
+                &hunt.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("headless CI runner; cores matter most"),
+            )
+            .unwrap();
+        assert_eq!(with_goal.goal, "headless CI runner; cores matter most");
+        assert_eq!(with_goal.timeslots, vec![600, 720], "and not reset the rest");
     }
 
     #[test]
     fn update_hunt_returns_none_for_unknown_id() {
         let reg = Registry::new();
         assert!(
-            reg.update_hunt("nope", None, None, None, None, None)
+            reg.update_hunt("nope", None, None, None, None, None, None)
                 .is_none()
         );
     }
@@ -352,7 +419,7 @@ mod tests {
     #[test]
     fn delete_hunt_removes_it() {
         let reg = Registry::new();
-        let hunt = reg.create_hunt("Strat", "https://x", sample_terms(), vec![], "EBAY_GB");
+        let hunt = reg.create_hunt("Strat", "https://x", sample_terms(), vec![], "EBAY_GB", "");
         assert!(reg.delete_hunt(&hunt.id));
         assert!(reg.get_hunt(&hunt.id).is_none());
         assert!(!reg.delete_hunt(&hunt.id));
@@ -368,6 +435,7 @@ mod tests {
             sample_terms(),
             vec![],
             "EBAY_GB",
+            "",
         )
         .id
     }
@@ -439,6 +507,50 @@ mod tests {
         assert_eq!(after, vec!["3", "2", "1", "4"]);
         // And the oldest, still undismissed, stays above it.
         assert!(!reg.mark_find_reviewed(&format!("{}-nope", oldest.id)));
+    }
+
+    #[test]
+    fn set_find_scores_writes_by_item_id_and_leaves_the_rest_alone() {
+        let reg = Registry::new();
+        let hunt_id = sample_hunt(&reg);
+        reg.insert_find(&hunt_id, &sample_listing("1"), "term", None);
+        reg.insert_find(&hunt_id, &sample_listing("2"), "term", None);
+        assert!(reg.list_finds(None, 10).iter().all(|f| f.score.is_none()));
+
+        // Item "2" is deliberately left out: a model that did not mention an
+        // item has said nothing about it, which is not a score of zero.
+        let written = reg.set_find_scores(&hunt_id, &[("1".into(), 87), ("nope".into(), 50)]);
+        assert_eq!(written, 1, "only the item that exists is written");
+        let finds = reg.list_finds(None, 10);
+        let one = finds.iter().find(|f| f.item_id == "1").unwrap();
+        let two = finds.iter().find(|f| f.item_id == "2").unwrap();
+        assert_eq!(one.score, Some(87));
+        assert_eq!(two.score, None);
+    }
+
+    #[test]
+    fn set_find_scores_clamps_to_0_100() {
+        let reg = Registry::new();
+        let hunt_id = sample_hunt(&reg);
+        reg.insert_find(&hunt_id, &sample_listing("1"), "term", None);
+        reg.insert_find(&hunt_id, &sample_listing("2"), "term", None);
+        reg.set_find_scores(&hunt_id, &[("1".into(), 9_000), ("2".into(), -5)]);
+        let finds = reg.list_finds(None, 10);
+        assert_eq!(finds.iter().find(|f| f.item_id == "1").unwrap().score, Some(100));
+        assert_eq!(finds.iter().find(|f| f.item_id == "2").unwrap().score, Some(0));
+    }
+
+    #[test]
+    fn unreviewed_finds_excludes_dismissed_and_is_not_capped() {
+        let reg = Registry::new();
+        let hunt_id = sample_hunt(&reg);
+        let a = reg.insert_find(&hunt_id, &sample_listing("1"), "term", None);
+        reg.insert_find(&hunt_id, &sample_listing("2"), "term", None);
+        assert_eq!(reg.unreviewed_finds(&hunt_id).len(), 2);
+        assert!(reg.mark_find_reviewed(&a.id));
+        let left = reg.unreviewed_finds(&hunt_id);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].item_id, "2");
     }
 
     #[test]

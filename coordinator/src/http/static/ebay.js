@@ -6,7 +6,7 @@ import { showToast } from '/static/util.js';
 // chips → timeslot strip → save), with a reverse-chronological find ticker
 // as the primary surface. See plans/ebay-bargain-finder.md.
 
-let state = { hunts: [], finds: [] };
+let state = { hunts: [], finds: [], sortBy: 'newest' };
 let editingHunt = null; // null while creating a new hunt
 let draftTerms = [];
 let draftTimeslots = new Set();
@@ -42,12 +42,24 @@ export function init(panel) {
       </aside>
       <section class="ebay-main">
         <div id="ebay-editor" class="ebay-editor" hidden></div>
+        <div class="ebay-sortbar">
+          <span class="gw-hint">Order</span>
+          <button type="button" class="ebay-sort" data-sort="newest">Newest</button>
+          <button type="button" class="ebay-sort" data-sort="score">Best fit</button>
+        </div>
         <div id="ebay-ticker"><p class="placeholder">No finds yet.</p></div>
       </section>
     </div>
   `;
 
   panel.querySelector('#ebay-new-hunt').addEventListener('click', () => openEditor(null));
+  panel.querySelectorAll('.ebay-sort').forEach(btn => btn.addEventListener('click', () => {
+    state.sortBy = btn.dataset.sort;
+    syncSortControl();
+    sortFinds(state.finds);
+    renderTicker();
+  }));
+  syncSortControl();
   wireSettings(panel);
 
   refreshConfig();
@@ -153,6 +165,13 @@ function openEditor(hunt) {
       <input id="ebay-name" type="text" value="${escapeHtml(hunt?.name ?? '')}">
     </div>
     <div class="gw-field">
+      <label for="ebay-goal">What it's for</label>
+      <textarea id="ebay-goal" rows="2" placeholder="e.g. headless CI runner — core count matters most, then RAM; storage secondary">${escapeHtml(hunt?.goal ?? '')}</textarea>
+      <span class="gw-hint">Optional, and the single biggest lever on how good the
+        verdicts and ranking are. Without it the LLM only knows the hunt name, so it
+        scores similarity to that title rather than fitness for the job.</span>
+    </div>
+    <div class="gw-field">
       <span class="gw-label">Search terms</span>
       <div id="ebay-terms" class="ebay-chips"></div>
       <div class="gw-field gw-inline">
@@ -173,6 +192,7 @@ function openEditor(hunt) {
       <button id="ebay-cancel" type="button">Cancel</button>
       ${hunt ? `
       <button id="ebay-run-now" type="button">Check now</button>
+      <button id="ebay-rank" type="button" title="Refresh from eBay, then score every live find against 'What it's for'">Rank</button>
       <button id="ebay-toggle-enabled" type="button">${hunt.enabled ? 'Disable' : 'Enable'}</button>
       <button id="ebay-delete" type="button">Delete</button>` : ''}
     </div>
@@ -198,6 +218,8 @@ function openEditor(hunt) {
   } else {
     const runBtn = editor.querySelector('#ebay-run-now');
     runBtn.addEventListener('click', () => runNow(hunt.id, runBtn));
+    const rankBtn = editor.querySelector('#ebay-rank');
+    rankBtn.addEventListener('click', () => rankHunt(hunt, rankBtn));
     editor.querySelector('#ebay-toggle-enabled').addEventListener('click', () => toggleEnabled(hunt));
     editor.querySelector('#ebay-delete').addEventListener('click', () => deleteHunt(hunt.id));
   }
@@ -310,6 +332,7 @@ async function saveHunt() {
     name,
     terms: draftTerms,
     timeslots: Array.from(draftTimeslots).sort((a, b) => a - b),
+    goal: document.getElementById('ebay-goal')?.value.trim() ?? '',
   };
   let res;
   if (editingHunt) {
@@ -333,6 +356,54 @@ async function saveHunt() {
 //
 // `btn` is optional so a caller without one still works; the toast is the
 // feedback in that case.
+// Hold a button in a visible working state for the whole request. Everything
+// here is slow enough (an eBay round-trip, an LLM call) that without it the
+// control reads as dead.
+async function whileBusy(btn, label, work) {
+  const restore = btn ? btn.textContent : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add('is-busy');
+    btn.textContent = label;
+  }
+  try {
+    return await work();
+  } finally {
+    // In `finally` so a thrown request cannot leave the button stuck on its
+    // busy label with no way back short of a reload.
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove('is-busy');
+      btn.textContent = restore;
+    }
+  }
+}
+
+// Score every live find for this hunt against its goal, in one LLM call, and
+// switch the ticker to best-fit order so the answer is visible immediately —
+// ranking that leaves the list in date order has not told anyone anything.
+async function rankHunt(hunt, btn) {
+  if (!hunt.goal?.trim() && !window.confirm(
+    `"${hunt.name}" has no "What it's for" set, so the ranking can only go on the hunt name. Rank anyway?`)) {
+    return;
+  }
+  await whileBusy(btn, 'Ranking…', async () => {
+    const res = await api(`/ebay/hunts/${encodeURIComponent(hunt.id)}/rank`, { method: 'POST' });
+    if (!res.ok) { showToast(`Ranking failed: ${await res.text()}`, true); return; }
+    const data = await res.json();
+    if (data.refresh_error) {
+      // Said out loud rather than swallowed: a ranking over a set that could
+      // not be refreshed may be led by something already sold.
+      showToast(`Ranked ${data.scored} of ${data.considered} — but eBay refresh failed (${data.refresh_error}), so this may include sold listings`, true);
+    } else {
+      showToast(`Ranked ${data.scored} of ${data.considered} find(s)`);
+    }
+    state.sortBy = 'score';
+    syncSortControl();
+    await refreshFinds();
+  });
+}
+
 async function runNow(id, btn) {
   const restore = btn ? btn.textContent : null;
   if (btn) {
@@ -436,10 +507,29 @@ function isExactMatch(f) {
 // stays newest-first, and the near-misses carry a visible match percentage
 // instead of a position, the same trade the bargain badge makes.
 function sortFinds(finds) {
+  // Dismissed is below everything in both modes — it means "I have dealt with
+  // this", which outranks any opinion about quality or recency.
+  //
+  // Best fit falls back to the newest ordering for anything unscored, rather
+  // than treating a missing score as zero: a find the model never mentioned,
+  // or one stored before ranking existed, has not been judged badly. Unscored
+  // rows sit below scored ones so the ranking is not interleaved with noise.
+  if (state.sortBy === 'score') {
+    return finds.sort((a, b) =>
+      (!!a.reviewed - !!b.reviewed)
+      || ((a.score == null) - (b.score == null))
+      || ((b.score ?? 0) - (a.score ?? 0))
+      || (b.found_ms - a.found_ms));
+  }
   return finds.sort((a, b) =>
     (!!a.reviewed - !!b.reviewed)
     || (isExactMatch(b) - isExactMatch(a))
     || (b.found_ms - a.found_ms));
+}
+
+function syncSortControl() {
+  document.querySelectorAll('.ebay-sort').forEach(btn =>
+    btn.classList.toggle('is-active', btn.dataset.sort === state.sortBy));
 }
 
 // "14 Sep, 06:00" — short enough for the hint line, unambiguous about which
@@ -483,6 +573,7 @@ function renderTicker() {
             ? '<span class="ebay-badge ebay-badge-exact">exact</span>'
             : `<span class="ebay-match-pct">${Math.round(keywordCoverage(f) * 100)}% match</span>`}
           · matched "${escapeHtml(f.matched_term)}"
+          ${f.score != null ? `· <span class="ebay-score" title="Fitness for this hunt's goal, 0-100">${f.score}/100</span>` : ''}
         </div>
         <div class="ebay-verdict${f.verdict ? '' : ' gw-hint'}">${isBargain(f) ? '<span class="ebay-badge">bargain</span> ' : ''}${f.verdict ? escapeHtml(f.verdict) : 'not yet judged'}</div>
       </div>

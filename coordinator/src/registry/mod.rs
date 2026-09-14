@@ -409,6 +409,37 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_ebay_finds_hunt_found ON ebay_finds(hunt_id, found_ms);",
     )?;
 
+    // Migration: what a hunt is FOR, and how well each find serves it.
+    //
+    // The bargain verdict was only ever given `hunt.name` as context, so it was
+    // really answering "does this title match that string" — which is why a
+    // hunt named after one exact machine kept returning "not a bargain:
+    // different model" for boxes that were better buys for the thing the user
+    // actually wanted. `goal` is that missing sentence, free text, straight
+    // into the prompt. `score` is the 0-100 fitness the model returns for it,
+    // nullable because everything stored before this, and everything found
+    // while no LLM is configured, has never been scored.
+    for (table, column, ddl) in [
+        (
+            "ebay_hunts",
+            "goal",
+            "ALTER TABLE ebay_hunts ADD COLUMN goal TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "ebay_finds",
+            "score",
+            "ALTER TABLE ebay_finds ADD COLUMN score INTEGER",
+        ),
+    ] {
+        let cols: Vec<String> = conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |row| row.get(1))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !cols.contains(&column.to_string()) {
+            conn.execute(ddl, [])?;
+        }
+    }
+
     // Migration: Add overrides_json to room_effects if absent.
     let re_cols: Vec<String> = conn
         .prepare("PRAGMA table_info(room_effects)")?

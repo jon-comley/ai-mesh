@@ -4485,6 +4485,21 @@ body {
 .ebay-find-exact { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
 .ebay-badge-exact { background: var(--accent); color: var(--surface); }
 .ebay-match-pct { font-variant-numeric: tabular-nums; }
+.ebay-score { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.ebay-sortbar { display: flex; align-items: center; gap: 8px; }
+.ebay-sort {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 12px;
+  font-size: 13px; cursor: pointer;
+}
+.ebay-sort.is-active { background: var(--accent); color: var(--surface); border-color: var(--accent); }
+
+.ebay-editor textarea {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px;
+  font-size: 14px; font-family: inherit; resize: vertical;
+}
 .ebay-find-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: 0 0 auto; background: var(--surface-2); }
 .ebay-find-body { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .ebay-find-body a { color: var(--accent); font-weight: 600; text-decoration: none; }
