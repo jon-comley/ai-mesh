@@ -4480,6 +4480,11 @@ body {
   letter-spacing: .04em; vertical-align: 1px;
 }
 .ebay-find-when { color: var(--text); font-variant-numeric: tabular-nums; }
+/* An exact keyword match is the one thing allowed above recency, so it gets a
+   stronger mark than the bargain badge — it is the reason the row is up there. */
+.ebay-find-exact { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.ebay-badge-exact { background: var(--accent); color: var(--surface); }
+.ebay-match-pct { font-variant-numeric: tabular-nums; }
 .ebay-find-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; flex: 0 0 auto; background: var(--surface-2); }
 .ebay-find-body { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .ebay-find-body a { color: var(--accent); font-weight: 600; text-decoration: none; }

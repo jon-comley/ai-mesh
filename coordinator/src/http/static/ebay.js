@@ -397,8 +397,49 @@ function isBargain(f) {
   return typeof f.verdict === 'string' && f.verdict.startsWith('bargain:');
 }
 
+// How much of the term that matched actually appears in the title, 0..1.
+//
+// eBay's search is fuzzy and joins a hunt's terms with " OR ", which is why an
+// M920q hunt returns M900s and M710qs at all. The API gives no relevance score
+// back, so this recomputes one from what we do have: the words of
+// `matched_term` against the words of the title. Punctuation-insensitive
+// because "i5-8500T" and "i5 8500T" are the same machine, and set-based
+// because word order in an eBay title means nothing.
+//
+// Deliberately not a substring test on the whole term: no real title contains
+// "Lenovo ThinkCentre M920q Tiny PC i5 8500T 16GB RAM 512GB SSD WiFi Warranty"
+// verbatim, so that would rank everything equally at zero.
+function termWords(s) {
+  return String(s ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+export function keywordCoverage(find) {
+  const wanted = termWords(find?.matched_term);
+  if (!wanted.length) return 0;
+  const have = new Set(termWords(find?.title));
+  return wanted.filter(w => have.has(w)).length / wanted.length;
+}
+
+// A title carrying every keyword of the term that found it. Jon, 2026-09-14:
+// "lets have matches that match the keywords exactly at the top."
+function isExactMatch(f) {
+  return keywordCoverage(f) === 1;
+}
+
+// Exact keyword matches, then newest first, with dismissed below everything.
+//
+// **Only the exact tier is allowed to jump the queue, and that is on purpose.**
+// The previous attempt at a quality-first sort (bargains) put a large,
+// ever-growing group above recency and buried every recent find behind it. An
+// exact match is rare by construction — 2 of 212 finds on the day this went in
+// — so it is a handful of rows at the top rather than a wall. Everything below
+// stays newest-first, and the near-misses carry a visible match percentage
+// instead of a position, the same trade the bargain badge makes.
 function sortFinds(finds) {
-  return finds.sort((a, b) => (!!a.reviewed - !!b.reviewed) || (b.found_ms - a.found_ms));
+  return finds.sort((a, b) =>
+    (!!a.reviewed - !!b.reviewed)
+    || (isExactMatch(b) - isExactMatch(a))
+    || (b.found_ms - a.found_ms));
 }
 
 // "14 Sep, 06:00" — short enough for the hint line, unambiguous about which
@@ -431,13 +472,16 @@ function renderTicker() {
     return;
   }
   box.innerHTML = state.finds.map(f => `
-    <div class="ebay-find${f.reviewed ? ' ebay-find-reviewed' : ''}${isBargain(f) ? ' ebay-find-bargain' : ''}">
+    <div class="ebay-find${f.reviewed ? ' ebay-find-reviewed' : ''}${isBargain(f) ? ' ebay-find-bargain' : ''}${isExactMatch(f) ? ' ebay-find-exact' : ''}">
       ${f.image_url ? `<img class="ebay-find-thumb" src="${escapeHtml(f.image_url)}" alt="">` : '<div class="ebay-find-thumb ebay-find-thumb-empty"></div>'}
       <div class="ebay-find-body">
         <a href="${escapeHtml(f.item_web_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(f.title)}</a>
         <div class="gw-hint">
           <time datetime="${escapeHtml(new Date(f.found_ms).toISOString?.() ?? '')}" class="ebay-find-when">${escapeHtml(formatFound(f.found_ms))}</time>
           · ${f.price_minor != null ? `${(f.price_minor / 100).toFixed(2)} ${escapeHtml(f.currency ?? '')}` : 'price unknown'}
+          · ${isExactMatch(f)
+            ? '<span class="ebay-badge ebay-badge-exact">exact</span>'
+            : `<span class="ebay-match-pct">${Math.round(keywordCoverage(f) * 100)}% match</span>`}
           · matched "${escapeHtml(f.matched_term)}"
         </div>
         <div class="ebay-verdict${f.verdict ? '' : ' gw-hint'}">${isBargain(f) ? '<span class="ebay-badge">bargain</span> ' : ''}${f.verdict ? escapeHtml(f.verdict) : 'not yet judged'}</div>

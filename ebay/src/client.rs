@@ -10,6 +10,9 @@ use tokio::sync::Mutex;
 const TOKEN_URL: &str = "https://api.ebay.com/identity/v1/oauth2/token";
 const API_BASE: &str = "https://api.ebay.com/buy/browse/v1";
 const OAUTH_SCOPE: &str = "https://api.ebay.com/oauth/api_scope";
+/// Listings fetched per search cycle. See `Client::search` for why this is the
+/// ceiling on what a hunt can notice at all. eBay's Browse API allows up to 200.
+const SEARCH_LIMIT: &str = "100";
 
 /// Errors from the Browse API, pre-phrased for humans.
 #[derive(Debug)]
@@ -127,6 +130,19 @@ impl EbayClient {
     /// `GET item_summary/search` for `terms` (joined with " OR " so any one
     /// matching term surfaces a listing), scoped to `marketplace` (e.g.
     /// "EBAY_GB").
+    ///
+    /// **`SEARCH_LIMIT` is how many listings a cycle can see at all.** Anything
+    /// past it is not "shown later", it is never fetched, so a hunt whose terms
+    /// match more than this silently only ever considers the first page eBay
+    /// chooses to return. Raised 50 -> 100 on 2026-09-14 at Jon's request; the
+    /// Browse API caps it at 200, so there is headroom if a hunt outgrows this
+    /// too. The cost is one request either way — the limit does not change the
+    /// number of API calls, only the size of the one response, and dedupe
+    /// against `ebay_seen_listings` means a bigger page does not mean more LLM
+    /// verdicts on repeat cycles.
+    ///
+    /// Not to be confused with `default_finds_limit` in `http::api::ebay`,
+    /// which caps how many already-stored finds the dashboard asks for.
     pub async fn search(
         &self,
         terms: &[String],
@@ -139,7 +155,7 @@ impl EbayClient {
             .get(format!("{API_BASE}/item_summary/search"))
             .bearer_auth(token)
             .header("X-EBAY-C-MARKETPLACE-ID", marketplace)
-            .query(&[("q", query.as_str()), ("limit", "50")])
+            .query(&[("q", query.as_str()), ("limit", SEARCH_LIMIT)])
             .send()
             .await
             .map_err(|e| EbayError::Other(format!("could not reach eBay: {e}")))?;

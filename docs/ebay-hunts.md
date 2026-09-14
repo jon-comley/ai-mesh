@@ -77,8 +77,13 @@ reasoning — the ticker shows "not yet judged" instead of a verdict.
 5. Inside a hunt: the enable/disable button pauses it without deleting it, and
    **Delete** removes it along with its history.
 6. The ticker (main panel) shows every match with **the date it was found**,
-   its price, which term matched, and the LLM's verdict if judged. It reads
-   **newest first**, with anything dismissed below every live find. A judged
+   its price, how much of the matched term the title actually carries, which
+   term matched, and the LLM's verdict if judged. A title containing **every**
+   keyword of the term that found it is badged `exact` and floated to the top;
+   everything else reads **newest first**, with anything dismissed below every
+   live find. Exact matches are rare by construction — 2 of 212 finds the day
+   this went in — so the top of the list stays short rather than becoming a
+   second wall in front of recent finds. A judged
    bargain is marked with a `bargain` badge and a highlighted border rather
    than being sorted to the top — it used to be sorted there, and once the
    backlog of bargains passed the response limit that meant the newest finds
