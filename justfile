@@ -424,7 +424,7 @@ deploy-node node:
         echo ">>> Running provisioning script (this takes a minute — installing NSSM, llama.cpp, registering service)..."
         scp_dots ">>> Provisioning" \
             ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
-                & '${WIN_PATH}\\install-node-windows.ps1' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}' -SttServer '${STT_SERVER:-}'\
+                & '${WIN_PATH}\\install-node-windows.ps1' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}' -SttServer '${STT_SERVER:-}' -CoordinatorIp '${COORDINATOR_IP:-}'\
             \""
         # Stability hardening (ULPS, AX200 NIC, power plan) is applied by
         # install-node-windows.ps1's Harden-Stability function above — no
