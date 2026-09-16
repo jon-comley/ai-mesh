@@ -11,6 +11,50 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## beelink1 was reaching for the coordinator on itself (2026-09-16)
+
+Reported as "ai-mesh is down". It was not: the coordinator on pi1 was up, five of
+six nodes were heartbeating, and `just chat` answered in 682ms — **from
+`api.groq.com`.** That is the part worth keeping. Cloud fallback means a mesh with
+no local compute still answers every question correctly, so nothing looks broken
+from the outside; the only tell was the `node_id` in the response envelope.
+
+**beelink1's agent had no `COORDINATOR_IP` and never could have had one.** The
+agent falls back to `127.0.0.1:9000` when mDNS discovery finds nothing, which on a
+remote node means dialling the coordinator on itself: connect, refused, three
+retries, 60s backoff, rescan, for ever. `Get-Service` reported `Running` the whole
+time — the process was genuinely alive and genuinely useless, which is the same
+trap as the five stale addresses on 2026-09-15.
+
+**The root cause was in the provisioning path, not the config.**
+`install-node-windows.ps1` carried the comment *"The agent finds the coordinator
+via mDNS discovery — no coordinator IP is baked in"*, and `deploy-node`'s Windows
+branch had no way to pass one. The macOS branch passes `COORDINATOR_IP`
+positionally and always has, so only Windows was exposed. Both now take
+`-CoordinatorIp`, and it is written into the NSSM environment **conditionally** —
+an empty `COORDINATOR_IP=` is worse than none, because the agent parses it as an
+address and fails rather than falling back to discovery.
+
+**A second bug was hiding behind the first.** With the node connected and
+heartbeating, `just auto-load-model beelink1` still failed after a 120s wait with
+"not found in coordinator registry ... Is the agent running?" — which is exactly
+the wrong question. `cli find-node` matches on **IP alone**
+(`cli/src/commands/find_node.rs`: `nodes.into_iter().find(|n| n.ip == ip)`), and
+`nodes/beelink1.env` carried `NODE_HOST=beelink1.local`. A hostname can never
+match, and Windows registers its hostname uppercased (`BEELINK1`) so even the name
+would not have. Every other node already pinned an IP; beelink1 was the last
+`.local` and it was invisible until something asked the registry for it by name.
+
+**Why beelink1 specifically:** it was powered off for the BIOS flash on 2026-09-15
+while the other four nodes were being pinned, so it missed the sweep. Worth
+assuming that any machine that was off during a fleet-wide fix did not get it.
+
+**Unrelated but seen in passing:** the coordinator is logging
+`rejected connection from 192.168.1.243:61660: auth frame length 542393671 exceeds
+MAX_FRAME_LEN` alongside TLS handshake failures. The rejection is the code working
+correctly — nothing on the mesh sends a 542MB auth frame — but nobody has
+established what .243 is.
+
 ## Deleting a hunt left its finds on screen (2026-09-14)
 
 Reported as wanting the finds to go when the hunt does. **They already did** — `ebay_finds`

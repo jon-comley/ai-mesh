@@ -1,6 +1,17 @@
 param(
-    # The agent finds the coordinator via mDNS discovery — no coordinator IP is baked in.
-    # (Set COORDINATOR_IP in the agent service environment to override discovery for debugging.)
+    # Where the coordinator is, baked into the service environment.
+    #
+    # **mDNS discovery is not enough for this node and never was.** The agent
+    # falls back to 127.0.0.1:9000 when discovery finds nothing, which on a
+    # remote node means it tries to reach the coordinator on itself and loops
+    # for ever — connect, refuse, back off 60s, rescan, repeat. It never
+    # recovers on its own and the service still reports Running throughout, so
+    # nothing surfaces it. beelink1 sat like that until 2026-09-16.
+    #
+    # Discovery stays as the fallback when this is empty, so a node genuinely
+    # on the same host as the coordinator still works untouched.
+    [string]$CoordinatorIp = "",
+
     [string]$Role = "compute",
 
     [string]$AuthorizedKey = "",
@@ -538,13 +549,22 @@ function Ensure-AgentService {
         & $nssm install $agentService $agentPath
     }
     & $nssm set $agentService AppDirectory $aiMeshRoot
-    & $nssm set $agentService AppEnvironmentExtra `
-        "AGENT_ROLE=$Role" `
-        "LLAMA_MODEL_DIR=$env:USERPROFILE\.ai-mesh\models" `
-        "LLAMA_SERVER_BIN=$(Join-Path $llamaInstallDir 'llama-server.exe')" `
-        "LLAMA_GPU_LAYERS=99" `
-        "LLAMA_CTX_SIZE=4096" `
+    # Built as a list because COORDINATOR_IP is conditional: writing an empty
+    # COORDINATOR_IP= would be worse than omitting it, since the agent would
+    # take the empty string as an address and fail to parse it rather than
+    # falling back to discovery.
+    $agentEnv = @(
+        "AGENT_ROLE=$Role",
+        "LLAMA_MODEL_DIR=$env:USERPROFILE\.ai-mesh\models",
+        "LLAMA_SERVER_BIN=$(Join-Path $llamaInstallDir 'llama-server.exe')",
+        "LLAMA_GPU_LAYERS=99",
+        "LLAMA_CTX_SIZE=4096",
         "DEFAULT_MODEL=$defaultModel"
+    )
+    if ($CoordinatorIp) {
+        $agentEnv += "COORDINATOR_IP=$CoordinatorIp"
+    }
+    & $nssm set $agentService AppEnvironmentExtra $agentEnv
     & $nssm set $agentService Start SERVICE_AUTO_START
     & $nssm set $agentService AppStdout $agentLog
     & $nssm set $agentService AppStderr $agentLog
