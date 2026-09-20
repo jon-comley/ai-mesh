@@ -11,6 +11,39 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## pi1 is a coordinator and nothing else (2026-09-19, finished 2026-09-20)
+
+Jon, after the card filled: *"pi1 is coordinator so doesn't need weights"*, then
+*"never use pi1 for inference so please remove any needed for it and remove
+compute from the ai-mesh configuration for it."*
+
+**The disk was the symptom, not the problem.** pi1's 29 GB card hit 100% and the
+GitHub runner crash-looped creating its own log — while `systemctl` reported the
+service `active (running)` throughout, which is the reason this took a while to
+see. A service being up says a process exists, not that it is achieving anything.
+
+**The configuration half was done on the 19th.** `nodes/pi1.env` carries
+`NODE_ROLE=controller` (`8783452`), and because the running agent's role comes
+from a systemd drop-in rather than that file, the drop-in was pinned too
+(`4a127bf`) with a comment naming the commit. Both matter: `read_role_from_env`
+matches the literal string `"controller"` and **falls through to `Compute` for
+anything else**, so an unset variable, a typo or a capital C all make a node
+eligible for inference. That is written up in [`docs/roles.md`](docs/roles.md).
+
+**The removal half was only finished on the 20th, and the gap is the point.**
+The weights and the ollama model store went on the 19th. Re-checked on the 20th
+before writing this down, and the **binaries were still there** —
+`/usr/local/bin/ollama` (40 MB), `/usr/local/bin/llama-server` (7.7 MB), a
+disabled `ollama.service`, an empty `/usr/share/ollama` and the `ollama` system
+user. The service was disabled and nothing listened on 11434, so no inference
+could happen by accident; but "remove any needed for it" was not done, and a
+session that had said so would have been wrong. **Verifying a removal is not the
+same as remembering having done one.** All of it is gone now, including the unit
+file and the user, and the coordinator and agent were confirmed still active
+with the role still `controller` afterwards.
+
+**Where it leaves the card:** 11 GB used of 29, 39%.
+
 ## beelink1 was reaching for the coordinator on itself (2026-09-16)
 
 Reported as "ai-mesh is down". It was not: the coordinator on pi1 was up, five of
