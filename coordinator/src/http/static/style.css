@@ -4386,8 +4386,12 @@ body {
 .gw-stat.gw-err > strong { color: var(--red); font-weight: 500; }
 
 /* ── Hunts tab (eBay bargain finder) ─────────────────────────────────────── */
-.ebay-layout { display: grid; grid-template-columns: 260px 1fr; gap: 16px; align-items: start; }
-@media (max-width: 720px) { .ebay-layout { grid-template-columns: 1fr; } }
+/* minmax(0, 1fr), not 1fr: a bare 1fr will not shrink below its content, so on a
+   phone the settings rows (label, input and button in a line) made the column
+   405px wide in a 390px viewport and everything ran off both sides. */
+.ebay-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 720px) { .ebay-layout { grid-template-columns: minmax(0, 1fr); } }
+.ebay-sidebar, .ebay-main { min-width: 0; }
 
 .ebay-sidebar { display: flex; flex-direction: column; gap: 10px; }
 .ebay-sidebar > button#ebay-new-hunt {
@@ -4443,11 +4447,19 @@ body {
   background: var(--surface-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 9px 10px; font-size: 14px; flex: 1 1 160px;
 }
+/* The 160px above is a minimum width for inputs sitting in a row with a button.
+   In a stacked field (label over input) the same value sets the HEIGHT, which
+   made "Hunt name" a tall empty box. */
+.ebay-editor .gw-field:not(.gw-inline) > input[type="text"] { flex: 0 0 auto; }
 .ebay-editor button {
   background: var(--surface-2); color: var(--text);
   border: 1px solid var(--border); border-radius: 6px; padding: 9px 14px;
   font-size: 14px; cursor: pointer;
 }
+/* The rule above is (0,1,1) and beat the chips' own (0,1,0) button styles, so
+   every chip drew a box inside a box. Restated with enough weight to win. */
+.ebay-editor .ebay-chip-toggle { background: none; border: none; padding: 2px 4px; font-size: 13px; }
+.ebay-editor .ebay-chip-remove { background: none; border: none; padding: 0; width: 20px; height: 20px; border-radius: 50%; font-size: 14px; }
 
 .ebay-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .ebay-chip {
