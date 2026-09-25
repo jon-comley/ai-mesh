@@ -214,6 +214,7 @@ pub fn router(
         .route("/api/art/current", get(api::art::get_art_current))
         .route("/api/art/general", post(api::art::general_art))
         .route("/api/ebay/analyze", post(api::ebay::analyze))
+        .route("/api/ebay/chat", post(api::ebay_chat::chat))
         .route(
             "/api/ebay/hunts",
             get(api::ebay::list_hunts).post(api::ebay::create_hunt),

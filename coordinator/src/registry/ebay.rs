@@ -1,7 +1,7 @@
 // eBay bargain-finder ("Hunts") persistence: saved searches, the seen-listing
 // dedup set, and the finds feed. See plans/ebay-bargain-finder.md.
 use super::{Registry, gen_uuid, now_unix_millis};
-use ::ebay::{HuntSpec, Listing, TermEntry};
+use ::ebay::{HuntFilter, HuntSpec, Listing, TermEntry};
 use rusqlite::params;
 use tracing::warn;
 
@@ -31,7 +31,8 @@ pub struct EbayFindRecord {
 impl Registry {
     pub fn list_hunts(&self) -> Vec<HuntSpec> {
         let mut stmt = match self.conn.prepare(
-            "SELECT id, name, source_url, terms_json, timeslots_json, marketplace, enabled, goal
+            "SELECT id, name, source_url, terms_json, timeslots_json, marketplace, enabled, goal,
+                    category_id, category_name, max_price_minor
              FROM ebay_hunts ORDER BY created_ms ASC",
         ) {
             Ok(s) => s,
@@ -52,6 +53,11 @@ impl Registry {
                 marketplace: row.get(5)?,
                 enabled: row.get::<_, i64>(6)? != 0,
                 goal: row.get(7)?,
+                filter: HuntFilter {
+                    category_id: row.get(8)?,
+                    category_name: row.get(9)?,
+                    max_price_minor: row.get(10)?,
+                },
             })
         })
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -91,7 +97,25 @@ impl Registry {
             marketplace: marketplace.to_owned(),
             enabled: true,
             goal: goal.to_owned(),
+            filter: HuntFilter::default(),
         }
+    }
+
+    /// Replace a hunt's category and price ceiling. `None` if there is no such hunt.
+    ///
+    /// Separate from `create_hunt` and `update_hunt` on purpose: both take a long
+    /// positional argument list that every caller and test spells out in full, and
+    /// a filter is optional everywhere.
+    pub fn set_hunt_filter(&self, id: &str, filter: &HuntFilter) -> Option<HuntSpec> {
+        let mut hunt = self.get_hunt(id)?;
+        if let Err(e) = self.conn.execute(
+            "UPDATE ebay_hunts SET category_id = ?2, category_name = ?3, max_price_minor = ?4 WHERE id = ?1",
+            params![id, filter.category_id, filter.category_name, filter.max_price_minor],
+        ) {
+            warn!(error = %e, "set_hunt_filter failed");
+        }
+        hunt.filter = filter.clone();
+        Some(hunt)
     }
 
     /// Update a hunt's mutable fields. `None` leaves that field unchanged.
@@ -344,6 +368,77 @@ mod tests {
             enabled: true,
             is_misspelling: false,
         }]
+    }
+
+    #[test]
+    fn a_new_hunt_has_no_filter() {
+        let reg = Registry::new();
+        let hunt = reg.create_hunt("Strat", "https://x", sample_terms(), vec![], "EBAY_GB", "");
+
+        assert!(hunt.filter.is_empty());
+        assert!(reg.get_hunt(&hunt.id).unwrap().filter.is_empty());
+    }
+
+    #[test]
+    fn a_filter_survives_a_reload() {
+        let reg = Registry::new();
+        let hunt = reg.create_hunt("Runaround", "", sample_terms(), vec![], "EBAY_GB", "");
+
+        let saved = reg
+            .set_hunt_filter(
+                &hunt.id,
+                &HuntFilter {
+                    category_id: Some("9801".into()),
+                    category_name: Some("Cars".into()),
+                    max_price_minor: Some(150_000),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(saved.filter.category_id.as_deref(), Some("9801"));
+
+        let reloaded = reg.get_hunt(&hunt.id).unwrap();
+        assert_eq!(reloaded.filter.category_id.as_deref(), Some("9801"));
+        assert_eq!(reloaded.filter.category_name.as_deref(), Some("Cars"));
+        assert_eq!(reloaded.filter.max_price_minor, Some(150_000));
+    }
+
+    #[test]
+    fn a_filter_can_be_cleared() {
+        let reg = Registry::new();
+        let hunt = reg.create_hunt("Runaround", "", sample_terms(), vec![], "EBAY_GB", "");
+        reg.set_hunt_filter(
+            &hunt.id,
+            &HuntFilter { category_id: Some("9801".into()), ..Default::default() },
+        );
+
+        reg.set_hunt_filter(&hunt.id, &HuntFilter::default());
+
+        assert!(reg.get_hunt(&hunt.id).unwrap().filter.is_empty());
+    }
+
+    #[test]
+    fn setting_the_filter_of_a_hunt_that_is_not_there_is_none() {
+        let reg = Registry::new();
+
+        assert!(reg.set_hunt_filter("nope", &HuntFilter::default()).is_none());
+    }
+
+    #[test]
+    fn editing_a_hunt_leaves_its_filter_alone() {
+        let reg = Registry::new();
+        let hunt = reg.create_hunt("Runaround", "", sample_terms(), vec![], "EBAY_GB", "");
+        reg.set_hunt_filter(
+            &hunt.id,
+            &HuntFilter { category_id: Some("9801".into()), max_price_minor: Some(99), ..Default::default() },
+        );
+
+        reg.update_hunt(&hunt.id, Some("Renamed"), None, None, None, None, None);
+
+        let after = reg.get_hunt(&hunt.id).unwrap();
+        assert_eq!(after.name, "Renamed");
+        assert_eq!(after.filter.category_id.as_deref(), Some("9801"));
+        assert_eq!(after.filter.max_price_minor, Some(99));
     }
 
     #[test]

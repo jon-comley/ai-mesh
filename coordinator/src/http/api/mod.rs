@@ -17,6 +17,7 @@ pub mod av;
 pub mod bluetooth;
 pub mod chat;
 pub mod ebay;
+pub mod ebay_chat;
 pub mod effects;
 pub mod gateway;
 pub mod lights;

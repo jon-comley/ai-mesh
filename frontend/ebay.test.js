@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // and testing them through the panel they actually build is the point: the
 // three bugs this file covers were all "the DOM does not have the thing in it".
 const apiCalls = [];
-let hunts, finds, runNowResolve, rankReply;
+let hunts, finds, runNowResolve, rankReply, chatQueue = [], analyzeReply;
 
 vi.mock('/static/api.js', () => ({
   api: (path, opts) => {
@@ -15,6 +15,13 @@ vi.mock('/static/api.js', () => ({
     if (path.endsWith('/run-now')) return new Promise(r => { runNowResolve = () => r(json({ new_listings: 2 })); });
     if (path.endsWith('/rank')) return Promise.resolve(json(rankReply));
     if (path.endsWith('/reviewed')) return Promise.resolve(json({}));
+    if (path === '/ebay/analyze') return Promise.resolve(json(analyzeReply));
+    if (path === '/ebay/chat') {
+      const next = chatQueue.shift();
+      // `{ __fail: text }` is a non-2xx answer, as the server gives when Online AI is unset.
+      if (next?.__fail) return Promise.resolve({ ok: false, text: () => Promise.resolve(next.__fail), json: () => Promise.reject(new Error('not json')) });
+      return Promise.resolve(json(next));
+    }
     return Promise.resolve(json({}));
   },
 }));
@@ -56,6 +63,8 @@ beforeEach(() => {
   hunts = [{ id: 'h1', name: 'M920q', enabled: true, terms: [], timeslots: [], goal: 'headless CI runner' }];
   finds = [];
   rankReply = { scored: 2, considered: 2, refresh_error: null };
+  chatQueue = [];
+  analyzeReply = {};
   window.confirm = () => true;
 });
 
@@ -365,5 +374,171 @@ describe('ranking', () => {
     const [msg, isError] = showToast.mock.calls.at(-1);
     expect(msg).toContain('may include sold listings');
     expect(isError).toBe(true);
+  });
+});
+
+describe('describing a hunt in words', () => {
+  const openNew = async panel => { panel.querySelector('#ebay-new-hunt').click(); await settle(); };
+  const say = async (panel, text) => {
+    panel.querySelector('#ebay-chat-input').value = text;
+    panel.querySelector('#ebay-chat-send').click();
+    await settle();
+    await settle();
+  };
+  const draft = (over = {}) => ({
+    name: 'Cheap runaround', goal: 'cheap reliable car',
+    terms: [{ text: 'ford fiesta', enabled: true, is_misspelling: false }, { text: 'vauxhall corsa', enabled: true, is_misspelling: false }],
+    max_price_minor: 150_000, category_id: '9801', category_name: 'Cars', marketplace: 'EBAY_GB', ...over,
+  });
+
+  // What the chat endpoint will answer, in order, before the panel is mounted.
+  async function mountWithChat(replies) {
+    chatQueue = [...replies];
+    return mount();
+  }
+
+  it('offers the chat only when creating a hunt, not when editing one', async () => {
+    const panel = await mount();
+    await openNew(panel);
+    expect(panel.querySelector('#ebay-chat-input')).not.toBeNull();
+
+    panel.querySelector('.ebay-hunt-open').click();
+    await settle();
+    expect(panel.querySelector('#ebay-chat-input')).toBeNull();
+  });
+
+  it('sends the conversation so far, and only user and assistant turns', async () => {
+    const panel = await mountWithChat([{ reply: 'What is your budget?', draft: null }]);
+    await openNew(panel);
+    await say(panel, 'a cheap runaround car');
+
+    const call = apiCalls.find(c => c.path === '/ebay/chat');
+    expect(call.opts.method).toBe('POST');
+    expect(call.opts.body.messages).toEqual([{ role: 'user', content: 'a cheap runaround car' }]);
+  });
+
+  it('shows what was said and what came back', async () => {
+    const panel = await mountWithChat([{ reply: 'What is your budget?', draft: null }]);
+    await openNew(panel);
+    await say(panel, 'a cheap runaround car');
+
+    const log = panel.querySelector('#ebay-chat-log');
+    expect(log.hidden).toBe(false);
+    expect([...log.querySelectorAll('.ebay-chat-msg')].map(m => m.textContent))
+      .toEqual(['a cheap runaround car', 'What is your budget?']);
+  });
+
+  it('does not treat model text as markup', async () => {
+    const panel = await mountWithChat([{ reply: '<img src=x onerror=alert(1)>', draft: null }]);
+    await openNew(panel);
+    await say(panel, 'hello');
+
+    expect(panel.querySelector('#ebay-chat-log img')).toBeNull();
+  });
+
+  it('fills the form from a draft', async () => {
+    const panel = await mountWithChat([{ reply: 'Set up.', draft: draft() }]);
+    await openNew(panel);
+    await say(panel, 'cheap runaround under 1500');
+
+    expect(panel.querySelector('#ebay-name').value).toBe('Cheap runaround');
+    expect(panel.querySelector('#ebay-goal').value).toBe('cheap reliable car');
+    expect(panel.querySelector('#ebay-max-price').value).toBe('1500');
+    expect(panel.querySelector('#ebay-filter-category').textContent).toContain('Cars');
+    expect([...panel.querySelectorAll('#ebay-terms .ebay-chip-toggle')].map(b => b.textContent.trim()))
+      .toEqual(['ford fiesta', 'vauxhall corsa']);
+  });
+
+  it('saves the drafted category and price with the hunt', async () => {
+    const panel = await mountWithChat([{ reply: 'Set up.', draft: draft() }]);
+    await openNew(panel);
+    await say(panel, 'cheap runaround under 1500');
+
+    panel.querySelector('#ebay-save').click();
+    await settle();
+    const post = apiCalls.find(c => c.path === '/ebay/hunts' && c.opts?.method === 'POST');
+    expect(post.opts.body).toMatchObject({
+      name: 'Cheap runaround', category_id: '9801', category_name: 'Cars', max_price_minor: 150_000,
+    });
+  });
+
+  it('lets the person take the category off before saving', async () => {
+    const panel = await mountWithChat([{ reply: 'Set up.', draft: draft() }]);
+    await openNew(panel);
+    await say(panel, 'cheap runaround');
+
+    panel.querySelector('#ebay-filter-category .ebay-chip-remove').click();
+    panel.querySelector('#ebay-save').click();
+    await settle();
+    const post = apiCalls.find(c => c.path === '/ebay/hunts' && c.opts?.method === 'POST');
+    expect(post.opts.body.category_id).toBe('');
+  });
+
+  it('turns a typed price in pounds into pence, and nothing into no ceiling', async () => {
+    const panel = await mount();
+    await openNew(panel);
+    panel.querySelector('#ebay-name').value = 'Anything';
+    panel.querySelector('#ebay-max-price').value = '1299.05';
+    panel.querySelector('#ebay-save').click();
+    await settle();
+    let post = apiCalls.filter(c => c.path === '/ebay/hunts' && c.opts?.method === 'POST').at(-1);
+    expect(post.opts.body.max_price_minor).toBe(129_905);
+
+    await openNew(panel);
+    panel.querySelector('#ebay-name').value = 'Anything';
+    panel.querySelector('#ebay-max-price').value = '';
+    panel.querySelector('#ebay-save').click();
+    await settle();
+    post = apiCalls.filter(c => c.path === '/ebay/hunts' && c.opts?.method === 'POST').at(-1);
+    expect(post.opts.body.max_price_minor).toBe(0);
+  });
+
+  it('carries an existing hunt\'s category and price into its editor and back out', async () => {
+    hunts = [{ id: 'h1', name: 'Runaround', enabled: true, terms: [], timeslots: [],
+      category_id: '9801', category_name: 'Cars', max_price_minor: 99_900 }];
+    const panel = await mount();
+    panel.querySelector('.ebay-hunt-open').click();
+    await settle();
+
+    expect(panel.querySelector('#ebay-filter-category').textContent).toContain('Cars');
+    expect(panel.querySelector('#ebay-max-price').value).toBe('999');
+
+    panel.querySelector('#ebay-save').click();
+    await settle();
+    const patch = apiCalls.find(c => c.opts?.method === 'PATCH');
+    expect(patch.opts.body).toMatchObject({ category_id: '9801', max_price_minor: 99_900 });
+  });
+
+  it('says so, in the log, when the chat fails, and keeps the person\'s message', async () => {
+    const panel = await mountWithChat([{ __fail: 'the hunt chat needs Online AI' }]);
+    await openNew(panel);
+    await say(panel, 'a car');
+
+    const lines = [...panel.querySelectorAll('.ebay-chat-msg')];
+    expect(lines.at(-1).classList.contains('ebay-chat-error')).toBe(true);
+    expect(lines.at(-1).textContent).toContain('Online AI');
+    expect(lines[0].textContent).toBe('a car');
+  });
+
+  it('does not send an error line back to the model on the next turn', async () => {
+    const panel = await mountWithChat([{ __fail: 'boom' }, { reply: 'ok', draft: null }]);
+    await openNew(panel);
+    await say(panel, 'a car');
+    await say(panel, 'a cheap car');
+
+    const second = apiCalls.filter(c => c.path === '/ebay/chat').at(-1);
+    expect(second.opts.body.messages.map(m => m.content)).toEqual(['a car', 'a cheap car']);
+  });
+
+  it('copies the listing\'s own category when a URL is analysed', async () => {
+    const panel = await mountWithChat([]);
+    analyzeReply = { item_id: '1', title: 'Fiesta', terms: [{ text: 'fiesta', enabled: true, is_misspelling: false }],
+      marketplace: 'EBAY_GB', category_id: '9801', category_name: 'Ford' };
+    await openNew(panel);
+    panel.querySelector('#ebay-url').value = 'https://www.ebay.co.uk/itm/123456789012';
+    panel.querySelector('#ebay-analyze').click();
+    await settle();
+
+    expect(panel.querySelector('#ebay-filter-category').textContent).toContain('Ford');
   });
 });

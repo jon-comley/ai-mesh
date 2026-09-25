@@ -430,6 +430,24 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             "score",
             "ALTER TABLE ebay_finds ADD COLUMN score INTEGER",
         ),
+        // Category and price ceiling: what keeps a hunt for a car from being
+        // answered with car parts. All nullable, and null means "no filter",
+        // which is how every hunt saved before 2026-09-25 behaved.
+        (
+            "ebay_hunts",
+            "category_id",
+            "ALTER TABLE ebay_hunts ADD COLUMN category_id TEXT",
+        ),
+        (
+            "ebay_hunts",
+            "category_name",
+            "ALTER TABLE ebay_hunts ADD COLUMN category_name TEXT",
+        ),
+        (
+            "ebay_hunts",
+            "max_price_minor",
+            "ALTER TABLE ebay_hunts ADD COLUMN max_price_minor INTEGER",
+        ),
     ] {
         let cols: Vec<String> = conn
             .prepare(&format!("PRAGMA table_info({table})"))?
