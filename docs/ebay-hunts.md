@@ -1,7 +1,7 @@
 # Hunts (eBay Bargain Finder)
 
-The **Hunts** tab watches eBay for bargains on something you want: paste a
-listing URL, the coordinator asks the configured LLM for good search terms
+The **Hunts** tab watches eBay for bargains on something you want: describe it
+in words, or paste a listing URL, and the coordinator asks the configured LLM for good search terms
 (the clean name plus realistic misspellings/mis-listings sellers use), you
 pick daily timeslots, and it searches on that schedule — surfacing new
 matches in a live ticker and, if configured, a phone push via
@@ -60,28 +60,47 @@ reasoning — the ticker shows "not yet judged" instead of a verdict.
 
 ## Using it
 
-1. **New hunt** → paste an eBay item URL → **Analyze**. This looks the item
-   up and (if Online AI is configured) fills in a set of term chips — tap a
-   chip to enable/disable it, × to remove it, or type your own in the box
-   below.
-2. Tap timeslots on the 24-hour strip for when this hunt should run each day
+1. **New hunt**, then either:
+   - **Describe what you want** in the chat box at the top: *"a cheap runaround
+     car under 1500 pounds"*. The model works out what to search for and fills
+     the whole form in as you talk (name, what it's for, search terms, a price
+     ceiling and a category). It may ask one short question first if it truly
+     cannot tell what you mean. Ask for changes in the same box (*"add the Honda
+     Jazz"*, *"make it 1200"*) and it sends the whole form again. Nothing is saved
+     until you press **Create hunt**, so check and change anything first.
+   - or paste an eBay item URL and press **Analyze**. This looks the item up and
+     (if Online AI is configured) fills in a set of term chips, plus the
+     listing's own category.
+
+   Either way, tap a chip to enable/disable it, × to remove it, or type your own
+   term in the box below.
+2. **Keep it to** sets a category and a price ceiling. Without a category a
+   hunt matches on words alone, and words do not know a car from a car part: a
+   hunt for a "Ford Fiesta" also returns every wing mirror carrying that name. A
+   category confines the search to where the thing itself is listed. The chat
+   picks one by asking eBay's own category suggestions about each search term and
+   taking the deepest category most of them agree on (five different car models
+   agree on **Cars**); Analyze copies the listing's own. The chip's × takes it
+   off, and the price box is in pounds (blank means no limit). Both are optional.
+   Terms can only be given a category by the chat or Analyze; there is no picker.
+3. Tap timeslots on the 24-hour strip for when this hunt should run each day
    (local time — handles BST/GMT transitions automatically).
-3. **Create hunt**. It's armed immediately and re-arms itself on every
+4. **Create hunt**. It's armed immediately and re-arms itself on every
    coordinator restart from what's persisted in SQLite — you don't need to
    keep anything open for it to keep checking.
-4. **What it's for** (optional, on the hunt) is the single biggest lever on how
+5. **What it's for** (optional, on the hunt) is the single biggest lever on how
    useful the verdicts are. Without it the LLM is given only the hunt's *name*
    — which is the title of the listing you pasted — so it is really answering
    "does this title resemble that string". That is why an M920q hunt returned
    *"not a bargain: different model (M720q)"* for machines that were a better
    buy for the job. Write the purpose instead: *"headless CI runner — core
    count matters most, then RAM; storage secondary."*
-5. **Run** on any hunt row in the sidebar checks eBay immediately, without
+6. **Run** on any hunt row in the sidebar checks eBay immediately, without
    waiting for the next timeslot or opening the hunt. The button holds a
    "Checking…" state for the whole run — a few seconds, since each new listing
    is judged by the LLM — and cannot be pressed twice into the same run. The
    editor's **Check now** does the same thing for the hunt being edited.
-6. **Rank** (inside a hunt) refreshes from eBay and then scores every
+7. **Rank** (inside a hunt) refreshes from eBay and then scores every
    undismissed find 0–100 for how well it serves *What it's for*, in a single
    LLM call, and switches the ticker to **Best fit**. It refreshes first on
    purpose: the Browse API only returns live listings, so this is what keeps a
@@ -90,9 +109,9 @@ reasoning — the ticker shows "not yet judged" instead of a verdict.
    action, not something the nightly does — verdicts are issued per listing as
    it arrives, so the model never sees two candidates together and cannot
    compare them; ranking needs the whole set in one prompt.
-7. Inside a hunt: the enable/disable button pauses it without deleting it, and
+8. Inside a hunt: the enable/disable button pauses it without deleting it, and
    **Delete** removes it along with its history.
-8. The ticker (main panel) shows every match with **the date it was found**,
+9. The ticker (main panel) shows every match with **the date it was found**,
    its price, how much of the matched term the title actually carries, which
    term matched, and the LLM's verdict if judged. A title containing **every**
    keyword of the term that found it is badged `exact` and floated to the top;
@@ -120,4 +139,7 @@ reasoning — the ticker shows "not yet judged" instead of a verdict.
 | Terms are just the plain title, no misspellings | Online AI isn't configured (step 3) — this is the heuristic fallback, not an error |
 | Finds show "not yet judged" for everything | Same as above, or the selected model no longer exists — check the coordinator log for `ebay bargain-verdict LLM call failed`, which now carries the provider's message. From 2026-09-09 to 09-14 every verdict failed with OpenRouter's "This model is unavailable for free" because `openai/gpt-oss-120b:free` was retired; pi1 now judges with Groq's `openai/gpt-oss-120b`. Or the LLM's reply omitted that item from its batch verdict — it's still a real match, just unscored |
 | No phone push even though matches appear in the ticker | ntfy topic not set (step 2), or the LLM returned an explicit *not a bargain* verdict — that is the only thing that suppresses a push. **An unjudged match still pushes** (`None => (true, None)` in `process_hunt_results`), so heuristic mode notifies on everything rather than nothing. Corrected 2026-09-09: this row previously read "pushes only fire for judged bargains", which is the opposite of what the code does. |
+| The chat says it needs Online AI | The chat is the one part of Hunts with no fallback: it needs a saved key and model on the Online AI tab (step 3). Pasting a URL still works without it |
+| A hunt for a thing is answered with its parts and accessories | The hunt has no category. Create it from the chat or Analyze, or check the "Keep it to" chip is there. The chat leaves it off when its terms do not agree on one category (a mixed shopping list), and then only the words limit the search |
+| The chat's draft has odd search terms | Sellers list by make and model, so for a description ("a cheap runaround") the model is told to name specific models. Remove any that do not fit and ask for more in the box |
 | A hunt seems to have stopped checking | Confirm it's still enabled (sidebar shows "on"/"off"); a coordinator restart re-arms every enabled hunt automatically, so this should be self-healing |

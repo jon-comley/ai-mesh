@@ -269,7 +269,7 @@ first thing to look for.
 reads "everything is off" as "everything is broken" will look correct all day and be
 wrong every evening.
 
-## Hunts / eBay Bargain Finder — live on real eBay data since 2026-09-09; verdicts working, goal-aware ranking built (undeployed) since 2026-09-14
+## Hunts / eBay Bargain Finder: live on real eBay data since 2026-09-09; goal-aware ranking live since 2026-09-14; category and price filters and the describe-it-in-words chat live since 2026-09-25
 
 `plans/ebay-bargain-finder.md` is fully implemented and deployed to pi1:
 the `ebay` crate, registry persistence, coordinator HTTP API, background
@@ -313,13 +313,16 @@ See HISTORY.md.
 **Hunts now know what they are FOR (2026-09-14).** `ebay_hunts.goal` is free
 text fed to both prompts, and `POST /api/ebay/hunts/{id}/rank` refreshes from
 eBay then scores every undismissed find 0-100 against that goal in one call,
-with a Best fit order in the ticker. All built, tested and committed — **not
-yet deployed to pi1, and not yet exercised against the real Groq endpoint.**
+with a Best fit order in the ticker. Deployed 2026-09-14 (the running binary had the
+route when checked on 2026-09-25); **not yet exercised against the real Groq endpoint.**
 
 **Open:**
-- **Deploy to pi1** (`just update-coordinator pi1`) — everything since
-  2026-09-14 09:00 is committed but not running. The dashboard assets are
-  `include_str!`'d, so no JS change is live until the binary is replaced.
+- **Hunts made before 2026-09-25 have no category.** They behave as they always did. Open one
+  and it can be given a category only by re-analysing a listing (there is no category picker),
+  or recreate it from the chat. Only one hunt exists (Mac Mini M4), so this is not urgent.
+- **The category can be wrong or absent, and the chat does not say so loudly.** It is the deepest
+  category most terms agree on; a mixed shopping list gets none. The chip is there to check and
+  remove. If it proves too tight in use, a manual category picker is the fix.
 - **Set a `goal` on the three live hunts.** The feature does nothing until
   they have one; the M920q hunts' goal is a headless Playwright CI runner,
   core count first. Until then ranking still scores against the hunt name.

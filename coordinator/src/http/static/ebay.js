@@ -10,6 +10,13 @@ let state = { hunts: [], finds: [], sortBy: 'newest' };
 let editingHunt = null; // null while creating a new hunt
 let draftTerms = [];
 let draftTimeslots = new Set();
+// Category and price ceiling: what keeps a hunt for a car from being answered
+// with car parts. All optional; null means "search everything".
+let draftFilter = { category_id: null, category_name: null, max_price_minor: null };
+// The describe-what-you-want conversation for a NEW hunt. Held here and sent
+// whole on every turn, because the server keeps nothing between requests.
+let chatMessages = [];
+let chatBusy = false;
 
 export function init(panel) {
   panel.innerHTML = `
@@ -149,14 +156,30 @@ function openEditor(hunt) {
   editingHunt = hunt;
   draftTerms = hunt ? hunt.terms.map(t => ({ ...t })) : [];
   draftTimeslots = new Set(hunt ? hunt.timeslots : []);
+  draftFilter = {
+    category_id: hunt?.category_id ?? null,
+    category_name: hunt?.category_name ?? null,
+    max_price_minor: hunt?.max_price_minor ?? null,
+  };
+  chatMessages = [];
+  chatBusy = false;
 
   const editor = document.getElementById('ebay-editor');
   editor.hidden = false;
   editor.innerHTML = `
     <h3>${hunt ? 'Edit hunt' : 'New hunt'}</h3>
     ${hunt ? '' : `
+    <div class="gw-field ebay-chat">
+      <span class="gw-label">Describe what you want</span>
+      <div id="ebay-chat-log" class="ebay-chat-log" role="log" aria-live="polite" hidden></div>
+      <div class="gw-field gw-inline">
+        <input id="ebay-chat-input" type="text" autocomplete="off" placeholder="e.g. a cheap runaround car under £1500">
+        <button id="ebay-chat-send" type="button">Send</button>
+      </div>
+      <span class="gw-hint">The form below fills in as you talk. Change anything before you create the hunt.</span>
+    </div>
     <div class="gw-field gw-inline">
-      <label for="ebay-url">Item URL</label>
+      <label for="ebay-url">…or a listing</label>
       <input id="ebay-url" type="text" autocomplete="off" placeholder="paste an eBay listing URL…">
       <button id="ebay-analyze" type="button">Analyze</button>
     </div>`}
@@ -170,6 +193,15 @@ function openEditor(hunt) {
       <span class="gw-hint">Optional, and the single biggest lever on how good the
         verdicts and ranking are. Without it the LLM only knows the hunt name, so it
         scores similarity to that title rather than fitness for the job.</span>
+    </div>
+    <div class="gw-field">
+      <span class="gw-label">Keep it to</span>
+      <div id="ebay-filter-category" class="ebay-chips"></div>
+      <div class="gw-field gw-inline">
+        <label for="ebay-max-price">Up to (£)</label>
+        <input id="ebay-max-price" type="number" inputmode="decimal" min="0" step="any" placeholder="no limit" value="${escapeHtml(minorToInput(draftFilter.max_price_minor))}">
+      </div>
+      <span class="gw-hint">A category stops a hunt for a car being answered with car parts.</span>
     </div>
     <div class="gw-field">
       <span class="gw-label">Search terms</span>
@@ -215,6 +247,10 @@ function openEditor(hunt) {
   });
   if (!hunt) {
     editor.querySelector('#ebay-analyze').addEventListener('click', analyzeUrl);
+    editor.querySelector('#ebay-chat-send').addEventListener('click', sendChat);
+    editor.querySelector('#ebay-chat-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') sendChat();
+    });
   } else {
     const runBtn = editor.querySelector('#ebay-run-now');
     runBtn.addEventListener('click', () => runNow(hunt.id, runBtn));
@@ -238,6 +274,99 @@ function openEditor(hunt) {
 
   renderTermChips();
   renderTimeslotChips();
+  renderFilterCategory();
+}
+
+// "1500" → 150000 pence, and "" or nonsense or zero → null (no ceiling).
+function poundsToMinor(text) {
+  const n = parseFloat(text);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null;
+}
+
+function minorToInput(minor) {
+  return minor == null ? '' : String(minor / 100);
+}
+
+function renderFilterCategory() {
+  const box = document.getElementById('ebay-filter-category');
+  if (!box) return;
+  if (!draftFilter.category_id) {
+    box.innerHTML = '<p class="placeholder">Any category. The chat picks one for you, or Analyze copies the listing\'s.</p>';
+    return;
+  }
+  box.innerHTML = `
+    <span class="ebay-chip">
+      <span>${escapeHtml(draftFilter.category_name || draftFilter.category_id)}</span>
+      <button type="button" class="ebay-chip-remove" aria-label="remove category">×</button>
+    </span>`;
+  box.querySelector('.ebay-chip-remove').addEventListener('click', () => {
+    draftFilter.category_id = null;
+    draftFilter.category_name = null;
+    renderFilterCategory();
+  });
+}
+
+function renderChat() {
+  const log = document.getElementById('ebay-chat-log');
+  if (!log) return;
+  log.hidden = chatMessages.length === 0;
+  log.innerHTML = chatMessages.map(m =>
+    `<div class="ebay-chat-msg ebay-chat-${m.role}${m.error ? ' ebay-chat-error' : ''}">${escapeHtml(m.content)}</div>`
+  ).join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+// A draft from the chat replaces the form: the model sends the WHOLE draft again
+// when the person asks for a change, so replacing is right, and it means the last
+// thing said is what the form shows. Timeslots are the person's own and stay.
+function applyDraft(d) {
+  const name = document.getElementById('ebay-name');
+  if (name) name.value = d.name ?? '';
+  const goal = document.getElementById('ebay-goal');
+  if (goal) goal.value = d.goal ?? '';
+  draftTerms = (d.terms ?? []).map(t => ({ ...t }));
+  draftFilter = {
+    category_id: d.category_id ?? null,
+    category_name: d.category_name ?? null,
+    max_price_minor: d.max_price_minor ?? null,
+  };
+  const price = document.getElementById('ebay-max-price');
+  if (price) price.value = minorToInput(draftFilter.max_price_minor);
+  renderTermChips();
+  renderFilterCategory();
+}
+
+async function sendChat() {
+  const input = document.getElementById('ebay-chat-input');
+  const text = input?.value.trim();
+  if (!text || chatBusy) return;
+
+  chatMessages.push({ role: 'user', content: text });
+  input.value = '';
+  chatBusy = true;
+  const btn = document.getElementById('ebay-chat-send');
+  if (btn) { btn.disabled = true; btn.textContent = 'Thinking…'; }
+  renderChat();
+
+  try {
+    // Error lines are for the person to read, not for the model to be told about.
+    const history = chatMessages.filter(m => !m.error).map(({ role, content }) => ({ role, content }));
+    const res = await api('/ebay/chat', { method: 'POST', body: { messages: history } });
+    if (!res.ok) {
+      chatMessages.push({ role: 'assistant', content: (await res.text()) || 'That did not work.', error: true });
+      return;
+    }
+    const data = await res.json();
+    chatMessages.push({ role: 'assistant', content: data.reply });
+    if (data.draft) applyDraft(data.draft);
+  } catch (e) {
+    chatMessages.push({ role: 'assistant', content: `That did not work: ${e}`, error: true });
+  } finally {
+    chatBusy = false;
+    const again = document.getElementById('ebay-chat-send');
+    if (again) { again.disabled = false; again.textContent = 'Send'; }
+    renderChat();
+  }
 }
 
 function closeEditor() {
@@ -250,7 +379,7 @@ function renderTermChips() {
   const box = document.getElementById('ebay-terms');
   if (!box) return;
   if (!draftTerms.length) {
-    box.innerHTML = '<p class="placeholder">No terms yet — paste a URL and Analyze, or add one below.</p>';
+    box.innerHTML = '<p class="placeholder">No terms yet. Describe what you want above, paste a listing, or add one below.</p>';
     return;
   }
   box.innerHTML = draftTerms.map((t, i) => `
@@ -315,9 +444,13 @@ async function analyzeUrl() {
     if (!res.ok) { showToast(`Analyze failed: ${await res.text()}`, true); return; }
     const data = await res.json();
     draftTerms = data.terms;
+    // The listing's own category, so the hunt searches inside it.
+    draftFilter.category_id = data.category_id ?? null;
+    draftFilter.category_name = data.category_name ?? null;
     const nameInput = document.getElementById('ebay-name');
     if (nameInput && !nameInput.value.trim()) nameInput.value = data.title;
     renderTermChips();
+    renderFilterCategory();
   } catch (e) {
     showToast(`Analyze failed: ${e}`, true);
   } finally {
@@ -333,6 +466,10 @@ async function saveHunt() {
     terms: draftTerms,
     timeslots: Array.from(draftTimeslots).sort((a, b) => a - b),
     goal: document.getElementById('ebay-goal')?.value.trim() ?? '',
+    // Empty and zero mean "none": on an edit that is how a filter is cleared.
+    category_id: draftFilter.category_id ?? '',
+    category_name: draftFilter.category_name ?? '',
+    max_price_minor: poundsToMinor(document.getElementById('ebay-max-price')?.value) ?? 0,
   };
   let res;
   if (editingHunt) {

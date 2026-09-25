@@ -11,6 +11,61 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Hunts: describe it in words, and stay in the right category (2026-09-25)
+
+Jack, on the mesh for the first time: *"we wanted to find a cheap runaround car, so we
+copied a url, analysed and all that came back was car parts, so no good."* And the
+Hunts page on his iPhone ran off both sides and would not zoom to fit.
+
+**The car parts were the search, not the terms.** A hunt sends eBay only `q`, so a term
+like "Ford Fiesta" matches a wing mirror as readily as a car. The fix is a category on
+the hunt (`category_id`, `category_name`) and a price ceiling (`max_price_minor`), sent as
+Browse `category_ids` and `filter=price:[..1500.00],priceCurrency:GBP`. **Both checked
+against the real API** rather than trusted from the docs: "ford fiesta" went 131 results to
+125 in Cars, and the ceiling was exact (39 results, none over 1500). Two things that cost a
+probe each: `q` does not take `a OR b` (returns nothing at all; the app already searches one
+term at a time, which is why it never mattered), and a ceiling needs its currency beside it.
+All three columns are nullable and null means "search everything", so every hunt saved before
+today behaves exactly as it did. `HuntFilter` is flattened into the hunt's JSON and set through
+its own `set_hunt_filter`, because `create_hunt` and `update_hunt` take long positional lists
+that eighteen call sites spell out in full.
+
+**Analyze now copies the listing's own category** (`categoryId` from the item lookup), which is
+the fix for the case Jack hit.
+
+**The chat window (`POST /api/ebay/chat`, `ebay_chat.rs`).** Describe what you want; the model
+returns a reply and, when it has enough, a draft that fills the editor for a person to check.
+Nothing is saved by it. The browser holds the conversation and sends all of it each turn, so
+the server keeps no state. The model's output is treated as untrusted: parsed out of prose and
+fences, terms trimmed, capped and deduplicated, a price of NaN or a trillion dropped, roles
+other than user and assistant refused so a caller cannot inject a system message.
+
+**Two things about the model that only a real call showed.** (1) For "a cheap runaround car" its
+first draft searched for the words "runaround car", which no seller writes: they list by make and
+model. The prompt now says to name the specific models that fit, and the same request gives
+Fiesta, Corsa, Aygo, Focus, Astra, Micra, Ibiza. (2) It cannot be trusted to name a category.
+
+**The category comes from eBay, by vote, and the first design was wrong.** The obvious plan was to
+have the model name the kind of thing ("used cars") and look that up in the Taxonomy API. Run for
+real, it returned **Collectables > Flags > Other Flags**, and "cars" returned toy cars: the API is
+built for item titles, not descriptions. It answers specific titles well ("ford fiesta" is Cars > Ford,
+"vauxhall corsa" is Cars > Vauxhall). So each search term is looked up (up to five), and the deepest
+category that MORE THAN HALF of them pass through wins. Five different makes agree on **Cars**, one
+term that lands in Fuel Filters is outvoted, and terms with no majority give no category rather than
+a guess. The model is no longer asked for a category at all. Live: cars gave 9801 Cars, a laptop
+request PC Laptops, a Stratocaster Electric Guitars, an M920q PC Desktops.
+
+**The iPhone layout.** At 390px the sidebar column was 405px wide. The mobile grid used a bare
+`1fr`, which will not shrink below its content, and the settings rows are wide; `minmax(0, 1fr)`
+fixes it. Found by driving an iPhone-sized browser at the real stylesheet with a mocked API and
+measuring which elements ran past the viewport, which also turned up two more: the 160px `flex`
+basis meant for inputs in a row set the HEIGHT of stacked ones (Hunt name was a tall empty box), and
+the general `.ebay-editor button` rule outweighed the chips' own so each chip drew a box in a box.
+
+**The ROADMAP was wrong that goal ranking was undeployed.** The binary that was running before today
+already contained the `/rank` route (checked with `strings` on `ai-mesh-coordinator.prev`), so it went
+out on 2026-09-14. Deployed today in two steps (CSS alone, then the chat), each kept as `.prev`.
+
 ## pi1 is a coordinator and nothing else (2026-09-19, finished 2026-09-20)
 
 Jon, after the card filled: *"pi1 is coordinator so doesn't need weights"*, then

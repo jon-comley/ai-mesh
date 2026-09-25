@@ -12,7 +12,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::Timelike;
-use ebay::{EbayClient, EbayError, HuntSpec, ItemDetail, Listing, TermEntry};
+use ebay::{EbayClient, EbayError, HuntFilter, HuntSpec, ItemDetail, Listing, TermEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,7 @@ use crate::registry::{EbayFindRecord, Registry};
 /// stored, mirroring `crate::cloud::GATEWAY_USER`.
 pub const EBAY_USER: &str = "__ebay__";
 
-fn default_marketplace() -> String {
+pub(super) fn default_marketplace() -> String {
     "EBAY_GB".into()
 }
 
@@ -122,7 +122,7 @@ pub async fn set_config(
     Json(config_snapshot(&creds)).into_response()
 }
 
-fn build_client(reg: &Registry) -> Option<EbayClient> {
+pub(super) fn build_client(reg: &Registry) -> Option<EbayClient> {
     let creds = load_ebay_creds(reg);
     if creds.client_id.is_empty() || creds.client_secret.is_empty() {
         return None;
@@ -143,6 +143,19 @@ pub struct AnalyzeResponse {
     title: String,
     terms: Vec<TermEntry>,
     marketplace: String,
+    /// The listing's own eBay category, so a hunt made from it can search inside
+    /// that category. Without this a hunt from a car listing matched every car
+    /// part carrying the same name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category_name: Option<String>,
+}
+
+/// The leaf of an eBay category path: "Vehicles > Cars > Ford" is "Ford".
+fn category_leaf(path: &str) -> Option<String> {
+    let leaf = path.rsplit('>').next()?.trim();
+    (!leaf.is_empty()).then(|| leaf.to_string())
 }
 
 /// `POST /api/ebay/analyze` — look up the pasted eBay item URL, then ask the
@@ -185,11 +198,14 @@ pub async fn analyze(
         }
     };
     let terms = generate_terms(&item, &registry).await;
+    let category_name = item.category.as_deref().and_then(category_leaf);
     Json(AnalyzeResponse {
         item_id: item.item_id,
         title: item.title,
         terms,
         marketplace: default_marketplace(),
+        category_id: item.category_id.filter(|c| !c.is_empty()),
+        category_name,
     })
     .into_response()
 }
@@ -294,6 +310,9 @@ pub struct CreateHuntBody {
     /// What the hunt is for, in the user's words. See `HuntSpec::goal`.
     #[serde(default)]
     goal: String,
+    /// Category and price ceiling, flat in the JSON. See `ebay::HuntFilter`.
+    #[serde(default, flatten)]
+    filter: HuntFilter,
 }
 
 pub async fn create_hunt(
@@ -306,7 +325,7 @@ pub async fn create_hunt(
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, "name must not be empty").into_response();
     }
-    let hunt = registry.lock().unwrap().create_hunt(
+    let mut hunt = registry.lock().unwrap().create_hunt(
         &name,
         &body.source_url,
         body.terms,
@@ -314,6 +333,12 @@ pub async fn create_hunt(
         &body.marketplace,
         body.goal.trim(),
     );
+    if !body.filter.is_empty() {
+        let filter = clean_filter(body.filter);
+        if let Some(with_filter) = registry.lock().unwrap().set_hunt_filter(&hunt.id, &filter) {
+            hunt = with_filter;
+        }
+    }
     if hunt.enabled {
         arm_hunt_timer(state.clone(), registry.clone(), hunt.clone());
     }
@@ -328,6 +353,39 @@ pub struct UpdateHuntBody {
     marketplace: Option<String>,
     enabled: Option<bool>,
     goal: Option<String>,
+    /// An empty string clears the category (and its name).
+    category_id: Option<String>,
+    category_name: Option<String>,
+    /// Zero clears the ceiling.
+    max_price_minor: Option<i64>,
+}
+
+/// A category id or name of nothing, or a price of nothing, is no filter.
+fn clean_filter(filter: HuntFilter) -> HuntFilter {
+    let text = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+    let category_id = text(filter.category_id);
+
+    HuntFilter {
+        // A name with no id filters nothing, so it goes too.
+        category_name: category_id.as_ref().and_then(|_| text(filter.category_name)),
+        category_id,
+        max_price_minor: filter.max_price_minor.filter(|p| *p > 0),
+    }
+}
+
+/// The filter a PATCH leaves a hunt with, or `None` if it said nothing about one.
+/// Fields it leaves out keep their value; an empty category or a zero price clears.
+fn filter_after_update(current: &HuntFilter, body: &UpdateHuntBody) -> Option<HuntFilter> {
+    if body.category_id.is_none() && body.category_name.is_none() && body.max_price_minor.is_none() {
+        return None;
+    }
+
+    Some(clean_filter(HuntFilter {
+        category_id: body.category_id.clone().or_else(|| current.category_id.clone()),
+        category_name: body.category_name.clone().or_else(|| current.category_name.clone()),
+        max_price_minor: body.max_price_minor.or(current.max_price_minor),
+    }))
 }
 
 pub async fn update_hunt(
@@ -340,15 +398,20 @@ pub async fn update_hunt(
     let updated = registry.lock().unwrap().update_hunt(
         &id,
         body.name.as_deref(),
-        body.terms,
-        body.timeslots,
+        body.terms.clone(),
+        body.timeslots.clone(),
         body.marketplace.as_deref(),
         body.enabled,
         body.goal.as_deref().map(str::trim),
     );
-    let Some(hunt) = updated else {
+    let Some(mut hunt) = updated else {
         return (StatusCode::NOT_FOUND, "hunt not found").into_response();
     };
+    if let Some(filter) = filter_after_update(&hunt.filter, &body)
+        && let Some(with_filter) = registry.lock().unwrap().set_hunt_filter(&id, &filter)
+    {
+        hunt = with_filter;
+    }
     // Any update (timeslots, terms, enabled) invalidates an outstanding
     // timer — re-arm picks up the fresh spec; disabling just kills it.
     if hunt.enabled {
@@ -570,7 +633,7 @@ pub async fn run_hunt_cycle(
     let mut term_matches: Vec<(String, Listing)> = Vec::new();
     for term in &terms {
         match client
-            .search(std::slice::from_ref(term), &hunt.marketplace)
+            .search(std::slice::from_ref(term), &hunt.marketplace, &hunt.filter)
             .await
         {
             Ok(listings) => term_matches.extend(listings.into_iter().map(|l| (term.clone(), l))),
@@ -906,6 +969,100 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("\"name\":\"Strat\""), "body: {body}");
         assert_eq!(registry.lock().unwrap().list_hunts().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_hunt_saves_a_category_and_price_ceiling() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let (status, body) = send_with_body(
+            ebay_router(state.clone(), registry.clone()),
+            "POST",
+            "/api/ebay/hunts?token=",
+            r#"{"name":"Runaround","source_url":"","terms":[],"timeslots":[],
+                "category_id":"9801","category_name":"Cars","max_price_minor":150000}"#,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"category_id\":\"9801\""), "body: {body}");
+        let saved = registry.lock().unwrap().list_hunts().remove(0);
+        assert_eq!(saved.filter.category_id.as_deref(), Some("9801"));
+        assert_eq!(saved.filter.category_name.as_deref(), Some("Cars"));
+        assert_eq!(saved.filter.max_price_minor, Some(150_000));
+    }
+
+    #[tokio::test]
+    async fn create_hunt_without_a_filter_still_works_as_before() {
+        let registry = make_registry();
+        let state = make_state(vec![], empty_connections());
+        let (status, body) = send_with_body(
+            ebay_router(state, registry.clone()),
+            "POST",
+            "/api/ebay/hunts?token=",
+            r#"{"name":"Strat","source_url":"","terms":[],"timeslots":[]}"#,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("category_id"), "body: {body}");
+        assert!(registry.lock().unwrap().list_hunts()[0].filter.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_hunt_can_set_and_then_clear_the_filter() {
+        let registry = make_registry();
+        let hunt = registry.lock().unwrap().create_hunt("Strat", "", vec![], vec![], "EBAY_GB", "");
+        let state = make_state(vec![], empty_connections());
+        let uri = format!("/api/ebay/hunts/{}?token=", hunt.id);
+
+        send(ebay_router(state.clone(), registry.clone()), "PATCH", &uri,
+             r#"{"category_id":"9801","category_name":"Cars","max_price_minor":150000}"#).await;
+        let set = registry.lock().unwrap().get_hunt(&hunt.id).unwrap();
+        assert_eq!(set.filter.category_id.as_deref(), Some("9801"));
+        assert_eq!(set.filter.max_price_minor, Some(150_000));
+
+        send(ebay_router(state, registry.clone()), "PATCH", &uri,
+             r#"{"category_id":"","max_price_minor":0}"#).await;
+        assert!(registry.lock().unwrap().get_hunt(&hunt.id).unwrap().filter.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_hunt_that_says_nothing_of_the_filter_keeps_it() {
+        let registry = make_registry();
+        let hunt = registry.lock().unwrap().create_hunt("Strat", "", vec![], vec![], "EBAY_GB", "");
+        registry.lock().unwrap().set_hunt_filter(
+            &hunt.id,
+            &HuntFilter { category_id: Some("9801".into()), ..Default::default() },
+        );
+        let state = make_state(vec![], empty_connections());
+
+        send(ebay_router(state, registry.clone()), "PATCH",
+             &format!("/api/ebay/hunts/{}?token=", hunt.id), r#"{"name":"Renamed"}"#).await;
+
+        let after = registry.lock().unwrap().get_hunt(&hunt.id).unwrap();
+        assert_eq!(after.name, "Renamed");
+        assert_eq!(after.filter.category_id.as_deref(), Some("9801"));
+    }
+
+    #[test]
+    fn a_category_name_with_no_id_is_dropped_and_a_zero_price_is_no_price() {
+        let cleaned = clean_filter(HuntFilter {
+            category_id: Some("  ".into()),
+            category_name: Some("Cars".into()),
+            max_price_minor: Some(0),
+        });
+
+        assert!(cleaned.is_empty());
+        assert!(cleaned.category_name.is_none());
+    }
+
+    #[test]
+    fn the_category_of_a_listing_is_the_last_part_of_its_path() {
+        assert_eq!(category_leaf("Vehicles > Cars > Ford"), Some("Ford".to_string()));
+        assert_eq!(category_leaf("Cars"), Some("Cars".to_string()));
+        assert_eq!(category_leaf("  "), None);
+        assert_eq!(category_leaf("Vehicles > "), None);
     }
 
     #[tokio::test]
