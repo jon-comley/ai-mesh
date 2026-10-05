@@ -259,20 +259,17 @@ pub async fn chat(
         return (StatusCode::BAD_REQUEST, "say what you are looking for").into_response();
     }
 
-    let provider = {
-        let reg = registry.lock().unwrap();
-        crate::cloud::GatewayConfig::load(&reg).provider()
-    };
-    let Some(provider) = provider else {
+    let rotation = crate::cloud::provider_rotation(&registry.lock().unwrap());
+    if rotation.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "the hunt chat needs Online AI: set a key and model on the Online AI tab",
         )
             .into_response();
-    };
+    }
 
-    let reply = match provider.complete(&build_turns(&body.messages), 0.3).await {
-        Ok(r) => r,
+    let reply = match crate::cloud::complete_rotating(&rotation, &build_turns(&body.messages), 0.3).await {
+        Ok((r, _)) => r,
         Err(e) => {
             tracing::warn!(error = %e, "ebay hunt chat LLM call failed");
             return (StatusCode::BAD_GATEWAY, format!("the AI provider failed: {e}")).into_response();
