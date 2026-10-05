@@ -291,7 +291,20 @@ pub async fn list_hunts(
     _: Authed,
     Extension(registry): Extension<Arc<Mutex<Registry>>>,
 ) -> impl IntoResponse {
-    Json(registry.lock().unwrap().list_hunts()).into_response()
+    let reg = registry.lock().unwrap();
+    let hunts: Vec<serde_json::Value> = reg
+        .list_hunts()
+        .into_iter()
+        .map(|h| {
+            let ready = judge_ready(&reg, &h.id);
+            let mut v = serde_json::to_value(&h).unwrap_or_default();
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("judge_ready".into(), ready.into());
+            }
+            v
+        })
+        .collect();
+    Json(hunts).into_response()
 }
 
 #[derive(Deserialize)]
@@ -485,6 +498,8 @@ fn arm_hunt_timer(state: Arc<DashboardState>, registry: Arc<Mutex<Registry>>, hu
                     tracing::warn!(hunt_id = %hunt_id, error = %e, "ebay hunt cycle failed")
                 }
             }
+            // The scheduled run has happened, so Judge now is available again.
+            set_judge_spent(&registry.lock().unwrap(), &hunt_id, false);
         }
     });
 }
@@ -605,6 +620,106 @@ pub async fn rank_hunt(
     .into_response()
 }
 
+// ── judge now ────────────────────────────────────────────────────────────
+
+/// Finds per verdict call. A whole backlog in one prompt is a long reply to
+/// parse and one failure loses all of it.
+const JUDGE_BATCH: usize = 40;
+
+fn judge_spent_key(hunt_id: &str) -> String {
+    format!("judge_spent:{hunt_id}")
+}
+
+/// Judge now is available until it is used, and again once the hunt's next
+/// scheduled run has happened.
+fn judge_ready(reg: &Registry, hunt_id: &str) -> bool {
+    reg.get_preference(EBAY_USER, &judge_spent_key(hunt_id)).as_deref() != Some("1")
+}
+
+fn set_judge_spent(reg: &Registry, hunt_id: &str, spent: bool) {
+    reg.set_preference(EBAY_USER, &judge_spent_key(hunt_id), if spent { "1" } else { "" });
+}
+
+/// `POST /api/ebay/hunts/{id}/judge` — give a bargain verdict to every live
+/// find of this hunt that has none, in batches, through the AI rotation.
+///
+/// Verdicts are otherwise only issued to new listings as a cycle finds them,
+/// so anything found while the AI was failing stays "not yet judged" for ever.
+/// This is the way to catch up, and it can be used once per scheduled run:
+/// once spent it is refused until the hunt's timer has run again, which keeps
+/// the AI spend tied to the hunt's own schedule. A pass that judged nothing,
+/// because there was nothing to judge or every call failed, does not spend it.
+pub async fn judge_hunt(
+    Path(id): Path<String>,
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+) -> impl IntoResponse {
+    let (hunt, finds, rotation) = {
+        let reg = registry.lock().unwrap();
+        let Some(hunt) = reg.get_hunt(&id) else {
+            return (StatusCode::NOT_FOUND, "hunt not found").into_response();
+        };
+        if !judge_ready(&reg, &id) {
+            return (
+                StatusCode::CONFLICT,
+                "already judged: available again after the next scheduled check",
+            )
+                .into_response();
+        }
+        let finds: Vec<EbayFindRecord> = reg
+            .unreviewed_finds(&id)
+            .into_iter()
+            .filter(|f| f.verdict.is_none())
+            .collect();
+        (hunt, finds, crate::cloud::provider_rotation(&reg))
+    };
+    if finds.is_empty() {
+        return Json(serde_json::json!({ "judged": 0, "considered": 0 })).into_response();
+    }
+    if rotation.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no AI provider configured — set a key and model on the Online AI tab",
+        )
+            .into_response();
+    }
+
+    let mut judged = 0;
+    let mut answered = false;
+    let mut last_error = None;
+    for batch in finds.chunks(JUDGE_BATCH) {
+        let listing = listing_lines(batch.iter().map(|f| {
+            (f.item_id.as_str(), f.title.as_str(), f.price_minor, f.currency.as_deref())
+        }));
+        let prompt = verdict_prompt(&hunt, &listing);
+        match crate::cloud::complete_rotating(&rotation, &[shared::ChatTurn::user(prompt)], 0.2).await {
+            Ok((reply, _)) => {
+                answered = true;
+                let verdicts = parse_verdicts(&reply.text);
+                let reg = registry.lock().unwrap();
+                for (item_id, (bargain, reason)) in &verdicts {
+                    judged += reg.set_find_verdict(&hunt.id, item_id, &verdict_text(*bargain, reason));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(hunt_id = %hunt.id, error = %e, "ebay judge-now batch failed");
+                last_error = Some(e.to_string());
+            }
+        }
+    }
+    if !answered {
+        let e = last_error.unwrap_or_default();
+        return (StatusCode::BAD_GATEWAY, format!("judging failed: {e}")).into_response();
+    }
+    set_judge_spent(&registry.lock().unwrap(), &hunt.id, true);
+    Json(serde_json::json!({
+        "judged": judged,
+        "considered": finds.len(),
+        "failed_batches": last_error.is_some(),
+    }))
+    .into_response()
+}
+
 /// One search cycle for `hunt`: search each enabled term, diff against
 /// already-seen listings, get a bargain verdict (LLM batch, or heuristic
 /// fallback), persist + broadcast every new listing, and ntfy the bargains.
@@ -710,14 +825,7 @@ fn process_hunt_results(
             .map(|(t, _)| t.clone())
             .unwrap_or_default();
         let (is_bargain, verdict_text) = match verdicts.get(&listing.item_id) {
-            Some((bargain, reason)) => (
-                *bargain,
-                Some(if *bargain {
-                    format!("bargain: {reason}")
-                } else {
-                    format!("not a bargain: {reason}")
-                }),
-            ),
+            Some((bargain, reason)) => (*bargain, Some(verdict_text(*bargain, reason))),
             // Heuristic mode (gateway unconfigured) or the LLM's reply
             // omitted this item: unjudged, but still notify-worthy.
             None => (true, None),
@@ -728,6 +836,29 @@ fn process_hunt_results(
         results.push((record, is_bargain));
     }
     results
+}
+
+/// A verdict as stored on a find and shown in the ticker.
+fn verdict_text(bargain: bool, reason: &str) -> String {
+    if bargain {
+        format!("bargain: {reason}")
+    } else {
+        format!("not a bargain: {reason}")
+    }
+}
+
+/// The bargain-verdict prompt over `listing` (one line per listing).
+fn verdict_prompt(hunt: &HuntSpec, listing: &str) -> String {
+    format!(
+        "A user is hunting for bargains related to \"{}\".{} Below are newly found eBay listings \
+         matching their search terms. For each, decide if it looks like a genuine bargain \
+         (underpriced, mis-listed, or a rare find) versus a normal-priced listing — a \
+         suspiciously low price on a \"for parts/not working\" item is NOT a bargain. Reply with \
+         ONLY a JSON array like [{{\"item_id\":\"...\",\"is_bargain\":true,\"reason\":\"...\"}}]. \
+         No other text.\n\n{listing}",
+        hunt.name,
+        goal_clause(&hunt.goal),
+    )
 }
 
 /// The hunt's purpose as a prompt sentence, or nothing when it has none.
@@ -808,16 +939,7 @@ async fn get_verdicts(
             l.item_id, l.title
         ));
     }
-    let prompt = format!(
-        "A user is hunting for bargains related to \"{}\".{} Below are newly found eBay listings \
-         matching their search terms. For each, decide if it looks like a genuine bargain \
-         (underpriced, mis-listed, or a rare find) versus a normal-priced listing — a \
-         suspiciously low price on a \"for parts/not working\" item is NOT a bargain. Reply with \
-         ONLY a JSON array like [{{\"item_id\":\"...\",\"is_bargain\":true,\"reason\":\"...\"}}]. \
-         No other text.\n\n{listing}",
-        hunt.name,
-        goal_clause(&hunt.goal),
-    );
+    let prompt = verdict_prompt(hunt, &listing);
     let reply = match crate::cloud::complete_rotating(&rotation, &[shared::ChatTurn::user(prompt)], 0.2).await {
         Ok((r, _)) => r.text,
         Err(e) => {
@@ -911,6 +1033,7 @@ mod tests {
             )
             .route("/api/ebay/hunts/{id}/run-now", post(run_now))
             .route("/api/ebay/hunts/{id}/rank", post(rank_hunt))
+            .route("/api/ebay/hunts/{id}/judge", post(judge_hunt))
             .route("/api/ebay/finds", get(list_finds))
             .route("/api/ebay/finds/{id}/reviewed", post(mark_reviewed))
             .route("/api/ebay/config", get(get_config).post(set_config))
@@ -928,6 +1051,76 @@ mod tests {
             item_web_url: format!("https://ebay.co.uk/itm/{id}"),
             condition: Some("Used".into()),
         }
+    }
+
+    // ── judge now ────────────────────────────────────────────────────────
+
+    fn judge_ready_in_list(body: &str, hunt_id: &str) -> bool {
+        let hunts: Vec<serde_json::Value> = serde_json::from_str(body).unwrap();
+        let h = hunts.iter().find(|h| h["id"] == hunt_id).unwrap();
+        h["judge_ready"].as_bool().unwrap()
+    }
+
+    #[tokio::test]
+    async fn judge_now_is_offered_until_spent_and_again_after_the_scheduled_run() {
+        let registry = make_registry();
+        let hunt = registry.lock().unwrap().create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB", "");
+        let state = make_state(vec![], empty_connections());
+        let list = || send_with_body(ebay_router(state.clone(), registry.clone()), "GET", "/api/ebay/hunts?token=", "");
+
+        assert!(judge_ready_in_list(&list().await.1, &hunt.id));
+
+        set_judge_spent(&registry.lock().unwrap(), &hunt.id, true);
+        assert!(!judge_ready_in_list(&list().await.1, &hunt.id));
+        let (status, body) = send_with_body(
+            ebay_router(state.clone(), registry.clone()),
+            "POST",
+            &format!("/api/ebay/hunts/{}/judge?token=", hunt.id),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("next scheduled check"));
+
+        // What the hunt timer does after its run.
+        set_judge_spent(&registry.lock().unwrap(), &hunt.id, false);
+        assert!(judge_ready_in_list(&list().await.1, &hunt.id));
+    }
+
+    #[tokio::test]
+    async fn judging_nothing_does_not_spend_it() {
+        let registry = make_registry();
+        let hunt = registry.lock().unwrap().create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB", "");
+        // Already judged by a cycle, so there is nothing left to judge.
+        registry.lock().unwrap().insert_find(&hunt.id, &sample_listing("1"), "strat", Some("bargain: cheap"));
+        let state = make_state(vec![], empty_connections());
+        let (status, body) = send_with_body(
+            ebay_router(state, registry.clone()),
+            "POST",
+            &format!("/api/ebay/hunts/{}/judge?token=", hunt.id),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"judged\":0"));
+        assert!(judge_ready(&registry.lock().unwrap(), &hunt.id));
+    }
+
+    #[tokio::test]
+    async fn judging_with_no_ai_configured_does_not_spend_it() {
+        let registry = make_registry();
+        let hunt = registry.lock().unwrap().create_hunt("Strat", "https://x", vec![], vec![], "EBAY_GB", "");
+        registry.lock().unwrap().insert_find(&hunt.id, &sample_listing("1"), "strat", None);
+        let state = make_state(vec![], empty_connections());
+        let status = send(
+            ebay_router(state, registry.clone()),
+            "POST",
+            &format!("/api/ebay/hunts/{}/judge?token=", hunt.id),
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(judge_ready(&registry.lock().unwrap(), &hunt.id));
     }
 
     // ── create/update/delete hunts ──────────────────────────────────────
