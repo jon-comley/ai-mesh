@@ -355,9 +355,15 @@ route when checked on 2026-09-25); **not yet exercised against the real Groq end
   `unreviewed_finds` already returns the uncapped set a digest would be built
   from. Note finds carry titles only — no descriptions, no photos — so the
   answers are bounded by what an eBay title says.
-- The 212 finds from before the Groq switch are still unjudged — only new
-  listings get a verdict. A one-off "judge the unjudged" pass would give them
-  verdicts; `rank` already scores them regardless of verdict.
+- **Judge now (2026-10-05)** gives every unjudged live find a verdict, 40 per
+  call through the rotation, once per scheduled check: used, it is refused
+  until the hunt's timer has run again. On pi1 that day 190 of 191 finds had
+  no verdict.
+- **Why so many were unjudged, fixed 2026-10-05:** a cycle sent every listing
+  eBay returned, seen or not, in one verdict prompt. For the car hunt that is a
+  few hundred, and the reply came back empty ("empty or unparseable
+  response"), so the new ones went unjudged. A cycle now judges only listings
+  it has not seen, 40 per call.
 - Watch the next few cycles' journal for `LLM provider failed` and
   `ebay bargain-verdict LLM call failed` to confirm the rotation moves on when
   Groq runs out, on a real batch, not just the test prompt.
