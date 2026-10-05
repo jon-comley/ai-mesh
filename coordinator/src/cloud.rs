@@ -26,6 +26,11 @@ pub struct ProviderPreset {
     pub label: &'static str,
     pub base_url: &'static str,
     pub models: &'static [&'static str],
+    /// Free tier: tried before the paid providers when rotating.
+    pub free: bool,
+    /// The model used when this provider stands in for another. The cheap one
+    /// for a paid provider, never the first menu entry.
+    pub fallback_model: &'static str,
 }
 
 /// Known OpenAI-compatible providers. Anthropic is reachable via its OpenAI
@@ -47,18 +52,24 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             // but took 93s against the 60s default timeout — raise
             // CLOUD_TIMEOUT_SECS before relying on it.
             models: &["nvidia/nemotron-3.5-lightning:free"],
+            free: true,
+            fallback_model: "nvidia/nemotron-3.5-lightning:free",
         },
         ProviderPreset {
             id: "anthropic",
             label: "Anthropic (Claude)",
             base_url: "https://api.anthropic.com/v1",
             models: &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
+            free: false,
+            fallback_model: "claude-haiku-4-5",
         },
         ProviderPreset {
             id: "openai",
             label: "OpenAI (ChatGPT)",
             base_url: "https://api.openai.com/v1",
             models: &["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3-mini"],
+            free: false,
+            fallback_model: "gpt-4o-mini",
         },
         ProviderPreset {
             id: "groq",
@@ -67,12 +78,24 @@ pub fn provider_presets() -> &'static [ProviderPreset] {
             // Off Groq's own /models, 2026-09-14 — the llama-3.x ids are gone.
             // gpt-oss-120b is what pi1 judges hunts with: correct verdicts in 3s.
             models: &["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"],
+            free: true,
+            fallback_model: "openai/gpt-oss-120b",
         },
         ProviderPreset {
             id: "gemini",
             label: "Google Gemini (free)",
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
             models: &["gemini-2.0-flash", "gemini-2.0-flash-lite"],
+            free: true,
+            fallback_model: "gemini-2.0-flash",
+        },
+        ProviderPreset {
+            id: "mistral",
+            label: "Mistral (free)",
+            base_url: "https://api.mistral.ai/v1",
+            models: &["mistral-small-latest", "mistral-medium-latest"],
+            free: true,
+            fallback_model: "mistral-small-latest",
         },
     ]
 }
@@ -437,27 +460,121 @@ impl OpenAiCompatProvider {
 /// which a key was saved at some point (switching endpoints in the Gateway
 /// tab leaves the old key in place under its own `api_key:<base_url>` pref),
 /// excluding whichever endpoint is primary right now. Each fallback uses its
-/// preset's first model, since there's no per-provider model preference to
-/// restore. Order follows `provider_presets()`.
+/// preset's `fallback_model`, since there's no per-provider model preference
+/// to restore. Free providers come first, then paid, each in
+/// `provider_presets()` order, so a paid key is only spent once the free
+/// tiers are used up.
 pub fn fallback_providers(reg: &Registry, exclude_base_url: &str) -> Vec<OpenAiCompatProvider> {
     let exclude = normalize_url(exclude_base_url);
     let prefs: std::collections::HashMap<String, String> =
         reg.get_all_preferences(GATEWAY_USER).into_iter().collect();
-    provider_presets()
-        .iter()
+    let free = provider_presets().iter().filter(|p| p.free);
+    let paid = provider_presets().iter().filter(|p| !p.free);
+    free.chain(paid)
         .filter(|p| normalize_url(p.base_url) != exclude)
         .filter_map(|p| {
             let key = prefs
                 .get(&provider_key_name(p.base_url))
                 .filter(|k| !k.is_empty())?;
-            let model = p.models.first()?;
             Some(OpenAiCompatProvider {
                 base_url: normalize_url(p.base_url).to_string(),
                 api_key: key.clone(),
-                model: model.to_string(),
+                model: p.fallback_model.to_string(),
             })
         })
         .collect()
+}
+
+/// How long a provider is skipped after it says it has run out. A rate limit
+/// is usually per minute or per day on the free tiers; running out of paid
+/// credit lasts until somebody tops it up.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+const NO_CREDIT_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
+
+type Cooldowns = std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>;
+
+/// Providers that have run out, by endpoint, and when to try them again.
+/// In memory only: a restart gives every provider another go, which is the
+/// right default.
+fn cooldowns() -> &'static Cooldowns {
+    static C: std::sync::OnceLock<Cooldowns> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// The cooldown this error earns, if it means the provider has run out rather
+/// than that this one request went wrong. OpenRouter says 402 for no credit,
+/// Anthropic a 400 naming the credit balance, OpenAI a 429. A timeout rests it
+/// too: OpenRouter's free models have taken 93 s against the 60 s limit, and
+/// every request would otherwise wait that out before moving on. A rejected key
+/// stays rejected until somebody changes it.
+fn cooldown_for(e: &CloudError) -> Option<Duration> {
+    match e {
+        CloudError::RateLimited | CloudError::Timeout => Some(RATE_LIMIT_COOLDOWN),
+        CloudError::Unauthorized => Some(NO_CREDIT_COOLDOWN),
+        CloudError::Status(402, _) => Some(NO_CREDIT_COOLDOWN),
+        CloudError::Status(_, detail) => {
+            let d = detail.to_ascii_lowercase();
+            (d.contains("credit") || d.contains("quota") || d.contains("billing"))
+                .then_some(NO_CREDIT_COOLDOWN)
+        }
+        _ => None,
+    }
+}
+
+fn cooling(base_url: &str) -> bool {
+    let mut c = cooldowns().lock().unwrap();
+    match c.get(base_url) {
+        Some(until) if *until > std::time::Instant::now() => true,
+        Some(_) => {
+            c.remove(base_url);
+            false
+        }
+        None => false,
+    }
+}
+
+/// Every provider worth trying, in order: the one chosen on the Online AI tab,
+/// then the others with a saved key (free before paid). Providers that have
+/// run out are moved to the back rather than dropped, so a request still has
+/// something to try when every one of them is resting.
+pub fn provider_rotation(reg: &Registry) -> Vec<OpenAiCompatProvider> {
+    let cfg = GatewayConfig::load(reg);
+    let mut all: Vec<OpenAiCompatProvider> = cfg.provider().into_iter().collect();
+    all.extend(fallback_providers(reg, &cfg.base_url));
+    let (resting, ready): (Vec<_>, Vec<_>) =
+        all.into_iter().partition(|p| cooling(p.base_url()));
+    ready.into_iter().chain(resting).collect()
+}
+
+/// Run a completion on the first provider in `rotation` that answers. A
+/// provider that has run out is rested so the next request starts elsewhere.
+/// Returns the reply and the provider that gave it, or the last error.
+pub async fn complete_rotating(
+    rotation: &[OpenAiCompatProvider],
+    messages: &[shared::ChatTurn],
+    temperature: f32,
+) -> Result<(CloudReply, OpenAiCompatProvider), CloudError> {
+    let mut last = CloudError::NoKey;
+    for p in rotation {
+        match p.complete(messages, temperature).await {
+            Ok(reply) => return Ok((reply, p.clone())),
+            Err(e) => {
+                if let Some(rest) = cooldown_for(&e) {
+                    cooldowns()
+                        .lock()
+                        .unwrap()
+                        .insert(p.base_url().to_string(), std::time::Instant::now() + rest);
+                }
+                tracing::warn!(
+                    provider = %p.provider_name(),
+                    model = %p.model(),
+                    "cloud provider failed: {e}"
+                );
+                last = e;
+            }
+        }
+    }
+    Err(last)
 }
 
 /// Persist a single gateway config field (writes through the registry K/V store).
@@ -565,6 +682,61 @@ mod tests {
     }
 
     #[test]
+    fn paid_fallbacks_use_the_cheap_model() {
+        let reg = Registry::new();
+        reg.set_preference(
+            GATEWAY_USER,
+            &provider_key_name("https://api.anthropic.com/v1"),
+            "ant-key",
+        );
+        let fb = fallback_providers(&reg, "https://api.groq.com/openai/v1");
+        assert_eq!(fb[0].model, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn running_out_rests_a_provider_and_a_bad_request_does_not() {
+        assert_eq!(cooldown_for(&CloudError::RateLimited), Some(RATE_LIMIT_COOLDOWN));
+        assert_eq!(
+            cooldown_for(&CloudError::Status(402, String::new())),
+            Some(NO_CREDIT_COOLDOWN)
+        );
+        assert_eq!(
+            cooldown_for(&CloudError::Status(400, "Your credit balance is too low".into())),
+            Some(NO_CREDIT_COOLDOWN)
+        );
+        assert_eq!(cooldown_for(&CloudError::Status(400, "bad model".into())), None);
+        assert_eq!(cooldown_for(&CloudError::Timeout), Some(RATE_LIMIT_COOLDOWN));
+        assert_eq!(cooldown_for(&CloudError::Unauthorized), Some(NO_CREDIT_COOLDOWN));
+        assert_eq!(cooldown_for(&CloudError::Empty), None);
+    }
+
+    #[test]
+    fn rotation_puts_a_resting_provider_last() {
+        let reg = Registry::new();
+        let groq = "https://api.groq.com/openai/v1";
+        let mistral = "https://api.mistral.ai/v1";
+        reg.set_preference(GATEWAY_USER, "base_url", groq);
+        reg.set_preference(GATEWAY_USER, "selected_model", "openai/gpt-oss-120b");
+        reg.set_preference(GATEWAY_USER, &provider_key_name(groq), "groq-key");
+        reg.set_preference(GATEWAY_USER, &provider_key_name(mistral), "mistral-key");
+
+        let order = |reg: &Registry| -> Vec<String> {
+            provider_rotation(reg)
+                .iter()
+                .map(|p| p.base_url().to_string())
+                .collect()
+        };
+        assert_eq!(order(&reg), vec![groq, mistral]);
+
+        cooldowns()
+            .lock()
+            .unwrap()
+            .insert(groq.to_string(), std::time::Instant::now() + RATE_LIMIT_COOLDOWN);
+        assert_eq!(order(&reg), vec![mistral, groq]);
+        cooldowns().lock().unwrap().remove(groq);
+    }
+
+    #[test]
     fn fallback_providers_excludes_the_primary_endpoint() {
         let reg = Registry::new();
         let groq = "https://api.groq.com/openai/v1";
@@ -583,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn fallback_providers_follows_preset_order() {
+    fn fallback_providers_try_free_before_paid() {
         let reg = Registry::new();
         for preset in provider_presets() {
             reg.set_preference(
@@ -593,8 +765,10 @@ mod tests {
             );
         }
         let fb = fallback_providers(&reg, "https://api.groq.com/openai/v1");
-        let expected: Vec<&str> = provider_presets()
-            .iter()
+        let free = provider_presets().iter().filter(|p| p.free);
+        let paid = provider_presets().iter().filter(|p| !p.free);
+        let expected: Vec<&str> = free
+            .chain(paid)
             .map(|p| p.base_url)
             .filter(|&u| u != "https://api.groq.com/openai/v1")
             .collect();

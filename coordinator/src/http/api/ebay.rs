@@ -218,10 +218,10 @@ async fn generate_terms(item: &ItemDetail, registry: &Arc<Mutex<Registry>>) -> V
             is_misspelling: false,
         }]
     };
-    let cfg = crate::cloud::GatewayConfig::load(&registry.lock().unwrap());
-    let Some(provider) = cfg.provider() else {
+    let rotation = crate::cloud::provider_rotation(&registry.lock().unwrap());
+    if rotation.is_empty() {
         return fallback();
-    };
+    }
     let category = item
         .category
         .clone()
@@ -239,11 +239,8 @@ async fn generate_terms(item: &ItemDetail, registry: &Arc<Mutex<Registry>>) -> V
          [{{\"text\":\"...\",\"is_misspelling\":false}}]. No other text.",
         item.title,
     );
-    match provider
-        .complete(&[shared::ChatTurn::user(prompt)], 0.4)
-        .await
-    {
-        Ok(reply) => parse_term_candidates(&reply.text).unwrap_or_else(fallback),
+    match crate::cloud::complete_rotating(&rotation, &[shared::ChatTurn::user(prompt)], 0.4).await {
+        Ok((reply, _)) => parse_term_candidates(&reply.text).unwrap_or_else(fallback),
         Err(e) => {
             tracing::warn!(error = %e, "ebay term-generation LLM call failed");
             fallback()
@@ -563,14 +560,14 @@ pub async fn rank_hunt(
         return Json(serde_json::json!({ "scored": 0, "refresh_error": refresh_error })).into_response();
     }
 
-    let cfg = crate::cloud::GatewayConfig::load(&registry.lock().unwrap());
-    let Some(provider) = cfg.provider() else {
+    let rotation = crate::cloud::provider_rotation(&registry.lock().unwrap());
+    if rotation.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "no AI provider configured — set a key and model on the Online AI tab",
         )
             .into_response();
-    };
+    }
 
     let listing = listing_lines(finds.iter().map(|f| {
         (
@@ -591,11 +588,8 @@ pub async fn rank_hunt(
         goal_clause(&hunt.goal),
     );
 
-    let reply = match provider
-        .complete(&[shared::ChatTurn::user(prompt)], 0.2)
-        .await
-    {
-        Ok(r) => r.text,
+    let reply = match crate::cloud::complete_rotating(&rotation, &[shared::ChatTurn::user(prompt)], 0.2).await {
+        Ok((r, _)) => r.text,
         Err(e) => {
             tracing::warn!(error = %e, "ebay ranking LLM call failed");
             return (StatusCode::BAD_GATEWAY, format!("ranking failed: {e}")).into_response();
@@ -789,10 +783,10 @@ async fn get_verdicts(
     term_matches: &[(String, Listing)],
     registry: &Arc<Mutex<Registry>>,
 ) -> HashMap<String, (bool, String)> {
-    let cfg = crate::cloud::GatewayConfig::load(&registry.lock().unwrap());
-    let Some(provider) = cfg.provider() else {
+    let rotation = crate::cloud::provider_rotation(&registry.lock().unwrap());
+    if rotation.is_empty() {
         return HashMap::new();
-    };
+    }
     let mut listing = String::new();
     for (_, l) in term_matches {
         let price = l
@@ -824,11 +818,8 @@ async fn get_verdicts(
         hunt.name,
         goal_clause(&hunt.goal),
     );
-    let reply = match provider
-        .complete(&[shared::ChatTurn::user(prompt)], 0.2)
-        .await
-    {
-        Ok(r) => r.text,
+    let reply = match crate::cloud::complete_rotating(&rotation, &[shared::ChatTurn::user(prompt)], 0.2).await {
+        Ok((r, _)) => r.text,
         Err(e) => {
             tracing::warn!(error = %e, "ebay bargain-verdict LLM call failed");
             return HashMap::new();
