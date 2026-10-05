@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 shared = { path = "../shared" }
+llm-rotation = { path = "../llm-rotation" }
 ebay = { path = "../ebay" }
 libc = "0.2"
 thiserror = "1"

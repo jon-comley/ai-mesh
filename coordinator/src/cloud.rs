@@ -1,16 +1,20 @@
-//! Online-AI ("gateway") provider — Phase B.
+//! Online-AI ("gateway") settings: which providers the coordinator may use and
+//! with which keys.
 //!
-//! A single OpenAI-compatible chat client. "Pluggable" is achieved through the
-//! config-driven `base_url`: the same client reaches OpenRouter (free models),
-//! Groq, Cerebras, Mistral, and Gemini's compat endpoint — so we are not locked
-//! to any one vendor. Config (including the API key) is persisted in the
-//! coordinator's `dashboard_preferences` K/V store under [`GATEWAY_USER`], with
-//! environment-variable fallbacks for headless deploys.
+//! The client itself, the provider presets and the rotation that rests a
+//! provider when it runs out live in the `llm-rotation` crate. This module
+//! reads the coordinator's side of it: config (including the API keys) is
+//! persisted in the `dashboard_preferences` K/V store under [`GATEWAY_USER`],
+//! with environment-variable fallbacks for headless deploys.
 
 use crate::compress::CompressionEngine;
 use crate::registry::Registry;
-use serde::Deserialize;
 use std::time::Duration;
+
+pub use llm_rotation::{
+    Error as CloudError, Preset as ProviderPreset, Provider as OpenAiCompatProvider,
+    Reply as CloudReply,
+};
 
 /// Preferences namespace (user_id) under which gateway config is stored.
 pub const GATEWAY_USER: &str = "__gateway__";
@@ -18,107 +22,21 @@ pub const GATEWAY_USER: &str = "__gateway__";
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
-/// A one-click endpoint preset: a known OpenAI-compatible provider plus the
-/// model menu to offer for it. Selecting one fills the endpoint + model in the
-/// Gateway tab. The user can always type a custom endpoint/model instead.
-pub struct ProviderPreset {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub base_url: &'static str,
-    pub models: &'static [&'static str],
-    /// Free tier: tried before the paid providers when rotating.
-    pub free: bool,
-    /// The model used when this provider stands in for another. The cheap one
-    /// for a paid provider, never the first menu entry.
-    pub fallback_model: &'static str,
-}
-
-/// Known OpenAI-compatible providers. Anthropic is reachable via its OpenAI
-/// compatibility endpoint (`https://api.anthropic.com/v1/chat/completions`,
-/// bearer auth with an `sk-ant-…` key) — so a paid Claude key works through the
-/// same client as the free providers.
+/// Known OpenAI-compatible providers.
 pub fn provider_presets() -> &'static [ProviderPreset] {
-    &[
-        ProviderPreset {
-            id: "openrouter",
-            label: "OpenRouter (free)",
-            base_url: "https://openrouter.ai/api/v1",
-            // Free slugs rotate often — these are a starting menu; the model box
-            // is type-in editable, so any current slug from openrouter.ai/models
-            // works too.
-            // Refreshed 2026-09-14 after gpt-oss-120b, qwen3-next-80b and
-            // llama-3.3-70b all lost their `:free` versions (404, "use the paid
-            // slug"). nemotron-3.5-lightning answered a verdict prompt correctly
-            // but took 93s against the 60s default timeout — raise
-            // CLOUD_TIMEOUT_SECS before relying on it.
-            models: &["nvidia/nemotron-3.5-lightning:free"],
-            free: true,
-            fallback_model: "nvidia/nemotron-3.5-lightning:free",
-        },
-        ProviderPreset {
-            id: "anthropic",
-            label: "Anthropic (Claude)",
-            base_url: "https://api.anthropic.com/v1",
-            models: &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-            free: false,
-            fallback_model: "claude-haiku-4-5",
-        },
-        ProviderPreset {
-            id: "openai",
-            label: "OpenAI (ChatGPT)",
-            base_url: "https://api.openai.com/v1",
-            models: &["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3-mini"],
-            free: false,
-            fallback_model: "gpt-4o-mini",
-        },
-        ProviderPreset {
-            id: "groq",
-            label: "Groq (free)",
-            base_url: "https://api.groq.com/openai/v1",
-            // Off Groq's own /models, 2026-09-14 — the llama-3.x ids are gone.
-            // gpt-oss-120b is what pi1 judges hunts with: correct verdicts in 3s.
-            models: &["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"],
-            free: true,
-            fallback_model: "openai/gpt-oss-120b",
-        },
-        ProviderPreset {
-            id: "gemini",
-            label: "Google Gemini (free)",
-            base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-            models: &["gemini-2.0-flash", "gemini-2.0-flash-lite"],
-            free: true,
-            fallback_model: "gemini-2.0-flash",
-        },
-        ProviderPreset {
-            id: "mistral",
-            label: "Mistral (free)",
-            base_url: "https://api.mistral.ai/v1",
-            models: &["mistral-small-latest", "mistral-medium-latest"],
-            free: true,
-            fallback_model: "mistral-small-latest",
-        },
-    ]
-}
-
-fn normalize_url(u: &str) -> &str {
-    u.trim_end_matches('/')
+    llm_rotation::presets()
 }
 
 /// Preference key under which a provider's API key is stored. Keys are kept
 /// per-endpoint so switching provider restores the matching key automatically.
 pub fn provider_key_name(base_url: &str) -> String {
-    format!("api_key:{}", normalize_url(base_url))
+    format!("api_key:{}", llm_rotation::normalize_url(base_url))
 }
 
-/// The model menu for a given endpoint — the matching preset's models, or empty
+/// The model menu for a given endpoint: the matching preset's models, or empty
 /// for a custom endpoint (the tab still shows the user's chosen model).
 pub fn models_for_base_url(base_url: &str) -> Vec<String> {
-    let n = normalize_url(base_url);
-    provider_presets()
-        .iter()
-        .find(|p| normalize_url(p.base_url) == n)
-        .map(|p| p.models.iter().map(|s| s.to_string()).collect())
-        .unwrap_or_default()
+    llm_rotation::models_for(base_url)
 }
 
 /// Fallback model menu (OpenRouter free) used when no endpoint is configured.
@@ -126,67 +44,19 @@ pub fn available_models() -> Vec<String> {
     models_for_base_url(DEFAULT_BASE_URL)
 }
 
-/// Errors from a cloud completion. Variants map to the graceful-fallback policy:
-/// any of these causes `handle_intent` to fall back to local inference.
-#[derive(Debug)]
-pub enum CloudError {
-    /// No API key configured (neither pref nor env).
-    NoKey,
-    /// 401/403 — bad or missing credentials.
-    Unauthorized,
-    /// 429 — rate limited / free-tier quota exhausted.
-    RateLimited,
-    /// Request timed out.
-    Timeout,
-    /// Other non-success HTTP status, with the provider's own explanation.
-    /// The body is kept because the code alone hides the cause: OpenRouter
-    /// answers a retired free slug with a 404 whose body names the paid slug to
-    /// use instead, and hunts went unjudged for days logging only "HTTP 404".
-    Status(u16, String),
-    /// Transport-level failure (DNS, TLS, connection).
-    Network(String),
-    /// Response could not be parsed / had no content.
-    Empty,
-}
-
-impl std::fmt::Display for CloudError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CloudError::NoKey => write!(f, "no API key configured"),
-            CloudError::Unauthorized => write!(f, "unauthorized (check API key)"),
-            CloudError::RateLimited => write!(f, "rate limited (free-tier quota?)"),
-            CloudError::Timeout => write!(f, "request timed out"),
-            CloudError::Status(s, detail) if detail.is_empty() => write!(f, "HTTP {s}"),
-            CloudError::Status(s, detail) => write!(f, "HTTP {s}: {detail}"),
-            CloudError::Network(e) => write!(f, "network error: {e}"),
-            CloudError::Empty => write!(f, "empty or unparseable response"),
-        }
-    }
-}
-
-impl std::error::Error for CloudError {}
-
-/// The provider's error body, trimmed and capped for a log line. Prefers the
-/// OpenAI-style `error.message` when the body is that shape.
-async fn error_detail(resp: reqwest::Response) -> String {
-    let text = resp.text().await.unwrap_or_default();
-    let message = serde_json::from_str::<serde_json::Value>(&text)
+/// A provider with this coordinator's timeout (`CLOUD_TIMEOUT_SECS`) and the
+/// attribution headers OpenRouter wants (`CLOUD_HTTP_REFERER`, `CLOUD_X_TITLE`).
+fn provider(base_url: &str, api_key: &str, model: &str) -> OpenAiCompatProvider {
+    let timeout = std::env::var("CLOUD_TIMEOUT_SECS")
         .ok()
-        .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
-        .unwrap_or(text);
-    let message = message.trim();
-    match message.char_indices().nth(300) {
-        Some((cut, _)) => format!("{}…", &message[..cut]),
-        None => message.to_string(),
-    }
-}
-
-/// A successful completion plus the provider-reported token usage.
-#[derive(Debug, Clone)]
-pub struct CloudReply {
-    pub text: String,
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let referer = std::env::var("CLOUD_HTTP_REFERER")
+        .unwrap_or_else(|_| "https://github.com/ai-mesh".into());
+    let title = std::env::var("CLOUD_X_TITLE").unwrap_or_else(|_| "ai-mesh".into());
+    OpenAiCompatProvider::new(base_url, api_key, model)
+        .with_timeout(Duration::from_secs(timeout))
+        .with_attribution(referer, title)
 }
 
 /// Resolved gateway configuration (prefs with env fallback). `api_key` is the
@@ -269,194 +139,15 @@ impl GatewayConfig {
         if !self.is_configured() {
             return None;
         }
-        Some(OpenAiCompatProvider {
-            base_url: self.base_url.trim_end_matches('/').to_string(),
-            api_key: self.api_key.clone().unwrap_or_default(),
-            model: self.selected_model.clone(),
-        })
+        Some(provider(
+            &self.base_url,
+            self.api_key.as_deref().unwrap_or_default(),
+            &self.selected_model,
+        ))
     }
 }
 
-/// OpenAI-compatible chat-completions client.
-#[derive(Clone)]
-pub struct OpenAiCompatProvider {
-    base_url: String,
-    api_key: String,
-    model: String,
-}
-
-#[derive(Deserialize)]
-struct ChatChoiceMessage {
-    content: Option<String>,
-}
-#[derive(Deserialize)]
-struct ChatChoice {
-    message: ChatChoiceMessage,
-}
-#[derive(Deserialize, Default)]
-struct ChatUsage {
-    #[serde(default)]
-    prompt_tokens: u32,
-    #[serde(default)]
-    completion_tokens: u32,
-}
-#[derive(Deserialize)]
-struct ChatResponse {
-    #[serde(default)]
-    choices: Vec<ChatChoice>,
-    #[serde(default)]
-    usage: ChatUsage,
-}
-
-/// Process-wide client with a connection pool; built once on first use.
-fn http_client() -> &'static reqwest::Client {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
-}
-
-impl OpenAiCompatProvider {
-    /// The endpoint this provider talks to (normalized, no trailing slash).
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    /// Provider label for logging / response attribution (the endpoint host).
-    pub fn provider_name(&self) -> &str {
-        self.base_url
-            .split("://")
-            .nth(1)
-            .and_then(|h| h.split('/').next())
-            .unwrap_or("cloud")
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    /// Run a chat completion over a full conversation.
-    pub async fn complete(
-        &self,
-        messages: &[shared::ChatTurn],
-        temperature: f32,
-    ) -> Result<CloudReply, CloudError> {
-        if self.api_key.is_empty() {
-            return Err(CloudError::NoKey);
-        }
-        let timeout = std::env::var("CLOUD_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_TIMEOUT_SECS);
-
-        // ChatTurn serializes with OpenAI role names, so the array passes straight through.
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-        });
-
-        // OpenRouter throttles/rejects free-tier requests lacking these headers.
-        let referer = std::env::var("CLOUD_HTTP_REFERER")
-            .unwrap_or_else(|_| "https://github.com/ai-mesh".into());
-        let title = std::env::var("CLOUD_X_TITLE").unwrap_or_else(|_| "ai-mesh".into());
-
-        let resp = http_client()
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .header("HTTP-Referer", referer)
-            .header("X-Title", title)
-            .timeout(Duration::from_secs(timeout))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    CloudError::Timeout
-                } else {
-                    CloudError::Network(e.to_string())
-                }
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(match status.as_u16() {
-                401 | 403 => CloudError::Unauthorized,
-                429 => CloudError::RateLimited,
-                other => CloudError::Status(other, error_detail(resp).await),
-            });
-        }
-
-        let parsed: ChatResponse = resp.json().await.map_err(|_| CloudError::Empty)?;
-        let text = parsed
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .ok_or(CloudError::Empty)?;
-
-        Ok(CloudReply {
-            text,
-            prompt_tokens: parsed.usage.prompt_tokens,
-            completion_tokens: parsed.usage.completion_tokens,
-        })
-    }
-
-    /// Open a streaming chat completion. Returns the raw response after the
-    /// status check; the caller consumes `bytes_stream()` with `shared::sse`.
-    /// A generous 1h cap replaces the normal request timeout so a wedged
-    /// provider still can't pin a connection forever — liveness during the
-    /// stream is the caller's per-chunk timeout.
-    pub async fn complete_stream(
-        &self,
-        messages: &[shared::ChatTurn],
-        temperature: f32,
-    ) -> Result<reqwest::Response, CloudError> {
-        if self.api_key.is_empty() {
-            return Err(CloudError::NoKey);
-        }
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": true,
-            "stream_options": { "include_usage": true },
-        });
-
-        let referer = std::env::var("CLOUD_HTTP_REFERER")
-            .unwrap_or_else(|_| "https://github.com/ai-mesh".into());
-        let title = std::env::var("CLOUD_X_TITLE").unwrap_or_else(|_| "ai-mesh".into());
-
-        let resp = http_client()
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .header("HTTP-Referer", referer)
-            .header("X-Title", title)
-            .timeout(Duration::from_secs(3600))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    CloudError::Timeout
-                } else {
-                    CloudError::Network(e.to_string())
-                }
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(match status.as_u16() {
-                401 | 403 => CloudError::Unauthorized,
-                429 => CloudError::RateLimited,
-                other => CloudError::Status(other, error_detail(resp).await),
-            });
-        }
-        Ok(resp)
-    }
-}
-
-/// Other providers to try if the primary cloud call fails — any preset for
+/// Other providers to try if the primary cloud call fails: any preset for
 /// which a key was saved at some point (switching endpoints in the Gateway
 /// tab leaves the old key in place under its own `api_key:<base_url>` pref),
 /// excluding whichever endpoint is primary right now. Each fallback uses its
@@ -465,116 +156,46 @@ impl OpenAiCompatProvider {
 /// `provider_presets()` order, so a paid key is only spent once the free
 /// tiers are used up.
 pub fn fallback_providers(reg: &Registry, exclude_base_url: &str) -> Vec<OpenAiCompatProvider> {
-    let exclude = normalize_url(exclude_base_url);
+    let exclude = llm_rotation::normalize_url(exclude_base_url);
     let prefs: std::collections::HashMap<String, String> =
         reg.get_all_preferences(GATEWAY_USER).into_iter().collect();
     let free = provider_presets().iter().filter(|p| p.free);
     let paid = provider_presets().iter().filter(|p| !p.free);
     free.chain(paid)
-        .filter(|p| normalize_url(p.base_url) != exclude)
+        .filter(|p| llm_rotation::normalize_url(p.base_url) != exclude)
         .filter_map(|p| {
             let key = prefs
                 .get(&provider_key_name(p.base_url))
                 .filter(|k| !k.is_empty())?;
-            Some(OpenAiCompatProvider {
-                base_url: normalize_url(p.base_url).to_string(),
-                api_key: key.clone(),
-                model: p.fallback_model.to_string(),
-            })
+            Some(provider(p.base_url, key, p.fallback_model))
         })
         .collect()
 }
 
-/// How long a provider is skipped after it says it has run out. A rate limit
-/// is usually per minute or per day on the free tiers; running out of paid
-/// credit lasts until somebody tops it up.
-const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(15 * 60);
-const NO_CREDIT_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
-
-type Cooldowns = std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>;
-
-/// Providers that have run out, by endpoint, and when to try them again.
-/// In memory only: a restart gives every provider another go, which is the
-/// right default.
-fn cooldowns() -> &'static Cooldowns {
-    static C: std::sync::OnceLock<Cooldowns> = std::sync::OnceLock::new();
-    C.get_or_init(Default::default)
-}
-
-/// The cooldown this error earns, if it means the provider has run out rather
-/// than that this one request went wrong. OpenRouter says 402 for no credit,
-/// Anthropic a 400 naming the credit balance, OpenAI a 429. A timeout rests it
-/// too: OpenRouter's free models have taken 93 s against the 60 s limit, and
-/// every request would otherwise wait that out before moving on. A rejected key
-/// stays rejected until somebody changes it.
-fn cooldown_for(e: &CloudError) -> Option<Duration> {
-    match e {
-        CloudError::RateLimited | CloudError::Timeout => Some(RATE_LIMIT_COOLDOWN),
-        CloudError::Unauthorized => Some(NO_CREDIT_COOLDOWN),
-        CloudError::Status(402, _) => Some(NO_CREDIT_COOLDOWN),
-        CloudError::Status(_, detail) => {
-            let d = detail.to_ascii_lowercase();
-            (d.contains("credit") || d.contains("quota") || d.contains("billing"))
-                .then_some(NO_CREDIT_COOLDOWN)
-        }
-        _ => None,
-    }
-}
-
-fn cooling(base_url: &str) -> bool {
-    let mut c = cooldowns().lock().unwrap();
-    match c.get(base_url) {
-        Some(until) if *until > std::time::Instant::now() => true,
-        Some(_) => {
-            c.remove(base_url);
-            false
-        }
-        None => false,
-    }
+/// The one rotation for this process, so every caller sees the same rests.
+fn rotation() -> &'static llm_rotation::Rotation {
+    static R: std::sync::OnceLock<llm_rotation::Rotation> = std::sync::OnceLock::new();
+    R.get_or_init(llm_rotation::Rotation::new)
 }
 
 /// Every provider worth trying, in order: the one chosen on the Online AI tab,
-/// then the others with a saved key (free before paid). Providers that have
-/// run out are moved to the back rather than dropped, so a request still has
-/// something to try when every one of them is resting.
+/// then the others with a saved key (free before paid), with any that have run
+/// out moved to the back.
 pub fn provider_rotation(reg: &Registry) -> Vec<OpenAiCompatProvider> {
     let cfg = GatewayConfig::load(reg);
     let mut all: Vec<OpenAiCompatProvider> = cfg.provider().into_iter().collect();
     all.extend(fallback_providers(reg, &cfg.base_url));
-    let (resting, ready): (Vec<_>, Vec<_>) =
-        all.into_iter().partition(|p| cooling(p.base_url()));
-    ready.into_iter().chain(resting).collect()
+    rotation().order(all)
 }
 
-/// Run a completion on the first provider in `rotation` that answers. A
-/// provider that has run out is rested so the next request starts elsewhere.
-/// Returns the reply and the provider that gave it, or the last error.
+/// Run a completion on the first provider in `providers` that answers, resting
+/// any that have run out. Returns the reply and the provider that gave it.
 pub async fn complete_rotating(
-    rotation: &[OpenAiCompatProvider],
+    providers: &[OpenAiCompatProvider],
     messages: &[shared::ChatTurn],
     temperature: f32,
 ) -> Result<(CloudReply, OpenAiCompatProvider), CloudError> {
-    let mut last = CloudError::NoKey;
-    for p in rotation {
-        match p.complete(messages, temperature).await {
-            Ok(reply) => return Ok((reply, p.clone())),
-            Err(e) => {
-                if let Some(rest) = cooldown_for(&e) {
-                    cooldowns()
-                        .lock()
-                        .unwrap()
-                        .insert(p.base_url().to_string(), std::time::Instant::now() + rest);
-                }
-                tracing::warn!(
-                    provider = %p.provider_name(),
-                    model = %p.model(),
-                    "cloud provider failed: {e}"
-                );
-                last = e;
-            }
-        }
-    }
-    Err(last)
+    rotation().complete(providers, messages, temperature).await
 }
 
 /// Persist a single gateway config field (writes through the registry K/V store).
@@ -677,8 +298,7 @@ mod tests {
         let fb = fallback_providers(&reg, "https://api.groq.com/openai/v1");
         assert_eq!(fb.len(), 1);
         assert_eq!(fb[0].base_url(), "https://openrouter.ai/api/v1");
-        assert_eq!(fb[0].api_key, "or-key");
-        assert_eq!(fb[0].model, "nvidia/nemotron-3.5-lightning:free");
+        assert_eq!(fb[0].model(), "nvidia/nemotron-3.5-lightning:free");
     }
 
     #[test]
@@ -690,25 +310,9 @@ mod tests {
             "ant-key",
         );
         let fb = fallback_providers(&reg, "https://api.groq.com/openai/v1");
-        assert_eq!(fb[0].model, "claude-haiku-4-5");
+        assert_eq!(fb[0].model(), "claude-haiku-4-5");
     }
 
-    #[test]
-    fn running_out_rests_a_provider_and_a_bad_request_does_not() {
-        assert_eq!(cooldown_for(&CloudError::RateLimited), Some(RATE_LIMIT_COOLDOWN));
-        assert_eq!(
-            cooldown_for(&CloudError::Status(402, String::new())),
-            Some(NO_CREDIT_COOLDOWN)
-        );
-        assert_eq!(
-            cooldown_for(&CloudError::Status(400, "Your credit balance is too low".into())),
-            Some(NO_CREDIT_COOLDOWN)
-        );
-        assert_eq!(cooldown_for(&CloudError::Status(400, "bad model".into())), None);
-        assert_eq!(cooldown_for(&CloudError::Timeout), Some(RATE_LIMIT_COOLDOWN));
-        assert_eq!(cooldown_for(&CloudError::Unauthorized), Some(NO_CREDIT_COOLDOWN));
-        assert_eq!(cooldown_for(&CloudError::Empty), None);
-    }
 
     #[test]
     fn rotation_puts_a_resting_provider_last() {
@@ -728,12 +332,9 @@ mod tests {
         };
         assert_eq!(order(&reg), vec![groq, mistral]);
 
-        cooldowns()
-            .lock()
-            .unwrap()
-            .insert(groq.to_string(), std::time::Instant::now() + RATE_LIMIT_COOLDOWN);
+        rotation().rest(groq, Duration::from_secs(60));
         assert_eq!(order(&reg), vec![mistral, groq]);
-        cooldowns().lock().unwrap().remove(groq);
+        rotation().rest(groq, Duration::ZERO);
     }
 
     #[test]

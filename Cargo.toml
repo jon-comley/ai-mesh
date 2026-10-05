@@ -12,6 +12,7 @@ members = [
     "capabilities/audio",
     "capabilities/music",
     "ebay",
+    "llm-rotation",
     "agent",
     "coordinator",
     "cli",

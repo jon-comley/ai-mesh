@@ -72,4 +72,5 @@ finished work and the reasoning behind it is in [`HISTORY.md`](HISTORY.md).
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT or Apache-2.0, at your option: see [`LICENSE-MIT`](LICENSE-MIT) and
+[`LICENSE-APACHE`](LICENSE-APACHE).
