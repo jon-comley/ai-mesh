@@ -1070,9 +1070,12 @@ missing is the separation: no member's `Cargo.toml` has `license`,
 `license = "MIT"`, `description` and `repository`, give it a README with an
 example, and check with `cargo publish --dry-run` before publishing.
 
+**First: the AI provider rotation** (Jon, 2026-10-05: "the ai rotation would
+make a good crate").
+
 **Not decided:** whether to publish to crates.io or only make the GitHub repo
-public, which crates go first, and whether MIT stays or becomes MIT OR
-Apache-2.0 (the usual Rust pairing).
+public, and whether MIT stays or becomes MIT OR Apache-2.0 (the usual Rust
+pairing).
 
 ## CI (Proposed 2026-07-12)
 
