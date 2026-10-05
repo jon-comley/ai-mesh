@@ -909,45 +909,62 @@ fn parse_scores(reply: &str) -> Vec<(String, i64)> {
         .unwrap_or_default()
 }
 
+/// Verdicts for the listings in `term_matches` this hunt has not seen before,
+/// `JUDGE_BATCH` at a time. Seen ones are left out: they were judged (or
+/// missed) when they were new, and process_hunt_results never stores a
+/// verdict for them. Sending everything eBay returned put a few hundred
+/// listings in one prompt, and the reply came back cut off or empty
+/// ("empty or unparseable response"), leaving the new ones unjudged.
 async fn get_verdicts(
     hunt: &HuntSpec,
     term_matches: &[(String, Listing)],
     registry: &Arc<Mutex<Registry>>,
 ) -> HashMap<String, (bool, String)> {
-    let rotation = crate::cloud::provider_rotation(&registry.lock().unwrap());
+    let (rotation, seen) = {
+        let reg = registry.lock().unwrap();
+        (crate::cloud::provider_rotation(&reg), reg.seen_listing_ids(&hunt.id))
+    };
     if rotation.is_empty() {
         return HashMap::new();
     }
-    let mut listing = String::new();
+    let mut fresh: Vec<&Listing> = Vec::new();
+    let mut queued = std::collections::HashSet::new();
     for (_, l) in term_matches {
-        let price = l
-            .price_minor
-            .map(|p| {
-                format!(
-                    "{:.2} {}",
-                    p as f64 / 100.0,
-                    l.currency.clone().unwrap_or_default()
-                )
-            })
-            .unwrap_or_else(|| "price unknown".into());
-        let condition = l
-            .condition
-            .clone()
-            .unwrap_or_else(|| "condition unknown".into());
-        listing.push_str(&format!(
-            "- item_id {}: \"{}\" — {price} ({condition})\n",
-            l.item_id, l.title
-        ));
-    }
-    let prompt = verdict_prompt(hunt, &listing);
-    let reply = match crate::cloud::complete_rotating(&rotation, &[shared::ChatTurn::user(prompt)], 0.2).await {
-        Ok((r, _)) => r.text,
-        Err(e) => {
-            tracing::warn!(error = %e, "ebay bargain-verdict LLM call failed");
-            return HashMap::new();
+        if !seen.contains(&l.item_id) && queued.insert(l.item_id.as_str()) {
+            fresh.push(l);
         }
-    };
-    parse_verdicts(&reply)
+    }
+
+    let mut verdicts = HashMap::new();
+    for batch in fresh.chunks(JUDGE_BATCH) {
+        let mut listing = String::new();
+        for l in batch {
+            let price = l
+                .price_minor
+                .map(|p| {
+                    format!(
+                        "{:.2} {}",
+                        p as f64 / 100.0,
+                        l.currency.clone().unwrap_or_default()
+                    )
+                })
+                .unwrap_or_else(|| "price unknown".into());
+            let condition = l
+                .condition
+                .clone()
+                .unwrap_or_else(|| "condition unknown".into());
+            listing.push_str(&format!(
+                "- item_id {}: \"{}\" — {price} ({condition})\n",
+                l.item_id, l.title
+            ));
+        }
+        let prompt = verdict_prompt(hunt, &listing);
+        match crate::cloud::complete_rotating(&rotation, &[shared::ChatTurn::user(prompt)], 0.2).await {
+            Ok((r, _)) => verdicts.extend(parse_verdicts(&r.text)),
+            Err(e) => tracing::warn!(error = %e, "ebay bargain-verdict LLM call failed"),
+        }
+    }
+    verdicts
 }
 
 #[derive(Deserialize)]
