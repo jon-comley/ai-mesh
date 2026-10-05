@@ -1044,6 +1044,36 @@ showing a meaningless fixed position. Needs a `RoomRecord`/device-position
 schema decision (new column? reuse of the existing light-position table
 with a null position meaning "portable"?) before implementation.
 
+## Reusable crates, open source (Proposed 2026-10-05)
+
+**Jon wants parts of the code broken out into separate, reusable libraries and
+published under an open-source licence.** In Rust these are crates, published on
+crates.io.
+
+**Where it starts from:** the repo is already MIT (`LICENSE`, Jonathan Comley
+2026) and already a Cargo workspace, so each piece is a crate already. What is
+missing is the separation: no member's `Cargo.toml` has `license`,
+`description` or `repository`, and the members depend on each other by path.
+
+**Candidates, each one only if it stands without the mesh:**
+- **The AI provider rotation** (`coordinator/src/cloud.rs`): one
+  OpenAI-compatible client across Groq, OpenRouter, Mistral, Gemini, Anthropic
+  and OpenAI, free before paid, resting a provider that runs out. Needs the
+  `Registry` preference reads pulled out behind a small config type first.
+- **The eBay client** (`ebay/`): Browse API search, item lookup, schedules and
+  diffs.
+- **The SSE reader** in `shared`.
+- **The capability crates** (`capabilities/*`), if `capability-core`'s trait is
+  worth offering as a plug-in interface in its own right.
+
+**Per crate:** remove any dependency on `shared` or `coordinator`, fill in
+`license = "MIT"`, `description` and `repository`, give it a README with an
+example, and check with `cargo publish --dry-run` before publishing.
+
+**Not decided:** whether to publish to crates.io or only make the GitHub repo
+public, which crates go first, and whether MIT stays or becomes MIT OR
+Apache-2.0 (the usual Rust pairing).
+
 ## CI (Proposed 2026-07-12)
 
 Flagged as wanted "when ready" — no scope decided yet (what runs: clippy +
