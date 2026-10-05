@@ -304,6 +304,18 @@ retired OpenRouter `:free` slug and was logged as a bare "HTTP 404". Fixed by
 switching pi1 to Groq `openai/gpt-oss-120b` and logging the provider's message;
 see HISTORY.md.
 
+**Hunts no longer depend on one provider (live on pi1 2026-10-05).** Every Hunts
+AI call (search terms, ranking, verdicts, the describe-it chat) goes through the
+`llm-rotation` crate: Groq first, as chosen on the Online AI tab, then every
+other provider with a saved key, free before paid (OpenRouter, Mistral, then
+Claude Haiku 4.5 and GPT-4o mini). One that runs out is rested: 15 minutes for a
+rate limit or timeout, 6 hours for no credit or a rejected key. Mistral was
+added as a preset and its key saved on pi1 the same day. **Open:** pi1 has no
+Gemini key (the glebefish site's is a Cloudflare secret), and whether the
+Anthropic and OpenAI accounts hold any credit is unknown; without it they are
+simply rested. Chat (`intent.rs`) still uses its older fallback loop, which
+tries the other providers but rests none of them.
+
 **Bargains-first was reverted the same day — it hid every recent find.** 74 of
 212 finds came back `bargain:`, against a 50-row response cap, so the list was
 50 bargains and nothing newer than four days old. Ordering is now newest-first
@@ -346,8 +358,9 @@ route when checked on 2026-09-25); **not yet exercised against the real Groq end
 - The 212 finds from before the Groq switch are still unjudged — only new
   listings get a verdict. A one-off "judge the unjudged" pass would give them
   verdicts; `rank` already scores them regardless of verdict.
-- Watch the next few cycles' journal for `ebay bargain-verdict LLM call failed`
-  to confirm Groq holds up on a real batch, not just the test prompt.
+- Watch the next few cycles' journal for `LLM provider failed` and
+  `ebay bargain-verdict LLM call failed` to confirm the rotation moves on when
+  Groq runs out, on a real batch, not just the test prompt.
 
 **Timeslot picker reworked (2026-07-15):** the original UI was a fixed
 00–23 hourly grid, and a CSS specificity bug (`.ebay-editor button` was
