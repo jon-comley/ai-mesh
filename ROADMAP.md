@@ -1050,8 +1050,8 @@ with a null position meaning "portable"?) before implementation.
 published under an open-source licence.** In Rust these are crates, published on
 crates.io.
 
-**Where it starts from:** the repo is already MIT (`LICENSE`, Jonathan Comley
-2026) and already a Cargo workspace, so each piece is a crate already. What is
+**Where it started from:** the repo was MIT (`LICENSE`, Jonathan Comley
+2026) and already a Cargo workspace, so each piece was a crate already. What is
 missing is the separation: no member's `Cargo.toml` has `license`,
 `description` or `repository`, and the members depend on each other by path.
 
@@ -1070,12 +1070,20 @@ missing is the separation: no member's `Cargo.toml` has `license`,
 `license = "MIT"`, `description` and `repository`, give it a README with an
 example, and check with `cargo publish --dry-run` before publishing.
 
-**First: the AI provider rotation** (Jon, 2026-10-05: "the ai rotation would
-make a good crate").
+**Decided 2026-10-05 (Jon):**
+- **Publish to crates.io.** The GitHub repo is already public; crates.io is
+  what makes a crate usable from one line in someone else's `Cargo.toml`.
+- **The AI provider rotation goes first** ("the ai rotation would make a good
+  crate").
+- **MIT OR Apache-2.0**, the Rust convention, for the whole repo:
+  `LICENSE-MIT` and `LICENSE-APACHE` at the root and in each published crate.
 
-**Not decided:** whether to publish to crates.io or only make the GitHub repo
-public, and whether MIT stays or becomes MIT OR Apache-2.0 (the usual Rust
-pairing).
+**Done 2026-10-05: `llm-rotation/`**, built and passing `cargo publish
+--dry-run`, **not yet published.** It holds the client, the presets and the
+rotation, with its own `Message` type and no dependency on the mesh;
+`coordinator/src/cloud.rs` keeps only the settings that choose providers and
+keys. **Publishing is permanent** (a version can be yanked, never deleted), so
+it waits for Jon's go-ahead and a crates.io token.
 
 ## CI (Proposed 2026-07-12)
 
