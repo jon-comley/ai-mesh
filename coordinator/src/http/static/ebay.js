@@ -225,6 +225,10 @@ function openEditor(hunt) {
       ${hunt ? `
       <button id="ebay-run-now" type="button">Check now</button>
       <button id="ebay-rank" type="button" title="Refresh from eBay, then score every live find against 'What it's for'">Rank</button>
+      <button id="ebay-judge" type="button" ${hunt.judge_ready === false ? 'disabled' : ''}
+        title="${hunt.judge_ready === false
+          ? 'Already used: available again after the next scheduled check'
+          : 'Give a bargain verdict to every find that has none yet. Once per scheduled check.'}">Judge now</button>
       <button id="ebay-toggle-enabled" type="button">${hunt.enabled ? 'Disable' : 'Enable'}</button>
       <button id="ebay-delete" type="button">Delete</button>` : ''}
     </div>
@@ -256,6 +260,8 @@ function openEditor(hunt) {
     runBtn.addEventListener('click', () => runNow(hunt.id, runBtn));
     const rankBtn = editor.querySelector('#ebay-rank');
     rankBtn.addEventListener('click', () => rankHunt(hunt, rankBtn));
+    const judgeBtn = editor.querySelector('#ebay-judge');
+    judgeBtn.addEventListener('click', () => judgeHunt(hunt, judgeBtn));
     editor.querySelector('#ebay-toggle-enabled').addEventListener('click', () => toggleEnabled(hunt));
     editor.querySelector('#ebay-delete').addEventListener('click', () => deleteHunt(hunt.id));
   }
@@ -539,6 +545,38 @@ async function rankHunt(hunt, btn) {
     syncSortControl();
     await refreshFinds();
   });
+}
+
+// Verdicts for every find that has none, once per scheduled check. The server
+// decides whether it is available; the button only mirrors that, and stays
+// disabled after a pass that used it up.
+async function judgeHunt(hunt, btn) {
+  let spent = false;
+  await whileBusy(btn, 'Judging…', async () => {
+    const res = await api(`/ebay/hunts/${encodeURIComponent(hunt.id)}/judge`, { method: 'POST' });
+    if (res.status === 409) {
+      spent = true;
+      showToast(await res.text(), true);
+      return;
+    }
+    if (!res.ok) { showToast(`Judging failed: ${await res.text()}`, true); return; }
+    const data = await res.json();
+    if (data.considered === 0) {
+      showToast('Nothing to judge: every find already has a verdict');
+      return;
+    }
+    spent = true;
+    showToast(data.failed_batches
+      ? `Judged ${data.judged} of ${data.considered}; some batches failed`
+      : `Judged ${data.judged} of ${data.considered} find(s)`, data.failed_batches);
+    await refreshFinds();
+  });
+  if (spent) {
+    hunt.judge_ready = false;
+    btn.disabled = true;
+    btn.title = 'Already used: available again after the next scheduled check';
+    refreshHunts();
+  }
 }
 
 async function runNow(id, btn) {

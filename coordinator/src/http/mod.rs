@@ -225,6 +225,7 @@ pub fn router(
         )
         .route("/api/ebay/hunts/{id}/run-now", post(api::ebay::run_now))
         .route("/api/ebay/hunts/{id}/rank", post(api::ebay::rank_hunt))
+        .route("/api/ebay/hunts/{id}/judge", post(api::ebay::judge_hunt))
         .route("/api/ebay/finds", get(api::ebay::list_finds))
         .route(
             "/api/ebay/finds/{id}/reviewed",

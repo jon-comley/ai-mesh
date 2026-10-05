@@ -185,6 +185,21 @@ impl Registry {
         written
     }
 
+    /// Give a stored find its bargain verdict, only where it has none yet, so
+    /// a judge-now pass can never overwrite what a cycle already said.
+    /// Returns how many rows changed.
+    pub fn set_find_verdict(&self, hunt_id: &str, item_id: &str, verdict: &str) -> usize {
+        self.conn
+            .execute(
+                "UPDATE ebay_finds SET verdict = ?3 WHERE hunt_id = ?1 AND item_id = ?2 AND verdict IS NULL",
+                params![hunt_id, item_id, verdict],
+            )
+            .unwrap_or_else(|e| {
+                warn!(error = %e, item_id, "set_find_verdict failed");
+                0
+            })
+    }
+
     /// Every find for a hunt that has not been dismissed, newest first — the
     /// set a ranking pass compares against each other. Unlike `list_finds`
     /// this is uncapped: ranking half a list produces a ranking of half a list.
@@ -602,6 +617,21 @@ mod tests {
         assert_eq!(after, vec!["3", "2", "1", "4"]);
         // And the oldest, still undismissed, stays above it.
         assert!(!reg.mark_find_reviewed(&format!("{}-nope", oldest.id)));
+    }
+
+    #[test]
+    fn set_find_verdict_fills_only_an_empty_verdict() {
+        let reg = Registry::new();
+        let hunt_id = sample_hunt(&reg);
+        reg.insert_find(&hunt_id, &sample_listing("1"), "term", None);
+        reg.insert_find(&hunt_id, &sample_listing("2"), "term", Some("bargain: from the cycle"));
+
+        assert_eq!(reg.set_find_verdict(&hunt_id, "1", "not a bargain: full price"), 1);
+        assert_eq!(reg.set_find_verdict(&hunt_id, "2", "not a bargain: overwrite?"), 0);
+        let finds = reg.list_finds(None, 10);
+        let verdict = |id: &str| finds.iter().find(|f| f.item_id == id).unwrap().verdict.clone();
+        assert_eq!(verdict("1").as_deref(), Some("not a bargain: full price"));
+        assert_eq!(verdict("2").as_deref(), Some("bargain: from the cycle"));
     }
 
     #[test]
