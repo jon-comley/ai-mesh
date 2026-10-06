@@ -20,7 +20,10 @@ let chatBusy = false;
 
 export function init(panel) {
   panel.innerHTML = `
-    <h2>Hunts</h2>
+    <div class="ebay-head">
+      <h2>Hunts</h2>
+      <button id="ebay-settings-show" class="ebay-settings-show" type="button" hidden>Settings</button>
+    </div>
     <div class="ebay-layout">
       <aside class="ebay-sidebar">
         <button id="ebay-new-hunt" type="button">+ New hunt</button>
@@ -77,6 +80,12 @@ export function init(panel) {
 // ── settings ─────────────────────────────────────────────────────────────
 
 function wireSettings(panel) {
+  panel.querySelector('#ebay-settings-show').addEventListener('click', () => {
+    const details = panel.querySelector('.ebay-settings');
+    details.hidden = false;
+    details.open = true;
+    panel.querySelector('#ebay-settings-show').hidden = true;
+  });
   panel.querySelector('#ebay-client-id-save').addEventListener('click', async () => {
     const input = panel.querySelector('#ebay-client-id');
     const res = await api('/ebay/config', { method: 'POST', body: { client_id: input.value.trim() } });
@@ -110,6 +119,17 @@ function renderConfig(cfg) {
   }
   const ntfyInput = document.getElementById('ebay-ntfy');
   if (ntfyInput && document.activeElement !== ntfyInput) ntfyInput.value = cfg.ntfy_topic_url ?? '';
+  // Out of the way once everything is set (Jon, 2026-10-06): the block is only
+  // needed to set up or change the keys and topic, so it hides behind a small
+  // Settings button by the heading.
+  // Left alone while it is open, so a save made in it does not hide it mid-edit.
+  const details = document.querySelector('.ebay-settings');
+  const show = document.getElementById('ebay-settings-show');
+  if (details && show && !details.open) {
+    const allSet = cfg.client_id_set && cfg.client_secret_set && !!cfg.ntfy_topic_url;
+    details.hidden = allSet;
+    show.hidden = !allSet;
+  }
 }
 
 // ── hunts sidebar ────────────────────────────────────────────────────────
