@@ -188,6 +188,20 @@ pub fn provider_rotation(reg: &Registry) -> Vec<OpenAiCompatProvider> {
     rotation().order(all)
 }
 
+/// `providers` with any that are resting moved to the back, for a caller that
+/// walks the list itself (chat, which records every provider's failure).
+pub fn order_by_rest(providers: Vec<OpenAiCompatProvider>) -> Vec<OpenAiCompatProvider> {
+    rotation().order(providers)
+}
+
+/// Rest `provider` if `e` says it has run out (rate limit, timeout, no credit,
+/// bad key), the same as [`complete_rotating`] does for its own failures.
+pub fn rest_if_out(provider: &OpenAiCompatProvider, e: &CloudError) {
+    if let Some(d) = rotation().rest_for(e) {
+        rotation().rest(provider.base_url(), d);
+    }
+}
+
 /// Run a completion on the first provider in `providers` that answers, resting
 /// any that have run out. Returns the reply and the provider that gave it.
 pub async fn complete_rotating(
