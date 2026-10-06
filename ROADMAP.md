@@ -313,8 +313,9 @@ rate limit or timeout, 6 hours for no credit or a rejected key. Mistral was
 added as a preset and its key saved on pi1 the same day. **Open:** pi1 has no
 Gemini key (the glebefish site's is a Cloudflare secret), and whether the
 Anthropic and OpenAI accounts hold any credit is unknown; without it they are
-simply rested. Chat (`intent.rs`) still uses its older fallback loop, which
-tries the other providers but rests none of them.
+simply rested. Chat (`intent.rs`) uses the same order and rests since
+2026-10-06, keeping its own loop so every provider's failure still reaches the
+dashboard.
 
 **Bargains-first was reverted the same day — it hid every recent find.** 74 of
 212 finds came back `bargain:`, against a 50-row response cap, so the list was

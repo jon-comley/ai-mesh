@@ -306,52 +306,43 @@ pub async fn handle_intent(
         // line (if we get there) summarizes every provider tried, not just
         // the last one.
         let mut attempted: Vec<String> = Vec::new();
-        let mut result = gw.provider.complete(&messages, 0.4).await.map(|r| {
-            (
-                r,
-                gw.provider.provider_name().to_string(),
-                gw.provider.model().to_string(),
-            )
-        });
-
-        if let Err(e) = &result {
-            warn!(
-                request_id = %request.request_id,
-                "cloud provider {} failed: {e}; trying other configured providers",
-                gw.provider.provider_name()
-            );
-            gw.state.record_gateway_error(e.to_string());
-            attempted.push(format!("{}: {e}", gw.provider.provider_name()));
-
-            let fallbacks = {
-                let reg = registry.lock().unwrap();
-                crate::cloud::fallback_providers(&reg, gw.provider.base_url())
-            };
-            for fp in fallbacks {
-                match fp.complete(&messages, 0.4).await {
-                    Ok(reply) => {
+        // The Online AI tab's provider first, then the others with a saved key
+        // (free before paid), with any the shared rotation is resting moved to
+        // the back: the same order and the same rests the hunts use, so a
+        // provider out of credit is not asked again on every message
+        // (2026-10-06). The loop stays here rather than in
+        // `cloud::complete_rotating` so each failure still reaches the
+        // dashboard and the summary below.
+        let providers = {
+            let reg = registry.lock().unwrap();
+            let mut all = vec![gw.provider.clone()];
+            all.extend(crate::cloud::fallback_providers(&reg, gw.provider.base_url()));
+            crate::cloud::order_by_rest(all)
+        };
+        let mut result = Err(crate::cloud::CloudError::NoKey);
+        for p in &providers {
+            match p.complete(&messages, 0.4).await {
+                Ok(reply) => {
+                    if !attempted.is_empty() {
                         info!(
                             request_id = %request.request_id,
-                            provider = %fp.provider_name(),
+                            provider = %p.provider_name(),
                             "cloud fallback succeeded"
                         );
-                        result = Ok((
-                            reply,
-                            fp.provider_name().to_string(),
-                            fp.model().to_string(),
-                        ));
-                        break;
                     }
-                    Err(fe) => {
-                        warn!(
-                            request_id = %request.request_id,
-                            provider = %fp.provider_name(),
-                            "cloud fallback provider failed: {fe}"
-                        );
-                        gw.state.record_gateway_error(fe.to_string());
-                        attempted.push(format!("{}: {fe}", fp.provider_name()));
-                        result = Err(fe);
-                    }
+                    result = Ok((reply, p.provider_name().to_string(), p.model().to_string()));
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        request_id = %request.request_id,
+                        provider = %p.provider_name(),
+                        "cloud provider failed: {e}; trying the next"
+                    );
+                    crate::cloud::rest_if_out(p, &e);
+                    gw.state.record_gateway_error(e.to_string());
+                    attempted.push(format!("{}: {e}", p.provider_name()));
+                    result = Err(e);
                 }
             }
         }
