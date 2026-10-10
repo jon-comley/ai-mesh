@@ -1048,6 +1048,18 @@ async fn process_message(
         MeshMessage::RequestWorkers => Some(MeshMessage::WorkerSnapshot(
             crate::inference::worker_snapshot(registry, connections),
         )),
+        MeshMessage::ReviewSnapshot(snapshot) => {
+            if let Some(dash) = dashboard {
+                dash.set_review_snapshot(*snapshot);
+            }
+            None
+        }
+        MeshMessage::ReviewReply(reply) => {
+            if let Some(dash) = dashboard {
+                dash.resolve_review_reply(reply);
+            }
+            None
+        }
         MeshMessage::ModelInferenceResult(res) => {
             info!(
                 request_id = %res.request_id,

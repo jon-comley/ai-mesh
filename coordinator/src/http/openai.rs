@@ -279,11 +279,13 @@ fn resolve_route(
     requested: Option<&str>,
     registry: &Arc<Mutex<Registry>>,
 ) -> Result<Route, ApiError> {
+    // Cloned first so the router's lock is never held with the registry's.
+    let roles = crate::work_router::state().lock().unwrap().roles.clone();
     let (ready, default_local, cfg) = {
         let reg = registry.lock().unwrap();
         (
             reg.ready_llm_models(),
-            reg.any_ready_control_model(&crate::work_router::state().lock().unwrap().roles),
+            reg.any_ready_control_model(&roles),
             crate::cloud::GatewayConfig::load(&reg),
         )
     };
