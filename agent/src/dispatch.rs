@@ -26,6 +26,8 @@ pub fn build_capabilities(node_id: &str) -> Vec<Arc<dyn Capability + Send + Sync
         Arc::new(capability_audio::AudioCapability::new(node_id)),
         #[cfg(feature = "music")]
         Arc::new(capability_music::MusicCapability::new(node_id)),
+        #[cfg(feature = "review")]
+        Arc::new(capability_review::ReviewCapability::new(node_id)),
     ]
 }
 

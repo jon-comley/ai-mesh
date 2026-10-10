@@ -103,6 +103,11 @@ pub struct NodeCapabilities {
     /// `serde(default)` keeps older agents' payloads parseable.
     #[serde(default)]
     pub audio_backends: Vec<String>,
+    /// The model server's context size in tokens (`LLAMA_CTX_SIZE`), so the
+    /// coordinator can tell review work how much one task may hold. `None`
+    /// from agents that predate wire v13 or have no LLM feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_ctx_size: Option<u32>,
 }
 
 /// A node capability, 1:1 with the agent's compile-time Cargo features.
@@ -118,6 +123,8 @@ pub enum Feature {
     Voice,
     Audio,
     Music,
+    /// Runs the code reviews (mac1) — see docs/code-review.md.
+    Review,
 }
 
 impl Default for NodeCapabilities {
@@ -129,6 +136,7 @@ impl Default for NodeCapabilities {
             max_model_size_gb: 0.0,
             features: vec![],
             audio_backends: vec![],
+            llm_ctx_size: None,
         }
     }
 }
@@ -204,6 +212,7 @@ mod tests {
             max_model_size_gb: 8.0,
             features: vec![Feature::Llm, Feature::Lighting],
             audio_backends: vec![],
+            llm_ctx_size: None,
         };
         let json = serde_json::to_string(&caps).unwrap();
         let back: NodeCapabilities = serde_json::from_str(&json).unwrap();
