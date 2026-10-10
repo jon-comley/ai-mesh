@@ -116,6 +116,7 @@ mod tests {
             max_model_size_gb: 3.9,
             features: vec![shared::Feature::Llm],
             audio_backends: vec![],
+            llm_ctx_size: None,
         }
     }
 

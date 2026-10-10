@@ -39,6 +39,10 @@ async fn main() {
     free_port(http_port);
 
     let coord = Coordinator::new_persistent("0.0.0.0:9000", "ai_mesh.db");
+    // Which models answer home commands and which do review work (dashboard
+    // setting, or MESH_CONTROL_MODELS / MESH_WORK_MODELS).
+    coordinator::work_router::state().lock().unwrap().roles =
+        coordinator::work_router::load_roles(&coord.registry.lock().unwrap());
     let (_handle, dashboard) = coord.start().await;
     coordinator::logging::bind(dashboard.clone());
 

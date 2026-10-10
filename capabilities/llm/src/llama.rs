@@ -52,7 +52,9 @@ fn gpu_layers() -> u32 {
         .unwrap_or(0)
 }
 
-fn ctx_size() -> u32 {
+/// The model server's context size in tokens (`LLAMA_CTX_SIZE`, default 4096).
+/// Public so the agent can report it: review work sizes its tasks from it.
+pub fn ctx_size() -> u32 {
     std::env::var("LLAMA_CTX_SIZE")
         .ok()
         .and_then(|v| v.trim().parse().ok())
@@ -80,6 +82,59 @@ fn flash_attn() -> &'static str {
         Some("off") => "off",
         _ => "auto",
     }
+}
+
+/// Extra llama-server flags for long-context work (docs/code-review.md):
+///
+/// * `LLAMA_KV_CACHE_TYPE` — `f16`, `q8_0` or `q4_0`, passed as both
+///   `--cache-type-k` and `--cache-type-v`. `q8_0` halves the context memory,
+///   which is what lets mac1 hold 256k tokens in about 12 GB. It needs flash
+///   attention, which `auto` turns on wherever the backend supports it.
+/// * `LLAMA_PARALLEL` — number of slots (`--parallel`). With two slots, a home
+///   command lands in the second one and a paused review's already-read prompt
+///   stays cached in the first, so resending the review continues from there.
+/// * `LLAMA_KV_UNIFIED` — `true`/`1` adds `--kv-unified`, so the slots share
+///   one context pool instead of each getting `ctx / parallel`.
+///
+/// Unrecognised values are ignored rather than passed through, so a typo
+/// cannot stop llama-server from starting.
+pub(crate) fn extra_server_args(
+    kv_cache_type: Option<&str>,
+    parallel: Option<&str>,
+    kv_unified: Option<&str>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(t) = kv_cache_type.map(|v| v.trim().to_ascii_lowercase())
+        && matches!(t.as_str(), "f16" | "q8_0" | "q4_0")
+    {
+        args.extend([
+            "--cache-type-k".into(),
+            t.clone(),
+            "--cache-type-v".into(),
+            t,
+        ]);
+    }
+    if let Some(n) = parallel.and_then(|v| v.trim().parse::<u32>().ok())
+        && (2..=8).contains(&n)
+    {
+        args.extend(["--parallel".into(), n.to_string()]);
+    }
+    if matches!(
+        kv_unified.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    ) {
+        args.push("--kv-unified".into());
+    }
+    args
+}
+
+fn env_extra_server_args() -> Vec<String> {
+    let get = |k: &str| std::env::var(k).ok();
+    extra_server_args(
+        get("LLAMA_KV_CACHE_TYPE").as_deref(),
+        get("LLAMA_PARALLEL").as_deref(),
+        get("LLAMA_KV_UNIFIED").as_deref(),
+    )
 }
 
 /// Default health-wait ceiling: 180 s floor, scaled up for larger models
@@ -558,6 +613,7 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
     if let Some(batch) = n_batch() {
         cmd.arg("--n-batch").arg(batch.to_string());
     }
+    cmd.args(env_extra_server_args());
 
     let child = cmd
         .spawn()
@@ -1269,6 +1325,30 @@ mod tests {
     }
 
     // ── ChatResponse deserialization ──────────────────────────────────────────
+
+    #[test]
+    fn extra_args_for_long_context_work() {
+        assert_eq!(
+            extra_server_args(Some("q8_0"), Some("2"), Some("true")),
+            vec![
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+                "--parallel",
+                "2",
+                "--kv-unified"
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_args_ignore_unset_and_bad_values() {
+        assert!(extra_server_args(None, None, None).is_empty());
+        assert!(extra_server_args(Some("q9"), Some("1"), Some("no")).is_empty());
+        assert!(extra_server_args(Some(""), Some("lots"), Some("")).is_empty());
+        assert_eq!(extra_server_args(Some(" Q8_0 "), None, None).len(), 4);
+    }
 
     #[test]
     fn health_timeout_floor_is_180s_for_small_models() {

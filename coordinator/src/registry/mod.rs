@@ -1087,6 +1087,56 @@ impl Registry {
             .map(|(name, _)| name.clone())
     }
 
+    /// Every Ready model on a Compute node, with the node it is on — what the
+    /// work router chooses between (see `work_router`). `require_llm` keeps
+    /// only nodes advertising the LLM feature, as model *selection* always
+    /// has; routing a named model has never required it (`Scheduler`).
+    pub fn ready_model_targets(&self, require_llm: bool) -> Vec<crate::work_router::Candidate> {
+        let mut out: Vec<crate::work_router::Candidate> = self
+            .nodes
+            .values()
+            .filter(|n| {
+                n.identity.role == NodeRole::Compute
+                    && (!require_llm
+                        || n.capabilities
+                            .as_ref()
+                            .map(|c| c.features.contains(&shared::Feature::Llm))
+                            .unwrap_or(false))
+            })
+            .flat_map(|n| {
+                n.models
+                    .iter()
+                    .filter(|(_, alloc)| alloc.state == ModelLifecycleState::Ready)
+                    .map(move |(name, alloc)| crate::work_router::Candidate {
+                        node_id: n.identity.id.clone(),
+                        hostname: n.identity.hostname.clone(),
+                        model_name: name.clone(),
+                        size_mb: alloc.size_mb,
+                        ctx_size: n.capabilities.as_ref().and_then(|c| c.llm_ctx_size),
+                    })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.node_id
+                .cmp(&b.node_id)
+                .then(a.model_name.cmp(&b.model_name))
+        });
+        out
+    }
+
+    /// The largest Ready model that may answer home commands under `roles`.
+    /// With no roles set this is [`Self::any_ready_llm_model`].
+    pub fn any_ready_control_model(
+        &self,
+        roles: &crate::work_router::ModelRoles,
+    ) -> Option<String> {
+        self.ready_model_targets(true)
+            .into_iter()
+            .filter(|c| roles.is_control(&c.model_name))
+            .max_by_key(|c| c.size_mb)
+            .map(|c| c.model_name)
+    }
+
     /// All model names in Ready state on LLM-capable Compute nodes, deduped
     /// and sorted. Used by the OpenAI-compatible API for routing and /v1/models.
     pub fn ready_llm_models(&self) -> Vec<String> {
@@ -2003,6 +2053,7 @@ mod tests {
             max_model_size_gb: 8.0,
             features: vec![shared::Feature::Llm],
             audio_backends: vec![],
+            llm_ctx_size: None,
         }
     }
 
@@ -2123,6 +2174,7 @@ mod tests {
             max_model_size_gb: 3.69,
             features: vec![shared::Feature::Llm],
             audio_backends: vec![],
+            llm_ctx_size: None,
         }
     }
 

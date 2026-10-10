@@ -17,3 +17,4 @@ pub mod soundbar;
 pub mod state;
 pub mod tls;
 pub mod tv;
+pub mod work_router;

@@ -245,7 +245,10 @@ async fn curate_with_llm(
     registry: &Arc<Mutex<Registry>>,
     state: &Arc<DashboardState>,
 ) -> Option<Vec<usize>> {
-    let model = registry.lock().unwrap().any_ready_llm_model()?;
+    // Any control model on the least busy machine (see `work_router`).
+    let roles = crate::work_router::state().lock().unwrap().roles.clone();
+    registry.lock().unwrap().any_ready_control_model(&roles)?;
+    let model = crate::inference::AUTO_CONTROL_MODEL.to_string();
 
     let mut listing = String::new();
     for (i, obj) in candidates.iter().enumerate() {
@@ -391,7 +394,10 @@ async fn narrate_artwork(
     registry: &Arc<Mutex<Registry>>,
     state: &Arc<DashboardState>,
 ) -> Option<String> {
-    let model = registry.lock().unwrap().any_ready_llm_model()?;
+    // Any control model on the least busy machine (see `work_router`).
+    let roles = crate::work_router::state().lock().unwrap().roles.clone();
+    registry.lock().unwrap().any_ready_control_model(&roles)?;
+    let model = crate::inference::AUTO_CONTROL_MODEL.to_string();
     let date = if item.date.is_empty() {
         "date unknown"
     } else {

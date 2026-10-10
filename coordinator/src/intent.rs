@@ -158,10 +158,17 @@ pub async fn handle_intent(
     // 2. Choose model. In cloud mode the label is the cloud model; a local model
     //    is still resolved when available so we can fall back if the cloud call
     //    fails. Only hard-fail on "no model" when we have neither.
-    let local_model: Option<String> = request
-        .model_name
-        .clone()
-        .or_else(|| registry.lock().unwrap().any_ready_llm_model());
+    // With no model named, leave the choice to the router: any control model,
+    // on the least busy machine, so a home command never waits behind review
+    // work (see `work_router`).
+    let local_model: Option<String> = request.model_name.clone().or_else(|| {
+        let roles = crate::work_router::state().lock().unwrap().roles.clone();
+        registry
+            .lock()
+            .unwrap()
+            .any_ready_control_model(&roles)
+            .map(|_| crate::inference::AUTO_CONTROL_MODEL.to_string())
+    });
     // The actual model used is only known once inference runs (cloud may fall
     // back across providers, or to local) — this match exists purely as an
     // early-exit guard for "no model anywhere".
@@ -316,7 +323,10 @@ pub async fn handle_intent(
         let providers = {
             let reg = registry.lock().unwrap();
             let mut all = vec![gw.provider.clone()];
-            all.extend(crate::cloud::fallback_providers(&reg, gw.provider.base_url()));
+            all.extend(crate::cloud::fallback_providers(
+                &reg,
+                gw.provider.base_url(),
+            ));
             crate::cloud::order_by_rest(all)
         };
         let mut result = Err(crate::cloud::CloudError::NoKey);
