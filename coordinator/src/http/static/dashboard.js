@@ -12,6 +12,7 @@ import * as chat from '/static/chat.js';
 import * as reaper from '/static/reaper.js';
 import * as gateway from '/static/gateway.js';
 import * as ebay from '/static/ebay.js';
+import * as reviews from '/static/reviews.js';
 import { registerSwitchAction } from '/static/devicewidgets.js';
 
 // Keeps the Home tab's room-card Bluetooth badge in sync with the AV
@@ -112,6 +113,7 @@ const handlers = {
   ReaperUpdate: evt => reaper.handleReaperUpdate(evt),
   GatewayUpdate: evt => gateway.handleGatewayUpdate(evt),
   EbayFind: evt => ebay.handleFind(evt),
+  ReviewUpdate: evt => reviews.handleUpdate(evt),
 };
 
 function dispatch(evt) {
@@ -188,6 +190,7 @@ chat.init(document.getElementById('panel-chat'));
 reaper.init(document.getElementById('panel-reaper'));
 gateway.init(document.getElementById('panel-gateway'));
 ebay.init(document.getElementById('panel-ebay'));
+reviews.init(document.getElementById('panel-reviews'));
 
 // Ask for token on very first visit when auth is likely needed.
 if (!localStorage.getItem('meshToken')) {

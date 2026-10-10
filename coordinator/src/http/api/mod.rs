@@ -24,6 +24,7 @@ pub mod lights;
 pub mod model_search;
 pub mod nodes;
 pub mod prefs;
+pub mod reviews;
 pub mod rooms;
 pub mod scenes;
 pub mod sensors;

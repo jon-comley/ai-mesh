@@ -4541,3 +4541,21 @@ body {
   font-size: 13px; cursor: pointer; flex: 0 0 auto;
 }
 .ebay-dismiss:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── Reviews tab (docs/code-review.md) ───────────────────────────────────── */
+.rv-notice { background: var(--surface); border: 1px solid var(--red); border-radius: 8px; padding: 8px 12px; }
+.rv-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.rv-run, .rv-finding {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0;
+}
+.rv-run-failed { border-color: var(--red); }
+.rv-task { font-size: 13px; padding-left: 8px; border-left: 2px solid var(--accent); }
+.rv-quote, .rv-report-text {
+  white-space: pre-wrap; word-break: break-word; overflow-x: auto; font-size: 12px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 4px 0;
+}
+.rv-report { margin-bottom: 12px; }
+.rv-report-text { max-height: 60vh; overflow-y: auto; }
+.rv-role-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 14px; }
+.rv-role-row > span { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; }

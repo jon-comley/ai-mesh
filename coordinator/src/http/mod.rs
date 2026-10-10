@@ -52,6 +52,7 @@ const PREFS_JS: &str = include_str!("static/prefs.js");
 const REAPER_JS: &str = include_str!("static/reaper.js");
 const GATEWAY_JS: &str = include_str!("static/gateway.js");
 const EBAY_JS: &str = include_str!("static/ebay.js");
+const REVIEWS_JS: &str = include_str!("static/reviews.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
@@ -235,6 +236,27 @@ pub fn router(
             "/api/ebay/config",
             get(api::ebay::get_config).post(api::ebay::set_config),
         )
+        // Reviews tab (docs/code-review.md): mac1 owns the data, these relay.
+        .route("/api/reviews", get(api::reviews::get_reviews))
+        .route("/api/reviews/run-now", post(api::reviews::run_now))
+        .route("/api/reviews/repos", post(api::reviews::upsert_repo))
+        .route(
+            "/api/reviews/repos/{name}",
+            axum::routing::delete(api::reviews::remove_repo),
+        )
+        .route(
+            "/api/reviews/findings/{id}",
+            post(api::reviews::set_finding_status),
+        )
+        .route("/api/reviews/settings", post(api::reviews::set_settings))
+        .route(
+            "/api/reviews/runs/{id}/report",
+            get(api::reviews::get_report),
+        )
+        .route(
+            "/api/work/roles",
+            get(api::reviews::get_roles).post(api::reviews::set_roles),
+        )
         .route(
             "/api/switch-bindings",
             get(api::switch_bindings::list_switch_bindings)
@@ -288,6 +310,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/reaper.js", REAPER_JS, JS),
         ("/static/gateway.js", GATEWAY_JS, JS),
         ("/static/ebay.js", EBAY_JS, JS),
+        ("/static/reviews.js", REVIEWS_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
     ];

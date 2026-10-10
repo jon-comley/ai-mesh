@@ -49,8 +49,11 @@ whole HTTP surface.
   this path and there is **no silent cloud↔local fallback** — you asked for a
   specific model, you get that model or an error.
 - Anything else → `404` with `code: "model_not_found"`.
-- `model` omitted → largest Ready local model, else the gateway model, else
-  `503` `no_model_ready`.
+- `model` omitted → largest Ready local model that may answer home commands
+  (the *control* list, see [`code-review.md`](code-review.md#lights-first)),
+  else the gateway model, else `503` `no_model_ready`.
+- Local requests go to an idle machine serving the model where there is one,
+  and pause review work on a machine that is busy only with that.
 
 `GET /v1/models` lists exactly what routing will accept: local Ready models
 (`owned_by: "ai-mesh"`) plus the gateway model when the gateway is enabled.

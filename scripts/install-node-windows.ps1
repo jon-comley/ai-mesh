@@ -22,10 +22,18 @@ param(
     # llama-server: this node runs no voice capability (the ESPHome device
     # belongs to pi1), and a standalone service survives agent
     # deploy-restarts, which kill agent children every deploy.
-    [string]$SttServer = ""
+    [string]$SttServer = "",
+
+    # The model server's context in tokens (LLAMA_CTX_SIZE in nodes/<node>.env).
+    # beelink1 runs 32768 so it can check review findings with the whole file
+    # in view (docs/code-review.md); anything unparseable falls back to 4096.
+    [string]$CtxSize = "4096"
 )
 
 $ErrorActionPreference = "Stop"
+
+$ctxSizeValue = 4096
+if ($CtxSize -match '^\d+$' -and [int]$CtxSize -ge 2048) { $ctxSizeValue = [int]$CtxSize }
 
 $aiMeshRoot      = "C:\Users\$env:USERNAME\ai-mesh"
 $agentPath       = Join-Path $aiMeshRoot "agent.exe"
@@ -558,7 +566,7 @@ function Ensure-AgentService {
         "LLAMA_MODEL_DIR=$env:USERPROFILE\.ai-mesh\models",
         "LLAMA_SERVER_BIN=$(Join-Path $llamaInstallDir 'llama-server.exe')",
         "LLAMA_GPU_LAYERS=99",
-        "LLAMA_CTX_SIZE=4096",
+        "LLAMA_CTX_SIZE=$ctxSizeValue",
         "DEFAULT_MODEL=$defaultModel"
     )
     if ($CoordinatorIp) {
