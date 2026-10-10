@@ -169,8 +169,10 @@ These need the real machines; none of them could be checked from the code.
 2. **Deploy** mac1 and beelink1 with the updated node files
    (`just deploy-node mac1`, `just deploy-node beelink1`) and the coordinator.
 3. **Add repos** on the Reviews tab. For dashboard, add guv too and set
-   *Imports from other repos* to `@app/ = guv:src`, so guv code it imports is
-   read as context.
+   *Imports from other repos* to `@app/ = guv:src` and
+   `@app-functions/ = guv:functions/src`, so guv code it imports is read as
+   context. Without the second, a question about invoice totals found the
+   `invoiceTotals` import but could not open it.
 4. **Notifications:** paste an ntfy topic URL in the tab's settings. Use a long
    random topic name; pushes carry only counts and repo names, never code.
 
