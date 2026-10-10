@@ -283,7 +283,7 @@ fn resolve_route(
         let reg = registry.lock().unwrap();
         (
             reg.ready_llm_models(),
-            reg.any_ready_llm_model(),
+            reg.any_ready_control_model(&crate::work_router::state().lock().unwrap().roles),
             crate::cloud::GatewayConfig::load(&reg),
         )
     };
