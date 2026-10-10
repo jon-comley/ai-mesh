@@ -213,6 +213,32 @@ hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
+## Code reviews on mac1 — code-complete, NOT yet benched or deployed (2026-10-10)
+
+mac1 runs scheduled code reviews of the GitHub repos with local models,
+handing review and check tasks to every free machine, while pi1 keeps home
+commands first (pausing review work when a light command needs its machine).
+Full write-up: [`docs/code-review.md`](docs/code-review.md).
+
+**In tree, tested:** the work router on the coordinator, wire v13, the pure
+`codereview` crate, `capability-review` on mac1, the Reviews tab, and the node
+settings (mac1 256k with a `q8_0` cache; beelink1 32k).
+
+**Still to do, in order — see "Before turning it on" in the doc:**
+
+1. Load `qwen3-coder:30b` on mac1 at 256k; measure memory and prompt-reading
+   speed; run `reaper_bench_real.py` to decide whether it also answers home
+   commands (`just work-roles`). Record in `docs/model-selection.md`.
+2. Check llama.cpp b9444 accepts `--parallel 2 --kv-unified`; if so, uncomment
+   them in `nodes/mac1.env`.
+3. Deploy keys + `~/.ssh/config` aliases on mac1, then add dashboard and guv
+   on the tab and run the known-bugs check (the invoice that bills the cheapest
+   option; the payment reversal that cannot be entered).
+4. A light command during a run answers in the usual time.
+5. Later: a second model slot per agent, so mac1 can keep `qwen2.5:14b` for
+   home control beside the coder; test and lint output as review context for
+   the JavaScript repos.
+
 ## Fixed in tree, not yet deployed — the ✕ on a switch card did nothing (2026-08-30)
 
 **Reported by Jon:** clicking the ✕ to take a switch out of a room did nothing, and the

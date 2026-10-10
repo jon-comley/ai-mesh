@@ -380,6 +380,14 @@ fn resolve_gguf(model_name: &str) -> Result<GgufSpec, String> {
             "Qwen/Qwen3-32B-GGUF",
             "Qwen3-32B-Q4_K_M.gguf",
         )),
+        // The review model for mac1 (docs/code-review.md): a mixture-of-experts
+        // with 3B active parameters, so fast for its size, and a 256k native
+        // context. Q5_K_M is ~22 GB. Name taken from Unsloth's GGUF repo; if a
+        // load fails with a 404, check the file list there first.
+        "qwen3-coder:30b" => Ok(GgufSpec::single(
+            "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            "Qwen3-Coder-30B-A3B-Instruct-Q5_K_M.gguf",
+        )),
         "llama3.2:1b" => Ok(GgufSpec::single(
             "bartowski/Llama-3.2-1B-Instruct-GGUF",
             "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
