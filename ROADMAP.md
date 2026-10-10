@@ -220,15 +220,8 @@ handing review and check tasks to every free machine, while pi1 keeps home
 commands first (pausing review work when a light command needs its machine).
 Full write-up: [`docs/code-review.md`](docs/code-review.md).
 
-**Live (2026-10-10, from branch `claude/adoring-cerf-h3nz8p`, not yet on
-main):** coordinator on pi1, mac1 with `qwen3-coder:30b` at 256k/`q8_0`,
-beelink1 `qwen2.5:7b` at 32k. Eight repos added (guv, dashboard, vanround,
-guvguvguv, guvtrade, glebefish, ventures with read-only `mac1 reviews` deploy
-keys; ai-mesh over https), nightly 02:15 to 03:25 ten minutes apart, ntfy on.
-Model roles left empty and the home-control bench skipped: Jon hardly uses the
-home automation. A question answers in about 2.5 minutes; a one-file review
-ran mac1 then a beelink1 check, and the checker rightly threw out mac1's one
-false finding.
+Deployed 2026-10-10 from branch `claude/adoring-cerf-h3nz8p` (not yet on
+main); what went live and what it taught is in HISTORY.md.
 
 **Still to do:**
 
