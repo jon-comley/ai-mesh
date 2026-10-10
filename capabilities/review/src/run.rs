@@ -33,28 +33,37 @@ pub trait Mesh: Send + Sync {
     async fn infer(&self, req: WorkInferenceRequest) -> WorkInferenceDone;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunKind {
     Nightly,
     Sweep,
     /// "Run now" from the dashboard: new commits since the last review.
     Manual,
+    /// On demand: everything under one folder or file.
+    Path(String),
+    /// On demand: what a branch changes compared with the repo's main branch.
+    Branch(String),
 }
 
 impl RunKind {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             RunKind::Nightly => "nightly",
             RunKind::Sweep => "sweep",
             RunKind::Manual => "manual",
+            RunKind::Path(_) => "path",
+            RunKind::Branch(_) => "branch",
         }
     }
 
-    pub fn parse(s: &str) -> RunKind {
+    /// Back from the database after a restart. Path and branch runs are not
+    /// queued again: they were asked for once, by hand.
+    pub fn parse(s: &str) -> Option<RunKind> {
         match s {
-            "sweep" => RunKind::Sweep,
-            "manual" => RunKind::Manual,
-            _ => RunKind::Nightly,
+            "nightly" => Some(RunKind::Nightly),
+            "sweep" => Some(RunKind::Sweep),
+            "manual" => Some(RunKind::Manual),
+            _ => None,
         }
     }
 }
@@ -118,6 +127,9 @@ pub struct Ctx {
     pub limits: Limits,
     /// Local "now", injectable for tests.
     pub now: fn() -> chrono::NaiveDateTime,
+    /// Questions waiting for an answer. While any are, a run hands out no new
+    /// tasks, so a question is answered in minutes rather than after the run.
+    pub questions_waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub fn unix_now() -> i64 {
@@ -185,7 +197,7 @@ impl Ctx {
         self.touch();
     }
 
-    async fn workers(&self) -> Vec<Worker> {
+    pub(crate) async fn workers(&self) -> Vec<Worker> {
         let speeds = self.speeds.lock().unwrap().clone();
         match self.mesh.workers().await {
             Ok(ws) => ws
@@ -272,6 +284,18 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     let repos_dir = ctx.home.join("repos");
     let repo = Repo::sync(&repos_dir.join(&spec.name), &spec.url, &spec.branch).await?;
     let head = repo.head().await?;
+    // What is reviewed: the main branch, or the branch asked for.
+    let (rev, branch_base) = match &req.kind {
+        RunKind::Branch(b) => {
+            if !files::valid_branch(b) {
+                return Err(format!("'{b}' is not a valid branch name"));
+            }
+            let bhead = repo.fetch_branch(b).await?;
+            let base = repo.merge_base(&head, &bhead).await?;
+            (bhead, Some(base))
+        }
+        _ => (head.clone(), None),
+    };
 
     // Companion repos named by import aliases (dashboard → guv), for context.
     let mut companions: HashMap<String, (Repo, String)> = HashMap::new();
@@ -305,10 +329,10 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     }
 
     // ── what to review ──────────────────────────────────────────────────────
-    let all_paths = repo.files(&head).await?;
+    let all_paths = repo.files(&rev).await?;
     let mut targets: Vec<SourceFile> = Vec::new();
     let mut sweep_folder = None;
-    let scope = match req.kind {
+    let scope = match &req.kind {
         RunKind::Nightly | RunKind::Manual => {
             let base = match row.last_reviewed_commit.as_deref() {
                 Some(c) if repo.has_commit(c).await => c.to_string(),
@@ -372,6 +396,56 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
             };
             format!("Weekly sweep: {shown} at {}", short(&head))
         }
+        RunKind::Path(path) => {
+            let path = path.trim_matches('/');
+            if !files::valid_review_path(path) {
+                return Err(format!("'{path}' is not a path inside the repo"));
+            }
+            for p in all_paths.iter().filter(|p| {
+                files::is_reviewable(p) && (*p == path || p.starts_with(&format!("{path}/")))
+            }) {
+                if let Some(content) = load(&repo, &head, p).await {
+                    targets.push(SourceFile {
+                        repo: spec.name.clone(),
+                        path: p.clone(),
+                        content,
+                        diff: None,
+                        target: true,
+                    });
+                }
+            }
+            if targets.is_empty() {
+                return Err(format!("nothing reviewable under '{path}'"));
+            }
+            format!("On demand: {path} at {}", short(&head))
+        }
+        RunKind::Branch(b) => {
+            let base = branch_base.clone().unwrap_or_default();
+            if base == rev {
+                return finish_quiet(ctx, run_id, "the branch has nothing the main branch lacks");
+            }
+            let changed = repo.changed_files(&base, &rev).await?;
+            for path in changed.iter().filter(|p| files::is_reviewable(p)) {
+                if let Some(content) = load(&repo, &rev, path).await {
+                    let diff = repo.diff(&base, &rev, path).await.ok();
+                    targets.push(SourceFile {
+                        repo: spec.name.clone(),
+                        path: path.clone(),
+                        content,
+                        diff,
+                        target: true,
+                    });
+                }
+            }
+            let n = repo.commit_count(&base, &rev).await.unwrap_or(0);
+            format!(
+                "Branch {b}: {n} commit{} not on {} ({}..{})",
+                if n == 1 { "" } else { "s" },
+                spec.branch,
+                short(&base),
+                short(&rev)
+            )
+        }
     };
     ctx.store(|s| {
         s.update_run(
@@ -384,10 +458,16 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     });
     if targets.is_empty() {
         let out = finish_quiet(ctx, run_id, "no reviewable files changed");
-        if req.kind != RunKind::Sweep {
-            ctx.store(|s| s.set_last_reviewed(&spec.name, &head));
-        } else if let Some(f) = &sweep_folder {
-            ctx.store(|s| s.set_sweep_cursor(&spec.name, f));
+        match &req.kind {
+            RunKind::Nightly | RunKind::Manual => {
+                ctx.store(|s| s.set_last_reviewed(&spec.name, &head))
+            }
+            RunKind::Sweep => {
+                if let Some(f) = &sweep_folder {
+                    ctx.store(|s| s.set_sweep_cursor(&spec.name, f));
+                }
+            }
+            RunKind::Path(_) | RunKind::Branch(_) => {}
         }
         return out;
     }
@@ -433,7 +513,7 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
                     continue;
                 }
                 let content = if r == spec.name {
-                    load(&repo, &head, &p).await
+                    load(&repo, &rev, &p).await
                 } else if let Some((cr, ch)) = companions.get(&r) {
                     load(cr, ch, &p).await
                 } else {
@@ -559,13 +639,15 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
                 ..Default::default()
             },
         );
-        match req.kind {
+        match &req.kind {
             RunKind::Sweep => {
                 if let Some(f) = &sweep_folder {
                     s.set_sweep_cursor(&spec.name, f);
                 }
             }
-            _ => s.set_last_reviewed(&spec.name, &head),
+            RunKind::Nightly | RunKind::Manual => s.set_last_reviewed(&spec.name, &head),
+            // On-demand runs leave the nightly and sweep bookkeeping alone.
+            RunKind::Path(_) | RunKind::Branch(_) => {}
         }
     });
     ctx.touch();
@@ -703,7 +785,16 @@ async fn dispatch_all(
                 .count() as u32;
         });
 
-        if !pending.is_empty() {
+        // A question is waiting: hand out nothing new so a machine frees up
+        // for it. Tasks already running carry on.
+        let yielding = ctx
+            .questions_waiting
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0;
+        if yielding {
+            last_progress = Instant::now();
+        }
+        if !pending.is_empty() && !yielding {
             let workers = ctx.workers().await;
             let occupied: HashSet<String> = running.values().cloned().collect();
             let picks = assign::assign(&pending, &workers, &occupied);
@@ -1073,6 +1164,7 @@ mod tests {
             progress: Arc::new(Mutex::new(Progress::default())),
             changed: Arc::new(Notify::new()),
             speeds: Arc::new(Mutex::new(HashMap::new())),
+            questions_waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             limits: Limits {
                 poll: Duration::from_millis(20),
                 stall: Duration::from_millis(500),
@@ -1238,6 +1330,103 @@ mod tests {
         let s = c.store.lock().unwrap();
         assert!(s.runs(1)[0].scope.starts_with("Weekly sweep: src"));
         assert_eq!(s.repo("app").unwrap().sweep_cursor.as_deref(), Some("src"));
+    }
+
+    fn plain_mesh() -> Arc<FakeMesh> {
+        Arc::new(FakeMesh {
+            reviews: AtomicU32::new(0),
+            checks: AtomicU32::new(0),
+            preempt_first: AtomicU32::new(0),
+            expect_companion: false,
+            seen_nodes: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[tokio::test]
+    async fn an_on_demand_path_review_covers_that_folder_only_and_moves_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(
+            tmp.path(),
+            "app",
+            &[
+                ("src/services/a.ts", "export const a = 1;\n"),
+                ("src/pages/b.ts", "export const b = 2;\n"),
+            ],
+        );
+        let store = Store::open_in_memory().unwrap();
+        add_repo(&store, "app", &repo, vec![]);
+        let mesh = plain_mesh();
+        let c = ctx(&tmp.path().join("home"), mesh.clone(), store);
+        let out = run_local(&c, "app", RunKind::Path("src/services".into())).await;
+        assert_eq!(out.status, "done");
+        {
+            let s = c.store.lock().unwrap();
+            assert!(s.runs(1)[0].scope.starts_with("On demand: src/services"));
+            let row = s.repo("app").unwrap();
+            assert!(
+                row.last_reviewed_commit.is_none(),
+                "nightly bookkeeping untouched"
+            );
+            assert!(row.sweep_cursor.is_none());
+        }
+        let err = execute(
+            &c,
+            &RunRequest {
+                repo: "app".into(),
+                kind: RunKind::Path("docs".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("nothing reviewable"));
+    }
+
+    #[tokio::test]
+    async fn a_branch_review_covers_what_the_branch_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(tmp.path(), "app", &[("src/a.ts", "export const a = 1;\n")]);
+        sh(&repo, &["checkout", "-q", "-b", "feature/x"]);
+        std::fs::write(repo.join("src/new.ts"), "export const n = 3;\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "feature"]);
+        sh(&repo, &["checkout", "-q", "main"]);
+        let store = Store::open_in_memory().unwrap();
+        add_repo(&store, "app", &repo, vec![]);
+        let mesh = plain_mesh();
+        let c = ctx(&tmp.path().join("home"), mesh.clone(), store);
+        let out = run_local(&c, "app", RunKind::Branch("feature/x".into())).await;
+        assert_eq!(out.status, "done");
+        assert_eq!(mesh.reviews.load(Ordering::SeqCst), 1);
+        let s = c.store.lock().unwrap();
+        let scope = &s.runs(1)[0].scope;
+        assert!(
+            scope.starts_with("Branch feature/x: 1 commit not on main"),
+            "{scope}"
+        );
+        assert!(s.repo("app").unwrap().last_reviewed_commit.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_question_holds_back_new_review_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(tmp.path(), "app", &[("src/a.ts", "export const a = 1;\n")]);
+        let store = Store::open_in_memory().unwrap();
+        add_repo(&store, "app", &repo, vec![]);
+        let mesh = plain_mesh();
+        let c = ctx(&tmp.path().join("home"), mesh.clone(), store);
+        c.questions_waiting.store(1, Ordering::SeqCst);
+        let waiting = c.questions_waiting.clone();
+        let run = tokio::spawn(async move { run_local(&c, "app", RunKind::Manual).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            mesh.reviews.load(Ordering::SeqCst),
+            0,
+            "nothing handed out yet"
+        );
+        waiting.store(0, Ordering::SeqCst);
+        let out = run.await.unwrap();
+        assert_eq!(out.status, "done");
+        assert_eq!(mesh.reviews.load(Ordering::SeqCst), 1);
     }
 
     async fn run_local(c: &Ctx, repo: &str, kind: RunKind) -> RunOutcome {

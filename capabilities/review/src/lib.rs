@@ -7,6 +7,7 @@
 //! `~/.ai-mesh/reviews/`; the coordinator only shows snapshots of them on the
 //! dashboard's Reviews tab. See docs/code-review.md.
 
+pub mod ask;
 pub mod files;
 pub mod git;
 pub mod run;
@@ -33,6 +34,10 @@ use tracing::{info, warn};
 
 /// How long one task may take before mac1 stops waiting for its result.
 const TASK_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+/// Questions sent to the dashboard.
+const SNAPSHOT_QUESTIONS: u32 = 20;
+const MAX_QUESTION_CHARS: usize = 2_000;
+const MAX_QUEUED_QUESTIONS: usize = 20;
 /// Open findings sent to the dashboard.
 const SNAPSHOT_FINDINGS: u32 = 200;
 const SNAPSHOT_RUNS: u32 = 20;
@@ -53,6 +58,12 @@ struct Inner {
     speeds: Arc<Mutex<HashMap<String, f32>>>,
     started: AtomicBool,
     notice: Mutex<Option<String>>,
+    /// Question ids waiting to be answered, oldest first.
+    questions: Mutex<VecDeque<String>>,
+    questions_wake: Notify,
+    /// How many questions are waiting or being answered; review runs hand out
+    /// no new tasks while this is above zero.
+    questions_waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub struct ReviewCapability {
@@ -115,6 +126,9 @@ impl ReviewCapability {
                 changed: Arc::new(Notify::new()),
                 speeds: Arc::new(Mutex::new(HashMap::new())),
                 started: AtomicBool::new(false),
+                questions: Mutex::new(VecDeque::new()),
+                questions_wake: Notify::new(),
+                questions_waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 notice: Mutex::new(notice),
             }),
         }
@@ -241,6 +255,21 @@ impl Inner {
                 allowed_owners: env_list("REVIEW_ALLOWED_OWNERS"),
             },
             notice: self.notice.lock().unwrap().clone(),
+            questions: store.questions(SNAPSHOT_QUESTIONS),
+        }
+    }
+
+    fn ctx(self: &Arc<Self>) -> Ctx {
+        Ctx {
+            store: self.store.clone(),
+            home: self.home.clone(),
+            mesh: Arc::new(Link(self.clone())),
+            progress: self.progress.clone(),
+            changed: self.changed.clone(),
+            speeds: self.speeds.clone(),
+            questions_waiting: self.questions_waiting.clone(),
+            limits: self.limits(),
+            now: || chrono::Local::now().naive_local(),
         }
     }
 
@@ -251,17 +280,67 @@ impl Inner {
 
     async fn apply(&self, cmd: ReviewCommand) {
         match cmd {
-            ReviewCommand::RunNow { repo, sweep } => {
+            ReviewCommand::RunNow {
+                repo,
+                sweep,
+                path,
+                branch,
+            } => {
                 if self.store.lock().unwrap().repo(&repo).is_none() {
                     self.set_notice(format!("'{repo}' is not in the review list"));
                     return;
                 }
-                let kind = if sweep {
-                    RunKind::Sweep
-                } else {
-                    RunKind::Manual
+                let path = path
+                    .map(|p| p.trim().trim_matches('/').to_string())
+                    .filter(|p| !p.is_empty());
+                let branch = branch
+                    .map(|b| b.trim().to_string())
+                    .filter(|b| !b.is_empty());
+                let kind = match (path, branch) {
+                    (Some(p), _) if !files::valid_review_path(&p) => {
+                        self.set_notice(format!("'{p}' is not a path inside the repo"));
+                        return;
+                    }
+                    (_, Some(b)) if !files::valid_branch(&b) => {
+                        self.set_notice(format!("'{b}' is not a valid branch name"));
+                        return;
+                    }
+                    (Some(p), _) => RunKind::Path(p),
+                    (None, Some(b)) => RunKind::Branch(b),
+                    (None, None) if sweep => RunKind::Sweep,
+                    (None, None) => RunKind::Manual,
                 };
                 self.enqueue(RunRequest { repo, kind });
+            }
+            ReviewCommand::Ask { id, repo, question } => {
+                let question = question.trim().to_string();
+                let id_ok = !id.is_empty()
+                    && id.len() <= 64
+                    && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+                if !id_ok || question.is_empty() || question.len() > MAX_QUESTION_CHARS {
+                    self.set_notice("a question needs some text, and at most 2,000 characters");
+                    return;
+                }
+                if self.store.lock().unwrap().repo(&repo).is_none() {
+                    self.set_notice(format!("'{repo}' is not in the review list"));
+                    return;
+                }
+                if self.questions.lock().unwrap().len() >= MAX_QUEUED_QUESTIONS {
+                    self.set_notice("too many questions waiting; ask again when some are answered");
+                    return;
+                }
+                if !self
+                    .store
+                    .lock()
+                    .unwrap()
+                    .add_question(&id, &repo, &question, run::unix_now())
+                {
+                    return;
+                }
+                self.questions_waiting
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.questions.lock().unwrap().push_back(id);
+                self.questions_wake.notify_one();
             }
             ReviewCommand::UpsertRepo { spec } => match validate_spec(&spec) {
                 Ok(()) => {
@@ -424,16 +503,7 @@ async fn runner(inner: Arc<Inner>) {
             inner.queue_wake.notified().await;
             continue;
         };
-        let ctx = Ctx {
-            store: inner.store.clone(),
-            home: inner.home.clone(),
-            mesh: Arc::new(Link(inner.clone())),
-            progress: inner.progress.clone(),
-            changed: inner.changed.clone(),
-            speeds: inner.speeds.clone(),
-            limits: inner.limits(),
-            now: || chrono::Local::now().naive_local(),
-        };
+        let ctx = inner.ctx();
         // Leave it on the queue while it runs, so a second "Run now" for the
         // same repo is not queued behind it.
         let result = run::execute(&ctx, &req).await;
@@ -444,6 +514,48 @@ async fn runner(inner: Arc<Inner>) {
             }
             Err(e) => warn!(repo = %req.repo, error = %e, "review run failed"),
         }
+        inner.changed.notify_one();
+    }
+}
+
+/// Answers questions one at a time, alongside (and ahead of) review runs.
+async fn asker(inner: Arc<Inner>) {
+    loop {
+        let next = inner.questions.lock().unwrap().front().cloned();
+        let Some(id) = next else {
+            inner.questions_wake.notified().await;
+            continue;
+        };
+        let q = inner
+            .store
+            .lock()
+            .unwrap()
+            .questions(MAX_QUEUED_QUESTIONS as u32 * 4)
+            .into_iter()
+            .find(|q| q.id == id);
+        if let Some(q) = q {
+            inner
+                .store
+                .lock()
+                .unwrap()
+                .set_question_status(&id, "thinking");
+            inner.changed.notify_one();
+            let ctx = inner.ctx();
+            let result = ask::answer(&ctx, &q.repo, &q.question).await;
+            let now = run::unix_now();
+            let store = inner.store.lock().unwrap();
+            match result {
+                Ok(a) => store.answer_question(&id, &a.text, &a.sources, a.worker.as_deref(), now),
+                Err(e) => {
+                    warn!(question = %id, error = %e, "question failed");
+                    store.fail_question(&id, &e, now);
+                }
+            }
+        }
+        inner.questions.lock().unwrap().pop_front();
+        inner
+            .questions_waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         inner.changed.notify_one();
     }
 }
@@ -510,18 +622,22 @@ impl Capability for ReviewCapability {
             drop(waiter);
         }
         if !inner.started.swap(true, Ordering::SeqCst) {
-            for (repo, kind) in inner
-                .store
-                .lock()
-                .unwrap()
-                .take_interrupted(run::unix_now())
-            {
-                inner.queue.lock().unwrap().push_back(RunRequest {
-                    repo,
-                    kind: RunKind::parse(&kind),
-                });
+            let interrupted = {
+                let store = inner.store.lock().unwrap();
+                store.fail_unanswered(run::unix_now());
+                store.take_interrupted(run::unix_now())
+            };
+            for (repo, kind) in interrupted {
+                if let Some(kind) = RunKind::parse(&kind) {
+                    inner
+                        .queue
+                        .lock()
+                        .unwrap()
+                        .push_back(RunRequest { repo, kind });
+                }
             }
             tokio::spawn(runner(inner.clone()));
+            tokio::spawn(asker(inner.clone()));
             tokio::spawn(scheduler(inner.clone()));
             tokio::spawn(snapshot_pusher(inner.clone()));
             inner.queue_wake.notify_one();
@@ -638,12 +754,16 @@ mod tests {
             .apply(ReviewCommand::RunNow {
                 repo: "dashboard".into(),
                 sweep: false,
+                path: None,
+                branch: None,
             })
             .await;
         c.inner
             .apply(ReviewCommand::RunNow {
                 repo: "dashboard".into(),
                 sweep: false,
+                path: None,
+                branch: None,
             })
             .await;
         let snap = c.inner.snapshot();
@@ -654,6 +774,68 @@ mod tests {
         assert_eq!(snap.settings.max_review_tokens, 4_000, "floored");
         let queued: Vec<_> = snap.runs.iter().filter(|r| r.status == "queued").collect();
         assert_eq!(queued.len(), 1, "a second Run now is not queued twice");
+    }
+
+    #[tokio::test]
+    async fn questions_and_on_demand_runs_are_checked_and_queued() {
+        let (c, _tmp) = cap();
+        c.inner
+            .apply(ReviewCommand::UpsertRepo {
+                spec: spec("dashboard", "https://github.com/jon-comley/dashboard"),
+            })
+            .await;
+        c.inner
+            .apply(ReviewCommand::Ask {
+                id: "q-1".into(),
+                repo: "dashboard".into(),
+                question: "  Where is VAT added?  ".into(),
+            })
+            .await;
+        c.inner
+            .apply(ReviewCommand::Ask {
+                id: "q-2".into(),
+                repo: "dashboard".into(),
+                question: "   ".into(),
+            })
+            .await;
+        let snap = c.inner.snapshot();
+        assert_eq!(snap.questions.len(), 1);
+        assert_eq!(snap.questions[0].question, "Where is VAT added?");
+        assert_eq!(snap.questions[0].status, "waiting");
+        assert!(snap.notice.is_some(), "the empty question was refused");
+        assert_eq!(
+            c.inner
+                .questions_waiting
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        c.inner
+            .apply(ReviewCommand::RunNow {
+                repo: "dashboard".into(),
+                sweep: false,
+                path: Some("/src/services/".into()),
+                branch: None,
+            })
+            .await;
+        c.inner
+            .apply(ReviewCommand::RunNow {
+                repo: "dashboard".into(),
+                sweep: false,
+                path: None,
+                branch: Some("--upload-pack=x".into()),
+            })
+            .await;
+        let q = c.inner.queue.lock().unwrap().clone();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].kind, RunKind::Path("src/services".into()));
+        assert!(
+            c.inner
+                .snapshot()
+                .notice
+                .unwrap()
+                .contains("not a valid branch")
+        );
     }
 
     #[tokio::test]
