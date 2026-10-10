@@ -239,6 +239,7 @@ pub fn router(
         // Reviews tab (docs/code-review.md): mac1 owns the data, these relay.
         .route("/api/reviews", get(api::reviews::get_reviews))
         .route("/api/reviews/run-now", post(api::reviews::run_now))
+        .route("/api/reviews/ask", post(api::reviews::ask))
         .route("/api/reviews/repos", post(api::reviews::upsert_repo))
         .route(
             "/api/reviews/repos/{name}",

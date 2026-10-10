@@ -244,6 +244,33 @@ pub struct ReviewSnapshot {
     /// URL, say), shown once in the tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// Recent questions, newest first.
+    #[serde(default)]
+    pub questions: Vec<ReviewQuestionView>,
+}
+
+/// A question about a repo and, once ready, its answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewQuestionView {
+    pub id: String,
+    pub repo: String,
+    pub question: String,
+    /// "waiting", "thinking", "answered" or "failed".
+    pub status: String,
+    /// Markdown, citing `repo/path:line`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    /// The files the model was shown.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// `model@hostname` that answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub asked_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<u64>,
 }
 
 /// Coordinator → mac1: something the dashboard asked for.
@@ -255,6 +282,19 @@ pub enum ReviewCommand {
         /// Review the whole repo, one folder at a time, instead of new commits.
         #[serde(default)]
         sweep: bool,
+        /// Review everything under this folder or file instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Review what this branch changes compared with the repo's main branch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+    /// Answer a question about a repo's code. The answer arrives in the
+    /// snapshot's `questions`.
+    Ask {
+        id: String,
+        repo: String,
+        question: String,
     },
     UpsertRepo {
         spec: ReviewRepoSpec,
@@ -350,6 +390,13 @@ mod tests {
         roundtrip(MeshMessage::ReviewCommand(ReviewCommand::RunNow {
             repo: "dashboard".into(),
             sweep: false,
+            path: None,
+            branch: Some("feature-x".into()),
+        }));
+        roundtrip(MeshMessage::ReviewCommand(ReviewCommand::Ask {
+            id: "q1".into(),
+            repo: "dashboard".into(),
+            question: "Where is the invoice total worked out?".into(),
         }));
         roundtrip(MeshMessage::ReviewCommand(ReviewCommand::SetSettings {
             ntfy_topic_url: Some(String::new()),

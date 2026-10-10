@@ -117,6 +117,33 @@ pub fn validate_repo_url(url: &str, allowed_owners: &[String]) -> Result<String,
     Ok(format!("{owner}/{repo}"))
 }
 
+/// A branch name safe to hand to git: no option-like start, no `..`, no
+/// spaces or ref punctuation.
+pub fn valid_branch(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('-')
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.ends_with(".lock")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\@{".contains(c))
+}
+
+/// A folder or file path inside the repo, for an on-demand review.
+pub fn valid_review_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 300
+        && !path.starts_with('/')
+        && !path.starts_with('-')
+        && path
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != ".." && seg != ".")
+}
+
 /// A repo name safe to use as a folder name.
 pub fn valid_repo_name(name: &str) -> bool {
     !name.is_empty()
@@ -222,6 +249,22 @@ mod tests {
         let owners = vec!["jon-comley".to_string()];
         assert!(validate_repo_url("https://github.com/Jon-Comley/guv", &owners).is_ok());
         assert!(validate_repo_url("https://github.com/someone/guv", &owners).is_err());
+    }
+
+    #[test]
+    fn branch_names_and_paths_are_checked() {
+        assert!(valid_branch("main"));
+        assert!(valid_branch("claude/adoring-cerf-h3nz8p"));
+        for bad in [
+            "", "-x", "a..b", "a b", "a:b", "x.lock", "/a", "a//b", "a@{1}",
+        ] {
+            assert!(!valid_branch(bad), "{bad} accepted");
+        }
+        assert!(valid_review_path("src/services"));
+        assert!(valid_review_path("firestore.rules"));
+        for bad in ["", "/etc", "../x", "src/../x", "-rf", "src//x"] {
+            assert!(!valid_review_path(bad), "{bad} accepted");
+        }
     }
 
     #[test]

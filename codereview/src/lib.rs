@@ -19,6 +19,7 @@
 //!
 //! [`assign::assign`] decides which idle worker takes which task.
 
+pub mod ask;
 pub mod assign;
 pub mod check;
 pub mod chunk;

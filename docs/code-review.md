@@ -1,9 +1,10 @@
 # Code reviews on the mesh
 
-mac1 reviews your GitHub repos on a schedule, using local models only, and
-shares the work out across the mesh's machines like a team of agents. Findings
-show on the dashboard's **Reviews** tab, as Markdown reports on mac1, and as an
-ntfy push with the headline numbers. Nothing leaves the house.
+mac1 reviews your GitHub repos on a schedule or whenever you ask, answers
+questions about their code, and shares the work out across the mesh's
+machines like a team of agents, using local models only. Findings and answers
+show on the dashboard's **Reviews** tab; reports are also Markdown files on
+mac1, and an ntfy push gives the headline numbers. Nothing leaves the house.
 
 Written by local models: treat every finding as a lead to check, not a verdict.
 
@@ -93,10 +94,30 @@ These need the real machines; none of them could be checked from the code.
    - `scripts/bench/reaper_bench_real.py` — can it also do home control? That
      decides the roles above;
    - on beelink1, time to read 4k, 12k and 30k tokens with STT running.
-3. **Try the two slots.** Start llama-server by hand with `--parallel 2
-   --kv-unified`. If b9444 accepts it, uncomment `LLAMA_PARALLEL` and
-   `LLAMA_KV_UNIFIED` in `nodes/mac1.env` and redeploy. (An unknown flag stops
-   llama-server starting, so they are off until then.)
+3. **Try the two slots.** An unknown flag stops llama-server starting, so
+   `LLAMA_PARALLEL` and `LLAMA_KV_UNIFIED` stay commented out in
+   `nodes/mac1.env` until this passes. On mac1 (`ssh mac1`), using the agent's
+   own llama-server binary:
+
+   ```bash
+   BIN=$(sed -n 's/^LLAMA_SERVER_BIN=//p' ~/ai-mesh/agent.env)
+   "$BIN" --version
+   "$BIN" --help 2>&1 | grep -E -- '--kv-unified|--parallel'
+   ```
+
+   If `--kv-unified` is listed, check it really starts, on a spare port with
+   any small model already downloaded (the agent's server on 8080 is not
+   touched):
+
+   ```bash
+   MODEL=$(find ~/.ai-mesh/models -name '*.gguf' -size -6G | head -1)
+   "$BIN" -m "$MODEL" --port 8099 --ctx-size 8192 --parallel 2 --kv-unified > /tmp/kvu.log 2>&1 &
+   sleep 30; curl -s localhost:8099/health; echo; kill %1
+   grep -iE "error|unknown|invalid" /tmp/kvu.log | head
+   ```
+
+   `{"status":"ok"}` with no errors means it is supported: uncomment the two
+   lines and `just deploy-node mac1`.
 4. **Known bugs.** Add dashboard and guv, then `just review-now dashboard` on a
    range that includes the invoice that bills the cheapest quote option
    (`JobDetailPage.tsx:219` + `jobPricing.ts:125`) and the payment reversal
@@ -139,6 +160,52 @@ Only URLs of the form `https://github.com/owner/repo`,
 and with `REVIEW_ALLOWED_OWNERS` set (mac1's is `jon-comley`), only those
 owners. Clones are bare (no working tree), hooks are off, and repo code is
 never run.
+
+## Reviews on demand
+
+Besides the schedule, a review can be started any time — from the tab's
+**Review now** picker or `just review-now`:
+
+| Choice | Reviews | Moves the nightly / sweep bookmark? |
+|---|---|---|
+| New commits | Everything since the last review | Yes |
+| The next folder | The next top-level folder in turn | Yes (the sweep's) |
+| A folder or file | Everything under that path, at the latest commit | No |
+| A branch | What the branch changes since it left the main branch | No |
+
+```bash
+just review-now dashboard                     # new commits
+just review-now dashboard sweep               # the next folder
+just review-now dashboard path:src/services   # one folder or file
+just review-now guv branch:feature-x          # a branch against main
+```
+
+Runs queue one at a time; the same request twice is queued once.
+
+## Asking questions
+
+Type a question on the tab's **Ask about the code** box, or:
+
+```bash
+just ask dashboard "where is the invoice total worked out?"
+```
+
+mac1 searches the repo for the question's words (identifiers are split too,
+so `parsePrice` also finds *parse* and *price*), ranks the files — rare words
+and file names count for more — and shows the best of them, as many as fit,
+to the free machine with the largest context. The answer cites
+`repo/path:line`, and lists the files it read. If no file mentions any of the
+words, it says so without asking a model.
+
+Questions come first: while one is waiting, a running review hands out no new
+tasks, so a machine frees up within minutes rather than at the end of the run.
+Like review work, a question gives way to home commands and is asked again if
+paused. The tab keeps the last 20; one unanswered when mac1 restarts is marked
+failed, so ask it again.
+
+Answers come from the files shown, so a question about something spread thinly
+across the repo ("how does auth work?") gets a thinner answer than one that
+names the thing ("what does `requireRole` check?").
 
 ## How a run works
 
@@ -184,7 +251,7 @@ the tab stays dismissed when a later run reports it again.
 | `WorkInferenceDone` | pi1 → mac1 | Finished, Preempted, Failed or NoWorker, with the output |
 | `RequestWorkers` / `WorkerSnapshot` | mac1 ↔ pi1 | Machines with models: context, roles, busy, resting |
 | `ReviewSnapshot` | mac1 → pi1 | The whole review state, for the tab |
-| `ReviewCommand` | pi1 → mac1 | Run now, edit repos, finding status, settings, fetch report |
+| `ReviewCommand` | pi1 → mac1 | Run now (new commits, next folder, a path or a branch), ask a question, edit repos, finding status, settings, fetch report |
 | `ReviewReply` | mac1 → pi1 | A report, or why a command failed |
 
 pi1 streams each task from the worker, so the agent's 90 s non-streaming cap
@@ -194,9 +261,12 @@ prompt) and 3 minutes between tokens after that.
 ## Commands
 
 ```bash
-just review-now dashboard          # new commits since the last review
-just review-now dashboard sweep    # the next folder of the whole repo
-just work-roles                    # show which models do what
+just review-now dashboard                     # new commits since the last review
+just review-now dashboard sweep               # the next folder of the whole repo
+just review-now dashboard path:src/services   # one folder or file
+just review-now guv branch:feature-x          # what a branch changes
+just ask dashboard "where is VAT added?"      # a question, waits for the answer
+just work-roles                               # show which models do what
 ```
 
 ## Settings
