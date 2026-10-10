@@ -213,31 +213,48 @@ hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
-## Code reviews on mac1 — code-complete, NOT yet benched or deployed (2026-10-10)
+## Code reviews on mac1: live since 2026-10-10, two checks still open
 
 mac1 runs scheduled code reviews of the GitHub repos with local models,
 handing review and check tasks to every free machine, while pi1 keeps home
 commands first (pausing review work when a light command needs its machine).
 Full write-up: [`docs/code-review.md`](docs/code-review.md).
 
-**In tree, tested:** the work router on the coordinator, wire v13, the pure
-`codereview` crate, `capability-review` on mac1, the Reviews tab, questions
-about a repo's code (`just ask`), on-demand reviews of a folder, file or branch
-(`just review-now`), and the node settings (mac1 256k with a `q8_0` cache;
-beelink1 32k).
+**Live (2026-10-10, from branch `claude/adoring-cerf-h3nz8p`, not yet on
+main):** coordinator on pi1, mac1 with `qwen3-coder:30b` at 256k/`q8_0`,
+beelink1 `qwen2.5:7b` at 32k. Eight repos added (guv, dashboard, vanround,
+guvguvguv, guvtrade, glebefish, ventures with read-only `mac1 reviews` deploy
+keys; ai-mesh over https), nightly 02:15 to 03:25 ten minutes apart, ntfy on.
+Model roles left empty and the home-control bench skipped: Jon hardly uses the
+home automation. A question answers in about 2.5 minutes; a one-file review
+ran mac1 then a beelink1 check, and the checker rightly threw out mac1's one
+false finding.
 
-**Still to do, in order — see "Before turning it on" in the doc:**
+**Still to do:**
 
-1. Load `qwen3-coder:30b` on mac1 at 256k; measure memory and prompt-reading
-   speed; run `reaper_bench_real.py` to decide whether it also answers home
-   commands (`just work-roles`). Record in `docs/model-selection.md`.
-2. Check llama.cpp b9444 accepts `--parallel 2 --kv-unified` (commands in the
-   doc); if so, uncomment them in `nodes/mac1.env`.
-3. Deploy keys + `~/.ssh/config` aliases on mac1, then add dashboard and guv
-   on the tab and run the known-bugs check (the invoice that bills the cheapest
-   option; the payment reversal that cannot be entered).
-4. A light command during a run answers in the usual time.
-5. Later: a second model slot per agent, so mac1 can keep `qwen2.5:14b` for
+1. **Known-bugs check.** Both bugs in the doc were fixed before the first run
+   (`1f0ae7d` for the cheapest-option invoice), so a clean report proves
+   nothing. Review a branch that puts one back (`just review-now dashboard
+   branch:<name>`).
+2. **A light command during a run** answers in the usual time.
+3. **Merge the branch to main.** Until then, `just update-coordinator` or
+   `just update-node mac1` from main would take the review feature off.
+4. **Bench numbers** in `docs/model-selection.md`: memory, and reading speed
+   at more lengths than the four in the doc.
+5. **Two slots:** b9444 already starts mac1 with `n_parallel = 4` and a
+   unified cache by itself, and `--parallel 2 --kv-unified` starts cleanly on
+   a spare port. Uncommenting `LLAMA_PARALLEL=2` would *lower* it from 4 to 2,
+   so decide what is wanted before touching `nodes/mac1.env`.
+6. **Reading-time model** (`codereview::assign`) assumes a fixed tokens/s, but
+   speed falls about 15x from 4k to 100k. Harmless at the 32k cap; wrong if
+   the cap is raised.
+7. **Downloads keep the preallocated size:** `set_len` uses the recipe's size
+   estimate and is never trimmed back, so mac1's coder GGUF has ~1.07 GB of
+   zeros on the end (it loads fine).
+8. **`just deploy-node beelink1`'s auto-load** was acknowledged and never
+   reached the agent, which had just restarted for credentials; a second
+   `just load-model` worked.
+9. Later: a second model slot per agent, so mac1 can keep `qwen2.5:14b` for
    home control beside the coder; test and lint output as review context for
    the JavaScript repos.
 
