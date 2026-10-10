@@ -103,8 +103,11 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_review_tokens: 100_000,
-            evening_max_tokens: 32_000,
+            // Reading slows steeply with length on mac1 (qwen3-coder:30b,
+            // 2026-10-10): 32k in ~100 s, 100k in over 15 minutes. Bigger
+            // tasks also outlast any pause-and-retry, so keep them small.
+            max_review_tokens: 32_000,
+            evening_max_tokens: 16_000,
             allowed_owners: Vec::new(),
             first_run_commits: 20,
             stall: Duration::from_secs(20 * 60),
