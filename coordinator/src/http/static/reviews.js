@@ -40,6 +40,27 @@ export function formatAliases(aliases) {
   return (aliases ?? []).map(a => `${a.prefix} = ${a.repo}:${a.dir}`).join('\n');
 }
 
+// The run-now body for the "Review now" picker.
+export function onDemandBody(repo, what, arg) {
+  const body = { repo, sweep: what === 'sweep' };
+  const value = String(arg ?? '').trim();
+  if (what === 'path') {
+    if (!value) return null;
+    body.path = value;
+  } else if (what === 'branch') {
+    if (!value) return null;
+    body.branch = value;
+  }
+  return body;
+}
+
+const QUESTION_STATUS = {
+  waiting: 'waiting for a free machine',
+  thinking: 'reading the code…',
+  answered: 'answered',
+  failed: 'could not answer',
+};
+
 export function scheduleText(spec) {
   const parts = [];
   if (spec.timeslots?.length) parts.push(`nightly ${spec.timeslots.map(formatTime).join(', ')}`);
@@ -92,6 +113,25 @@ export function init(panel) {
         </details>
       </aside>
       <section class="ebay-main">
+        <h3>Ask about the code</h3>
+        <div class="rv-ask">
+          <select id="rv-ask-repo" aria-label="Repo"></select>
+          <textarea id="rv-ask-text" rows="2" maxlength="2000" placeholder="Where is the invoice total worked out?"></textarea>
+          <button id="rv-ask-go" type="button">Ask</button>
+        </div>
+        <div id="rv-questions"></div>
+        <h3>Review now</h3>
+        <div class="rv-ondemand">
+          <select id="rv-od-repo" aria-label="Repo"></select>
+          <select id="rv-od-what" aria-label="What to review">
+            <option value="new">New commits</option>
+            <option value="sweep">The next folder</option>
+            <option value="path">A folder or file…</option>
+            <option value="branch">A branch…</option>
+          </select>
+          <input id="rv-od-arg" type="text" autocomplete="off" hidden>
+          <button id="rv-od-go" type="button">Start</button>
+        </div>
         <h3>Runs</h3>
         <div id="rv-runs"><p class="placeholder">No runs yet.</p></div>
         <div id="rv-report" class="rv-report" hidden></div>
@@ -121,6 +161,23 @@ export function init(panel) {
     });
   });
   panel.querySelector('#rv-roles-save').addEventListener('click', saveRoles);
+  panel.querySelector('#rv-ask-go').addEventListener('click', askQuestion);
+  panel.querySelector('#rv-ask-text').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) askQuestion();
+  });
+  panel.querySelector('#rv-od-what').addEventListener('change', e => {
+    const arg = panel.querySelector('#rv-od-arg');
+    arg.hidden = !['path', 'branch'].includes(e.target.value);
+    arg.placeholder = e.target.value === 'path' ? 'src/services' : 'feature-branch';
+  });
+  panel.querySelector('#rv-od-go').addEventListener('click', async () => {
+    const repo = panel.querySelector('#rv-od-repo').value;
+    const what = panel.querySelector('#rv-od-what').value;
+    const body = onDemandBody(repo, what, panel.querySelector('#rv-od-arg').value);
+    if (!repo) { showToast('Add a repo first', true); return; }
+    if (!body) { showToast(what === 'path' ? 'Which folder or file?' : 'Which branch?', true); return; }
+    if (await post('/reviews/run-now', body)) showToast(`${repo}: review queued`);
+  });
   panel.addEventListener('click', onClick);
   refresh();
 }
@@ -165,6 +222,8 @@ function render() {
     notice.textContent = snap?.notice ?? '';
   }
   renderRepos(snap?.repos ?? []);
+  fillRepoSelects(snap?.repos ?? []);
+  renderQuestions(snap?.questions ?? []);
   renderRuns(snap?.runs ?? []);
   renderFindings(snap?.findings ?? []);
   renderSettings(snap?.settings);
@@ -186,6 +245,43 @@ function renderRepos(repos) {
         <button type="button" data-act="edit" data-repo="${esc(r.name)}">Edit</button>
       </div>
     </div>`).join('');
+}
+
+function fillRepoSelects(repos) {
+  for (const id of ['rv-ask-repo', 'rv-od-repo']) {
+    const sel = document.getElementById(id);
+    if (!sel) continue;
+    const keep = sel.value;
+    sel.innerHTML = repos.map(r => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join('');
+    if (repos.some(r => r.name === keep)) sel.value = keep;
+  }
+}
+
+function renderQuestions(questions) {
+  const el = document.getElementById('rv-questions');
+  if (!el) return;
+  if (!questions.length) { el.innerHTML = ''; return; }
+  el.innerHTML = questions.map(q => `
+    <div class="rv-question rv-q-${esc(q.status)}">
+      <div><strong>${esc(q.repo)}:</strong> ${esc(q.question)}</div>
+      <div class="gw-hint">${esc(QUESTION_STATUS[q.status] ?? q.status)}${q.worker ? ` · ${esc(q.worker)}` : ''}</div>
+      ${q.answer ? `<div class="rv-answer">${esc(q.answer)}</div>` : ''}
+      ${q.error ? `<div class="gw-hint" data-ok="0">${esc(q.error)}</div>` : ''}
+      ${q.sources?.length ? `<details><summary class="gw-hint">${q.sources.length} file${q.sources.length === 1 ? '' : 's'} read</summary>
+        <div class="gw-hint">${q.sources.map(esc).join('<br>')}</div></details>` : ''}
+    </div>`).join('');
+}
+
+async function askQuestion() {
+  const repo = document.getElementById('rv-ask-repo')?.value;
+  const input = document.getElementById('rv-ask-text');
+  const question = input?.value.trim();
+  if (!repo) { showToast('Add a repo first', true); return; }
+  if (!question) { showToast('Type a question first', true); return; }
+  if (await post('/reviews/ask', { repo, question })) {
+    input.value = '';
+    showToast('Asked — the answer will appear here');
+  }
 }
 
 function runStatusText(run) {

@@ -91,6 +91,12 @@ pub struct RunNowBody {
     repo: String,
     #[serde(default)]
     sweep: bool,
+    /// Review this folder or file instead of new commits.
+    #[serde(default)]
+    path: Option<String>,
+    /// Review what this branch changes compared with the main branch.
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 pub async fn run_now(
@@ -105,11 +111,53 @@ pub async fn run_now(
         ReviewCommand::RunNow {
             repo: body.repo,
             sweep: body.sweep,
+            path: body.path,
+            branch: body.branch,
         },
     )
     .await
     {
         Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(r) => r,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AskBody {
+    repo: String,
+    question: String,
+}
+
+/// Ask mac1 a question about a repo. Answers take minutes, so this returns
+/// the question's id at once; the answer arrives in the snapshot's
+/// `questions` (and so on the Reviews tab, live).
+pub async fn ask(
+    Extension(registry): Extension<Arc<Mutex<Registry>>>,
+    _: Authed,
+    State(state): State<Arc<DashboardState>>,
+    Json(body): Json<AskBody>,
+) -> Response {
+    let question = body.question.trim().to_string();
+    if question.is_empty() || question.len() > 2_000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "a question needs some text, and at most 2,000 characters"})),
+        )
+            .into_response();
+    }
+    let id = super::gen_request_id();
+    match send_command(
+        &state,
+        &registry,
+        ReviewCommand::Ask {
+            id: id.clone(),
+            repo: body.repo,
+            question,
+        },
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::ACCEPTED, Json(serde_json::json!({ "id": id }))).into_response(),
         Err(r) => r,
     }
 }
@@ -290,6 +338,7 @@ mod tests {
         Router::new()
             .route("/api/reviews", get(get_reviews))
             .route("/api/reviews/run-now", post(run_now))
+            .route("/api/reviews/ask", post(ask))
             .route("/api/reviews/repos", post(upsert_repo))
             .route("/api/reviews/repos/{name}", delete(remove_repo))
             .route("/api/reviews/findings/{id}", post(set_finding_status))
@@ -339,7 +388,9 @@ mod tests {
             rx.recv().await,
             Some(MeshMessage::ReviewCommand(ReviewCommand::RunNow {
                 repo: "dashboard".into(),
-                sweep: true
+                sweep: true,
+                path: None,
+                branch: None,
             }))
         );
         let (status, body) = send_with_body(
@@ -353,6 +404,73 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["online"], true);
         assert_eq!(v["snapshot"]["node_id"], "mac1");
+    }
+
+    #[tokio::test]
+    async fn a_question_is_sent_with_an_id_and_the_id_returned() {
+        let conns = empty_connections();
+        let (tx, mut rx) = mpsc::channel(4);
+        conns.lock().unwrap().insert("mac1".into(), tx);
+        let state = make_state(vec![], conns);
+        state.set_review_snapshot(snapshot("mac1"));
+        let (status, body) = send_with_body(
+            router(state.clone(), make_registry()),
+            "POST",
+            "/api/reviews/ask?token=",
+            r#"{"repo":"dashboard","question":"  Where is VAT added?  "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let Some(MeshMessage::ReviewCommand(ReviewCommand::Ask {
+            id: sent,
+            repo,
+            question,
+        })) = rx.recv().await
+        else {
+            panic!("expected an Ask");
+        };
+        assert_eq!(
+            (sent, repo, question.as_str()),
+            (id, "dashboard".to_string(), "Where is VAT added?")
+        );
+
+        let status = send(
+            router(state, make_registry()),
+            "POST",
+            "/api/reviews/ask?token=",
+            r#"{"repo":"dashboard","question":"   "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn run_now_passes_a_path_or_branch_through() {
+        let conns = empty_connections();
+        let (tx, mut rx) = mpsc::channel(4);
+        conns.lock().unwrap().insert("mac1".into(), tx);
+        let state = make_state(vec![], conns);
+        state.set_review_snapshot(snapshot("mac1"));
+        send(
+            router(state, make_registry()),
+            "POST",
+            "/api/reviews/run-now?token=",
+            r#"{"repo":"guv","branch":"feature-x"}"#,
+        )
+        .await;
+        assert_eq!(
+            rx.recv().await,
+            Some(MeshMessage::ReviewCommand(ReviewCommand::RunNow {
+                repo: "guv".into(),
+                sweep: false,
+                path: None,
+                branch: Some("feature-x".into()),
+            }))
+        );
     }
 
     #[tokio::test]

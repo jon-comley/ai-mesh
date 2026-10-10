@@ -56,8 +56,10 @@ impl Repo {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             let mut cmd = base(None);
-            cmd.args(["clone", "--bare", "--filter=blob:none", "--", url])
-                .arg(dir);
+            // A full bare clone, not a partial one: questions search every
+            // file with `git grep`, which would otherwise fetch each blob one
+            // by one. These repos are small beside mac1's disk.
+            cmd.args(["clone", "--bare", "--", url]).arg(dir);
             run(cmd).await?;
         }
         let mut cmd = base(Some(dir));
@@ -156,6 +158,57 @@ impl Repo {
         cmd.args(["rev-list", "--count", &format!("{base}..{head}")]);
         Ok(run_text(cmd).await?.trim().parse().unwrap_or(0))
     }
+
+    /// Fetch another branch (for an on-demand review of it) and return its
+    /// head commit. The name is checked by the caller.
+    pub async fn fetch_branch(&self, branch: &str) -> Result<String, String> {
+        let mut cmd = self.git();
+        cmd.args([
+            "fetch",
+            "--",
+            "origin",
+            &format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
+        ]);
+        run(cmd).await?;
+        let mut cmd = self.git();
+        cmd.args(["rev-parse", "--verify"])
+            .arg(format!("refs/remotes/origin/{branch}^{{commit}}"));
+        Ok(run_text(cmd).await?.trim().to_string())
+    }
+
+    /// Where `a` and `b` last shared history.
+    pub async fn merge_base(&self, a: &str, b: &str) -> Result<String, String> {
+        let mut cmd = self.git();
+        cmd.args(["merge-base", a, b]);
+        Ok(run_text(cmd).await?.trim().to_string())
+    }
+
+    /// Files at `rev` containing `term` (case-insensitive, fixed string), with
+    /// how many lines match. No match is an empty list, not an error.
+    pub async fn grep_count(&self, rev: &str, term: &str) -> Result<Vec<(String, u32)>, String> {
+        let mut cmd = self.git();
+        cmd.args(["grep", "-c", "-i", "-I", "-F", "-e", term, rev, "--"]);
+        let out = cmd
+            .output()
+            .await
+            .map_err(|e| format!("could not run git: {e}"))?;
+        // git grep exits 1 when nothing matches.
+        if !out.status.success() && out.status.code() != Some(1) {
+            return Err(format!(
+                "git grep failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let prefix = format!("{rev}:");
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let l = l.strip_prefix(&prefix).unwrap_or(l);
+                let (path, n) = l.rsplit_once(':')?;
+                Some((path.to_string(), n.parse().ok()?))
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +286,32 @@ mod tests {
         assert_eq!(repo.read(&head, "bin.dat").await.unwrap(), None);
         assert_eq!(repo.files(&head).await.unwrap().len(), 3);
         assert_eq!(repo.commit_count(&first, &head).await.unwrap(), 1);
+
+        let mut hits = repo.grep_count(&head, "EXPORT CONST").await.unwrap();
+        hits.sort();
+        assert_eq!(
+            hits,
+            vec![("a.ts".to_string(), 1), ("src/b.ts".to_string(), 1)]
+        );
+        assert!(
+            repo.grep_count(&head, "nowhere-to-be-found")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A feature branch, fetched on demand, and where it split off.
+        sh(&origin, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(origin.join("src/c.ts"), "export const c = 5;\n").unwrap();
+        sh(&origin, &["add", "."]);
+        sh(&origin, &["commit", "-qm", "feature"]);
+        sh(&origin, &["checkout", "-q", "main"]);
+        let fhead = repo.fetch_branch("feature").await.unwrap();
+        assert_eq!(repo.merge_base(&head, &fhead).await.unwrap(), head);
+        assert_eq!(
+            repo.changed_files(&head, &fhead).await.unwrap(),
+            vec!["src/c.ts"]
+        );
 
         // A second sync fetches new commits into the existing clone.
         std::fs::write(origin.join("a.ts"), "export const a = 4;\n").unwrap();

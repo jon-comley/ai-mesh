@@ -4559,3 +4559,12 @@ body {
 .rv-report-text { max-height: 60vh; overflow-y: auto; }
 .rv-role-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 14px; }
 .rv-role-row > span { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; }
+.rv-ask, .rv-ondemand { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+.rv-ask textarea { flex: 1 1 260px; min-width: 0; }
+.rv-ondemand input { flex: 1 1 160px; min-width: 0; }
+.rv-question {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0;
+}
+.rv-q-failed { border-color: var(--red); }
+.rv-answer { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }

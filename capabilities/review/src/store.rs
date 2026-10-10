@@ -3,7 +3,7 @@
 
 use codereview::{Finding, Verdict};
 use rusqlite::{Connection, OptionalExtension, params};
-use shared::{ReviewCounts, ReviewFindingView, ReviewRepoSpec, ReviewRunView};
+use shared::{ReviewCounts, ReviewFindingView, ReviewQuestionView, ReviewRepoSpec, ReviewRunView};
 use std::path::Path;
 
 pub struct Store {
@@ -72,6 +72,18 @@ CREATE TABLE IF NOT EXISTS findings (
     found_by_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'open',
     first_seen INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS questions (
+    id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL,
+    answer TEXT,
+    sources_json TEXT NOT NULL DEFAULT '[]',
+    worker TEXT,
+    error TEXT,
+    asked_at INTEGER NOT NULL,
+    answered_at INTEGER
 );
 ";
 
@@ -387,6 +399,86 @@ impl Store {
         .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default()
     }
+
+    // ── questions ────────────────────────────────────────────────────────────
+
+    pub fn add_question(&self, id: &str, repo: &str, question: &str, now: i64) -> bool {
+        self.conn
+            .execute(
+                "INSERT INTO questions (id, repo, question, status, asked_at)
+                 VALUES (?1, ?2, ?3, 'waiting', ?4)",
+                params![id, repo, question, now],
+            )
+            .is_ok()
+    }
+
+    pub fn set_question_status(&self, id: &str, status: &str) {
+        let _ = self.conn.execute(
+            "UPDATE questions SET status = ?2 WHERE id = ?1",
+            params![id, status],
+        );
+    }
+
+    pub fn answer_question(
+        &self,
+        id: &str,
+        answer: &str,
+        sources: &[String],
+        worker: Option<&str>,
+        now: i64,
+    ) {
+        let sources = serde_json::to_string(sources).unwrap_or_else(|_| "[]".into());
+        let _ = self.conn.execute(
+            "UPDATE questions SET status = 'answered', answer = ?2, sources_json = ?3,
+                    worker = ?4, answered_at = ?5, error = NULL
+             WHERE id = ?1",
+            params![id, answer, sources, worker, now],
+        );
+    }
+
+    pub fn fail_question(&self, id: &str, error: &str, now: i64) {
+        let _ = self.conn.execute(
+            "UPDATE questions SET status = 'failed', error = ?2, answered_at = ?3 WHERE id = ?1",
+            params![id, error, now],
+        );
+    }
+
+    /// Questions left unanswered by a restart are marked failed.
+    pub fn fail_unanswered(&self, now: i64) {
+        let _ = self.conn.execute(
+            "UPDATE questions SET status = 'failed', error = 'mac1 restarted before answering',
+                    answered_at = ?1
+             WHERE status IN ('waiting', 'thinking')",
+            [now],
+        );
+    }
+
+    pub fn questions(&self, limit: u32) -> Vec<ReviewQuestionView> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, repo, question, status, answer, sources_json, worker, error, asked_at,
+                    answered_at
+             FROM questions ORDER BY asked_at DESC, rowid DESC LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        stmt.query_map([limit], |r| {
+            Ok(ReviewQuestionView {
+                id: r.get(0)?,
+                repo: r.get(1)?,
+                question: r.get(2)?,
+                status: r.get(3)?,
+                answer: r.get(4)?,
+                sources: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+                worker: r.get(6)?,
+                error: r.get(7)?,
+                asked_at: r.get::<_, i64>(8)? as u64,
+                answered_at: r.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+            })
+        })
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -500,6 +592,34 @@ mod tests {
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].verdict, None);
         assert_eq!(open[0].found_by, vec!["m@mac1"]);
+    }
+
+    #[test]
+    fn questions_go_from_waiting_to_answered_or_failed() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.add_question("q1", "dashboard", "Where is VAT added?", 10));
+        assert!(
+            !s.add_question("q1", "dashboard", "again", 11),
+            "ids are unique"
+        );
+        assert!(s.add_question("q2", "guv", "What does parsePrice refuse?", 12));
+        s.set_question_status("q1", "thinking");
+        s.answer_question(
+            "q1",
+            "In `dashboard/src/a.ts:3`.",
+            &["dashboard/src/a.ts".into()],
+            Some("qwen3-coder@mac1"),
+            20,
+        );
+        let qs = s.questions(10);
+        assert_eq!(qs[0].id, "q2", "newest first");
+        assert_eq!(qs[1].status, "answered");
+        assert_eq!(qs[1].sources, vec!["dashboard/src/a.ts"]);
+        assert_eq!(qs[1].worker.as_deref(), Some("qwen3-coder@mac1"));
+        s.fail_unanswered(30);
+        let q2 = &s.questions(10)[0];
+        assert_eq!(q2.status, "failed");
+        assert!(q2.error.as_deref().unwrap().contains("restarted"));
     }
 
     #[test]

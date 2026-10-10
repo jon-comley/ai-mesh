@@ -221,16 +221,18 @@ commands first (pausing review work when a light command needs its machine).
 Full write-up: [`docs/code-review.md`](docs/code-review.md).
 
 **In tree, tested:** the work router on the coordinator, wire v13, the pure
-`codereview` crate, `capability-review` on mac1, the Reviews tab, and the node
-settings (mac1 256k with a `q8_0` cache; beelink1 32k).
+`codereview` crate, `capability-review` on mac1, the Reviews tab, questions
+about a repo's code (`just ask`), on-demand reviews of a folder, file or branch
+(`just review-now`), and the node settings (mac1 256k with a `q8_0` cache;
+beelink1 32k).
 
 **Still to do, in order — see "Before turning it on" in the doc:**
 
 1. Load `qwen3-coder:30b` on mac1 at 256k; measure memory and prompt-reading
    speed; run `reaper_bench_real.py` to decide whether it also answers home
    commands (`just work-roles`). Record in `docs/model-selection.md`.
-2. Check llama.cpp b9444 accepts `--parallel 2 --kv-unified`; if so, uncomment
-   them in `nodes/mac1.env`.
+2. Check llama.cpp b9444 accepts `--parallel 2 --kv-unified` (commands in the
+   doc); if so, uncomment them in `nodes/mac1.env`.
 3. Deploy keys + `~/.ssh/config` aliases on mac1, then add dashboard and guv
    on the tab and run the known-bugs check (the invoice that bills the cheapest
    option; the payment reversal that cannot be entered).
