@@ -2048,10 +2048,15 @@ ask repo question:
     echo "Asked. Waiting for mac1 (Ctrl+C stops waiting; the answer also shows on the Reviews tab)..."
     for _ in $(seq 1 360); do
         OUT=$(curl -s "$BASE/reviews?token=${TOKEN}" | python3 scripts/review-cli.py answer "$ID" || true)
-        if [ -n "$OUT" ]; then echo "$OUT"; exit 0; fi
+        if [ -n "$OUT" ]; then
+            echo "$OUT"
+            # review-cli.py marks a failed question with a leading ✗.
+            case "$OUT" in "✗"*) exit 1 ;; *) exit 0 ;; esac
+        fi
         sleep 5
     done
-    echo "Still waiting after 30 minutes — check the Reviews tab."
+    echo "✗ Still waiting after 30 minutes: check the Reviews tab."
+    exit 1
 
 # Which models answer home commands and which do review work. With no
 # arguments, shows the current lists; otherwise sets them (comma-separated,
