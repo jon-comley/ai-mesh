@@ -155,9 +155,14 @@ impl Inner {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_else(|| env_num(env, default))
         };
+        let d = Limits::default();
         Limits {
-            max_review_tokens: num("max_review_tokens", "REVIEW_MAX_TOKENS", 100_000),
-            evening_max_tokens: num("evening_max_tokens", "REVIEW_EVENING_MAX_TOKENS", 32_000),
+            max_review_tokens: num("max_review_tokens", "REVIEW_MAX_TOKENS", d.max_review_tokens),
+            evening_max_tokens: num(
+                "evening_max_tokens",
+                "REVIEW_EVENING_MAX_TOKENS",
+                d.evening_max_tokens,
+            ),
             allowed_owners: env_list("REVIEW_ALLOWED_OWNERS"),
             ..Limits::default()
         }
@@ -212,15 +217,16 @@ impl Inner {
             .collect();
         queued_views.extend(runs);
         let topic = store.setting("ntfy_topic_url").filter(|t| !t.is_empty());
+        let d = Limits::default();
         let limits_max = store
             .setting("max_review_tokens")
             .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| env_num("REVIEW_MAX_TOKENS", 100_000))
+            .unwrap_or_else(|| env_num("REVIEW_MAX_TOKENS", d.max_review_tokens))
             as u32;
         let limits_evening = store
             .setting("evening_max_tokens")
             .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| env_num("REVIEW_EVENING_MAX_TOKENS", 32_000))
+            .unwrap_or_else(|| env_num("REVIEW_EVENING_MAX_TOKENS", d.evening_max_tokens))
             as u32;
         ReviewSnapshot {
             node_id: self.node_id.clone(),

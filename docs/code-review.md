@@ -79,7 +79,26 @@ file:
 prompt-reading speed from finished tasks. A task only goes to a machine whose
 context fits it and which can read it in 15 minutes (reviews) or 3 minutes
 (checks, which run on the machines that also answer the lights). From 17:00
-to 23:00 review tasks are capped at 32k tokens so a pause costs less.
+to 23:00 review tasks are capped at 16k tokens so a pause costs less.
+
+**Keep tasks small.** Reading slows steeply as a prompt grows. Measured on
+mac1 with `qwen3-coder:30b`, q8_0 cache (2026-10-10):
+
+| Tokens read so far | Reading speed |
+|---|---|
+| 4k | ~1,000 tokens/s |
+| 30k | ~340 tokens/s |
+| 57k | ~200 tokens/s |
+| 100k | ~70 tokens/s |
+
+A 32k task is read in about 100 s; a 115k one took over 20 minutes. So the
+default largest task is 32k, and questions use the same cap.
+
+llama-server sends nothing while it reads a prompt, so the agent waits up to
+20 minutes for the first token (`LLAMA_STREAM_FIRST_TOKEN_TIMEOUT_SECS`, the
+same as pi1's allowance) and 5 minutes between tokens after that
+(`LLAMA_STREAM_IDLE_TIMEOUT_SECS`). Before this, the 5-minute limit applied
+from the start and killed every long prompt.
 
 ## Before turning it on
 
@@ -273,8 +292,8 @@ just work-roles                               # show which models do what
 
 | Where | Setting | Default |
 |---|---|---|
-| Reviews tab / `REVIEW_MAX_TOKENS` | Largest review task | 100,000 tokens |
-| Reviews tab / `REVIEW_EVENING_MAX_TOKENS` | Largest task 17:00–23:00 | 32,000 tokens |
+| Reviews tab / `REVIEW_MAX_TOKENS` | Largest review task or question | 32,000 tokens |
+| Reviews tab / `REVIEW_EVENING_MAX_TOKENS` | Largest task 17:00–23:00 | 16,000 tokens |
 | Reviews tab | ntfy topic URL | none |
 | mac1 env `REVIEW_ALLOWED_OWNERS` | GitHub owners that may be added | any |
 | mac1 env `REVIEW_HOME` | Where clones, database and reports live | `~/.ai-mesh/reviews` |

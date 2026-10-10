@@ -57,7 +57,7 @@ function snapshot(overrides = {}) {
         title: '<script>alert(1)</script>', quote: 'x', scenario: '', fix: '',
         found_by: [], status: 'open', first_seen: 1 },
     ],
-    settings: { ntfy_topic_set: false, max_review_tokens: 100000, evening_max_tokens: 32000 },
+    settings: { ntfy_topic_set: false, max_review_tokens: 32000, evening_max_tokens: 16000 },
     questions: [
       { id: 'q2', repo: 'dashboard', question: 'Is VAT rounded per line?', status: 'thinking', sources: [], asked_at: 2 },
       { id: 'q1', repo: 'dashboard', question: 'Where is the invoice total worked out?', status: 'answered',

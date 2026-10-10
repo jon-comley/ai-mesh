@@ -896,14 +896,27 @@ fn stream_http_client() -> &'static reqwest::Client {
     })
 }
 
-/// Max silence between stream chunks before the generation is declared hung.
-/// Generous default because llama-server emits nothing during prefill, which
-/// on a 14b model with a long prompt can take minutes.
+/// Max silence between stream chunks, once the first has arrived, before the
+/// generation is declared hung.
 fn stream_idle_timeout_secs() -> u64 {
-    std::env::var("LLAMA_STREAM_IDLE_TIMEOUT_SECS")
+    env_secs("LLAMA_STREAM_IDLE_TIMEOUT_SECS", 300)
+}
+
+/// Max wait for the first stream chunk. llama-server sends nothing while it
+/// reads the prompt, and reading slows as the prompt grows: on mac1,
+/// qwen3-coder:30b read ~1,000 tokens/s at 4k but ~70 at 100k, so a 115k
+/// review prompt took over 20 minutes and the 300 s idle limit killed it three
+/// times (2026-10-10). Matches the coordinator's `WORK_FIRST_TOKEN_SECS`; the
+/// coordinator still cancels sooner for anything it has stopped waiting for.
+fn stream_first_chunk_timeout_secs() -> u64 {
+    env_secs("LLAMA_STREAM_FIRST_TOKEN_TIMEOUT_SECS", 1200)
+}
+
+fn env_secs(name: &str, default: u64) -> u64 {
+    std::env::var(name)
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(300)
+        .unwrap_or(default)
 }
 
 /// Streamed inference: each content delta is sent into `delta_tx` as it
@@ -929,7 +942,9 @@ pub async fn generate_stream(
     )
     .await?;
 
+    let first_wait = std::time::Duration::from_secs(stream_first_chunk_timeout_secs());
     let idle = std::time::Duration::from_secs(stream_idle_timeout_secs());
+    let mut got_chunk = false;
     let mut byte_stream = resp.bytes_stream();
     let mut parser = shared::sse::SseParser::new();
     let mut output = String::new();
@@ -938,17 +953,20 @@ pub async fn generate_stream(
     let mut completion_tokens: Option<u32> = None;
 
     'read: loop {
-        let chunk = match tokio::time::timeout(idle, byte_stream.next()).await {
+        let wait = if got_chunk { idle } else { first_wait };
+        let chunk = match tokio::time::timeout(wait, byte_stream.next()).await {
             Ok(Some(Ok(bytes))) => bytes,
             Ok(Some(Err(e))) => return Err(format!("stream read failed: {e}")),
             Ok(None) => break 'read, // EOF — treat like [DONE]
             Err(_) => {
                 return Err(format!(
-                    "llama-server stream stalled for {}s",
-                    idle.as_secs()
+                    "llama-server stream stalled for {}s{}",
+                    wait.as_secs(),
+                    if got_chunk { "" } else { " reading the prompt" }
                 ));
             }
         };
+        got_chunk = true;
         for payload in parser.feed(&chunk) {
             if payload == "[DONE]" {
                 break 'read;
