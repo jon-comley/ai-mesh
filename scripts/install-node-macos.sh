@@ -5,11 +5,13 @@
 # restarts, and it keeps any credentials `just set-fingerprint` has pushed.
 #
 #     install-node-macos.sh <role> <features> [coordinator_ip] [ctx_size] [default_model] \
-#                           [kv_cache_type] [parallel] [kv_unified] [review_allowed_owners]
+#                           [kv_cache_type] [parallel] [kv_unified] [review_allowed_owners] \
+#                           [node_name]
 #
 # The last four are for long-context review work (docs/code-review.md): mac1
 # runs a 256k context with a q8_0 cache, two slots sharing it, and only clones
-# repos owned by the listed GitHub accounts.
+# repos owned by the listed GitHub accounts. node_name (mac1) becomes the agent's
+# HOSTNAME: cron sets none, and the Mac's own name is JonathansMacStudio.
 #
 # **Why the agent is built here.** Cross-compiling a macOS binary from Linux
 # needs Apple's SDK (osxcross), which the controller doesn't have. The node has
@@ -43,6 +45,7 @@ KV_CACHE_TYPE="${6:-}"
 PARALLEL="${7:-}"
 KV_UNIFIED="${8:-}"
 REVIEW_ALLOWED_OWNERS="${9:-}"
+NODE_NAME="${10:-}"
 
 # Matches beelink1's server build, so benches on both nodes compare like for like.
 LLAMA_VERSION="b9444"
@@ -96,6 +99,8 @@ KEEP="$(grep -E '^(MESH_TLS_FINGERPRINT|MESH_AUTH_TOKEN|MESH_AUTH_TOKEN_NEXT)=' 
     [ -n "$PARALLEL" ] && echo "LLAMA_PARALLEL=${PARALLEL}"
     [ -n "$KV_UNIFIED" ] && echo "LLAMA_KV_UNIFIED=${KV_UNIFIED}"
     [ -n "$REVIEW_ALLOWED_OWNERS" ] && echo "REVIEW_ALLOWED_OWNERS=${REVIEW_ALLOWED_OWNERS}"
+    # The review capability names the node by HOSTNAME, else by its UUID.
+    [ -n "$NODE_NAME" ] && echo "HOSTNAME=${NODE_NAME}"
     if [ -n "$COORDINATOR_IP" ]; then
         # The agent dials the loopback relay; RELAY_TARGET is the real coordinator.
         echo "COORDINATOR_IP=127.0.0.1"
