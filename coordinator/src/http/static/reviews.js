@@ -211,8 +211,10 @@ function render() {
   const snap = view.snapshot;
   const status = document.getElementById('rv-status');
   if (status) {
+    // mac1's launchd service has no HOSTNAME, so the snapshot falls back to the node id.
+    const host = snap?.hostname && snap.hostname !== snap.node_id ? snap.hostname : 'mac1';
     status.textContent = view.online
-      ? `running on ${snap?.hostname ?? 'mac1'}`
+      ? `running on ${host}`
       : 'mac1 is offline — showing the last state it sent';
     status.dataset.ok = view.online ? '1' : '0';
   }
@@ -235,13 +237,13 @@ function renderRepos(repos) {
   if (!el) return;
   if (!repos.length) { el.innerHTML = '<p class="placeholder">No repos yet.</p>'; return; }
   el.innerHTML = repos.map(r => `
-    <div class="ebay-hunt-row${r.enabled ? '' : ' ebay-hunt-off'}" data-repo="${esc(r.name)}">
-      <strong>${esc(r.name)}</strong> <span class="gw-hint">${esc(r.branch)}</span>
+    <div class="rv-repo${r.enabled ? '' : ' ebay-hunt-off'}" data-repo="${esc(r.name)}">
+      <div class="rv-repo-head"><strong>${esc(r.name)}</strong> <span class="gw-hint">${esc(r.branch)}</span></div>
       <div class="gw-hint">${esc(scheduleText(r))}</div>
-      <div class="gw-hint">${r.last_reviewed_commit ? `reviewed to ${esc(r.last_reviewed_commit.slice(0, 7))}` : 'not reviewed yet'}${r.last_sweep_folder ? ` · last swept ${esc(r.last_sweep_folder)}` : ''}</div>
+      <div class="gw-hint">${r.last_reviewed_commit ? `reviewed to <code>${esc(r.last_reviewed_commit.slice(0, 7))}</code>` : 'not reviewed yet'}${r.last_sweep_folder ? ` · last swept ${esc(r.last_sweep_folder)}` : ''}</div>
       <div class="rv-actions">
         <button type="button" data-act="run" data-repo="${esc(r.name)}">Run now</button>
-        <button type="button" data-act="sweep" data-repo="${esc(r.name)}">Sweep a folder</button>
+        <button type="button" data-act="sweep" data-repo="${esc(r.name)}">Sweep</button>
         <button type="button" data-act="edit" data-repo="${esc(r.name)}">Edit</button>
       </div>
     </div>`).join('');
@@ -265,11 +267,18 @@ function renderQuestions(questions) {
     <div class="rv-question rv-q-${esc(q.status)}">
       <div><strong>${esc(q.repo)}:</strong> ${esc(q.question)}</div>
       <div class="gw-hint">${esc(QUESTION_STATUS[q.status] ?? q.status)}${q.worker ? ` · ${esc(q.worker)}` : ''}</div>
-      ${q.answer ? `<div class="rv-answer">${esc(q.answer)}</div>` : ''}
+      ${q.answer ? `<div class="rv-answer">${answerHtml(q.answer)}</div>` : ''}
       ${q.error ? `<div class="gw-hint" data-ok="0">${esc(q.error)}</div>` : ''}
       ${q.sources?.length ? `<details><summary class="gw-hint">${q.sources.length} file${q.sources.length === 1 ? '' : 's'} read</summary>
         <div class="gw-hint">${q.sources.map(esc).join('<br>')}</div></details>` : ''}
     </div>`).join('');
+}
+
+// Answers are markdown-ish: show ``` fences as code blocks, everything else as text.
+export function answerHtml(text) {
+  return String(text ?? '').split(/```[\w-]*\n?/).map((part, i) => (i % 2
+    ? `<pre class="rv-quote">${esc(part.replace(/\n$/, ''))}</pre>`
+    : esc(part.trim()))).filter(Boolean).join('');
 }
 
 async function askQuestion() {
@@ -301,15 +310,23 @@ function renderRuns(runs) {
   const el = document.getElementById('rv-runs');
   if (!el) return;
   if (!runs.length) { el.innerHTML = '<p class="placeholder">No runs yet.</p>'; return; }
-  el.innerHTML = runs.map(run => `
+  // Queued runs have nothing to show but their name: one line, not a card each.
+  const queued = runs.filter(r => r.status === 'queued');
+  const rest = runs.filter(r => r.status !== 'queued')
+    .sort((a, b) => (b.status === 'running') - (a.status === 'running'));
+  const queuedHtml = queued.length ? `
+    <div class="rv-queued"><span class="gw-hint">Queued (${queued.length}):</span>
+      ${queued.map(r => `<span class="rv-chip">${esc(r.repo)} <span class="gw-hint">${esc(r.kind)}</span></span>`).join('')}
+    </div>` : '';
+  el.innerHTML = rest.map(run => `
     <div class="rv-run rv-run-${esc(run.status)}">
-      <div><strong>${esc(run.repo)}</strong> <span class="gw-hint">${esc(run.kind)}</span>
-        ${run.started_at ? `<span class="gw-hint">${new Date(run.started_at * 1000).toLocaleString('en-GB')}</span>` : ''}</div>
+      <div class="rv-run-head"><strong>${esc(run.repo)}</strong> <span class="gw-hint">${esc(run.kind)}</span>
+        ${run.started_at ? `<span class="gw-hint rv-when">${new Date(run.started_at * 1000).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}</span>` : ''}</div>
       <div class="gw-hint">${esc(run.scope)}</div>
-      <div>${esc(runStatusText(run))}</div>
+      <div class="rv-run-status">${esc(runStatusText(run))}
+        ${run.status === 'done' ? `<button type="button" data-act="report" data-run="${run.id}">Report</button>` : ''}</div>
       ${(run.running ?? []).map(t => `<div class="rv-task">${esc(t.kind)} on <strong>${esc(t.worker)}</strong>: ${esc(t.label)}</div>`).join('')}
-      ${run.status === 'done' ? `<button type="button" data-act="report" data-run="${run.id}">Report</button>` : ''}
-    </div>`).join('');
+    </div>`).join('') + queuedHtml;
 }
 
 function renderFindings(findings) {

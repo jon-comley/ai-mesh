@@ -23,7 +23,7 @@ function json(body) {
   return { ok: true, status: 200, json: () => Promise.resolve(body), text: () => Promise.resolve('') };
 }
 
-const { init, handleUpdate, parseTimes, formatTime, parseAliases, formatAliases, scheduleText, onDemandBody } =
+const { init, handleUpdate, parseTimes, formatTime, parseAliases, formatAliases, scheduleText, onDemandBody, answerHtml } =
   await import('/static/reviews.js');
 
 const flush = () => new Promise(r => setTimeout(r, 0));
@@ -191,5 +191,16 @@ describe('Reviews tab', () => {
     await flush();
     expect(apiCalls.find(c => c.path === '/work/roles').opts.body)
       .toEqual({ control: ['qwen2.5:7b'], work: ['qwen3-coder'] });
+  });
+});
+
+describe('answerHtml', () => {
+  it('shows ``` fences as code blocks and escapes everything', () => {
+    const html = answerHtml('Look here:\n```ts\nconst a = <b>1</b>;\n```\nDone.');
+    expect(html).toBe('Look here:<pre class="rv-quote">const a = &lt;b&gt;1&lt;/b&gt;;</pre>Done.');
+  });
+
+  it('leaves an answer without fences as text', () => {
+    expect(answerHtml('just <text>')).toBe('just &lt;text&gt;');
   });
 });

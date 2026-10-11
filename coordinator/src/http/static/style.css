@@ -4446,6 +4446,8 @@ body {
   display: flex; flex-direction: column; gap: 12px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px;
 }
+/* display: flex above beats the hidden attribute, which left an empty box. */
+.ebay-editor[hidden] { display: none; }
 .ebay-editor input[type="text"],
 .ebay-editor input[type="number"] {
   background: var(--surface-2); color: var(--text);
@@ -4568,3 +4570,37 @@ body {
 }
 .rv-q-failed { border-color: var(--red); }
 .rv-answer { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+
+/* Controls on the Reviews tab: without these, buttons, selects and the ask box
+   drew as white browser defaults. */
+#panel-reviews button:not(.ebay-settings-show),
+#panel-reviews select,
+#panel-reviews textarea,
+#panel-reviews input[type="text"],
+#panel-reviews input[type="number"] {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 10px; font-size: 14px; font-family: inherit;
+}
+#panel-reviews button:not(.ebay-settings-show) { cursor: pointer; }
+#panel-reviews button:not(.ebay-settings-show):hover { border-color: var(--accent); }
+#panel-reviews button:active { transform: translateY(1px); }
+#panel-reviews .rv-actions button, .rv-run-status button { padding: 4px 10px; font-size: 13px; }
+#panel-reviews h3 { margin: 8px 0 0; }
+#panel-reviews h4 { margin: 4px 0; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
+#rv-status { overflow-wrap: anywhere; min-width: 0; }
+#rv-repos { display: flex; flex-direction: column; gap: 6px; }
+.rv-repo {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; min-width: 0;
+}
+.rv-repo-head { display: flex; align-items: baseline; gap: 6px; }
+.rv-run-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.rv-when { margin-left: auto; font-variant-numeric: tabular-nums; }
+.rv-run-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.rv-run-running { border-color: var(--accent); }
+.rv-queued { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rv-chip { background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 13px; }
+.rv-finding code, .rv-repo code { overflow-wrap: anywhere; }
+.rv-finding .rv-actions { margin-top: 2px; }
+.rv-answer .rv-quote { white-space: pre; }
