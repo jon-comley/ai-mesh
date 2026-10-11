@@ -440,7 +440,7 @@ deploy-node node:
         rsync -a --delete --exclude target --exclude node_modules --exclude .git --exclude 'ai_mesh.db*' \
             -e "ssh {{ssh_opts}}" ./ ${NODE_USER}@${NODE_HOST}:ai-mesh-src/
         ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
-            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}' '${LLAMA_KV_CACHE_TYPE:-}' '${LLAMA_PARALLEL:-}' '${LLAMA_KV_UNIFIED:-}' '${REVIEW_ALLOWED_OWNERS:-}'"
+            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}' '${LLAMA_KV_CACHE_TYPE:-}' '${LLAMA_PARALLEL:-}' '${LLAMA_KV_UNIFIED:-}' '${REVIEW_ALLOWED_OWNERS:-}' '{{node}}'"
         ;;
 
       *)
@@ -647,7 +647,7 @@ update-node node:
         rsync -a --delete --exclude target --exclude node_modules --exclude .git --exclude 'ai_mesh.db*' \
             -e "ssh {{ssh_opts}}" ./ ${NODE_USER}@${NODE_HOST}:ai-mesh-src/
         ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
-            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}' '${LLAMA_KV_CACHE_TYPE:-}' '${LLAMA_PARALLEL:-}' '${LLAMA_KV_UNIFIED:-}' '${REVIEW_ALLOWED_OWNERS:-}'"
+            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}' '${LLAMA_KV_CACHE_TYPE:-}' '${LLAMA_PARALLEL:-}' '${LLAMA_KV_UNIFIED:-}' '${REVIEW_ALLOWED_OWNERS:-}' '{{node}}'"
         ;;
     esac
     echo ">>> Node {{node}} updated."
