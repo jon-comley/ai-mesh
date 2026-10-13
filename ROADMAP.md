@@ -213,6 +213,43 @@ hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
+## pi1 is a single point of failure: the whole mesh went down, 2026-10-13
+
+pi1 dropped off the network around 03:30 and Jon had to power-cycle it by hand.
+With no other host able to coordinate, everything stopped: the agents, the
+dashboard, the lights' automation and the gated test runs that need pi1's Pixel.
+
+**Found on the way back: lenovo1's agent was never given the coordinator's
+address.** `nodes/lenovo1.env` pins `COORDINATOR_IP`, but the installed unit did
+not have it, so the agent fell back to mDNS, which does not cross the Velop and
+Orbi meshes, and then to 127.0.0.1. It had been connected before the reboot and
+could not find pi1 after it, so the dashboard showed lenovo1 down while the box
+was up. Fixed on the box with a drop-in,
+`/etc/systemd/system/ai-mesh-agent.service.d/coordinator.conf`; **the deploy
+path that wrote the unit without the env file's values still needs fixing**, or
+the next `deploy-node lenovo1` takes it away. Check the other nodes' installed
+units against their `nodes/*.env` too (mac1 not yet checked).
+
+**What to build, in order** (Claude's proposal, not yet agreed):
+
+1. **pi1 recovers on its own.** The hardware watchdog (`RuntimeWatchdogSec=15`
+   in `/etc/systemd/system.conf`) for a hang; a timer that pings the router and
+   restarts the Wi-Fi, then reboots, after about five minutes without an
+   answer, for "up but off the network". **And a cable**: pi1 is still on weak
+   Wi-Fi, the likeliest cause of this and of most earlier drops.
+2. **Nightly copy of the coordinator's state** (`ai_mesh.db`, and the cert, key
+   and state in `~/.config/ai-mesh/`) to lenovo1. `plans/coordinator-on-pi1.md`
+   called for this backup; it was never built.
+3. **Nodes find the coordinator by a name, not pi1's address.** Every
+   `nodes/*.env` pins the address, so moving the coordinator means editing six
+   machines. A Tailscale or LAN name moves in one place.
+4. **`just failover-coordinator lenovo1`**, and back again: stop pi1's
+   coordinator if reachable, start lenovo1's from last night's copy, move the
+   name. **Run by hand, not automatic**: two coordinators each writing their
+   own SQLite history is worse than a few minutes down.
+5. Later, if wanted: the MQTT broker and Zigbee2MQTT able to move too (the
+   SLZB-06 is on the network, not on pi1), so the lights survive a failover.
+
 ## Code reviews on mac1: live since 2026-10-10, two checks still open
 
 mac1 runs scheduled code reviews of the GitHub repos with local models,
