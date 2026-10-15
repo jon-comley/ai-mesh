@@ -11,6 +11,34 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## `just rotate-token` rotates the coordinator where it runs now, pi1 (2026-10-15)
+
+The mesh token had to be rotated: `firebase emulators:exec`, run from the guv repo,
+writes the whole environment of the script it runs into `firebase-debug.log`, and
+`MESH_AUTH_TOKEN` is exported from `~/.bashrc`. Reading the recipe before running it
+showed it had not followed the coordinator's move to pi1 on 2026-05-31. It still
+killed and rebuilt `target/debug/coordinator` on the machine it ran on, so on the
+laptop it would have started a second coordinator there while pi1's kept the old
+token; and it pushed the new token only to `NODE_ROLE=compute` nodes (beelink1,
+mac1), so pi1's own agent, pi2, lenovo1 and the laptop's would have been locked out
+when the old token went.
+
+Now: the coordinator node is the one with `NODE_COORDINATOR=true`, and its
+`/var/lib/ai-mesh/coordinator.state` (the unit's `EnvironmentFile`) is the one source
+of the current token and fingerprint. The window opens by adding
+`MESH_AUTH_TOKEN_NEXT` there and restarting the service; the new token goes to every
+node through `_push-node-env`; then this machine's `~/.config/ai-mesh/coordinator.state`
+and `~/.bashrc` are rewritten (one `MESH_TLS_FINGERPRINT` line: OmniLink1 had two,
+an old certificate's and the current one, and the old one came first); then the
+service restarts with the new token alone and its journal is read for a minute for
+`rejected connection: invalid auth token` or `heartbeat rejected`. The glebefish
+sensor push reads the same state file, so it follows by itself. A node that can't be
+reached stops it before the revoke with both tokens still accepted, and a re-run
+resumes with the token already in the window (`MESH_AUTH_TOKEN_NEXT`) rather than
+minting another; `ROTATE_SKIP` leaves out a node with no agent. Tested on stand-ins
+for pi1, the six nodes and the laptop (an unreachable node, the resume, the skip, an
+old-token warning), not yet on the mesh.
+
 ## Hunts: describe it in words, and stay in the right category (2026-09-25)
 
 Jack, on the mesh for the first time: *"we wanted to find a cheap runaround car, so we

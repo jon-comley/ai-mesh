@@ -890,107 +890,134 @@ set-auth-token token:
     done
     echo ">>> Auth token push complete."
 
-# Zero-downtime auth token rotation using the dual-token window.
-# Coordinator accepts both old and new tokens while nodes are updated,
-# then restarts with the new token only once all nodes have reconnected.
+# Zero-downtime auth token rotation using the dual-token window, for the
+# coordinator where it runs now: the node with NODE_COORDINATOR=true (pi1), as a
+# systemd service reading /var/lib/ai-mesh/coordinator.state. (The recipe before
+# 2026-10-15 still restarted a coordinator binary on the machine it ran on, as
+# before the move to pi1, and pushed the new token only to compute nodes, so it
+# would have started a second coordinator on the laptop and locked out the
+# controllers' agents. Jon, 2026-10-15: the token had leaked into a log.)
+#   1. pi1's coordinator restarted accepting the old and the new token
+#      (MESH_AUTH_TOKEN_NEXT in its state file)
+#   2. the new token pushed to EVERY node's agent (_push-node-env), controllers
+#      included. A node that can't be reached stops it here with both tokens
+#      still accepted: bring the node up and run it again, it resumes with the
+#      same new token
+#   3. this machine: ~/.config/ai-mesh/coordinator.state (what the other
+#      recipes read) and ~/.bashrc (one MESH_TLS_FINGERPRINT, the new
+#      MESH_AUTH_TOKEN; the old file kept as ~/.bashrc.pre-rotate)
+#   4. pi1's coordinator restarted with the new token only, its log watched a
+#      minute for anything still using the old one, then the models reloaded
+# ROTATE_SKIP="lenovo1 mac1": nodes left out of step 2 (no agent there, or off for
+# good); their agents are locked out once the old token goes.
 # Usage: just rotate-token
 rotate-token:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Inline helper: restart only the coordinator binary.
-    # Does not touch models, fingerprints, or the controller agent.
-    # Args: $1=MESH_AUTH_TOKEN  $2=MESH_AUTH_TOKEN_NEXT (optional)
-    restart_coordinator_binary() {
-        local primary="$1"
-        local next="${2:-}"
-        pkill -f "target/(debug|release)/coordinator" || true
-        sleep 0.3
-        rm -f /tmp/mesh-coordinator.log
-        cargo build -q -p coordinator
-        if [ -n "$next" ]; then
-            MDNS_ADVERTISE_IP={{coordinator_ip}} \
-                MESH_AUTH_TOKEN="$primary" \
-                MESH_AUTH_TOKEN_NEXT="$next" \
-                ./target/debug/coordinator >> /tmp/mesh-coordinator.log 2>&1 &
-        else
-            MDNS_ADVERTISE_IP={{coordinator_ip}} \
-                MESH_AUTH_TOKEN="$primary" \
-                ./target/debug/coordinator >> /tmp/mesh-coordinator.log 2>&1 &
-        fi
-        for i in $(seq 1 60); do
-            sleep 1
-            grep -q "Coordinator is running" /tmp/mesh-coordinator.log 2>/dev/null && { echo ">>> Coordinator ready."; return 0; }
-            [ "$i" -eq 60 ] && { echo ">>> ERROR: coordinator did not start. Check /tmp/mesh-coordinator.log"; exit 1; }
-        done
+    COORD_FILE=$(grep -l '^NODE_COORDINATOR=true' nodes/*.env | head -1)
+    [ -n "$COORD_FILE" ] || { echo ">>> ERROR: no nodes/*.env has NODE_COORDINATOR=true"; exit 1; }
+    COORD_NODE=$(basename "$COORD_FILE" .env)
+    COORD_HOST=$(grep -h '^NODE_HOST=' "$COORD_FILE" | cut -d= -f2)
+    COORD_USER=$(grep -h '^NODE_USER=' "$COORD_FILE" | cut -d= -f2)
+    COORD="${COORD_USER}@${COORD_HOST}"
+    REMOTE_STATE=/var/lib/ai-mesh/coordinator.state
+
+    # The coordinator's own state, the one source of the current token and fingerprint.
+    STATE_TEXT=$(ssh {{ssh_opts}} "$COORD" "cat $REMOTE_STATE") \
+        || { echo ">>> ERROR: could not read $REMOTE_STATE on ${COORD_NODE}"; exit 1; }
+    state_value() { printf '%s\n' "$STATE_TEXT" | grep "^$1=" | head -1 | cut -d= -f2- || true; }
+    FP=$(state_value MESH_TLS_FINGERPRINT)
+    OLD_TOKEN=$(state_value MESH_AUTH_TOKEN)
+    NEW_TOKEN=$(state_value MESH_AUTH_TOKEN_NEXT)
+    [ -n "$FP" ] && [ -n "$OLD_TOKEN" ] || { echo ">>> ERROR: $REMOTE_STATE on ${COORD_NODE} has no fingerprint or token"; exit 1; }
+    if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "$OLD_TOKEN" ]; then
+        echo ">>> A rotation window is already open on ${COORD_NODE}: resuming with its new token."
+    else
+        NEW_TOKEN=$(openssl rand -hex 32)
+        echo ">>> New token generated."
+    fi
+
+    # Restarts pi1's coordinator with the given state lines (token from stdin, not argv).
+    restart_coordinator() {
+        local next="$1"   # "next": keep the old token and add the new; "only": the new token alone
+        printf '%s\n%s\n' "$OLD_TOKEN" "$NEW_TOKEN" | ssh {{ssh_opts}} "$COORD" "
+            set -e
+            read -r old; read -r new
+            f=$REMOTE_STATE
+            grep -v -E '^(MESH_AUTH_TOKEN|MESH_AUTH_TOKEN_NEXT)=' \$f > \$f.new || true
+            if [ '$next' = next ]; then
+                printf 'MESH_AUTH_TOKEN=%s\nMESH_AUTH_TOKEN_NEXT=%s\n' \"\$old\" \"\$new\" >> \$f.new
+            else
+                printf 'MESH_AUTH_TOKEN=%s\n' \"\$new\" >> \$f.new
+            fi
+            chmod 600 \$f.new && mv \$f.new \$f
+            sudo systemctl restart ai-mesh-coordinator
+            sleep 5
+            if systemctl is-active --quiet ai-mesh-coordinator; then exit 0; fi
+            echo '>>> ERROR: ai-mesh-coordinator did not stay up'; sudo journalctl -u ai-mesh-coordinator -n 20 --no-pager; exit 1
+        "
     }
 
-    # Step 1: Load current primary token and fingerprint.
-    STATE="$HOME/.config/ai-mesh/coordinator.state"
-    [ -f "$STATE" ] || { echo ">>> ERROR: $STATE not found — is the coordinator running?"; exit 1; }
-    source "$STATE"
-    export MESH_TLS_FINGERPRINT
-    OLD_TOKEN="${MESH_AUTH_TOKEN:-}"
-    [ -n "$OLD_TOKEN" ] || { echo ">>> ERROR: MESH_AUTH_TOKEN not set in coordinator state — run 'just restart-coordinator' first"; exit 1; }
+    echo ">>> Phase 1/4 — ${COORD_NODE}: accepting the old and the new token..."
+    restart_coordinator next
 
-    # Step 2: Generate new token.
-    NEW_TOKEN=$(openssl rand -hex 32)
-    echo ">>> New token generated."
-
-    # Step 3: Restart coordinator accepting both old and new tokens.
-    echo ">>> Phase 1/3 — opening rotation window (both tokens accepted)..."
-    restart_coordinator_binary "$OLD_TOKEN" "$NEW_TOKEN"
-
-    # Step 4: Push new token to all compute nodes.
-    # set-auth-token handles Linux (systemd drop-in) and Windows (NSSM AppEnvironmentExtra).
-    echo ">>> Phase 2/3 — distributing new token to all nodes..."
-    just set-auth-token "$NEW_TOKEN"
-
-    # Step 5: Wait for all nodes to reconnect with the new token before revoking the old.
-    # Export the new token so the CLI can authenticate — coordinator accepts both at this point.
-    # Exits non-zero on timeout — old token remains active, safe to re-run.
-    export MESH_AUTH_TOKEN="$NEW_TOKEN"
-    WAIT_IPS=()
+    echo ">>> Phase 2/4 — the new token to every node's agent..."
+    FAILED=()
     for f in nodes/*.env; do
-        source "$f"
         NODE_NAME=$(basename "$f" .env)
-        [ "${NODE_ROLE}" = "compute" ] || continue
-        WAIT_IPS+=("${NODE_HOST}")
+        if [[ " ${ROTATE_SKIP:-} " == *" ${NODE_NAME} "* ]]; then
+            echo ">>> ${NODE_NAME}: skipped (ROTATE_SKIP)"
+            continue
+        fi
+        echo ">>> ${NODE_NAME}..."
+        just _push-node-env "${NODE_NAME}" "${FP}" "${NEW_TOKEN}" || FAILED+=("${NODE_NAME}")
     done
-    echo ">>> Waiting for all nodes to reconnect..."
-    cargo run -q -p cli -- wait-ready "${WAIT_IPS[@]}" --timeout 120 \
-        || { echo ">>> ERROR: nodes did not reconnect in time — old token still active, rotation aborted"; exit 1; }
+    if [ ${#FAILED[@]} -gt 0 ]; then
+        echo ">>> STOPPED: could not update ${FAILED[*]}. ${COORD_NODE} still accepts both tokens, so"
+        echo ">>>          nothing is locked out. Bring them up and run: just rotate-token (it resumes),"
+        echo ">>>          or leave out a node with no agent: ROTATE_SKIP=\"<node>\" just rotate-token"
+        exit 1
+    fi
 
-    # Step 6: Restart coordinator with new token only — rotation window closed.
-    echo ">>> Phase 3/3 — revoking old token..."
-    restart_coordinator_binary "$NEW_TOKEN"
+    echo ">>> Phase 3/4 — this machine's state copy and ~/.bashrc..."
+    mkdir -p "$HOME/.config/ai-mesh" && chmod 700 "$HOME/.config/ai-mesh"
+    LOCAL_STATE="$HOME/.config/ai-mesh/coordinator.state"
+    ( umask 077; printf 'MESH_TLS_FINGERPRINT=%s\nMESH_AUTH_TOKEN=%s\n' "$FP" "$NEW_TOKEN" > "$LOCAL_STATE.new" )
+    mv "$LOCAL_STATE.new" "$LOCAL_STATE"
+    if [ -f "$HOME/.bashrc" ]; then
+        cp -p "$HOME/.bashrc" "$HOME/.bashrc.pre-rotate"
+        chmod 600 "$HOME/.bashrc.pre-rotate"
+        grep -v -E '^(export )?(MESH_TLS_FINGERPRINT|MESH_AUTH_TOKEN)=' "$HOME/.bashrc.pre-rotate" \
+            | grep -v -E '^# ai-mesh auth token' > "$HOME/.bashrc.new" || true
+    else
+        : > "$HOME/.bashrc.new"
+    fi
+    printf '# ai-mesh coordinator credentials — managed by just rotate-token\nexport MESH_TLS_FINGERPRINT=%s\nexport MESH_AUTH_TOKEN=%s\n' "$FP" "$NEW_TOKEN" >> "$HOME/.bashrc.new"
+    chmod --reference="$HOME/.bashrc.pre-rotate" "$HOME/.bashrc.new" 2>/dev/null || true
+    mv "$HOME/.bashrc.new" "$HOME/.bashrc"
 
-    # Clear stale SQLite model state so wait-ready doesn't see a false Ready
-    # from the pre-rotation registry. Mirrors what restart-coordinator does.
-    cargo run -q -p cli -- reset-registry > /dev/null || true
+    echo ">>> Phase 4/4 — ${COORD_NODE}: the new token only (old one revoked)..."
+    restart_coordinator only
+    echo ">>> Watching ${COORD_NODE}'s log for a minute for anything still using the old token..."
+    sleep 60
+    REJECTS=$(ssh {{ssh_opts}} "$COORD" "sudo journalctl -u ai-mesh-coordinator --since '-65s' --no-pager" \
+        | grep -E 'rejected connection: invalid auth token|heartbeat rejected' || true)
+    if [ -n "$REJECTS" ]; then
+        echo ">>> WARNING: something still uses the old token:"
+        printf '%s\n' "$REJECTS" | tail -5
+        echo ">>>          For a node: just set-fingerprint <node>. A phone's dashboard link needs the new ?token=."
+    else
+        echo ">>> No old-token connections."
+    fi
 
-    # Restart the local controller with the new token (set-auth-token only pushes
-    # to remote compute nodes; the local agent process keeps the old token otherwise).
-    pkill -f "target/(debug|release)/agent" || true
-    sleep 0.3
-    AGENT_ROLE=controller cargo run -q -p agent >> /tmp/mesh-agent.log 2>&1 &
+    export MESH_TLS_FINGERPRINT="$FP" MESH_AUTH_TOKEN="$NEW_TOKEN"
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" nodes || true
+    echo ">>> Reloading models on compute nodes (the agent restarts stopped them)..."
+    just load-models-retry || echo ">>> WARNING: models slow to load — run: just load-models-retry"
 
-    # Reload models on all compute nodes — agent service restarts during rotation
-    # kill llama-server, so the models must be reloaded explicitly.
-    echo ">>> Reloading models on compute nodes..."
-    for f in nodes/*.env; do
-        source "$f"
-        NODE_NAME=$(basename "$f" .env)
-        [ "${NODE_ROLE}" = "compute" ] || continue
-        just auto-load-model ${NODE_NAME} \
-            || echo ">>> Warning: could not reload model on ${NODE_NAME} (skipping)"
-    done
-
-    cargo run -q -p cli -- wait-ready "${WAIT_IPS[@]}" --timeout 120 \
-        || { echo ">>> WARNING: nodes slow after model reload — run: just restart-coordinator"; }
-
-    echo ">>> Token rotation complete."
-    echo ">>> New token is live in ~/.config/ai-mesh/coordinator.state and ~/.bashrc"
+    echo ">>> Token rotation complete. Open a new terminal (or: source ~/.bashrc) for the new token."
+    echo ">>> Dashboard links with the old ?token= stop working; the new one is in ~/.config/ai-mesh/coordinator.state."
 
 # Remove the ai-mesh-agent service from a node.
 # Usage: just uninstall-node pi1
