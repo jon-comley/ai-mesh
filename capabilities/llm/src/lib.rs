@@ -1,5 +1,7 @@
 mod llama;
 
+pub use llama::ctx_size as configured_ctx_size;
+
 use async_trait::async_trait;
 use capability_core::Capability;
 use shared::{

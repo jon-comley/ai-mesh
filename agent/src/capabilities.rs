@@ -43,7 +43,15 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
         shared::Feature::Audio,
         #[cfg(feature = "music")]
         shared::Feature::Music,
+        #[cfg(feature = "review")]
+        shared::Feature::Review,
     ];
+
+    // Review work sizes its tasks from each machine's context (docs/code-review.md).
+    #[cfg(feature = "llm")]
+    let llm_ctx_size = Some(capability_llm::configured_ctx_size());
+    #[cfg(not(feature = "llm"))]
+    let llm_ctx_size = None;
 
     // Report which audio backends this node runs so the coordinator can
     // list each as a distinct room-assignable sink. Same parser the
@@ -60,6 +68,7 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
         max_model_size_gb,
         features,
         audio_backends,
+        llm_ctx_size,
     })
 }
 

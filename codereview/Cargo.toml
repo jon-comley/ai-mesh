@@ -1,0 +1,11 @@
+[package]
+name = "codereview"
+version = "0.1.0"
+edition = "2024"
+
+# Pure review logic for mac1's review capability: chunking, prompts, parsing,
+# the quote check, de-duplication, the report and task hand-out. No clock, no
+# network, no database — the capability supplies those (same split as `ebay`).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

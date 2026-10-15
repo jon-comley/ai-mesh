@@ -52,7 +52,9 @@ fn gpu_layers() -> u32 {
         .unwrap_or(0)
 }
 
-fn ctx_size() -> u32 {
+/// The model server's context size in tokens (`LLAMA_CTX_SIZE`, default 4096).
+/// Public so the agent can report it: review work sizes its tasks from it.
+pub fn ctx_size() -> u32 {
     std::env::var("LLAMA_CTX_SIZE")
         .ok()
         .and_then(|v| v.trim().parse().ok())
@@ -80,6 +82,59 @@ fn flash_attn() -> &'static str {
         Some("off") => "off",
         _ => "auto",
     }
+}
+
+/// Extra llama-server flags for long-context work (docs/code-review.md):
+///
+/// * `LLAMA_KV_CACHE_TYPE` — `f16`, `q8_0` or `q4_0`, passed as both
+///   `--cache-type-k` and `--cache-type-v`. `q8_0` halves the context memory,
+///   which is what lets mac1 hold 256k tokens in about 12 GB. It needs flash
+///   attention, which `auto` turns on wherever the backend supports it.
+/// * `LLAMA_PARALLEL` — number of slots (`--parallel`). With two slots, a home
+///   command lands in the second one and a paused review's already-read prompt
+///   stays cached in the first, so resending the review continues from there.
+/// * `LLAMA_KV_UNIFIED` — `true`/`1` adds `--kv-unified`, so the slots share
+///   one context pool instead of each getting `ctx / parallel`.
+///
+/// Unrecognised values are ignored rather than passed through, so a typo
+/// cannot stop llama-server from starting.
+pub(crate) fn extra_server_args(
+    kv_cache_type: Option<&str>,
+    parallel: Option<&str>,
+    kv_unified: Option<&str>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(t) = kv_cache_type.map(|v| v.trim().to_ascii_lowercase())
+        && matches!(t.as_str(), "f16" | "q8_0" | "q4_0")
+    {
+        args.extend([
+            "--cache-type-k".into(),
+            t.clone(),
+            "--cache-type-v".into(),
+            t,
+        ]);
+    }
+    if let Some(n) = parallel.and_then(|v| v.trim().parse::<u32>().ok())
+        && (2..=8).contains(&n)
+    {
+        args.extend(["--parallel".into(), n.to_string()]);
+    }
+    if matches!(
+        kv_unified.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    ) {
+        args.push("--kv-unified".into());
+    }
+    args
+}
+
+fn env_extra_server_args() -> Vec<String> {
+    let get = |k: &str| std::env::var(k).ok();
+    extra_server_args(
+        get("LLAMA_KV_CACHE_TYPE").as_deref(),
+        get("LLAMA_PARALLEL").as_deref(),
+        get("LLAMA_KV_UNIFIED").as_deref(),
+    )
 }
 
 /// Default health-wait ceiling: 180 s floor, scaled up for larger models
@@ -325,6 +380,14 @@ fn resolve_gguf(model_name: &str) -> Result<GgufSpec, String> {
             "Qwen/Qwen3-32B-GGUF",
             "Qwen3-32B-Q4_K_M.gguf",
         )),
+        // The review model for mac1 (docs/code-review.md): a mixture-of-experts
+        // with 3B active parameters, so fast for its size, and a 256k native
+        // context. Q5_K_M is ~22 GB. Name taken from Unsloth's GGUF repo; if a
+        // load fails with a 404, check the file list there first.
+        "qwen3-coder:30b" => Ok(GgufSpec::single(
+            "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+            "Qwen3-Coder-30B-A3B-Instruct-Q5_K_M.gguf",
+        )),
         "llama3.2:1b" => Ok(GgufSpec::single(
             "bartowski/Llama-3.2-1B-Instruct-GGUF",
             "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
@@ -558,6 +621,7 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
     if let Some(batch) = n_batch() {
         cmd.arg("--n-batch").arg(batch.to_string());
     }
+    cmd.args(env_extra_server_args());
 
     let child = cmd
         .spawn()
@@ -832,14 +896,27 @@ fn stream_http_client() -> &'static reqwest::Client {
     })
 }
 
-/// Max silence between stream chunks before the generation is declared hung.
-/// Generous default because llama-server emits nothing during prefill, which
-/// on a 14b model with a long prompt can take minutes.
+/// Max silence between stream chunks, once the first has arrived, before the
+/// generation is declared hung.
 fn stream_idle_timeout_secs() -> u64 {
-    std::env::var("LLAMA_STREAM_IDLE_TIMEOUT_SECS")
+    env_secs("LLAMA_STREAM_IDLE_TIMEOUT_SECS", 300)
+}
+
+/// Max wait for the first stream chunk. llama-server sends nothing while it
+/// reads the prompt, and reading slows as the prompt grows: on mac1,
+/// qwen3-coder:30b read ~1,000 tokens/s at 4k but ~70 at 100k, so a 115k
+/// review prompt took over 20 minutes and the 300 s idle limit killed it three
+/// times (2026-10-10). Matches the coordinator's `WORK_FIRST_TOKEN_SECS`; the
+/// coordinator still cancels sooner for anything it has stopped waiting for.
+fn stream_first_chunk_timeout_secs() -> u64 {
+    env_secs("LLAMA_STREAM_FIRST_TOKEN_TIMEOUT_SECS", 1200)
+}
+
+fn env_secs(name: &str, default: u64) -> u64 {
+    std::env::var(name)
         .ok()
         .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(300)
+        .unwrap_or(default)
 }
 
 /// Streamed inference: each content delta is sent into `delta_tx` as it
@@ -865,7 +942,9 @@ pub async fn generate_stream(
     )
     .await?;
 
+    let first_wait = std::time::Duration::from_secs(stream_first_chunk_timeout_secs());
     let idle = std::time::Duration::from_secs(stream_idle_timeout_secs());
+    let mut got_chunk = false;
     let mut byte_stream = resp.bytes_stream();
     let mut parser = shared::sse::SseParser::new();
     let mut output = String::new();
@@ -874,17 +953,20 @@ pub async fn generate_stream(
     let mut completion_tokens: Option<u32> = None;
 
     'read: loop {
-        let chunk = match tokio::time::timeout(idle, byte_stream.next()).await {
+        let wait = if got_chunk { idle } else { first_wait };
+        let chunk = match tokio::time::timeout(wait, byte_stream.next()).await {
             Ok(Some(Ok(bytes))) => bytes,
             Ok(Some(Err(e))) => return Err(format!("stream read failed: {e}")),
             Ok(None) => break 'read, // EOF — treat like [DONE]
             Err(_) => {
                 return Err(format!(
-                    "llama-server stream stalled for {}s",
-                    idle.as_secs()
+                    "llama-server stream stalled for {}s{}",
+                    wait.as_secs(),
+                    if got_chunk { "" } else { " reading the prompt" }
                 ));
             }
         };
+        got_chunk = true;
         for payload in parser.feed(&chunk) {
             if payload == "[DONE]" {
                 break 'read;
@@ -1269,6 +1351,30 @@ mod tests {
     }
 
     // ── ChatResponse deserialization ──────────────────────────────────────────
+
+    #[test]
+    fn extra_args_for_long_context_work() {
+        assert_eq!(
+            extra_server_args(Some("q8_0"), Some("2"), Some("true")),
+            vec![
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+                "--parallel",
+                "2",
+                "--kv-unified"
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_args_ignore_unset_and_bad_values() {
+        assert!(extra_server_args(None, None, None).is_empty());
+        assert!(extra_server_args(Some("q9"), Some("1"), Some("no")).is_empty());
+        assert!(extra_server_args(Some(""), Some("lots"), Some("")).is_empty());
+        assert_eq!(extra_server_args(Some(" Q8_0 "), None, None).len(), 4);
+    }
 
     #[test]
     fn health_timeout_floor_is_180s_for_small_models() {

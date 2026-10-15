@@ -1033,6 +1033,33 @@ async fn process_message(
         MeshMessage::RequestModelInference(req) => {
             handle_cli_inference(req, registry, connections, pending_inferences).await
         }
+        // Review work from mac1 (docs/code-review.md). Spawned: a review step
+        // runs for minutes and must not hold up this connection's reader.
+        MeshMessage::WorkInferenceRequest(req) => {
+            tokio::spawn(crate::inference::run_work_request(
+                req,
+                tx.clone(),
+                registry.clone(),
+                connections.clone(),
+                pending_streams.clone(),
+            ));
+            None
+        }
+        MeshMessage::RequestWorkers => Some(MeshMessage::WorkerSnapshot(
+            crate::inference::worker_snapshot(registry, connections),
+        )),
+        MeshMessage::ReviewSnapshot(snapshot) => {
+            if let Some(dash) = dashboard {
+                dash.set_review_snapshot(*snapshot);
+            }
+            None
+        }
+        MeshMessage::ReviewReply(reply) => {
+            if let Some(dash) = dashboard {
+                dash.resolve_review_reply(reply);
+            }
+            None
+        }
         MeshMessage::ModelInferenceResult(res) => {
             info!(
                 request_id = %res.request_id,
