@@ -1,9 +1,13 @@
+use crate::work::{
+    ReviewCommand, ReviewReply, ReviewSnapshot, WorkInferenceDone, WorkInferenceRequest,
+    WorkerSnapshot,
+};
 use crate::{
     HardwareSpec, HeartbeatPayload, ModelLifecycleState, NodeCapabilities, NodeRole, VersionInfo,
 };
 use serde::{Deserialize, Serialize};
 
-pub const WIRE_VERSION: u32 = 12;
+pub const WIRE_VERSION: u32 = 13;
 
 fn default_wire_version() -> u32 {
     WIRE_VERSION
@@ -951,6 +955,20 @@ pub enum MeshMessage {
     // Music capability messages (Spotify — plans/spotify-music.md)
     MusicCommand(MusicCommandRequest),
     MusicCommandResult(MusicCommandResult),
+    // Review work (wire v13 — see `work.rs` and docs/code-review.md)
+    /// Agent → coordinator: run a completion as background work on a chosen machine.
+    WorkInferenceRequest(WorkInferenceRequest),
+    /// Coordinator → agent: how that work request ended.
+    WorkInferenceDone(WorkInferenceDone),
+    /// Agent → coordinator: which machines could take work right now?
+    RequestWorkers,
+    WorkerSnapshot(WorkerSnapshot),
+    /// mac1 → coordinator: the review state for the dashboard.
+    ReviewSnapshot(Box<ReviewSnapshot>),
+    /// Coordinator → mac1: a dashboard action.
+    ReviewCommand(ReviewCommand),
+    /// mac1 → coordinator: a report, or why a command failed.
+    ReviewReply(ReviewReply),
 }
 
 /// Structured admin messages for coordinator control.
@@ -1169,6 +1187,7 @@ mod tests {
             max_model_size_gb: 3.69,
             features: vec![crate::Feature::Llm],
             audio_backends: vec![],
+            llm_ctx_size: None,
         };
 
         let rec = NodeRecordFull {

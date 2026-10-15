@@ -251,6 +251,11 @@ pub enum DashboardEvent {
         hunt_name: String,
         find: crate::registry::EbayFindRecord,
     },
+    /// mac1's review state changed (see docs/code-review.md). Not replayed on
+    /// connect — the Reviews tab loads it with `GET /api/reviews`.
+    ReviewUpdate {
+        snapshot: Box<shared::ReviewSnapshot>,
+    },
 }
 
 /// Combined gateway config (masked) + cumulative stats. Served by
@@ -541,6 +546,11 @@ pub struct DashboardState {
     /// freshly (re-)spawned one — same self-cancel trick as `art_rotation`'s
     /// single generation counter, but keyed since hunts run concurrently.
     ebay_hunt_generations: Mutex<HashMap<String, Arc<AtomicU64>>>,
+    /// The latest review state mac1 sent. In-memory: mac1 sends it again
+    /// whenever it reconnects, so a coordinator restart loses nothing.
+    review_snapshot: Mutex<Option<shared::ReviewSnapshot>>,
+    /// Report requests waiting for mac1's `ReviewReply`, by request id.
+    pending_review_replies: Mutex<HashMap<String, oneshot::Sender<shared::ReviewReply>>>,
 }
 
 /// A node's currently-paired Bluetooth device and whether it's actually
@@ -633,6 +643,8 @@ impl DashboardState {
             general_art_batch: Mutex::new(None),
             bluetooth_status: Mutex::new(HashMap::new()),
             ebay_hunt_generations: Mutex::new(HashMap::new()),
+            review_snapshot: Mutex::new(None),
+            pending_review_replies: Mutex::new(HashMap::new()),
         })
     }
 
@@ -665,6 +677,48 @@ impl DashboardState {
     pub fn push_gateway_update(&self, snapshot: GatewaySnapshot) {
         if self.tx.receiver_count() > 0 {
             let _ = self.tx.send(DashboardEvent::GatewayUpdate(snapshot));
+        }
+    }
+
+    /// Store mac1's latest review state and pass it to open dashboards.
+    pub fn set_review_snapshot(&self, snapshot: shared::ReviewSnapshot) {
+        *self.review_snapshot.lock().unwrap() = Some(snapshot.clone());
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(DashboardEvent::ReviewUpdate {
+                snapshot: Box::new(snapshot),
+            });
+        }
+    }
+
+    pub fn review_snapshot(&self) -> Option<shared::ReviewSnapshot> {
+        self.review_snapshot.lock().unwrap().clone()
+    }
+
+    /// Wait for mac1's answer to the command carrying `request_id`.
+    pub fn expect_review_reply(&self, request_id: &str) -> oneshot::Receiver<shared::ReviewReply> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_review_replies
+            .lock()
+            .unwrap()
+            .insert(request_id.to_string(), tx);
+        rx
+    }
+
+    pub fn forget_review_reply(&self, request_id: &str) {
+        self.pending_review_replies
+            .lock()
+            .unwrap()
+            .remove(request_id);
+    }
+
+    pub fn resolve_review_reply(&self, reply: shared::ReviewReply) {
+        if let Some(tx) = self
+            .pending_review_replies
+            .lock()
+            .unwrap()
+            .remove(&reply.request_id)
+        {
+            let _ = tx.send(reply);
         }
     }
 

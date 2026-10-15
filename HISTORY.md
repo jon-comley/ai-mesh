@@ -37,7 +37,42 @@ reached stops it before the revoke with both tokens still accepted, and a re-run
 resumes with the token already in the window (`MESH_AUTH_TOKEN_NEXT`) rather than
 minting another; `ROTATE_SKIP` leaves out a node with no agent. Tested on stand-ins
 for pi1, the six nodes and the laptop (an unreachable node, the resume, the skip, an
-old-token warning), not yet on the mesh.
+old-token warning), then run on the mesh the same day. The first attempt ran the old
+recipe from a clone on this branch's predecessor: it started a coordinator on the
+laptop and gave beelink1 and mac1 the laptop's certificate fingerprint (F0:A4, the
+laptop-era one; pi1's own, made when it first started as a service, is 29:1C, and
+the laptop's state file had been rewritten with F0:A4 by that stray coordinator).
+Stopping it and copying pi1's state back put things right, and the new recipe then
+rotated every node but pi2, which was off and got the token afterwards with `just
+set-fingerprint pi2`. pi2 does not answer to `pi2.local`, so its node file keeps
+the address.
+
+## Code reviews on mac1 went live (2026-10-10)
+
+Deployed from branch `claude/adoring-cerf-h3nz8p`: coordinator on pi1, mac1
+with `qwen3-coder:30b` at 256k/`q8_0`, beelink1 `qwen2.5:7b` at 32k. Eight
+repos added (guv, dashboard, vanround, guvguvguv, guvtrade, glebefish and
+ventures with read-only `mac1 reviews` deploy keys; ai-mesh over https),
+nightly 02:15 to 03:25 ten minutes apart, ntfy on. Model roles left empty and
+the home-control bench skipped: Jon hardly uses the home automation. Dashboard
+needs both `@app/` and `@app-functions/` aliases to read the guv code it
+imports.
+
+**The first question failed three times.** mac1 filled the 256k context, so
+the prompt was 115k tokens, and reading slows steeply with length: ~1,000
+tokens/s at 4k, ~200 at 57k, ~70 at 100k, over 20 minutes in all.
+llama-server sends nothing while reading, and the agent's 300 s stream idle
+limit applied from the first byte, so each try was killed at 5 minutes (each
+got further only because llama.cpp kept the part already read). pi1's
+20-minute first-token allowance never came into play. Fixed in `50a0369`: the
+agent waits 20 minutes for the first chunk, and the largest task or question
+is 32k tokens (16k in the evening). The same question then answered in 2.5
+minutes.
+
+The one-file review of `JobDetailPage.tsx` ran a mac1 review and a beelink1
+check; the checker rightly threw out mac1's one finding (a button it claimed
+could never show). It could not show the known cheapest-option invoice bug,
+because `1f0ae7d` had fixed that earlier the same day.
 
 ## Hunts: describe it in words, and stay in the right category (2026-09-25)
 

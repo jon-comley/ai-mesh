@@ -424,7 +424,7 @@ deploy-node node:
         echo ">>> Running provisioning script (this takes a minute — installing NSSM, llama.cpp, registering service)..."
         scp_dots ">>> Provisioning" \
             ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
-                & '${WIN_PATH}\\install-node-windows.ps1' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}' -SttServer '${STT_SERVER:-}' -CoordinatorIp '${COORDINATOR_IP:-}'\
+                & '${WIN_PATH}\\install-node-windows.ps1' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}' -SttServer '${STT_SERVER:-}' -CoordinatorIp '${COORDINATOR_IP:-}' -CtxSize '${LLAMA_CTX_SIZE:-4096}'\
             \""
         # Stability hardening (ULPS, AX200 NIC, power plan) is applied by
         # install-node-windows.ps1's Harden-Stability function above — no
@@ -440,7 +440,7 @@ deploy-node node:
         rsync -a --delete --exclude target --exclude node_modules --exclude .git --exclude 'ai_mesh.db*' \
             -e "ssh {{ssh_opts}}" ./ ${NODE_USER}@${NODE_HOST}:ai-mesh-src/
         ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
-            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}'"
+            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}' '${LLAMA_KV_CACHE_TYPE:-}' '${LLAMA_PARALLEL:-}' '${LLAMA_KV_UNIFIED:-}' '${REVIEW_ALLOWED_OWNERS:-}' '{{node}}'"
         ;;
 
       *)
@@ -647,7 +647,7 @@ update-node node:
         rsync -a --delete --exclude target --exclude node_modules --exclude .git --exclude 'ai_mesh.db*' \
             -e "ssh {{ssh_opts}}" ./ ${NODE_USER}@${NODE_HOST}:ai-mesh-src/
         ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} \
-            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}'"
+            "bash ~/ai-mesh-src/scripts/install-node-macos.sh '${NODE_ROLE}' '${NODE_FEATURES:-llm}' '${COORDINATOR_IP:-}' '${LLAMA_CTX_SIZE:-8192}' '${DEFAULT_MODEL:-}' '${LLAMA_KV_CACHE_TYPE:-}' '${LLAMA_PARALLEL:-}' '${LLAMA_KV_UNIFIED:-}' '${REVIEW_ALLOWED_OWNERS:-}' '{{node}}'"
         ;;
     esac
     echo ">>> Node {{node}} updated."
@@ -1124,6 +1124,7 @@ load model:
         qwen3:8b)         SIZE_MB=4795  ;;
         qwen3:14b)        SIZE_MB=8584  ;;
         qwen3:32b)        SIZE_MB=18849 ;;
+        qwen3-coder:30b)  SIZE_MB=21740 ;;
         qwen2.5:0.5b)     SIZE_MB=500   ;;
         qwen2.5:1.5b)     SIZE_MB=986   ;;
         qwen2.5:7b)       SIZE_MB=4096  ;;
@@ -1158,6 +1159,7 @@ load-model node model:
         qwen3:8b)         SIZE_MB=4795  ;;
         qwen3:14b)        SIZE_MB=8584  ;;
         qwen3:32b)        SIZE_MB=18849 ;;
+        qwen3-coder:30b)  SIZE_MB=21740 ;;
         qwen2.5:0.5b)     SIZE_MB=500   ;;
         qwen2.5:1.5b)     SIZE_MB=986   ;;
         qwen2.5:7b)       SIZE_MB=4096  ;;
@@ -2035,6 +2037,70 @@ chat text:
         -H 'Content-Type: application/json' \
         -d "{\"text\":$(printf '%s' '{{text}}' | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),\"context\":[]}" \
         | python3 -m json.tool
+
+# Ask mac1 to review a repo now (docs/code-review.md). With no mode it reviews
+# the commits since the last review; "sweep" does the next folder of the whole
+# repo; "path:<folder-or-file>" and "branch:<name>" review just that.
+# Usage: just review-now dashboard
+#        just review-now dashboard sweep
+#        just review-now dashboard path:src/services
+#        just review-now guv branch:feature-x
+review-now repo mode="":
+    #!/usr/bin/env bash
+    set -e
+    source scripts/mesh-env.sh
+    BODY=$(python3 scripts/review-cli.py run-body {{quote(repo)}} {{quote(mode)}})
+    CODE=$(curl -s -o /tmp/mesh-review-now.txt -w '%{http_code}' -X POST \
+        "http://{{coordinator_ip}}:9001/api/reviews/run-now?token=${TOKEN}" \
+        -H 'Content-Type: application/json' -d "$BODY")
+    if [ "$CODE" = "202" ]; then
+        echo "✓ {{repo}} queued on the review machine — follow it on the dashboard's Reviews tab"
+    else
+        echo "✗ HTTP $CODE: $(cat /tmp/mesh-review-now.txt)"; exit 1
+    fi
+
+# Ask mac1 a question about a repo's code and wait for the answer (it reads
+# the files that mention the question's words; a few minutes on a busy night).
+# Usage: just ask dashboard "where is the invoice total worked out?"
+ask repo question:
+    #!/usr/bin/env bash
+    set -e
+    source scripts/mesh-env.sh
+    BASE="http://{{coordinator_ip}}:9001/api"
+    BODY=$(python3 scripts/review-cli.py ask-body {{quote(repo)}} {{quote(question)}})
+    CODE=$(curl -s -o /tmp/mesh-ask.txt -w '%{http_code}' -X POST \
+        "$BASE/reviews/ask?token=${TOKEN}" -H 'Content-Type: application/json' -d "$BODY")
+    if [ "$CODE" != "202" ]; then echo "✗ HTTP $CODE: $(cat /tmp/mesh-ask.txt)"; exit 1; fi
+    ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' /tmp/mesh-ask.txt)
+    echo "Asked. Waiting for mac1 (Ctrl+C stops waiting; the answer also shows on the Reviews tab)..."
+    for _ in $(seq 1 360); do
+        OUT=$(curl -s "$BASE/reviews?token=${TOKEN}" | python3 scripts/review-cli.py answer "$ID" || true)
+        if [ -n "$OUT" ]; then
+            echo "$OUT"
+            # review-cli.py marks a failed question with a leading ✗.
+            case "$OUT" in "✗"*) exit 1 ;; *) exit 0 ;; esac
+        fi
+        sleep 5
+    done
+    echo "✗ Still waiting after 30 minutes: check the Reviews tab."
+    exit 1
+
+# Which models answer home commands and which do review work. With no
+# arguments, shows the current lists; otherwise sets them (comma-separated,
+# empty = every model). See docs/code-review.md.
+# Usage: just work-roles
+#        just work-roles "qwen2.5:7b,qwen3-coder:30b" "qwen3-coder:30b,qwen2.5:7b"
+work-roles control="" work="" :
+    #!/usr/bin/env bash
+    set -e
+    source scripts/mesh-env.sh
+    URL="http://{{coordinator_ip}}:9001/api/work/roles?token=${TOKEN}"
+    if [ -z "{{control}}{{work}}" ]; then
+        curl -s "$URL" | python3 -m json.tool
+        exit 0
+    fi
+    BODY=$(python3 -c 'import json,sys; s=lambda v:[m.strip() for m in v.split(",") if m.strip()]; print(json.dumps({"control":s(sys.argv[1]),"work":s(sys.argv[2])}))' "{{control}}" "{{work}}")
+    curl -s -X POST "$URL" -H 'Content-Type: application/json' -d "$BODY" | python3 -m json.tool
 
 # Remove a dead node from the registry (nodes never expire on their own).
 # Accepts the node's hostname (as shown in `just nodes`) or its uuid.

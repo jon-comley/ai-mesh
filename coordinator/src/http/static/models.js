@@ -12,6 +12,7 @@ const KNOWN_MODELS = [
   { family: 'Qwen 3',       name: 'qwen3:8b',         size_mb: 4795  },
   { family: 'Qwen 3',       name: 'qwen3:14b',        size_mb: 8584  },
   { family: 'Qwen 3',       name: 'qwen3:32b',        size_mb: 18849 },
+  { family: 'Qwen 3',       name: 'qwen3-coder:30b',  size_mb: 21740 },
   { family: 'Qwen 2.5',     name: 'qwen2.5:0.5b',     size_mb: 500   },
   { family: 'Qwen 2.5',     name: 'qwen2.5:1.5b',     size_mb: 986   },
   { family: 'Qwen 2.5',     name: 'qwen2.5:7b',       size_mb: 4096  },
