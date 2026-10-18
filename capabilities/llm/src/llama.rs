@@ -388,6 +388,13 @@ fn resolve_gguf(model_name: &str) -> Result<GgufSpec, String> {
             "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
             "Qwen3-Coder-30B-A3B-Instruct-Q5_K_M.gguf",
         )),
+        // 80B total, 3B active per token. IQ4_XS (38.4 GB) because it fits
+        // inside macOS's default GPU limit on mac1 (~48 GB of 64) with the
+        // 256k review context; the 4-bit K-quants (48-50 GB) do not.
+        "qwen3-coder-next:80b" => Ok(GgufSpec::single(
+            "unsloth/Qwen3-Coder-Next-GGUF",
+            "Qwen3-Coder-Next-UD-IQ4_XS.gguf",
+        )),
         "llama3.2:1b" => Ok(GgufSpec::single(
             "bartowski/Llama-3.2-1B-Instruct-GGUF",
             "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
@@ -1200,6 +1207,15 @@ mod tests {
         let err = resolve_gguf("llama3:8b").unwrap_err();
         assert!(err.contains("unknown model"));
         assert!(err.contains("llama3:8b"));
+    }
+
+    #[test]
+    fn resolve_gguf_knows_qwen3_coder_next() {
+        let spec = resolve_gguf("qwen3-coder-next:80b").unwrap();
+        assert_eq!(spec.repo, "unsloth/Qwen3-Coder-Next-GGUF");
+        assert_eq!(spec.shards, vec!["Qwen3-Coder-Next-UD-IQ4_XS.gguf"]);
+        // Qwen: gets /no_think like the other Qwen models.
+        assert!(is_qwen("qwen3-coder-next:80b"));
     }
 
     #[test]

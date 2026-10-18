@@ -1171,6 +1171,7 @@ load model:
         qwen3:14b)        SIZE_MB=8584  ;;
         qwen3:32b)        SIZE_MB=18849 ;;
         qwen3-coder:30b)  SIZE_MB=21740 ;;
+        qwen3-coder-next:80b) SIZE_MB=36621 ;;
         qwen2.5:0.5b)     SIZE_MB=500   ;;
         qwen2.5:1.5b)     SIZE_MB=986   ;;
         qwen2.5:7b)       SIZE_MB=4096  ;;
@@ -1206,6 +1207,7 @@ load-model node model:
         qwen3:14b)        SIZE_MB=8584  ;;
         qwen3:32b)        SIZE_MB=18849 ;;
         qwen3-coder:30b)  SIZE_MB=21740 ;;
+        qwen3-coder-next:80b) SIZE_MB=36621 ;;
         qwen2.5:0.5b)     SIZE_MB=500   ;;
         qwen2.5:1.5b)     SIZE_MB=986   ;;
         qwen2.5:7b)       SIZE_MB=4096  ;;
@@ -2135,7 +2137,7 @@ ask repo question:
 # arguments, shows the current lists; otherwise sets them (comma-separated,
 # empty = every model). See docs/code-review.md.
 # Usage: just work-roles
-#        just work-roles "qwen2.5:7b,qwen3-coder:30b" "qwen3-coder:30b,qwen2.5:7b"
+#        just work-roles "qwen2.5:7b,qwen3-coder-next:80b" "qwen3-coder-next:80b,qwen2.5:7b"
 work-roles control="" work="" :
     #!/usr/bin/env bash
     set -e

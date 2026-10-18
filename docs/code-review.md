@@ -50,14 +50,14 @@ sensible setups:
 just work-roles "" ""
 
 # It did not: keep it off the lights; beelink1 handles them during reviews.
-just work-roles "qwen2.5:7b,qwen2.5:14b" "qwen3-coder:30b,qwen2.5:7b"
+just work-roles "qwen2.5:7b,qwen2.5:14b" "qwen3-coder-next:80b,qwen2.5:7b"
 ```
 
 ## Models and context
 
 | Node | Model | `LLAMA_CTX_SIZE` | Why |
 |---|---|---|---|
-| mac1 | `qwen3-coder:30b` (Q5_K_M, ~22 GB) | 262144, `q8_0` cache | Feature-sized review tasks: a page, the services it calls and the companion repo code they import |
+| mac1 | `qwen3-coder-next:80b` (Unsloth UD-IQ4_XS, 38.4 GB) | 262144, `q8_0` cache | Feature-sized review tasks: a page, the services it calls and the companion repo code they import |
 | beelink1 | `qwen2.5:7b` (4.7 GB) | 32768 | Checks with the whole file in view; the model's native maximum (more needs rope scaling, which hurts short home prompts) |
 
 At 256k with a `q8_0` cache, mac1 uses about 34 GB: under macOS's default GPU
@@ -82,7 +82,10 @@ context fits it and which can read it in 15 minutes (reviews) or 3 minutes
 to 23:00 review tasks are capped at 16k tokens so a pause costs less.
 
 **Keep tasks small.** Reading slows steeply as a prompt grows. Measured on
-mac1 with `qwen3-coder:30b`, q8_0 cache (2026-10-10):
+mac1 with the previous review model, `qwen3-coder:30b`, q8_0 cache
+(2026-10-10). `qwen3-coder-next:80b` keeps full attention in only a quarter of
+its layers, so it should slow less with length; re-measure it before raising
+the 32k task cap:
 
 | Tokens read so far | Reading speed |
 |---|---|
@@ -104,10 +107,24 @@ from the start and killed every long prompt.
 
 These need the real machines; none of them could be checked from the code.
 
-1. **Load the model on mac1** at 256k: `just load-model mac1 qwen3-coder:30b`
-   after deploying mac1 with the new node file (`just deploy-node mac1`). The
-   GGUF name comes from Unsloth's repo; if the download 404s, check the file
-   list there and correct `resolve_gguf`.
+1. **Load the model on mac1** at 256k: `just load-model mac1 qwen3-coder-next:80b`
+   (a 38.4 GB download) after deploying mac1 with the new node file
+   (`just update-node mac1`). The GGUF name comes from Unsloth's repo; if the
+   download 404s, check the file list there and correct `resolve_gguf`.
+   - **Why this model (2026-10-18):** it was the strongest coding model that fits
+     on mac1 alone. It's an 80B mixture of experts with 3B active per token, a
+     step up from `qwen3-coder:30b`. Splitting gpt-oss-120b across mac1 and
+     beelink1 was considered and rejected: the context would shrink to
+     32-64k, beelink1 could no longer check findings with a second model,
+     nothing would be left free for home commands overnight, and every token
+     would cross beelink1's Wi-Fi.
+   - **The larger 4-bit build** (`UD-Q4_K_XL`, 49.6 GB) is a little better but
+     leaves mac1 ~9 GB for everything else. It also needs the GPU limit raised,
+     which resets at every reboot:
+     `sudo sysctl iogpu.wired_limit_mb=57344`. Then
+     `just load-model mac1 hf:unsloth/Qwen3-Coder-Next-GGUF:Qwen3-Coder-Next-UD-Q4_K_XL.gguf`.
+   - **Work roles:** if you set them with the old model name, update them to
+     `qwen3-coder-next:80b`. `just work-roles` shows the current lists.
 2. **Bench it** and record the results in `docs/model-selection.md`:
    - memory in use, and time to read 32k, 100k and 200k tokens;
    - `scripts/bench/reaper_bench_real.py` — can it also do home control? That

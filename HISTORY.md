@@ -11,6 +11,28 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Reviews: mac1 moves to Qwen3-Coder-Next (2026-10-18)
+
+mac1's review model goes from `qwen3-coder:30b` to `qwen3-coder-next:80b`, an
+80B mixture of experts with 3B active per token, using Unsloth's UD-IQ4_XS
+build (38.4 GB).
+- **Why that build:** it's the largest that fits inside macOS's default GPU
+  limit (~48 GB of 64) with the 256k review context. Only a quarter of the
+  model's layers keep a full attention cache, so 256k costs about 3-4 GB.
+- **Not the 49.6 GB `UD-Q4_K_XL`:** it's slightly better, but it leaves mac1
+  ~9 GB for macOS and the guv simulator, and needs the GPU limit raised again
+  after every reboot.
+
+**Considered first, and rejected:** splitting gpt-oss-120b across mac1 and
+beelink1 with llama.cpp RPC.
+- The context would drop from 256k to 32-64k.
+- beelink1 could no longer check findings with a different model.
+- Overnight, nothing would be free for home commands.
+- Every token would cross beelink1's Wi-Fi.
+
+The reasoning and the commands are in `docs/code-review.md`, "Before turning
+it on".
+
 ## Node names: one name per machine, everywhere (2026-10-18)
 
 The Nodes tab showed each computer's own name as its agent reported it, which
