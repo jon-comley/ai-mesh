@@ -292,7 +292,8 @@ describe('player', () => {
     for (const id of ['songs-back', 'songs-autoscroll', 'songs-tup', 'songs-fup', 'songs-listen-btn', 'songs-menu-btn', 'songs-full']) {
       expect(rail.querySelector(`#${id}`), id).not.toBeNull();
     }
-    expect(panel.querySelector('#songs-sheet .songs-sheethead strong').textContent).toBe('Pompeii');
+    expect(panel.querySelector('#songs-sheet .songs-page .songs-sheethead strong').textContent).toBe('Pompeii');
+    expect(panel.querySelector('#songs-sheet .songs-page pre')).not.toBeNull();
     // Panels open one at a time.
     panel.querySelector('#songs-menu-btn').click();
     expect(panel.querySelector('#songs-menu').hidden).toBe(false);

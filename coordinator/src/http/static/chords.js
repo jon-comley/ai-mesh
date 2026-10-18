@@ -558,12 +558,14 @@ function buildPlayer() {
   el.innerHTML = `
     <div class="songs-stage">
       <div class="songs-sheet" id="songs-sheet" tabindex="0">
+        <div class="songs-page">
         <header class="songs-sheethead">
           <strong>${esc(t.song_name)}</strong>
           <span>${esc(t.artist_name)}${facts ? ` · <b>${esc(facts)}</b>` : ''}</span>
           <span class="songs-sheetver">${esc(versionLabel(t))}${many ? ` · version ${idx + 1} of ${player.versions.length}` : ''}${player.savedId ? ' · <span class="songs-saved">Saved ✓</span>' : ''}</span>
         </header>
         <pre></pre>
+        </div>
       </div>
       <div class="songs-pop" id="songs-menu" hidden>
         <div class="songs-pophead"><strong>Song</strong>${rb('songs-menu-close', 'Close', '✕')}</div>
