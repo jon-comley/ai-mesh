@@ -14,6 +14,7 @@ import * as gateway from '/static/gateway.js';
 import * as ebay from '/static/ebay.js';
 import * as chords from '/static/chords.js';
 import * as reviews from '/static/reviews.js';
+import * as nav from '/static/nav.js';
 import { registerSwitchAction } from '/static/devicewidgets.js';
 
 // Keeps the Home tab's room-card Bluetooth badge in sync with the AV
@@ -28,20 +29,9 @@ if ('serviceWorker' in navigator) {
   );
 }
 
-// ── Tab switching ───────────────────────────────────────────────────────────
-const tabs = document.querySelectorAll('.tab');
-const panels = document.querySelectorAll('.panel');
-
-tabs.forEach(tab => {
-  tab.addEventListener('click', () => {
-    const target = tab.dataset.panel;
-    tabs.forEach(t => {
-      t.classList.toggle('active', t.dataset.panel === target);
-      t.setAttribute('aria-selected', t.dataset.panel === target ? 'true' : 'false');
-    });
-    panels.forEach(p => p.classList.toggle('active', p.id === `panel-${target}`));
-  });
-});
+// ── Navigation ──────────────────────────────────────────────────────────────
+// Five categories on the bottom bar, each panel a sub-tab — see nav.js.
+nav.init({ tabs: document.querySelector('.tab-bar'), subtabs: document.getElementById('subtab-bar') });
 
 // ── Token management ────────────────────────────────────────────────────────
 function getToken() {
@@ -109,8 +99,15 @@ const handlers = {
   },
   SwitchAction: evt => registerSwitchAction(evt.device_id, evt.action),
   VoiceExchange: evt => chat.handleVoiceExchange(evt),
-  ErrorUpdate: evt => errors.handleErrorUpdate(evt),
-  SecurityUpdate: evt => security.handleSecurityUpdate(evt),
+  ErrorUpdate: evt => {
+    errors.handleErrorUpdate(evt);
+    // Only errors badge the System tab: warnings arrive constantly.
+    nav.trackNew('errors', evt.errors.filter(e => e.level === 'ERROR').map(e => e.ts_ms));
+  },
+  SecurityUpdate: evt => {
+    security.handleSecurityUpdate(evt);
+    nav.trackNew('security', evt.events.map(e => e.ts_ms));
+  },
   ReaperUpdate: evt => reaper.handleReaperUpdate(evt),
   GatewayUpdate: evt => gateway.handleGatewayUpdate(evt),
   EbayFind: evt => ebay.handleFind(evt),

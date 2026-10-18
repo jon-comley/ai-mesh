@@ -1,6 +1,6 @@
 # Songs (chord sheets from Ultimate Guitar)
 
-The **Songs** tab finds chord sheets on [Ultimate Guitar](https://www.ultimate-guitar.com)
+The **Songs** tab (under **Music** on the bottom bar) finds chord sheets on [Ultimate Guitar](https://www.ultimate-guitar.com)
 (UG), lets you flip between the different versions people have posted of a song,
 and saves the ones you like into a library to play from next time. Design:
 `plans/chords-songbook.md`.

@@ -11,6 +11,36 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Dashboard navigation: five categories instead of thirteen tabs (2026-10-18)
+
+The bottom bar had grown to 13 tabs and scrolled sideways on a phone. It now holds
+five categories, and each category's tabs appear as a strip of sub-tabs under the
+header (`static/nav.js`):
+
+| Category | Tabs |
+|---|---|
+| Home | Home, Devices |
+| Chat | Chat |
+| Music | Songs, REAPER |
+| Tools | Hunts, Reviews |
+| System | Nodes, Health, Models, Online AI, Security, Errors |
+
+**What changed and what didn't:**
+- Jon chose to open on **Home**; it used to open on Nodes.
+- Each category reopens on the sub-tab it was left on.
+- The panels themselves are unchanged. Only which one is shown moved, from
+  `dashboard.js`'s tab switching into `nav.js`.
+
+**Errors and Security no longer have their own buttons**, so new items in them put a
+red dot on System and on their sub-tab:
+- An item counts as new if it's newer than the last time that feed was looked at.
+- Only ERROR-level entries count, not warnings, which arrive constantly.
+- The first feed a browser ever sees is treated as history, not news.
+
+**Songs no longer listens for its tab button.** It used to reload its library when
+its button was tapped. Now `nav.js` announces a `panelshown` event and Songs listens
+for that.
+
 ## Songs tab: Ultimate Guitar chord sheets, versions and a saved library (2026-10-18)
 
 Jon plays and sings from Ultimate Guitar chord sheets. He wanted them in the

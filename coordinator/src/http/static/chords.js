@@ -167,8 +167,8 @@ export function init(el) {
     document.addEventListener('keydown', onKey);
     // Songs can arrive while the page is open (the starter songs are fetched
     // after the coordinator starts), so re-read the library on each visit.
-    document.querySelector('.tab[data-panel="chords"]')?.addEventListener('click', () => {
-      if (view === 'library') refreshLibrary();
+    document.addEventListener('panelshown', e => {
+      if (e.detail?.panel === 'chords' && view === 'library') refreshLibrary();
     });
     // The browser drops a wake lock whenever the page is hidden.
     document.addEventListener('visibilitychange', () => {

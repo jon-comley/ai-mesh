@@ -132,10 +132,8 @@ body {
   border-top: 1px solid var(--border);
   display: flex;
   flex-shrink: 0;
-  /* Enough tabs to not fit a phone width (ten, as of Devices/Online AI) —
-     scroll instead of letting flex:1 squeeze every tab down to illegibility.
-     min-width below is the hard floor; flex-basis:0 + grow:1 still spreads
-     tabs evenly to fill a wide viewport when there's room to spare. */
+  /* Five categories now (nav.js), which fit any phone; overflow stays as a
+     guard should the bar grow again. */
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
@@ -178,6 +176,51 @@ body {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
+
+/* A category's panels, as a strip of sub-tabs under the header (nav.js). */
+.subtab-bar {
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.subtab-bar::-webkit-scrollbar { display: none; }
+.subtab-bar[hidden] { display: none; }
+.subtab {
+  position: relative;
+  flex: 0 0 auto;
+  background: none;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.subtab.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 25%, var(--surface-2));
+  border-color: var(--accent);
+}
+.subtab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Something new (an error, a security event) in a panel not on screen. */
+.tab { position: relative; }
+.tab.has-badge::after, .subtab.has-badge::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+}
+.tab.has-badge::after { top: 8px; left: calc(50% + 8px); }
+.subtab.has-badge::after { top: 2px; right: 2px; }
 
 /* ── Drag-to-reorder ───────────────────────────────────────────────────────── */
 [draggable="true"] { cursor: grab; }
@@ -4761,7 +4804,7 @@ body {
 .songs-sec { display: inline-block; color: var(--amber); font-weight: 600; margin-top: .3em; }
 
 /* Full screen for the music stand: the sheet and its rail only. */
-body.songs-fullscreen .app-header, body.songs-fullscreen .tab-bar { display: none; }
+body.songs-fullscreen .app-header, body.songs-fullscreen .subtab-bar, body.songs-fullscreen .tab-bar { display: none; }
 @media (max-width: 600px) {
   .songs-sheet { padding: 6px 12px; }
 }

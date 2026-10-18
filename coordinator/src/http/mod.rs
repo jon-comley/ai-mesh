@@ -53,6 +53,7 @@ const REAPER_JS: &str = include_str!("static/reaper.js");
 const GATEWAY_JS: &str = include_str!("static/gateway.js");
 const EBAY_JS: &str = include_str!("static/ebay.js");
 const CHORDS_JS: &str = include_str!("static/chords.js");
+const NAV_JS: &str = include_str!("static/nav.js");
 const REVIEWS_JS: &str = include_str!("static/reviews.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
@@ -331,6 +332,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/gateway.js", GATEWAY_JS, JS),
         ("/static/ebay.js", EBAY_JS, JS),
         ("/static/chords.js", CHORDS_JS, JS),
+        ("/static/nav.js", NAV_JS, JS),
         ("/static/reviews.js", REVIEWS_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
