@@ -4744,7 +4744,7 @@ body {
 .songs-video { position: relative; width: 100%; aspect-ratio: 16 / 9; }
 .songs-video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 8px; }
 
-.songs-sheet { flex: 1; min-width: 0; overflow-y: auto; padding: 8px 12px; outline: none; --songs-font: 16px; }
+.songs-sheet { flex: 1; min-width: 0; overflow-y: auto; padding: 8px 12px 8px 28px; outline: none; --songs-font: 16px; }
 .songs-sheethead { display: flex; flex-direction: column; gap: 1px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
 .songs-sheethead strong { font-size: 17px; }
 .songs-sheethead span { color: var(--text-muted); font-size: 13px; }
@@ -4760,5 +4760,5 @@ body {
 /* Full screen for the music stand: the sheet and its rail only. */
 body.songs-fullscreen .app-header, body.songs-fullscreen .tab-bar { display: none; }
 @media (max-width: 600px) {
-  .songs-sheet { padding: 6px 8px; }
+  .songs-sheet { padding: 6px 8px 6px 18px; }
 }
