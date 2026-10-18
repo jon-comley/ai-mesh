@@ -507,7 +507,7 @@ second room speaker exists (`plans/spotify-music.md` Phase 6).
 
   ✅ **Established 2026-09-09 — and the claim this line used to make was wrong.** It said this WSL shell has "no LAN path at all". It has one: `pi1` answers SSH from here on **`192.168.1.103`** and returns its hostname. The check behind that claim tested `pi1.local` — mDNS, which WSL cannot resolve — and read a name-resolution failure as a connectivity failure. **Use IP addresses from this box, not `.local` names.**
 
-  **`mac1` is `jonno@192.168.1.121`** — `Jonathans-Mac-Studio`, macOS 26.5 (25F71), `Mac16,9`, arm64, 64GB, 1.8TB free. **It was `.22` earlier the same day**; the lease moved when the SSID changed, so treat the address as volatile. Remote Login is on and sshd listens on tcp4 and tcp6. It is on Wi-Fi (`en1`); `en0` has no address, so the 10Gb Ethernet is unplugged and the address is a DHCP lease against a **randomised** Wi-Fi MAC (`2a:86:fb:fe:e9:80`) — it can move.
+  **`mac1` is `jonno@192.168.1.121`** — macOS 26.5 (25F71), `Mac16,9`, arm64, 64GB, 1.8TB free. **It was `.22` earlier the same day**; the lease moved when the SSID changed, so treat the address as volatile. Remote Login is on and sshd listens on tcp4 and tcp6. It is on Wi-Fi (`en1`); `en0` has no address, so the 10Gb Ethernet is unplugged and the address is a DHCP lease against a **randomised** Wi-Fi MAC (`2a:86:fb:fe:e9:80`) — it can move.
 
   ✅ **Directly reachable from this box since 2026-09-09 — `ssh mac1`, no jump host.** For a few hours it was not, and the cause is worth carrying: **the Mac had joined `ORBI40` on its 6 GHz radio while this box is on the same SSID's 5 GHz, and the Orbi does not bridge the two.** Neither machine could see the other in either direction; both reached `pi1` fine; ARP resolved correctly throughout. **This was the second occurrence of that exact fault in three weeks** — `infrastructure/network.md` had the first one written up, including the instruction to suspect a band split before touching any device's config, and it was still not the first thing checked here.
 
@@ -515,7 +515,7 @@ second room speaker exists (`plans/spotify-music.md` Phase 6).
 
   `~/.ssh/config` here still carries a working `ProxyJump pi1` route in a comment, because `pi1` was the one box that could see both. **Use it if the Mac ever lands on a band this machine cannot reach.**
 
-- **Multi-node routing validation** ✓ — `just validate-routing` confirms `qwen2.5:1.5b` → Pi and `qwen2.5:7b` → Beelink; `mesh infer` output now includes a `served-by:` line showing the serving node; load-balancing across identical-model nodes is a future concern when a second GPU node joins
+- **Multi-node routing validation** ✓ — `just validate-routing` confirms `qwen2.5:1.5b` → Pi and `qwen2.5:7b` → beelink1; `mesh infer` output now includes a `served-by:` line showing the serving node; load-balancing across identical-model nodes is a future concern when a second GPU node joins
 - **`just start-cluster` recipe** ✓ — starts coordinator + controller + all remote agents, then calls `auto-load-model` on every compute node; leaves mesh in a ready-to-use inference state
 - **`just auto-load-model <node>`** ✓ — SSHes into node, detects GPU VRAM or CPU RAM, selects best-fit model, loads it with hardware-filtered fallback hints
 - **Automatic model placement (coordinator side)** ✓ — `ModelLoadRequest.node_id` is now `Option<String>`; when absent the coordinator calls `select_node_for_model(mb)` and picks the node with the most headroom; `mesh load <model> <size>` works without `--node-id`; `just load-model` still passes explicit node for predictable placement
@@ -649,14 +649,14 @@ mesh security-report        # one-shot snapshot of current failure counts
 - Historical inference latency per model.
 - Live intent log (query, routed-to node, latency, response preview).
 - Mobile-friendly layout.
-- ~~**Beelink BIOS — locate Wake on LAN setting**~~ — done 2026-06-11: WoL located and disabled alongside the fTPM re-disable; node stable.
+- ~~**beelink1 BIOS — locate Wake on LAN setting**~~ — done 2026-06-11: WoL located and disabled alongside the fTPM re-disable; node stable.
 
 ## Phase 11.7 — REAPER DAW Integration (2026-06-14) — remaining work
 - ◐ REAPER on macOS — code is macOS-ready (`default_scripts_dir()` resolves
   `~/Library/Application Support/REAPER/Scripts` on macOS, `/mnt/c/...` on WSL2); full
   provisioning (install script + node setup + testing) still pending the Mac mini (~end Jul 2026).
 - ◐ Multi-REAPER instances — route intents to a specific REAPER node once more than one
-  exists (e.g. OmniLink1 + Mac mini). Registry side is ready (`nodes_with_feature` returns all
+  exists (e.g. omnibook1 + Mac mini). Registry side is ready (`nodes_with_feature` returns all
   matching nodes); intent routing currently grabs the **first connected** REAPER node (the
   `extend this to a policy` comment in `intent.rs` is the only code concession). Needs: a target
   (explicit `node` arg + an active/default instance, since small models can't reliably infer it

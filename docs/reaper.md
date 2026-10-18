@@ -13,7 +13,7 @@ User intent ("play the track")
 Coordinator (pi1) — intent router
     │  ReaperCommand message
     ▼
-OmniLink1 agent (WSL2, --features reaper)
+omnibook1 agent (WSL2, --features reaper)
     │  HTTP GET http://127.0.0.1:8080/_/{id};   (numeric transport actions)
     ▼
 REAPER Web Browser Control (Windows, port 8080)
@@ -27,7 +27,7 @@ enough — `csurf` can only dispatch **numeric** action IDs, not named (`RS...`)
 script actions. The `reaper_script` tool instead drives a **Lua daemon** running
 inside REAPER (see [ReaScript daemon bridge](#reascript-daemon-bridge)).
 
-REAPER runs on the Windows side of OmniLink1. The WSL2 agent reaches it over loopback via mirrored networking (`.wslconfig` `networkingMode=mirrored`). Note: use `127.0.0.1` explicitly — `localhost` resolves to IPv6 first on WSL2 and will fail.
+REAPER runs on the Windows side of omnibook1. The WSL2 agent reaches it over loopback via mirrored networking (`.wslconfig` `networkingMode=mirrored`). Note: use `127.0.0.1` explicitly — `localhost` resolves to IPv6 first on WSL2 and will fail.
 
 ---
 
@@ -67,7 +67,7 @@ TRANSPORT	0	0.000000	0	0:00.000	1.1.00	1.1.00
 
 ### 3. Build and install the agent
 
-The REAPER capability is a compile-time feature. Build the agent on OmniLink1:
+The REAPER capability is a compile-time feature. Build the agent on omnibook1:
 
 ```bash
 cargo build --release -p agent --features reaper
@@ -87,7 +87,7 @@ sudo systemctl daemon-reload && sudo systemctl restart ai-mesh-agent
 ### 4. Push credentials from the coordinator
 
 ```bash
-just set-fingerprint omnilink1
+just set-fingerprint omnibook1
 ```
 
 This runs locally (no SSH) when `NODE_HOST=127.0.0.1`.
@@ -125,7 +125,7 @@ Then fully quit and reopen REAPER — the daemon auto-starts via `__startup.lua`
 
 ## Node Configuration
 
-`nodes/omnilink1.env`:
+`nodes/omnibook1.env`:
 
 ```
 NODE_HOST=127.0.0.1
@@ -340,7 +340,7 @@ and `fx` (plugin name). The track is matched case-insensitively (same loop as
 
 - **Match the bare product name, no format prefix.** Pass `ValhallaSupermassive` /
   `ReaComp`, **not** `VST3:ValhallaSupermassive` — the installed format varies per machine
-  (Valhalla Supermassive surfaced VST2-only on OmniLink1), and REAPER resolves the bare name to
+  (Valhalla Supermassive surfaced VST2-only on omnibook1), and REAPER resolves the bare name to
   whatever it has. **Caveat:** this works for **VST**-style names; **JSFX** (e.g. `ReaVerbate`)
   do **not** resolve via `TrackFX_AddByName` by bare name. See [`reaper-plugins.md`](reaper-plugins.md).
 - **Unresolved plugins are reported, not silent.** `TrackFX_AddByName` returns -1 when REAPER
@@ -374,7 +374,7 @@ All DOM elements are null-guarded so the panel is safe to render before the firs
 - REAPER on macOS — the agent code is macOS-ready (`default_scripts_dir()` resolves the
   `~/Library/Application Support/REAPER/Scripts` path), but provisioning (install script + node
   setup + testing) is pending the Mac mini.
-- Multi-REAPER instances — more than one node running REAPER (e.g. OmniLink1 plus
+- Multi-REAPER instances — more than one node running REAPER (e.g. omnibook1 plus
   the Mac mini), with intents routed to a specific instance. Today every tool resolves
   its target the same way (`intent.rs`): `nodes_with_feature("reaper")` then **first
   connected** — unambiguous only because there's exactly one REAPER node. The comment
@@ -409,5 +409,5 @@ All DOM elements are null-guarded so the panel is safe to render before the firs
 **Agent logs `reaper: REAPER web server unreachable`**
 → Check `REAPER_HOST` and `REAPER_PORT` are set in the systemd drop-in: `sudo systemctl show ai-mesh-agent --property=Environment`.
 
-**`just set-fingerprint omnilink1` hangs**
+**`just set-fingerprint omnibook1` hangs**
 → Fixed in justfile — local nodes (`NODE_HOST=127.0.0.1`) skip SSH and write drop-ins directly. Pull latest and retry.

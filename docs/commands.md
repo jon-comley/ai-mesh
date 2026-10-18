@@ -163,7 +163,7 @@ These are uploaded and run remotely by the justfile recipes — you do not need 
 
 | Command | Description |
 |---------|-------------|
-| `just validate-routing` | **Recommended.** Confirms each model routes to the correct node: `qwen2.5:1.5b` → Pi, `qwen2.5:7b` → Beelink. Fails fast with a clear message if no compute nodes are registered (run `just restart-coordinator` or `just start-cluster` first). Prints PASS/FAIL per assertion |
+| `just validate-routing` | **Recommended.** Confirms each model routes to the correct node: `qwen2.5:1.5b` → Pi, `qwen2.5:7b` → beelink1. Fails fast with a clear message if no compute nodes are registered (run `just restart-coordinator` or `just start-cluster` first). Prints PASS/FAIL per assertion |
 | `just test-deploy-creds <node>` | Verify that `deploy-node` pushes credentials correctly. Scenario A: coordinator running → `set-fingerprint` called and succeeds. Scenario B: coordinator absent → reminder printed. Does not do a real deploy |
 | `just test-inference` | Legacy end-to-end test: loads `qwen2.5:1.5b` on **all** compute nodes then fires 4 requests. Does not validate hardware-aware routing. **Note: stops all remote agent services on exit** — run `just start-agents && just restart-coordinator` afterwards |
 
@@ -173,7 +173,7 @@ These are uploaded and run remotely by the justfile recipes — you do not need 
 
 1. **Pre-flight check** — queries `mesh nodes`; if no Compute nodes are registered, prints an error and exits immediately rather than waiting 60 s on doomed retries
 2. Fires `mesh infer qwen2.5:1.5b` — asserts the response came from Pi
-3. Fires `mesh infer qwen2.5:7b` — asserts the response came from Beelink
+3. Fires `mesh infer qwen2.5:7b` — asserts the response came from beelink1
 4. Prints `PASS` / `FAIL` per assertion and exits non-zero if any fail
 5. If all retries are exhausted, prints a hint to run `just restart-coordinator`
 

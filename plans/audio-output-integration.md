@@ -57,7 +57,7 @@ anything beyond audio streaming.
   **HDMI audio injection** (Pi → TV → soundbar/BT speaker) as the mesh's
   audio output sink. Optionally later: SmartThings/TV control, a Spotify
   Connect endpoint, or spare STT/LLM capacity — but note STT and LLM are
-  currently well-served by pi1 + the Beelink offload
+  currently well-served by pi1 + beelink1 offload
   (`VOICE_STT_REMOTE`), so those move only if a real need appears, not
   by default.
 - **Pi Zero 2W (satellite)**: leading candidate is hosting the kitchen

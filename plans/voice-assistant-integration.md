@@ -344,8 +344,8 @@ Implementation notes (all `capabilities/voice/src/lib.rs`):
   `is_no_speech`).
 - `VOICE_INTENT_TIMEOUT_SECS` (default 30) bounds the coordinator wait.
 - `model_name: None` → `any_ready_llm_model()` picks the largest ready
-  model mesh-wide — Beelink automatically when it's up, matching the
-  "Beelink only when needed" decision with zero voice-specific code.
+  model mesh-wide — beelink1 automatically when it's up, matching the
+  "beelink1 only when needed" decision with zero voice-specific code.
 - Clip-cache eviction (item 6): clips delete after successful
   transcription; failed ones are kept for debugging. Save-first still
   protects against a crash mid-pipeline.
@@ -391,12 +391,12 @@ complete in 688ms → response `[26.9°C]`, ~9s end-to-end including
 speaking time; repeated immediately after at 456ms intent time. The
 spoken question was answered by the house through the full mesh pipeline.
 
-**STT offloaded to the Beelink (same evening)**: transcription dominated
+**STT offloaded to beelink1 (same evening)**: transcription dominated
 the perceived wait (~4.9s of the ~6s thinking-flash — base.en on pi1's
 CPU). `VOICE_STT_REMOTE` (host:port) now sends clips to a remote
 whisper-server first with the local one as fallback (60s cooldown after a
-remote failure so an offline Beelink adds no per-utterance timeout lag).
-Beelink runs whisper-server as a **standalone NSSM service** on
+remote failure so an offline beelink1 adds no per-utterance timeout lag).
+beelink1 runs whisper-server as a **standalone NSSM service** on
 `0.0.0.0:8081` (`install-node-windows.ps1 -SttServer true`, gated by
 `STT_SERVER=true` in `nodes/beelink1.env`) — deliberately NOT an agent
 child: no voice capability runs there, and it survives agent
@@ -454,8 +454,8 @@ since both share `handle_intent`.
 5. ~~Register `capability-voice` as a real agent feature (`NODE_FEATURES`)~~
    — **done 2026-07-08**: pi1 runs `NODE_FEATURES=llm,lighting,sensors,voice`
    via the normal `just deploy-node pi1` path. STT (whisper.cpp) runs there
-   too by default rather than being offloaded to Beelink — simplicity over
-   speed; Beelink only enters the picture later if pi1's STT latency
+   too by default rather than being offloaded to beelink1 — simplicity over
+   speed; beelink1 only enters the picture later if pi1's STT latency
    actually turns out to be a problem in practice.
 6. ~~Clip-cache eviction~~ — **done 2026-07-08**: delete-after-transcribe
    (failed transcriptions keep their clip for debugging).

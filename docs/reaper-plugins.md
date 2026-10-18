@@ -186,7 +186,7 @@ The general pattern for any VST on the Windows REAPER host:
    plugin installs but stays invisible. Add that path, then click **Re-scan → Clear cache and
    re-scan all**. (The VST3 copy in `…\Common Files\VST3` is auto-scanned and needs no path entry.)
 4. Confirm REAPER sees it before testing automation — search the Add-FX browser for `valhalla`.
-   On the OmniLink1 box it listed as **`VST: ValhallaSupermassive (Valhalla DSP, LLC)`** — i.e.
+   On the omnibook1 box it listed as **`VST: ValhallaSupermassive (Valhalla DSP, LLC)`** — i.e.
    the **VST2** copy only; the **VST3 entry did not appear** despite being ticked at install and
    despite VST3 supposedly auto-scanning. **Design implication:** `reaper_add_fx` must match on
    the bare product name (`ValhallaSupermassive`) and must **not** hardcode a `VST3:` prefix —

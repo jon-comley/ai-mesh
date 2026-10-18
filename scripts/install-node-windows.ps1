@@ -27,7 +27,11 @@ param(
     # The model server's context in tokens (LLAMA_CTX_SIZE in nodes/<node>.env).
     # beelink1 runs 32768 so it can check review findings with the whole file
     # in view (docs/code-review.md); anything unparseable falls back to 4096.
-    [string]$CtxSize = "4096"
+    [string]$CtxSize = "4096",
+
+    # The node's mesh name (its nodes/<name>.env name), shown on the dashboard
+    # instead of the computer's own name, which Windows reports in capitals.
+    [string]$NodeName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -376,7 +380,7 @@ function Disable-Sleep {
 }
 
 function Harden-Stability {
-    # Registry fixes for Beelink stability (DPC_WATCHDOG and kernel hangs):
+    # Registry fixes for beelink1 stability (DPC_WATCHDOG and kernel hangs):
     #   1. Fast Startup - powercfg /h off disables hibernate but not Fast
     #      Startup (hybrid shutdown); can produce a half-suspended state.
     #   2. NIC power management - adapter should stay live across idle periods.
@@ -571,6 +575,9 @@ function Ensure-AgentService {
     )
     if ($CoordinatorIp) {
         $agentEnv += "COORDINATOR_IP=$CoordinatorIp"
+    }
+    if ($NodeName) {
+        $agentEnv += "MESH_NODE_NAME=$NodeName"
     }
     & $nssm set $agentService AppEnvironmentExtra $agentEnv
     & $nssm set $agentService Start SERVICE_AUTO_START

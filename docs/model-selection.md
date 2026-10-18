@@ -11,8 +11,8 @@ text instead of emitting a structured call is useless no matter how clever or fa
 
 ## Scope & caveats
 
-- **Inference runs on pi1, beelink1, and the Mac.** OmniLink1 is **controller-only**
-  (`nodes/omnilink1.env` → `NODE_FEATURES=reaper`, no `llm`); the project never schedules
+- **Inference runs on pi1, beelink1, and the Mac.** omnibook1 is **controller-only**
+  (`nodes/omnibook1.env` → `NODE_FEATURES=reaper`, no `llm`); the project never schedules
   inference on it.
 - **Mac node is not yet configured.** The repo plans a **Mac mini M4 (48 GB unified)**
   (~end July 2026). A Mac Studio (M-Max/Ultra, 32–192 GB unified) would have equal-or-greater

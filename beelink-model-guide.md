@@ -192,8 +192,8 @@ output token — can be significant on the first request to a freshly-loaded mod
 
 | Hardware | Model | First request | Subsequent |
 |---|---|---|---|
-| Beelink (GPU) | phi4:14b | ~6.6 s | ~2.3 s |
-| Beelink (GPU) | deepseek-r1:8b | ~3.3 s | ~1.0 s |
+| beelink1 (GPU) | phi4:14b | ~6.6 s | ~2.3 s |
+| beelink1 (GPU) | deepseek-r1:8b | ~3.3 s | ~1.0 s |
 | pi1 (CPU) | qwen2.5:1.5b | ~22 s | ~1–2 s |
 
 The large first-request cost is a cold KV-cache: llama.cpp must process all system

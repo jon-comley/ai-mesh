@@ -107,9 +107,16 @@ impl ReviewCapability {
                 )
             }
         };
-        let hostname = std::env::var("HOSTNAME")
-            .ok()
-            .filter(|h| !h.is_empty())
+        // The node's mesh name (see the agent's `identity.rs`), else HOSTNAME,
+        // which mac1's agent.env set before MESH_NODE_NAME existed.
+        let hostname = ["MESH_NODE_NAME", "HOSTNAME"]
+            .iter()
+            .find_map(|k| {
+                std::env::var(k)
+                    .ok()
+                    .map(|h| h.trim().to_string())
+                    .filter(|h| !h.is_empty())
+            })
             .unwrap_or_else(|| node_id.to_string());
         Self {
             inner: Arc::new(Inner {
@@ -157,7 +164,11 @@ impl Inner {
         };
         let d = Limits::default();
         Limits {
-            max_review_tokens: num("max_review_tokens", "REVIEW_MAX_TOKENS", d.max_review_tokens),
+            max_review_tokens: num(
+                "max_review_tokens",
+                "REVIEW_MAX_TOKENS",
+                d.max_review_tokens,
+            ),
             evening_max_tokens: num(
                 "evening_max_tokens",
                 "REVIEW_EVENING_MAX_TOKENS",

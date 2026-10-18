@@ -45,7 +45,7 @@ allow_anonymous true
 sudo systemctl restart mosquitto
 ```
 
-Verify from OmniLink1:
+Verify from omnibook1:
 
 ```bash
 mosquitto_pub -h pi1.local -t test -m hello
@@ -164,7 +164,7 @@ If Z2M reports EZSP version < 13, update the EFR32 radio firmware via the SLZB-0
 opens the 254-second bridge-wide window (`POST /api/zigbee/permit-join`) and
 streams join/interview events live into the panel. Works from the phone.
 
-**CLI fallback** from OmniLink1:
+**CLI fallback** from omnibook1:
 
 ```bash
 just pair-bulb
@@ -237,7 +237,7 @@ connects on startup and subscribes to Z2M topics automatically.
 
 ---
 
-## 8. Intent commands (from OmniLink1)
+## 8. Intent commands (from omnibook1)
 
 ```bash
 just intent "turn all lights off"
@@ -301,7 +301,7 @@ Flash the SLZB-06 radio firmware to EmberZNet ≥ 8.x via the web UI.
 **Z2M uses pnpm, not npm**
 `npm ci` fails because there is no `package-lock.json`. Use `pnpm install`.
 
-**Mosquitto: connection refused from OmniLink1**
+**Mosquitto: connection refused from omnibook1**
 Check `/etc/mosquitto/conf.d/remote.conf` exists with `listener 1883 0.0.0.0` and `allow_anonymous true`.
 
 **Agent: MQTT connect/disconnect storm in logs**

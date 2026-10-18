@@ -2388,7 +2388,7 @@ mod tests {
             let mut reg = Registry::open(path).expect("open db");
             reg.update_heartbeat(NodeIdentity {
                 id: "beelink1".into(),
-                hostname: "BEELINK1".into(),
+                hostname: "beelink1".into(),
                 ip: "192.168.1.14".into(),
                 role: NodeRole::Compute,
             });
@@ -2511,7 +2511,7 @@ mod tests {
         for (id, model, mb) in [
             ("pi1", "qwen2.5:1.5b", 1024u64),
             ("beelink1", "qwen2.5:7b", 4096u64),
-            ("omnilink1", "qwen2.5:7b", 4096u64), // duplicate model on a second node
+            ("omnibook1", "qwen2.5:7b", 4096u64), // duplicate model on a second node
         ] {
             reg.update_heartbeat(make_identity(id));
             reg.update_capabilities(

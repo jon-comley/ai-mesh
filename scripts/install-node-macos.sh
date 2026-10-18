@@ -11,7 +11,8 @@
 # The last four are for long-context review work (docs/code-review.md): mac1
 # runs a 256k context with a q8_0 cache, two slots sharing it, and only clones
 # repos owned by the listed GitHub accounts. node_name (mac1) becomes the agent's
-# HOSTNAME: cron sets none, and the Mac's own name is JonathansMacStudio.
+# MESH_NODE_NAME and HOSTNAME: cron sets none, and the Mac's own computer name
+# is not its mesh name.
 #
 # **Why the agent is built here.** Cross-compiling a macOS binary from Linux
 # needs Apple's SDK (osxcross), which the controller doesn't have. The node has
@@ -99,7 +100,9 @@ KEEP="$(grep -E '^(MESH_TLS_FINGERPRINT|MESH_AUTH_TOKEN|MESH_AUTH_TOKEN_NEXT)=' 
     [ -n "$PARALLEL" ] && echo "LLAMA_PARALLEL=${PARALLEL}"
     [ -n "$KV_UNIFIED" ] && echo "LLAMA_KV_UNIFIED=${KV_UNIFIED}"
     [ -n "$REVIEW_ALLOWED_OWNERS" ] && echo "REVIEW_ALLOWED_OWNERS=${REVIEW_ALLOWED_OWNERS}"
-    # The review capability names the node by HOSTNAME, else by its UUID.
+    # The node's mesh name, shown on the dashboard instead of the Mac's own
+    # name. HOSTNAME is what the review capability read before MESH_NODE_NAME.
+    [ -n "$NODE_NAME" ] && echo "MESH_NODE_NAME=${NODE_NAME}"
     [ -n "$NODE_NAME" ] && echo "HOSTNAME=${NODE_NAME}"
     if [ -n "$COORDINATOR_IP" ]; then
         # The agent dials the loopback relay; RELAY_TARGET is the real coordinator.

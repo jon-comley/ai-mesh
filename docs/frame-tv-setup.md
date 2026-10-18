@@ -122,7 +122,7 @@ sudo fbi -T 1 -d /dev/fb0 -a -noverbose /path/to/b.jpg
 Same cross-compiled aarch64 binary path as pi1 — no new build target needed.
 
 ```bash
-just deploy-node pi2   # from the coordinator/OmniLink1 side — nodes/pi2.env
+just deploy-node pi2   # from the coordinator/omnibook1 side — nodes/pi2.env
                         # already exists from the Pi 4 dev phase; just update
                         # NODE_HOST below to this Pi's reserved IP
 ```

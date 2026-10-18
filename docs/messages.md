@@ -170,7 +170,7 @@ pub const WIRE_VERSION: u32 = 5;
 
 This ensures **cross-platform compatibility** between:
 - macOS agents (Mac mini)
-- Linux agents (Pi 5, Beelink)
+- Linux agents (Pi 5, beelink1)
 - Linux coordinator (OmniBook)
 
 Older agents that do not send `wire_version` will still deserialize safely.

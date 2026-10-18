@@ -396,7 +396,7 @@ explicit rather than blurring it, because it changes the reliability
 story: a displayed painting or a Gutenberg poem's actual text is exactly
 what it claims to be, but text the model generates about "facts" carries
 real hallucination risk — more so on a small local model running on
-constrained hardware (Beelink/pi1) than a large cloud one. This is worth
+constrained hardware (beelink1/pi1) than a large cloud one. This is worth
 building, but worth building honestly:
 
 - Sketch: a new tool, e.g. `art_educate { topic }` — the coordinator (a)

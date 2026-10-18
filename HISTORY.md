@@ -11,6 +11,33 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Node names: one name per machine, everywhere (2026-10-18)
+
+The Nodes tab showed each computer's own name as its agent reported it, which
+didn't match the names used to manage the nodes:
+- Windows reports its name in capitals;
+- the Mac and the WSL laptop have computer names of their own.
+
+Jon wanted one name per machine, everywhere: mac1, beelink1 and omnibook1, with
+pi1, pi2 and lenovo1 unchanged.
+
+**How it works now:**
+- An agent reports `MESH_NODE_NAME` when it's set. Deploys set it to the node's
+  `nodes/<name>.env` name, so the name on the dashboard is the name typed in
+  `just` commands.
+- The machines' own computer names are untouched.
+- Node ids don't change, and the coordinator takes the name from each
+  heartbeat, so each node is renamed in place with no stale entry.
+
+**Where `deploy-node`/`update-node` write it (`just _set-node-name`):**
+- **Linux:** a systemd drop-in.
+- **Windows:** merged into the NSSM environment.
+- **macOS:** `agent.env`, written by the installer.
+
+**omnibook1:** the laptop's config is now `nodes/omnibook1.env`, and docs,
+plans, comments and this file use the new names throughout. The Reviews tab
+follows too: the review capability reads `MESH_NODE_NAME` before `HOSTNAME`.
+
 ## Dashboard navigation: five categories instead of thirteen tabs (2026-10-18)
 
 The bottom bar had grown to 13 tabs and scrolled sideways on a phone. It now holds
@@ -87,7 +114,7 @@ Now: the coordinator node is the one with `NODE_COORDINATOR=true`, and its
 of the current token and fingerprint. The window opens by adding
 `MESH_AUTH_TOKEN_NEXT` there and restarting the service; the new token goes to every
 node through `_push-node-env`; then this machine's `~/.config/ai-mesh/coordinator.state`
-and `~/.bashrc` are rewritten (one `MESH_TLS_FINGERPRINT` line: OmniLink1 had two,
+and `~/.bashrc` are rewritten (one `MESH_TLS_FINGERPRINT` line: omnibook1 had two,
 an old certificate's and the current one, and the old one came first); then the
 service restarts with the new token alone and its journal is read for a minute for
 `rejected connection: invalid auth token` or `heartbeat rejected`. The glebefish
@@ -251,8 +278,8 @@ heartbeating, `just auto-load-model beelink1` still failed after a 120s wait wit
 the wrong question. `cli find-node` matches on **IP alone**
 (`cli/src/commands/find_node.rs`: `nodes.into_iter().find(|n| n.ip == ip)`), and
 `nodes/beelink1.env` carried `NODE_HOST=beelink1.local`. A hostname can never
-match, and Windows registers its hostname uppercased (`BEELINK1`) so even the name
-would not have. Every other node already pinned an IP; beelink1 was the last
+match, and Windows registers its hostname in capitals, so even the name would
+not have. Every other node already pinned an IP; beelink1 was the last
 `.local` and it was invisible until something asked the registry for it by name.
 
 **Why beelink1 specifically:** it was powered off for the BIOS flash on 2026-09-15
@@ -646,7 +673,7 @@ While testing the device-auto-naming feature (`plans/device-auto-naming.md`), de
 
 Related: `plans/device-auto-naming.md`'s live re-validation step is blocked on this — the auto-naming fix (keying on `definition.model` SKU, not the nonexistent `model_id`) hasn't been confirmed against a real re-pair yet.
 
-**Attempted 2026-07-12, still blocked on step 1:** SLZB-06 physically moved next to pi1 and cabled into `eth0`, but the `eth0` static-IP step (plan item 1) was never actually done — `ping <slzb-06>` from both pi1 and OmniLink1 returned `Destination Host Unreachable`. `zigbee2mqtt/bridge/state` still reported `online`, which turned out to be a stale TCP session from before the move, not evidence the radio was reachable. Ran the touchlink scan twice (`zigbee2mqtt/bridge/request/touchlink/scan` via `mosquitto_sub`/`mosquitto_pub` against the broker on `<pi1>`) — both times it returned nothing, consistent with the radio being unreachable rather than a touchlink/hardware problem (this same scan succeeded cleanly on 2026-07-07 per the note above, before the SLZB-06 was moved). Next time: actually complete step 1 (`sudo ip addr add <pi1-eth0>/24 dev eth0` or similar on pi1, confirm the ping succeeds) and restart `zigbee2mqtt` to drop the stale socket before attempting the scan again.
+**Attempted 2026-07-12, still blocked on step 1:** SLZB-06 physically moved next to pi1 and cabled into `eth0`, but the `eth0` static-IP step (plan item 1) was never actually done — `ping <slzb-06>` from both pi1 and omnibook1 returned `Destination Host Unreachable`. `zigbee2mqtt/bridge/state` still reported `online`, which turned out to be a stale TCP session from before the move, not evidence the radio was reachable. Ran the touchlink scan twice (`zigbee2mqtt/bridge/request/touchlink/scan` via `mosquitto_sub`/`mosquitto_pub` against the broker on `<pi1>`) — both times it returned nothing, consistent with the radio being unreachable rather than a touchlink/hardware problem (this same scan succeeded cleanly on 2026-07-07 per the note above, before the SLZB-06 was moved). Next time: actually complete step 1 (`sudo ip addr add <pi1-eth0>/24 dev eth0` or similar on pi1, confirm the ping succeeds) and restart `zigbee2mqtt` to drop the stale socket before attempting the scan again.
 
 **RESOLVED 2026-07-28 — all bulbs recovered, zero physical resets; touchlink was never needed for these.** The insight that unlocked it: a force-removed bulb still holds *this* network's keys, so it is still a functioning router on our own network — it doesn't need resetting, it needs its z2m database entry back. zigbee-herdsman drops announces from devices not in its database (`controller.js onDeviceAnnounce`), which is why weeks of power-cycling and permit-join did nothing. Recovery procedure (full playbook in the ops notes):
 
@@ -777,7 +804,7 @@ into 15 review units; each finding independently verified by a skeptic pass).
 
 - **System prompt in correct role** — `InferenceRequest` carries `system_prompt: Option<String>`; intent handler sends the tool schema in the `system` role and the user text in the `user` role; previously both were concatenated into the user role, which instruction-following models (7b+) ignored
 - **Special-tag suppression** — system prompt explicitly forbids `<tool_call>` and XML tags; Qwen 7b emits these when detecting schemas in the system prompt, which llama-server strips to empty — causing silent no-ops
-- **Prefer largest model for intents** — `any_ready_llm_model` now selects the largest ready LLM by `size_mb` so intents always route to BEELINK1 7b over pi1 1.5b
+- **Prefer largest model for intents** — `any_ready_llm_model` now selects the largest ready LLM by `size_mb` so intents always route to beelink1 7b over pi1 1.5b
 - **Device name deduplication** — `all_light_device_names` uses `HashSet` to collapse duplicates; stale SQLite rows from old node UUIDs no longer show devices twice in the system prompt and target validation list
 - **`temperature=0`, `max_tokens=128` for intents** — greedy decoding for deterministic JSON; 128-token cap prevents runaway generation on a short tool call response
 - **`cache_prompt=true`** — llama-server reuses KV state for a stable system prompt; back-to-back intents skip prefill after the first, cutting latency noticeably
@@ -976,7 +1003,7 @@ These are non-blocking UX improvements for after C6 ships:
 
 - **User feedback batch (2026-07-05)** — live-testing pass after the Phase A–D deploy to pi1 turned up a pile of real issues. Fixed same day:
   - **Mobile tab bar didn't scroll** ✓ — ten tabs (post Home/Devices split) were squeezed via `flex:1` instead of overflowing; now `overflow-x:auto` with `flex:1 1 0; min-width:64px` per tab — still spreads evenly on a wide screen, clamps + scrolls on a phone.
-  - **Stale "Ready" model entry after a Beelink model switch** ✓ — root-caused: the agent's process-level kill-before-load was already correct, but the coordinator's registry only ever upserts the *new* model's entry; nothing told it the old one died unless an explicit `ModelUnload` was sent first. A load-triggered implicit kill left the old model showing "Ready" forever — not just cosmetic, since the scheduler checks that same state to decide which node has a model available, so it could genuinely misroute an inference request. Fixed: the agent now sends an `Unloaded` status for whatever it just killed, not only on an explicit unload (`capabilities/llm/src/lib.rs`, `unload_status_for`).
+  - **Stale "Ready" model entry after a beelink1 model switch** ✓ — root-caused: the agent's process-level kill-before-load was already correct, but the coordinator's registry only ever upserts the *new* model's entry; nothing told it the old one died unless an explicit `ModelUnload` was sent first. A load-triggered implicit kill left the old model showing "Ready" forever — not just cosmetic, since the scheduler checks that same state to decide which node has a model available, so it could genuinely misroute an inference request. Fixed: the agent now sends an `Unloaded` status for whatever it just killed, not only on an explicit unload (`capabilities/llm/src/lib.rs`, `unload_status_for`).
   - **Online model/compression widgets stayed clickable when Online AI was disabled** ✓ — `gateway.js` now greys out the model select, custom-model input, provider presets, compress toggle, and engine buttons when disabled; API key/endpoint/test-call stay live either way (need to be usable before flipping the switch on).
   - **Brightness/colour slider didn't sync after a scene recall** ✓ — two compounding causes: the 2 s "pending" window that stops a slider snapping back mid-drag doesn't get cleared when a *different* command (a scene recall) supersedes it, and a slider left holding DOM focus after a drag was being explicitly skipped by the WS-driven patch code — could look stuck indefinitely, not just for 2 s. `scenes.js`'s `clearPendingControlState` now clears both on every scene recall/revert. Deliberately scenes-only, not effects — a continuously-animating effect fighting the slider would look chaotic (matches the existing `device-under-effect` slider-freeze behaviour).
 
@@ -1004,15 +1031,15 @@ These are non-blocking UX improvements for after C6 ships:
 
 Full design spec: `plans/coordinator-on-pi1.md`
 
-Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniLink1`) to always-on Pi 5 (`pi1`, `<pi1-old>`). Dashboard now runs 24/7 independent of laptop power state. Tailscale tunnel enables remote phone access (cellular, public WiFi, anywhere) without port forwarding or Let's Encrypt.
+Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`omnibook1`) to always-on Pi 5 (`pi1`, `<pi1-old>`). Dashboard now runs 24/7 independent of laptop power state. Tailscale tunnel enables remote phone access (cellular, public WiFi, anywhere) without port forwarding or Let's Encrypt.
 
 **Achieved**
 
-- ✓ **pi1 hosts the coordinator** — co-located with zigbee2mqtt + Mosquitto on localhost. Beelink freed for heavy compute. Pi 5 fanless, low-power, zero crashes (vs. Beelink's fTPM/GPU driver instability).
+- ✓ **pi1 hosts the coordinator** — co-located with zigbee2mqtt + Mosquitto on localhost. beelink1 freed for heavy compute. Pi 5 fanless, low-power, zero crashes (vs. beelink1's fTPM/GPU driver instability).
 - ✓ **Tailscale remote access** — phone authenticated to 100.100.100.100; dashboard URL bookmarked; MagicDNS pending propagation (IP URL works immediately).
 - ✓ **Coordinator state migration** — cert/key/token + `ai_mesh.db` all in `/var/lib/ai-mesh/`; token reused across restarts so bookmarks remain valid.
 - ✓ **Systemd service** — `Restart=always` + `RestartSec=5s` for automatic recovery from transient network/DB issues; `ProtectSystem=full` + `ProtectHome=true` + `NoNewPrivileges=true` for baseline hardening.
-- ✓ **Agent repointing** — Beelink + OmniLink1 now point to pi1:9001; OmniLink1 reclassified as Compute (was Controller); all agents verified connected and healthy.
+- ✓ **Agent repointing** — beelink1 + omnibook1 now point to pi1:9001; omnibook1 reclassified as Compute (was Controller); all agents verified connected and healthy.
 
 **Deployment recipes**
 
@@ -1031,7 +1058,7 @@ Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniL
 - ✓ Laptop closed; dashboard accessible on phone via Tailscale IP (100.100.100.100:9001)
 - ✓ On/off, scenes, effects responsive over Tailscale tunnel
 - ✓ Cellular tested (WiFi off); stable remote access confirmed
-- ✓ Beelink heartbeats flowing; agent connectivity healthy
+- ✓ beelink1 heartbeats flowing; agent connectivity healthy
 - ✓ MagicDNS propagating (http://pi1:9001 will resolve in <5 minutes)
 
 **Future hardening (deferred — not blocking)**
@@ -1045,7 +1072,7 @@ Completed 2026-05-31. Coordinator successfully migrated from WSL2 laptop (`OmniL
 
 Full details: `docs/reaper.md`
 
-LLM control of the REAPER digital audio workstation via the coordinator intent pipeline. REAPER runs on Windows (OmniLink1); the agent runs in WSL2 and reaches the REAPER web server over loopback (WSL2 mirrored networking).
+LLM control of the REAPER digital audio workstation via the coordinator intent pipeline. REAPER runs on Windows (omnibook1); the agent runs in WSL2 and reaches the REAPER web server over loopback (WSL2 mirrored networking).
 
 **Achieved**
 
@@ -1054,7 +1081,7 @@ LLM control of the REAPER digital audio workstation via the coordinator intent p
 - ✓ `reaper_transport` + `reaper_action` tool schemas — LLM can trigger transport and arbitrary REAPER actions by name or numeric ID.
 - ✓ `reaper.js` dashboard panel — live online/offline badge, play state, position, tempo, time sig, command log; all elements null-guarded.
 - ✓ `scripts/install-reaper-windows.ps1` — downloads and silently installs REAPER, writes web server config (`reaper-webbrd.ini`, port 8080, `0.0.0.0`), registers the Web Browser Control surface in `reaper.ini`, opens firewall rule.
-- ✓ OmniLink1 registered as a `controller` node with `--features reaper`; REAPER env vars in systemd drop-in (`REAPER_HOST=127.0.0.1`, `REAPER_PORT=8080`).
+- ✓ omnibook1 registered as a `controller` node with `--features reaper`; REAPER env vars in systemd drop-in (`REAPER_HOST=127.0.0.1`, `REAPER_PORT=8080`).
 - ✓ `just set-fingerprint` and `just restart-node` handle local nodes (`NODE_HOST=127.0.0.1`) without SSH — write drop-ins and restart directly.
 
 **Follow-up (2026-06-16):**

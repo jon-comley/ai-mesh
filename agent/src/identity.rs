@@ -12,7 +12,10 @@ pub enum IdentityError {
 
 pub fn detect_identity(role: NodeRole) -> Result<NodeIdentity, IdentityError> {
     let id = generate_node_id();
-    let hostname = detect_hostname()?;
+    let hostname = match configured_name(std::env::var("MESH_NODE_NAME").ok()) {
+        Some(name) => name,
+        None => detect_hostname()?,
+    };
     let ip = detect_local_ip()?;
 
     Ok(NodeIdentity {
@@ -21,6 +24,16 @@ pub fn detect_identity(role: NodeRole) -> Result<NodeIdentity, IdentityError> {
         ip,
         role,
     })
+}
+
+/// The node's name in the mesh, when one is configured. The deploy tooling
+/// sets `MESH_NODE_NAME` to the node's `nodes/<name>.env` name, so the
+/// dashboard shows the name a node is managed by rather than the computer's
+/// own computer name (which Windows reports in capitals). Blank means unset.
+fn configured_name(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn generate_node_id() -> String {
@@ -104,6 +117,20 @@ mod tests {
     fn test_detect_hostname() {
         let hostname = detect_hostname().unwrap();
         assert!(!hostname.is_empty());
+    }
+
+    #[test]
+    fn a_configured_name_wins_and_blank_means_unset() {
+        assert_eq!(
+            configured_name(Some("mac1".into())).as_deref(),
+            Some("mac1")
+        );
+        assert_eq!(
+            configured_name(Some(" beelink1\n".into())).as_deref(),
+            Some("beelink1")
+        );
+        assert_eq!(configured_name(Some("  ".into())), None);
+        assert_eq!(configured_name(None), None);
     }
 
     #[test]

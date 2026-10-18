@@ -29,7 +29,7 @@ Platform implementations are gated with `#[cfg]`:
 ### identity.rs
 Provides:
 - Node ID generation — UUID v4 persisted to `~/.ai-mesh/node-id`; the same ID is returned on every agent restart, so the coordinator recognises the node without stale registry entries
-- Hostname detection — Windows reads `COMPUTERNAME` env var; Linux reads `/etc/hostname`
+- Node name — `MESH_NODE_NAME` when set, which is how every deployed node gets its `nodes/<name>.env` name (`mac1`, `beelink1`, `omnibook1`) on the dashboard. `deploy-node`/`update-node` write it: a systemd drop-in (`ai-mesh-agent.service.d/name.conf`) on Linux, the NSSM service environment on Windows, `agent.env` on macOS. Without it, the computer's own name: Windows reads the `COMPUTERNAME` env var; Linux and macOS read `/etc/hostname`, else run `hostname`
 - Local IP detection via UDP socket trick (cross-platform)
 
 ### capabilities.rs

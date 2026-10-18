@@ -1720,7 +1720,7 @@ fn build_remove_all_tracks_lua() -> String {
 /// `track` (case-insensitively, like `build_remove_track_lua`). The plugin is matched
 /// by the bare product name REAPER knows it as — NO `VST:`/`VST3:` prefix is forced,
 /// because the available format varies per machine (the first plugin we tested, Valhalla
-/// Supermassive, surfaced only as VST2 on OmniLink1). `TrackFX_AddByName` returns -1 when
+/// Supermassive, surfaced only as VST2 on omnibook1). `TrackFX_AddByName` returns -1 when
 /// REAPER can't resolve the name, which we relay as a clear "not installed/scanned" note
 /// rather than a silent no-op. Returns a summary the daemon relays back.
 fn build_add_fx_lua(track: &str, fx: &str) -> String {
@@ -4703,7 +4703,7 @@ mod tests {
     #[test]
     fn add_fx_lua_does_not_force_a_format_prefix() {
         // The available format varies per machine (Valhalla surfaced VST2-only on
-        // OmniLink1), so we must pass the bare name with no VST:/VST3: prefix.
+        // omnibook1), so we must pass the bare name with no VST:/VST3: prefix.
         let lua = build_add_fx_lua("guitar", "ReaComp");
         assert!(lua.contains("local fx = 'ReaComp'"));
         assert!(!lua.contains("VST3:"));

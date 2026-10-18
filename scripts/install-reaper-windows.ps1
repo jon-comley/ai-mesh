@@ -184,4 +184,4 @@ Show-VerificationSteps
 
 Write-Host ""
 Write-Host ">>> Done. Launch REAPER, verify the web server (steps above),"
-Write-Host ">>> then rebuild the OmniLink1 agent with --features reaper."
+Write-Host ">>> then rebuild the omnibook1 agent with --features reaper."

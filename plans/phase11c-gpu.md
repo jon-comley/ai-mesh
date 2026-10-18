@@ -161,4 +161,4 @@ if (hasGpu) {
 ### Live validation (both phases)
 - `just restart-coordinator` → open dashboard → Health tab
 - C7a: GPU row absent on all nodes (expected — no Linux AMD node)
-- C7b: GPU row present on beelink1; absent on pi1 and OmniLink1
+- C7b: GPU row present on beelink1; absent on pi1 and omnibook1

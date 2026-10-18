@@ -133,7 +133,7 @@ After it completes, verify the node is registered and the model is ready:
 
 ```bash
 just nodes
-# BEELINK1 | beelink1.local | Compute | ... | qwen2.5:7b (Ready)
+# beelink1 | beelink1.local | Compute | ... | qwen2.5:7b (Ready)
 
 just validate-routing
 ```
@@ -378,19 +378,19 @@ powercfg /change standby-timeout-ac 0   # disable sleep on AC power
 
 ### Beelink SER8 — CMOS reset recovery
 
-**Symptom:** Beelink shows an "unrecoverable" BIOS screen on boot (has happened twice). Requires a physical CMOS reset (button on the back of the unit).
+**Symptom:** beelink1 shows an "unrecoverable" BIOS screen on boot (has happened twice). Requires a physical CMOS reset (button on the back of the unit).
 
 **What a CMOS reset wipes:**
 - BIOS settings (boot order, etc.) — usually fine after reset
 - The SSH `administrators_authorized_keys` may survive, but in practice the machine needs to be treated as freshly provisioned
 
-**Recovery steps (from WSL on OmniLink1):**
+**Recovery steps (from WSL on omnibook1):**
 
 1. Once the machine boots and is reachable on the network, re-copy the SSH key:
    ```bash
    ssh-copy-id jonno@beelink1.local
    ```
-   If `ssh-copy-id` fails because the key isn't in `authorized_keys` yet, add it manually — open a PowerShell on the Beelink and run:
+   If `ssh-copy-id` fails because the key isn't in `authorized_keys` yet, add it manually — open a PowerShell on beelink1 and run:
    ```powershell
    Add-Content 'C:\ProgramData\ssh\administrators_authorized_keys' '<paste public key here>'
    ```
@@ -565,7 +565,7 @@ ssh jonno@beelink1.local "powershell -Command \"Get-WmiObject Win32_VideoControl
 
 #### 2026-05-31 — Machine triggered Windows self-reinstall; Type B crashes accelerating
 
-- **Incident:** Beelink triggered an automatic Windows reinstall from online recovery. Cause unknown — likely repeated BSODs triggered Windows recovery mode.
+- **Incident:** beelink1 triggered an automatic Windows reinstall from online recovery. Cause unknown — likely repeated BSODs triggered Windows recovery mode.
 - **Post-reinstall crash pattern:** Crashing within 1-2 minutes of boot (faster than before). Freeze → black screen → "Your device ran into a problem and needs to restart". No minidump captured (crashes too fast). No entries in System Event Log before crash.
 - **BIOS check:** On AMI v2.22.1293, confirmed "Security Device Support" under Advanced → Trusted Computing was already Disabled. Note: this may only hide TPM from Windows — AMD PSP fTPM may still be running at firmware level.
 - **SSH state:** Each reinstall wipes SSH config; must re-enable via `Add-WindowsCapability` each time.
@@ -607,7 +607,7 @@ ssh jonno@beelink1.local "powershell -Command \"Get-WmiObject Win32_VideoControl
 
 #### 2026-06-04 — fTPM storm ACTIVE again after CMOS reset (worst run yet) + Intel AX200 NIC errors
 
-Logs pulled live from BEELINK1 at **2026-06-04 21:15Z** (SSH; ICMP is firewalled but TCP/22 was up — the box looked "down" to ping earlier today but was reachable over SSH). **The machine is in an active `0x00000133` fTPM crash-loop right now.** It had been unreachable earlier; the **CMOS reset done to recover it re-enabled fTPM and it was not re-disabled in BIOS**, so the storm resumed and has been bug-checking every few minutes-to-hours across 06-03 and 06-04. At collection, uptime was **3m45s** (booted 21:11:42, immediately after the 21:11 crash).
+Logs pulled live from beelink1 at **2026-06-04 21:15Z** (SSH; ICMP is firewalled but TCP/22 was up — the box looked "down" to ping earlier today but was reachable over SSH). **The machine is in an active `0x00000133` fTPM crash-loop right now.** It had been unreachable earlier; the **CMOS reset done to recover it re-enabled fTPM and it was not re-disabled in BIOS**, so the storm resumed and has been bug-checking every few minutes-to-hours across 06-03 and 06-04. At collection, uptime was **3m45s** (booted 21:11:42, immediately after the 21:11 crash).
 
 **Bugchecks (System Event 1001) — all `0x00000133`, param2 `0x1e00` (the fTPM signature):**
 ```

@@ -105,7 +105,7 @@ http://100.x.x.x:9001/
 http://pi1:9001/              (once built-in DNS propagates)
 ```
 
-The page itself loads with no auth; the first WebSocket connection prompts a native browser dialog for `MESH_AUTH_TOKEN` (retrieve it with `echo $MESH_AUTH_TOKEN` on OmniLink1, or from `MESH_AUTH_TOKEN=` in pi1's `/var/lib/ai-mesh/coordinator.state`) and caches it in the browser's local storage — a `?token=` query param is not read by the client. Tap the connection dot (top of the page) to re-enter it if it's ever rejected.
+The page itself loads with no auth; the first WebSocket connection prompts a native browser dialog for `MESH_AUTH_TOKEN` (retrieve it with `echo $MESH_AUTH_TOKEN` on omnibook1, or from `MESH_AUTH_TOKEN=` in pi1's `/var/lib/ai-mesh/coordinator.state`) and caches it in the browser's local storage — a `?token=` query param is not read by the client. Tap the connection dot (top of the page) to re-enter it if it's ever rejected.
 
 > **If `pi1:9001` won't load:** the `pi1` and `100.x` addresses only resolve/route when that device is connected to the tailnet. Check that **Tailscale is on** (and the device shows online in `tailscale status` on pi1). On the home LAN you can always fall back to the direct `http://10.0.0.x:9001/`.
 
@@ -154,7 +154,7 @@ MESH_INSECURE=1 cargo run -p cli -- nodes
 | pi1 | Linux (ARM64) | Raspberry Pi 5, 8 GB RAM | `qwen2.5:1.5b` | llm, lighting |
 | pi2 | Linux (ARM64) | Raspberry Pi | — | art, audio, music |
 | Beelink SER8 (beelink1) | Windows 11 | AMD Radeon 780M, 8 GB VRAM | `qwen2.5:7b` | llm |
-| OmniLink1 (WSL2) | Linux (x86_64) | controller only | — | controller |
+| omnibook1 (WSL2) | Linux (x86_64) | controller only | — | controller |
 | Mac mini (mac1) | macOS (Apple Silicon, M4) | Mac mini M4 | TBD | llm, reaper |
 
 The coordinator schedules inference requests to whichever node has the requested model loaded and ready.

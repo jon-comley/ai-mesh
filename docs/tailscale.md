@@ -27,7 +27,7 @@ To add a new node (like a new Pi or a remote compute node) to the mesh tailnet w
    ```
 3. Scan the QR code or copy the URL to a browser on your phone/laptop to approve the node.
 
-### Windows (Beelink)
+### Windows (beelink1)
 1. Download and install the Tailscale MSI.
 2. The browser will open automatically for authentication.
 3. Ensure "Run at Startup" is enabled.

@@ -276,7 +276,7 @@ run-controller:
     LOG="$HOME/.local/share/ai-mesh/agent.log"
     mkdir -p "$(dirname "$LOG")"
     # **`AGENT_ROLE=controller`, not `compute` — corrected 2026-09-12.** This
-    # recipe is named `run-controller` and `nodes/omnilink1.env` says
+    # recipe is named `run-controller` and `nodes/omnibook1.env` says
     # `NODE_ROLE=controller`, but it started the agent as **compute**, which
     # registers this machine as an inference node and lets the scheduler send it
     # work. `agent/src/main.rs` accepts "controller" and falls back to Compute for
@@ -364,6 +364,7 @@ deploy-node node:
             sudo systemctl kill ai-mesh-agent 2>/dev/null || true
             echo ">>> Installing agent binary..."
             sudo install -m 755 ${AGENT_BIN} /home/${NODE_USER}/agent
+            just _set-node-name {{node}}
             sudo systemctl start ai-mesh-agent
         else
             NODE_ARCH=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "")
@@ -386,6 +387,7 @@ deploy-node node:
                 scp {{ssh_opts}} -q ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
             scp_dots ">>> Uploading install script" \
                 scp {{ssh_opts}} -q scripts/install-node-linux.sh ${NODE_USER}@${NODE_HOST}:/tmp/install-node.sh
+            just _set-node-name {{node}}
             ssh {{ssh_opts}} -t ${NODE_USER}@${NODE_HOST} \
                 "chmod +x /tmp/install-node.sh && sudo /tmp/install-node.sh '${NODE_ROLE}' '${NODE_USER}' '${MQTT_HOST:-}' '${MQTT_PORT:-1883}' '${NODE_FEATURES:-llm}' '${VOICE_DEVICE_HOST:-}' '${VOICE_STT_REMOTE:-}' '${VOICE_TTS_BASE_URL:-}' '${AUDIO_BACKENDS:-}' '${AUDIO_ALSA_DEVICE:-}' '${ART_MATTE_PERCENT:-}' '${ART_FRAME_THICKNESS:-}' '${SPOTIFY_DEVICE_NAME:-}' '${ART_SIDE_MARGIN_BOOST:-}' '${ART_GLAZE_PERCENT:-}' '${ART_BRIGHTNESS_PERCENT:-}' '${ART_BORDER_GLAZE_PERCENT:-}'"
         fi
@@ -424,7 +426,7 @@ deploy-node node:
         echo ">>> Running provisioning script (this takes a minute — installing NSSM, llama.cpp, registering service)..."
         scp_dots ">>> Provisioning" \
             ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -ExecutionPolicy Bypass -Command \"\
-                & '${WIN_PATH}\\install-node-windows.ps1' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}' -SttServer '${STT_SERVER:-}' -CoordinatorIp '${COORDINATOR_IP:-}' -CtxSize '${LLAMA_CTX_SIZE:-4096}'\
+                & '${WIN_PATH}\\install-node-windows.ps1' -Role '${NODE_ROLE}' -AuthorizedKey '${PUBKEY}' -SttServer '${STT_SERVER:-}' -CoordinatorIp '${COORDINATOR_IP:-}' -CtxSize '${LLAMA_CTX_SIZE:-4096}' -NodeName '{{node}}'\
             \""
         # Stability hardening (ULPS, AX200 NIC, power plan) is applied by
         # install-node-windows.ps1's Harden-Stability function above — no
@@ -483,7 +485,7 @@ deploy-node node:
 # Delegates to `deploy-node` per node so there is ONE deploy path — it handles local
 # 127.0.0.1 nodes (no SSH, native build), remote linux/windows, and the credential
 # push. This recipe used to carry its own copy of that logic, which had drifted: it
-# SSH'd to every node unconditionally (hanging on local 127.0.0.1 nodes like omnilink1)
+# SSH'd to every node unconditionally (hanging on local 127.0.0.1 nodes like omnibook1)
 # and probed arch over SSH, defaulting to aarch64 on failure → wrong binary.
 # Usage: just provision-all
 provision-all:
@@ -583,6 +585,7 @@ update-node node:
             timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null || true
             sudo systemctl kill ai-mesh-agent 2>/dev/null || true
             install -m 755 target/release/agent /home/${NODE_USER}/agent
+            just _set-node-name {{node}}
             sudo systemctl start ai-mesh-agent
         else
             NODE_ARCH=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "uname -m" 2>/dev/null || echo "aarch64")
@@ -597,6 +600,7 @@ update-node node:
             ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "timeout 12 sudo systemctl stop ai-mesh-agent 2>/dev/null; sudo systemctl kill ai-mesh-agent 2>/dev/null; true"
             scp {{ssh_opts}} -q -o ServerAliveInterval=5 -o ServerAliveCountMax=12 \
                 ${AGENT_BIN} ${NODE_USER}@${NODE_HOST}:/home/${NODE_USER}/agent
+            just _set-node-name {{node}}
             ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "sudo systemctl start ai-mesh-agent"
         fi
         ;;
@@ -628,6 +632,7 @@ update-node node:
             echo ">>> Upload failed after 3 attempts. Run 'just update-node {{node}}' to try again."
             exit 1
         fi
+        just _set-node-name {{node}}
         ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
             taskkill /F /IM llama-server.exe /T 2>&1 | Out-Null;\
             taskkill /F /IM agent.exe /T 2>&1 | Out-Null;\
@@ -716,6 +721,47 @@ _push-node-env node fp token:
             mv \$f.new \$f
             ~/ai-mesh/agentctl.sh restart
         "
+        ;;
+    esac
+
+# Internal: give ONE node's agent its mesh name — MESH_NODE_NAME, set to the node's
+# nodes/<name>.env name — so the dashboard shows the name the node is managed by
+# rather than the computer's own (Windows reports it in capitals). Writes the setting
+# only; the caller (re)starts the agent. Linux uses a systemd drop-in (it survives
+# install-node-linux.sh rewriting the unit); Windows merges into the NSSM
+# environment, like _push-node-env. macOS needs nothing here: install-node-macos.sh
+# writes it into agent.env from its last argument.
+# Usage: just _set-node-name <node>
+_set-node-name node:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/{{node}}.env
+    case "$NODE_OS" in
+      linux)
+        CMD="sudo mkdir -p /etc/systemd/system/ai-mesh-agent.service.d \
+            && printf '[Service]\nEnvironment=MESH_NODE_NAME=%s\n' '{{node}}' \
+               | sudo tee /etc/systemd/system/ai-mesh-agent.service.d/name.conf > /dev/null \
+            && sudo systemctl daemon-reload"
+        if [ "$NODE_HOST" = "127.0.0.1" ] || [ "$NODE_HOST" = "localhost" ]; then
+            bash -c "$CMD"
+        else
+            ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "$CMD"
+        fi
+        ;;
+      windows)
+        ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "powershell -Command \"\
+            \$rp = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\ai-mesh-agent\\Parameters';\
+            if (-not (Test-Path \$rp)) { Write-Host '>>> ai-mesh-agent service not installed yet; name not set'; exit 0 };\
+            \$raw = (Get-ItemProperty -Path \$rp -Name AppEnvironmentExtra -ErrorAction SilentlyContinue).AppEnvironmentExtra;\
+            \$envMap = @{};\
+            if (\$raw) { \$raw | ForEach-Object { if (\$_ -match '^([^=]+)=(.*)$') { \$envMap[\$Matches[1]] = \$Matches[2] } } };\
+            \$envMap['MESH_NODE_NAME'] = '{{node}}';\
+            \$pairs = @(\$envMap.GetEnumerator() | ForEach-Object { '{0}={1}' -f \$_.Key, \$_.Value });\
+            Set-ItemProperty -Path \$rp -Name AppEnvironmentExtra -Value \$pairs -Type MultiString;\
+            exit 0\
+        \""
+        ;;
+      macos)
         ;;
     esac
 
@@ -2160,7 +2206,7 @@ intent text:
 # Validate that each model routes to the correct hardware node.
 # Assumes the cluster is already running with hardware-selected models loaded
 # (i.e. run `just start-cluster` first).
-# Pi (pi1.local) should serve qwen2.5:1.5b; Beelink (beelink1.local) should serve qwen2.5:7b.
+# Pi (pi1.local) should serve qwen2.5:1.5b; beelink1 (beelink1.local) should serve qwen2.5:7b.
 # Usage: just validate-routing
 validate-routing: update-portproxy chaos
     #!/usr/bin/env bash
@@ -2208,7 +2254,7 @@ validate-routing: update-portproxy chaos
         echo ">>> All attempts failed. If the cluster was idle or you just opened your laptop, run: just restart-coordinator" >&2
     }
 
-    # Normalise hostname for case-insensitive comparison (BEELINK1 ↔ beelink1).
+    # Normalise hostname for case-insensitive comparison (Windows reports capitals).
     norm() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
     # --- Test 1: qwen2.5:1.5b → pi1 ---

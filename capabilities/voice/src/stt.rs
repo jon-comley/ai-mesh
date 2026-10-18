@@ -160,7 +160,7 @@ fn silence_preroll() -> Vec<u8> {
 // ── Remote STT offload ────────────────────────────────────────────────────
 // pi1's CPU takes ~5s to transcribe a 3s clip with base.en — the dominant
 // share of the perceived response time (measured live 2026-07-08). A
-// faster mesh node (the Beelink) can do the same in well under a second,
+// faster mesh node (beelink1) can do the same in well under a second,
 // so when `VOICE_STT_REMOTE` (host:port) is set, clips go there first and
 // the local whisper-server becomes the fallback: voice keeps working when
 // the remote box is off, just slower. Direct HTTP rather than a mesh
@@ -181,7 +181,7 @@ fn remote_stt() -> Option<String> {
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// After a remote failure, don't re-try the remote for this long — an
-/// offline Beelink must not add a connection-timeout penalty to every
+/// offline beelink1 must not add a connection-timeout penalty to every
 /// single utterance.
 const REMOTE_COOLDOWN_MS: u64 = 60_000;
 

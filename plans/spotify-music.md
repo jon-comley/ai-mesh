@@ -100,7 +100,7 @@ room-mapping convention should be decided against real hardware.
 1. `just deploy-coordinator pi1` **and** `just deploy-node pi2` — same session (WIRE_VERSION bump; old coordinator silently drops unknown variants)
 2. `just spotify-push-creds pi2` (after `just spotify-auth`)
 3. `just build-librespot && just deploy-librespot pi2 && just spotify-login pi2`
-4. Other nodes (pi1 agent, beelink1, omnilink1) redeploy at next convenient window for the wire bump.
+4. Other nodes (pi1 agent, beelink1, omnibook1) redeploy at next convenient window for the wire bump.
 
 ## Risks / verify during implementation
 

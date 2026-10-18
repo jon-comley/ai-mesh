@@ -2,25 +2,25 @@
 
 > Status: **Draft.** Reviewed by Bing and Gemini; refinements from both reviews integrated. Implementation pending user approval.
 >
-> Goal: Relocate the coordinator role from the WSL2 laptop (`OmniLink1`) to the always-on Raspberry Pi 5 already known as `pi1` (<pi1-old>) so the laptop can be closed without taking the smart-home dashboard offline. Add Tailscale for outside-LAN phone access.
+> Goal: Relocate the coordinator role from the WSL2 laptop (`omnibook1`) to the always-on Raspberry Pi 5 already known as `pi1` (<pi1-old>) so the laptop can be closed without taking the smart-home dashboard offline. Add Tailscale for outside-LAN phone access.
 
 ---
 
 ## Background
 
-Today's topology has `OmniLink1` (WSL2 laptop) tagged as Controller and `pi1` + `BEELINK1` as Compute. Closing the laptop means the dashboard and all light control die. Phone access from the LAN requires a Windows portproxy that drifts on every WSL restart, and remote access is impossible.
+Today's topology has `omnibook1` (WSL2 laptop) tagged as Controller and `pi1` + `beelink1` as Compute. Closing the laptop means the dashboard and all light control die. Phone access from the LAN requires a Windows portproxy that drifts on every WSL restart, and remote access is impossible.
 
-`pi1` already runs the Zigbee stack (zigbee2mqtt + Mosquitto) and is the natural host for the coordinator: co-locating coordinator with the Zigbee agent eliminates a network hop from every light command, frees Beelink for heavy LLM compute, and gives us a fanless, low-power, always-on box for the most stateful service.
+`pi1` already runs the Zigbee stack (zigbee2mqtt + Mosquitto) and is the natural host for the coordinator: co-locating coordinator with the Zigbee agent eliminates a network hop from every light command, frees beelink1 for heavy LLM compute, and gives us a fanless, low-power, always-on box for the most stateful service.
 
 ## Scope
 
 | In scope | Out of scope |
 |----------|--------------|
 | Coordinator binary running as a systemd service on pi1 | Replacing zigbee2mqtt / Mosquitto |
-| Cross-build pipeline from laptop → pi1 (aarch64) | Migrating compute models off Beelink |
+| Cross-build pipeline from laptop → pi1 (aarch64) | Migrating compute models off beelink1 |
 | Migration of `~/.config/ai-mesh/` (cert, key, state) + `ai_mesh.db` | Multi-coordinator HA / failover |
 | Tailscale install on pi1 + phone for outside-LAN dashboard access | Public DNS / Let's Encrypt / port forwarding |
-| Repoint Beelink + laptop agents at the new coordinator host | Per-agent custom certs (single self-signed remains) |
+| Repoint beelink1 + laptop agents at the new coordinator host | Per-agent custom certs (single self-signed remains) |
 | `just deploy-coordinator` and `just verify-coordinator` recipes | Replacing the existing `restart-coordinator` recipe |
 | Retire WSL2 portproxy from the dashboard path | Removing WSL2 entirely (laptop can remain a compute node) |
 
@@ -40,7 +40,7 @@ These hold today by construction; the move must preserve them.
 The coordinator's workload (HTTP/WS server, SQLite registry, mDNS, broadcast fan-out) is trivial — CPU and RAM are non-issues on any host. The choice is driven by:
 
 - **Zigbee locality** — co-located with the Zigbee agent → localhost MQTT roundtrip for every light command.
-- **Compute separation** — Beelink stays dedicated to qwen2.5:7b inference.
+- **Compute separation** — beelink1 stays dedicated to qwen2.5:7b inference.
 - **Reliability** — pi1 is fanless, low-power, no Windows updates, already on UPS-style power.
 
 pi1 continues to run a compute agent alongside the coordinator. Coordinator workload is light enough that this doesn't dilute compute throughput.
@@ -57,9 +57,9 @@ Tailscale install on pi1 + phone → phone always reaches pi1 at a stable `100.x
 
 ## Migration manifest
 
-These files move from `OmniLink1` to `pi1`:
+These files move from `omnibook1` to `pi1`:
 
-| Source on OmniLink1 (WSL2) | Destination on pi1 |
+| Source on omnibook1 (WSL2) | Destination on pi1 |
 |----------------------------|--------------------|
 | `~/.config/ai-mesh/coordinator.crt` | `~/.config/ai-mesh/coordinator.crt` |
 | `~/.config/ai-mesh/coordinator.key` | `~/.config/ai-mesh/coordinator.key` |
@@ -92,7 +92,7 @@ Copy order: state files first → cert/key first → DB → install unit → ena
 
 ### Phase 2 — Repoint agents and validate
 
-- BEELINK1 (Windows) + OmniLink1 (WSL2): update `MESH_AUTH_TOKEN` and coordinator address. The existing `set-auth-token` / `start-agents` recipes already handle the cross-OS plumbing — they only need the new controller host.
+- beelink1 (Windows) + omnibook1 (WSL2): update `MESH_AUTH_TOKEN` and coordinator address. The existing `set-auth-token` / `start-agents` recipes already handle the cross-OS plumbing — they only need the new controller host.
 - Repoint any justfile vars that hardcode the laptop as controller.
 - **Health check** (must all pass before declaring cutover done):
   1. `pi1` coordinator log shows all expected agents connected.
@@ -116,7 +116,7 @@ Copy order: state files first → cert/key first → DB → install unit → ena
 - Remove WSL2 portproxy entries (no longer needed: dashboard reaches pi1 directly, no traffic flows via the laptop).
 - Update `dashboard-mobile` justfile recipe — either delete it or repurpose it to print the new pi1 URL.
 - Update memory file `project_coordinator_topology.md` to reflect pi1-as-controller.
-- Keep OmniLink1 as an optional compute node; remove it entirely if not used.
+- Keep omnibook1 as an optional compute node; remove it entirely if not used.
 
 ## Mixed-OS considerations
 
