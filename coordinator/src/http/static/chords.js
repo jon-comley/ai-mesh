@@ -128,7 +128,7 @@ let searchCtl = null;
 // The open song. `tab` is a UG sheet or a saved song's fields mapped onto the
 // same names; `savedId` is set once it is in the library.
 let player = null;
-let scroll = { enabled: false, playing: false, carry: 0, last: 0, frame: null };
+let scroll = { enabled: false, playing: false, held: false, carry: 0, last: 0, frame: null };
 let wakeLock = null;
 let fontSize = FONT_DEFAULT;
 let docListeners = false;
@@ -534,66 +534,65 @@ function buildPlayer() {
     t.tuning && t.tuning !== 'E A D G B E' ? `Tuning ${t.tuning}` : null,
     t.tonality ? `Key ${t.tonality}` : null,
   ].filter(Boolean).join(' · ');
+  const rb = (id, label, text, extra = '') =>
+    `<button type="button" class="songs-rbtn" id="${id}" aria-label="${label}" title="${label}" ${extra}>${text}</button>`;
 
+  // The sheet gets the whole height; every control sits in a slim rail down
+  // the right-hand side, and the title scrolls away with the sheet. The less
+  // used controls open as panels over the sheet from the rail.
   el.innerHTML = `
-    <div class="songs-toolbar">
-      <div class="songs-toolrow">
-        <button type="button" class="songs-btn" id="songs-back">←</button>
-        <div class="songs-title">
+    <div class="songs-stage">
+      <div class="songs-sheet" id="songs-sheet" tabindex="0">
+        <header class="songs-sheethead">
           <strong>${esc(t.song_name)}</strong>
-          <span>${esc(t.artist_name)}${facts ? ` · ${esc(facts)}` : ''}</span>
-        </div>
-        <button type="button" class="songs-btn" id="songs-full" title="Full screen">⛶</button>
+          <span>${esc(t.artist_name)}${facts ? ` · <b>${esc(facts)}</b>` : ''}</span>
+          <span class="songs-sheetver">${esc(versionLabel(t))}${many ? ` · version ${idx + 1} of ${player.versions.length}` : ''}${player.savedId ? ' · <span class="songs-saved">Saved ✓</span>' : ''}</span>
+        </header>
+        <pre></pre>
       </div>
-      <div class="songs-toolrow songs-versionrow">
+      <div class="songs-pop" id="songs-menu" hidden>
+        <div class="songs-pophead"><strong>Song</strong>${rb('songs-menu-close', 'Close', '✕')}</div>
         ${many ? `
-          <button type="button" class="songs-btn" id="songs-prev" aria-label="Previous version" ${idx <= 0 ? 'disabled' : ''}>‹</button>
-          <select id="songs-version" aria-label="Version">
+          <label class="songs-poplabel" for="songs-version">Version</label>
+          <select id="songs-version">
             ${player.versions.map((v, i) => `<option value="${i}" ${i === idx ? 'selected' : ''}>${esc(versionLabel(v))}${player.saved[v.tab_id] || v.saved_id ? ' ★' : ''}</option>`).join('')}
-          </select>
-          <button type="button" class="songs-btn" id="songs-next" aria-label="Next version" ${idx >= player.versions.length - 1 ? 'disabled' : ''}>›</button>`
-          : `<span class="songs-onlyversion">${esc(versionLabel(t))}</span>`}
-        ${player.song && t.url ? '<button type="button" class="songs-btn" id="songs-more-versions">More versions</button>' : ''}
-        ${player.savedId
-          ? '<span class="songs-saved">Saved ✓</span>'
-          : '<button type="button" class="songs-btn songs-primary" id="songs-save">Save</button>'}
+          </select>` : ''}
+        ${player.song && t.url ? '<button type="button" class="songs-btn" id="songs-more-versions">More versions from Ultimate Guitar</button>' : ''}
+        ${player.savedId && t.url ? '<button type="button" class="songs-btn" id="songs-refresh">Refresh from Ultimate Guitar</button>' : ''}
+        ${player.savedId ? '<button type="button" class="songs-btn songs-danger" id="songs-delete">Delete from library</button>' : ''}
       </div>
-      <div class="songs-toolrow songs-controls">
-        <div class="songs-group" aria-label="Transpose">
-          <button type="button" class="songs-btn" id="songs-tdown" aria-label="Transpose down" title="Transpose down a semitone">♭</button>
-          <span id="songs-tval" class="songs-val"></span>
-          <button type="button" class="songs-btn" id="songs-tup" aria-label="Transpose up" title="Transpose up a semitone">♯</button>
-        </div>
-        <div class="songs-group" aria-label="Text size">
-          <button type="button" class="songs-btn" id="songs-fdown" aria-label="Smaller text">A−</button>
-          <button type="button" class="songs-btn" id="songs-fup" aria-label="Larger text">A+</button>
-        </div>
-        <label class="songs-switch">
-          <input type="checkbox" id="songs-autoscroll" ${scroll.enabled ? 'checked' : ''}>
-          <span>Auto-scroll</span>
-        </label>
-        <div class="songs-group" id="songs-scrollctl" ${scroll.enabled ? '' : 'hidden'}>
-          <button type="button" class="songs-btn songs-play" id="songs-play">▶ Play</button>
-          <button type="button" class="songs-btn" id="songs-slower" aria-label="Slower">−</button>
-          <span id="songs-speed" class="songs-val"></span>
-          <button type="button" class="songs-btn" id="songs-faster" aria-label="Faster">+</button>
-        </div>
-        <div class="songs-group">
-          <button type="button" class="songs-btn" id="songs-yt">YouTube</button>
-          <button type="button" class="songs-btn" id="songs-spotify">Spotify</button>
-        </div>
-        ${player.savedId ? `
-          <details class="songs-moremenu">
-            <summary class="songs-btn">⋯</summary>
-            <div>
-              ${t.url ? '<button type="button" class="songs-btn" id="songs-refresh">Refresh from Ultimate Guitar</button>' : ''}
-              <button type="button" class="songs-btn songs-danger" id="songs-delete">Delete from library</button>
-            </div>
-          </details>` : ''}
-      </div>
-      <div class="songs-listen" id="songs-listen" hidden></div>
+      <div class="songs-pop" id="songs-listen" hidden></div>
     </div>
-    <div class="songs-sheet" id="songs-sheet" tabindex="0"><pre></pre></div>`;
+    <nav class="songs-rail" aria-label="Song controls">
+      ${rb('songs-back', 'Back', '←')}
+      ${rb('songs-autoscroll', 'Auto-scroll on or off', '<span class="songs-cap">Auto</span>⇣', `aria-pressed="${scroll.enabled}"`)}
+      <div class="songs-railgroup" id="songs-scrollctl" ${scroll.enabled ? '' : 'hidden'}>
+        ${rb('songs-play', 'Play', '▶', 'class="songs-rbtn songs-play"')}
+        ${rb('songs-faster', 'Faster', '+')}
+        <span id="songs-speed" class="songs-val" title="Scroll speed"></span>
+        ${rb('songs-slower', 'Slower', '−')}
+      </div>
+      <div class="songs-railgroup">
+        ${rb('songs-tup', 'Transpose up a semitone', '♯')}
+        <span id="songs-tval" class="songs-val" title="Transpose"></span>
+        ${rb('songs-tdown', 'Transpose down a semitone', '♭')}
+      </div>
+      <div class="songs-railgroup">
+        ${rb('songs-fup', 'Larger text', 'A+')}
+        ${rb('songs-fdown', 'Smaller text', 'A−')}
+      </div>
+      ${many ? `<div class="songs-railgroup">
+        ${rb('songs-prev', 'Previous version', '‹', idx <= 0 ? 'disabled' : '')}
+        <span class="songs-val" title="Version">${idx + 1}/${player.versions.length}</span>
+        ${rb('songs-next', 'Next version', '›', idx >= player.versions.length - 1 ? 'disabled' : '')}
+      </div>` : ''}
+      ${player.savedId
+        ? rb('songs-saved', 'Saved in your library', '★', 'disabled')
+        : rb('songs-save', 'Save to your library', '☆')}
+      ${rb('songs-listen-btn', 'Listen: Spotify or YouTube', '♪')}
+      ${rb('songs-menu-btn', 'Versions and more', '⋯')}
+      ${rb('songs-full', 'Full screen', '⛶')}
+    </nav>`;
 
   const $ = sel => el.querySelector(sel);
   $('#songs-back').addEventListener('click', () => show(player.back === 'find' ? 'find' : 'library'));
@@ -609,28 +608,43 @@ function buildPlayer() {
   $('#songs-tup').addEventListener('click', () => setTranspose(player.transpose + 1));
   $('#songs-fdown').addEventListener('click', () => setFont(fontSize - 2));
   $('#songs-fup').addEventListener('click', () => setFont(fontSize + 2));
-  $('#songs-autoscroll').addEventListener('change', e => setAutoscroll(e.target.checked));
+  $('#songs-autoscroll').addEventListener('click', () => setAutoscroll(!scroll.enabled));
   $('#songs-play').addEventListener('click', () => (scroll.playing ? stopScroll() : startScroll()));
   $('#songs-slower').addEventListener('click', () => setSpeed(player.speed - SPEED_STEP));
   $('#songs-faster').addEventListener('click', () => setSpeed(player.speed + SPEED_STEP));
-  $('#songs-yt').addEventListener('click', () => toggleListen('youtube'));
-  $('#songs-spotify').addEventListener('click', () => toggleListen('spotify'));
+  $('#songs-menu-btn').addEventListener('click', () => togglePop('songs-menu'));
+  $('#songs-menu-close').addEventListener('click', () => togglePop('songs-menu', false));
+  $('#songs-listen-btn').addEventListener('click', () => togglePop('songs-listen'));
 
   const sheet = $('#songs-sheet');
   // With auto-scroll on, a tap on the sheet pauses or resumes. Off, the sheet
   // is just a page you scroll by hand and taps do nothing.
-  sheet.addEventListener('click', () => {
-    if (!scroll.enabled) return;
+  sheet.addEventListener('click', e => {
+    if (!scroll.enabled || e.target.closest('.songs-sheethead')) return;
     scroll.playing ? stopScroll() : startScroll();
   });
-  // Scrolling by hand mid-song pauses, so you can jump back a verse.
-  for (const evt of ['wheel', 'touchmove']) {
-    sheet.addEventListener(evt, () => { if (scroll.playing) stopScroll(); }, { passive: true });
+  // Scrolling by hand while it plays is how you correct it — ahead when it's
+  // slow, back when it's fast — so it keeps playing from wherever you leave
+  // it. It only holds still while a finger is on the sheet, so it doesn't
+  // fight the drag.
+  sheet.addEventListener('touchstart', () => { scroll.held = true; }, { passive: true });
+  for (const evt of ['touchend', 'touchcancel']) {
+    sheet.addEventListener(evt, () => { scroll.held = false; scroll.carry = 0; }, { passive: true });
   }
 
   paintSheet();
   paintScrollControls();
   setFont(fontSize);
+}
+
+/** Open (or close, or flip) one of the panels over the sheet; one at a time. */
+function togglePop(id, open) {
+  for (const pop of panel.querySelectorAll('#songs-player .songs-pop')) {
+    const show = pop.id === id && (open ?? pop.hidden);
+    pop.hidden = !show;
+    panel.querySelector(`#${pop.id}-btn`)?.classList.toggle('is-active', show);
+    if (show && pop.id === 'songs-listen' && !pop.dataset.built) paintListen(pop);
+  }
 }
 
 function paintSheet() {
@@ -748,10 +762,13 @@ function paintScrollControls() {
   const ctl = panel.querySelector('#songs-scrollctl');
   if (!ctl) return;
   ctl.hidden = !scroll.enabled;
-  const box = panel.querySelector('#songs-autoscroll');
-  if (box) box.checked = scroll.enabled;
+  const toggle = panel.querySelector('#songs-autoscroll');
+  toggle.setAttribute('aria-pressed', String(scroll.enabled));
+  toggle.classList.toggle('is-active', scroll.enabled);
   const play = panel.querySelector('#songs-play');
-  play.textContent = scroll.playing ? '❚❚ Pause' : '▶ Play';
+  play.textContent = scroll.playing ? '❚❚' : '▶';
+  play.setAttribute('aria-label', scroll.playing ? 'Pause' : 'Play');
+  play.title = play.getAttribute('aria-label');
   play.classList.toggle('is-active', scroll.playing);
   panel.querySelector('#songs-speed').textContent = `${player?.speed ?? SPEED_DEFAULT}`;
 }
@@ -786,7 +803,7 @@ function step(now) {
   const sheet = panel.querySelector('#songs-sheet');
   // Leaving the tab stops the song rather than scrolling a page nobody sees.
   if (!sheet || !panel.classList.contains('active') || view !== 'player') { stopScroll(); return; }
-  if (scroll.last) {
+  if (scroll.last && !scroll.held) {
     // scrollTop drops fractions, so carry them — at slow speeds a frame
     // moves less than a pixel and would otherwise never move at all.
     scroll.carry += (player.speed * Math.min(now - scroll.last, 100)) / 1000;
@@ -836,21 +853,33 @@ function setFullscreen(on) {
 
 // ── Listen along: YouTube and Spotify ───────────────────────────────────────
 
-function toggleListen(which) {
-  const box = panel.querySelector('#songs-listen');
-  if (!box.hidden && box.dataset.which === which) {
-    box.hidden = true;
-    box.innerHTML = '';
-    return;
-  }
-  box.dataset.which = which;
-  box.hidden = false;
-  if (which === 'youtube') paintYoutube(box);
-  else paintSpotify(box);
-}
-
 function songQuery() {
   return `${player.tab.song_name} ${player.tab.artist_name}`.trim();
+}
+
+// Spotify and YouTube share one panel. It is built once and then only hidden
+// and shown, so closing it doesn't stop a video that's playing.
+function paintListen(box) {
+  box.dataset.built = '1';
+  box.innerHTML = `
+    <div class="songs-pophead"><strong>Listen along</strong>
+      <button type="button" class="songs-rbtn" id="songs-listen-close" aria-label="Close" title="Close">✕</button></div>
+    <div class="songs-listen-row">
+      <button type="button" class="songs-btn songs-primary" id="songs-sp-play">▶ Spotify</button>
+      <button type="button" class="songs-btn" id="songs-sp-pause">❚❚ Pause</button>
+    </div>
+    <p class="songs-hint">Plays "${esc(songQuery())}" on the house speakers through the mesh's Spotify player — no adverts with Spotify Premium.</p>
+    <div id="songs-yt-box"></div>`;
+  const send = async body => {
+    const res = await api('/chords/spotify', { method: 'POST', body });
+    if (!res.ok) { showToast(await errorText(res), true); return; }
+    const { message } = await res.json();
+    showToast(message);
+  };
+  box.querySelector('#songs-listen-close').addEventListener('click', () => togglePop('songs-listen', false));
+  box.querySelector('#songs-sp-play').addEventListener('click', () => send({ action: 'play', query: songQuery() }));
+  box.querySelector('#songs-sp-pause').addEventListener('click', () => send({ action: 'pause' }));
+  paintYoutube(box.querySelector('#songs-yt-box'));
 }
 
 function paintYoutube(box) {
@@ -862,6 +891,8 @@ function paintYoutube(box) {
       referrerpolicy="strict-origin-when-cross-origin"></iframe></div>` : ''}
     <div class="songs-listen-row">
       <a class="songs-btn" href="${esc(search)}" target="_blank" rel="noopener noreferrer">Find on YouTube ↗</a>
+    </div>
+    <div class="songs-listen-row">
       <input type="url" id="songs-yt-url" placeholder="Paste a YouTube video link" autocomplete="off">
       <button type="button" class="songs-btn" id="songs-yt-use">${id ? 'Change' : 'Use'}</button>
       ${id ? '<button type="button" class="songs-btn" id="songs-yt-clear">Remove</button>' : ''}
@@ -880,21 +911,4 @@ function paintYoutube(box) {
     patchSong({ youtube_url: '' });
     paintYoutube(box);
   });
-}
-
-function paintSpotify(box) {
-  box.innerHTML = `
-    <div class="songs-listen-row">
-      <button type="button" class="songs-btn songs-primary" id="songs-sp-play">▶ Play on the house speakers</button>
-      <button type="button" class="songs-btn" id="songs-sp-pause">❚❚ Pause</button>
-    </div>
-    <p class="songs-hint">Plays "${esc(songQuery())}" through the mesh's Spotify player — no adverts with Spotify Premium.</p>`;
-  const send = async body => {
-    const res = await api('/chords/spotify', { method: 'POST', body });
-    if (!res.ok) { showToast(await errorText(res), true); return; }
-    const { message } = await res.json();
-    showToast(message);
-  };
-  box.querySelector('#songs-sp-play').addEventListener('click', () => send({ action: 'play', query: songQuery() }));
-  box.querySelector('#songs-sp-pause').addEventListener('click', () => send({ action: 'pause' }));
 }

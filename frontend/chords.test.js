@@ -206,53 +206,63 @@ describe('player', () => {
     expect(panel.querySelector('#songs-tval').textContent).toBe('+1');
   });
 
+  const autoscroll = panel => panel.querySelector('#songs-autoscroll');
+
   it('auto-scroll is off by default: no controls, and taps do nothing', async () => {
     const panel = await openSaved();
-    expect(panel.querySelector('#songs-autoscroll').checked).toBe(false);
+    expect(autoscroll(panel).getAttribute('aria-pressed')).toBe('false');
     expect(panel.querySelector('#songs-scrollctl').hidden).toBe(true);
-    panel.querySelector('#songs-sheet').click();
+    panel.querySelector('#songs-sheet pre').click();
     expect(isScrolling()).toBe(false);
   });
 
   it('turning auto-scroll on shows play and speed; tapping the sheet starts and pauses it', async () => {
     const panel = await openSaved();
-    const box = panel.querySelector('#songs-autoscroll');
-    box.checked = true;
-    box.dispatchEvent(new Event('change'));
+    autoscroll(panel).click();
+    expect(autoscroll(panel).getAttribute('aria-pressed')).toBe('true');
     expect(panel.querySelector('#songs-scrollctl').hidden).toBe(false);
     expect(panel.querySelector('#songs-speed').textContent).toBe('20');
     expect(isScrolling()).toBe(false); // never starts by itself
 
     panel.querySelector('#songs-play').click();
     expect(isScrolling()).toBe(true);
-    expect(panel.querySelector('#songs-play').textContent).toContain('Pause');
+    expect(panel.querySelector('#songs-play').getAttribute('aria-label')).toBe('Pause');
 
-    panel.querySelector('#songs-sheet').click();
+    const sheet = panel.querySelector('#songs-sheet pre');
+    sheet.click();
     expect(isScrolling()).toBe(false);
-    panel.querySelector('#songs-sheet').click();
+    sheet.click();
     expect(isScrolling()).toBe(true);
 
     panel.querySelector('#songs-faster').click();
     expect(panel.querySelector('#songs-speed').textContent).toBe('22');
   });
 
+  it('scrolling by hand corrects the position but keeps it playing', async () => {
+    const panel = await openSaved();
+    autoscroll(panel).click();
+    panel.querySelector('#songs-play').click();
+    const sheet = panel.querySelector('#songs-sheet');
+    sheet.dispatchEvent(new Event('wheel'));
+    sheet.dispatchEvent(new Event('touchstart'));
+    sheet.dispatchEvent(new Event('touchmove'));
+    sheet.dispatchEvent(new Event('touchend'));
+    expect(isScrolling()).toBe(true);
+  });
+
   it('turning auto-scroll off mid-song stops it, and the switch is remembered', async () => {
     let panel = await openSaved();
-    const box = panel.querySelector('#songs-autoscroll');
-    box.checked = true;
-    box.dispatchEvent(new Event('change'));
+    autoscroll(panel).click();
     panel.querySelector('#songs-play').click();
     expect(isScrolling()).toBe(true);
 
-    box.checked = false;
-    box.dispatchEvent(new Event('change'));
+    autoscroll(panel).click();
     expect(isScrolling()).toBe(false);
     expect(panel.querySelector('#songs-scrollctl').hidden).toBe(true);
 
-    box.checked = true;
-    box.dispatchEvent(new Event('change'));
+    autoscroll(panel).click();
     panel = await openSaved('s2');
-    expect(panel.querySelector('#songs-autoscroll').checked).toBe(true);
+    expect(autoscroll(panel).getAttribute('aria-pressed')).toBe('true');
     expect(panel.querySelector('#songs-scrollctl').hidden).toBe(false);
     expect(isScrolling()).toBe(false);
   });
@@ -261,14 +271,27 @@ describe('player', () => {
     const panel = await openSaved();
     document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
     expect(isScrolling()).toBe(false);
-    const box = panel.querySelector('#songs-autoscroll');
-    box.checked = true;
-    box.dispatchEvent(new Event('change'));
+    autoscroll(panel).click();
     panel.querySelector('#songs-sheet').dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
     expect(isScrolling()).toBe(true);
     // Leaving the player stops it.
     panel.querySelector('#songs-back').click();
     expect(isScrolling()).toBe(false);
+  });
+
+  it('puts every control in the side rail and the title in the sheet', async () => {
+    const panel = await openSaved();
+    const rail = panel.querySelector('.songs-rail');
+    for (const id of ['songs-back', 'songs-autoscroll', 'songs-tup', 'songs-fup', 'songs-listen-btn', 'songs-menu-btn', 'songs-full']) {
+      expect(rail.querySelector(`#${id}`), id).not.toBeNull();
+    }
+    expect(panel.querySelector('#songs-sheet .songs-sheethead strong').textContent).toBe('Pompeii');
+    // Panels open one at a time.
+    panel.querySelector('#songs-menu-btn').click();
+    expect(panel.querySelector('#songs-menu').hidden).toBe(false);
+    panel.querySelector('#songs-listen-btn').click();
+    expect(panel.querySelector('#songs-menu').hidden).toBe(true);
+    expect(panel.querySelector('#songs-listen').hidden).toBe(false);
   });
 
   it('switches between versions from a search', async () => {
@@ -301,7 +324,7 @@ describe('player', () => {
   it('a single version shows no switcher', async () => {
     const panel = await openSaved('s3');
     expect(panel.querySelector('#songs-version')).toBeNull();
-    expect(panel.querySelector('.songs-onlyversion')).not.toBeNull();
+    expect(panel.querySelector('#songs-prev')).toBeNull();
   });
 
   it('saves a fetched version without UG\'s version list', async () => {
@@ -321,7 +344,7 @@ describe('player', () => {
 
   it('embeds a pasted YouTube video by id and saves the link', async () => {
     const panel = await openSaved();
-    panel.querySelector('#songs-yt').click();
+    panel.querySelector('#songs-listen-btn').click();
     expect(panel.querySelector('#songs-listen a').href).toContain('youtube.com/results?search_query=Pompeii');
     panel.querySelector('#songs-yt-url').value = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
     panel.querySelector('#songs-yt-use').click();
@@ -333,7 +356,7 @@ describe('player', () => {
 
   it('asks the house Spotify player to play the song', async () => {
     const panel = await openSaved();
-    panel.querySelector('#songs-spotify').click();
+    panel.querySelector('#songs-listen-btn').click();
     panel.querySelector('#songs-sp-play').click();
     await settle();
     const call = apiCalls.find(c => c.path === '/chords/spotify');

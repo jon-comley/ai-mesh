@@ -24,7 +24,7 @@ Changes from the plan below, made while building it or asked for during the buil
 - **Auto-scroll has an on/off switch** (Jon). It is off by default and
   remembered per device. When it's off, there are no controls and taps do
   nothing. When it's on, play never starts by itself. A tap on the sheet or
-  Space pauses and resumes it, and scrolling by hand pauses it.
+  Space pauses and resumes it. Scrolling by hand doesn't stop it (Jon, 2026-10-18): you scroll to correct its pace, so it carries on from wherever you leave it.
 - **Version switching** (Jon): a dropdown and ‹ › whenever a song has two or
   more versions. A song opened from the library starts with its other saved
   versions, and *More versions* fetches UG's list on request, so a saved song
@@ -37,6 +37,12 @@ Changes from the plan below, made while building it or asked for during the buil
   - **Spotify**: plays the song on the house speakers through the existing
     music node (`intent::dispatch_music_command`, now `pub(crate)`). This one
     has no adverts, because librespot already needs Premium.
+- **Controls in a side rail** (Jon, 2026-10-18): the toolbar across the top cost
+  a quarter of a phone screen. Every control now sits in a 52px rail on the
+  right, the title scrolls away with the sheet, and versions, refresh/delete
+  and listen open as panels over the sheet. The Songs panel also opts out of
+  the desktop rule that centres panels in an 1100px column, which squeezed
+  the sheet on a tablet.
 - **Starter songs** (Jon): the four example versions are fetched into the
   library in the background when the coordinator starts, once each.
   `__chords__` preferences record which were added, so one deleted stays

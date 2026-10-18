@@ -25,26 +25,31 @@ browser does, sending one request each time you search or open a version.
   under each artist, and each artist can be collapsed. "The Beatles" files under
   B. The filter box narrows either list, and *Recently played* shows the last few
   songs you opened.
-- **Playing.**
-  - **♭ / ♯** transposes every chord. The capo, any unusual tuning and the key
-    are shown under the title.
-  - **A− / A+** changes the text size, remembered on that device.
+- **Playing.** The sheet fills the screen, and the controls sit in a slim rail down
+  the right-hand side. The title, capo, tuning and key are at the top of the sheet
+  and scroll away with it.
+  - **♯ / ♭** transposes every chord.
+  - **A+ / A−** changes the text size, remembered on that device.
+  - **★** saves the song (filled once it's saved).
+  - **⋯** opens the full version list, *More versions*, *Refresh* and *Delete*.
   - **⛶** goes full screen for a music stand. Esc leaves it.
   - The screen is kept awake while a song is open, where the browser allows it.
-- **Auto-scroll** has an on/off switch, off by default and remembered on that device.
+- **Auto-scroll** is the *Auto* button: off by default, remembered on that device.
   - **Off:** the sheet scrolls only by hand.
-  - **On:** ▶ starts it and − / + set the speed. Tapping the sheet, or Space on a
+  - **On:** ▶ starts it and + / − set the speed. Tapping the sheet, or Space on a
     keyboard, pauses and resumes it.
-  - Scrolling by hand pauses it, so you can go back a verse.
+  - Scrolling by hand doesn't stop it. Push ahead when it's too slow, or drag back
+    when it's too fast, and it carries on from where you leave it. It holds still
+    only while your finger is on the sheet.
   - It stops at the end of the song.
   - A saved song keeps its own speed and transpose.
-- **Listen along.**
-  - **YouTube** opens a YouTube search for the song. Paste a video's link and it
-    plays in a small player above the sheet, and a saved song remembers it.
-    YouTube shows its adverts unless you're signed in to YouTube Premium in that
-    browser; ai-mesh can't remove them.
+- **Listen along** is the **♪** button, with both options in one panel.
   - **Spotify** plays the song on the house speakers through the mesh's Spotify
     player (`docs/music.md`), with no adverts. It needs the music node running.
+  - **YouTube** opens a YouTube search for the song. Paste a video's link and it
+    plays in the panel, and a saved song remembers it. Closing the panel doesn't
+    stop the video. YouTube shows its adverts unless you're signed in to YouTube
+    Premium in that browser; ai-mesh can't remove them.
 - **Paste instead.** *Paste a link or the chords instead* opens a UG link directly,
   or saves chords copied from anywhere: chord lines above lyric lines, which are
   recognised and transpose like a UG sheet.
