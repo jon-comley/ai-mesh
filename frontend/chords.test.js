@@ -118,6 +118,13 @@ describe('renderSheet', () => {
     expect(html).toContain('Sing it');
   });
 
+  it('shows entities left in a saved sheet as the characters they stand for', () => {
+    const el = document.createElement('pre');
+    el.innerHTML = renderSheet("I&rsquo;m a line, y'all &amp; caf&eacute; &hellip; &#8217; &bogus; &lt;b&gt;");
+    expect(el.textContent).toBe("I’m a line, y'all & café … ’ &bogus; <b>");
+    expect(el.querySelector('b')).toBeNull();
+  });
+
   it('escapes whatever the sheet contains', () => {
     const html = renderSheet('<img src=x onerror=alert(1)> [ch]G[/ch]');
     expect(html).not.toContain('<img');

@@ -129,7 +129,85 @@ pub fn extract_store(html: &str) -> Result<Value, UgError> {
         .map_err(|e| UgError::Other(format!("unexpected Ultimate Guitar page: {e}")))
 }
 
-/// Undo HTML attribute escaping: the named entities UG uses, plus numeric ones.
+/// The named entities that turn up in chord sheets: HTML's basic five plus the
+/// typography (curly quotes, dashes, ellipses) and accented letters that
+/// sheet authors paste in from word processors.
+fn named_entity(name: &str) -> Option<char> {
+    Some(match name {
+        "quot" => '"',
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "apos" => '\'',
+        "nbsp" => '\u{a0}',
+        "rsquo" => '’',
+        "lsquo" => '‘',
+        "sbquo" => '‚',
+        "rdquo" => '”',
+        "ldquo" => '“',
+        "bdquo" => '„',
+        "hellip" => '…',
+        "ndash" => '–',
+        "mdash" => '—',
+        "prime" => '′',
+        "Prime" => '″',
+        "laquo" => '«',
+        "raquo" => '»',
+        "bull" => '•',
+        "middot" => '·',
+        "deg" => '°',
+        "times" => '×',
+        "frac12" => '½',
+        "frac14" => '¼',
+        "frac34" => '¾',
+        "copy" => '©',
+        "reg" => '®',
+        "trade" => '™',
+        "sharp" => '♯',
+        "flat" => '♭',
+        "natural" => '♮',
+        "aacute" => 'á',
+        "agrave" => 'à',
+        "acirc" => 'â',
+        "auml" => 'ä',
+        "atilde" => 'ã',
+        "aring" => 'å',
+        "eacute" => 'é',
+        "egrave" => 'è',
+        "ecirc" => 'ê',
+        "euml" => 'ë',
+        "iacute" => 'í',
+        "igrave" => 'ì',
+        "icirc" => 'î',
+        "iuml" => 'ï',
+        "oacute" => 'ó',
+        "ograve" => 'ò',
+        "ocirc" => 'ô',
+        "ouml" => 'ö',
+        "otilde" => 'õ',
+        "oslash" => 'ø',
+        "uacute" => 'ú',
+        "ugrave" => 'ù',
+        "ucirc" => 'û',
+        "uuml" => 'ü',
+        "ntilde" => 'ñ',
+        "ccedil" => 'ç',
+        "szlig" => 'ß',
+        "Eacute" => 'É',
+        "Aacute" => 'Á',
+        "Oacute" => 'Ó',
+        "Uacute" => 'Ú',
+        "Ntilde" => 'Ñ',
+        "Ccedil" => 'Ç',
+        "Auml" => 'Ä',
+        "Ouml" => 'Ö',
+        "Uuml" => 'Ü',
+        _ => return None,
+    })
+}
+
+/// Undo HTML escaping: named entities (see `named_entity`) and numeric ones.
+/// Anything unrecognised is left exactly as it was.
 fn decode_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -145,20 +223,14 @@ fn decode_entities(s: &str) -> String {
             continue;
         };
         let entity = &rest[1..semi];
-        let decoded = match entity {
-            "quot" => Some('"'),
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "apos" => Some('\''),
-            "nbsp" => Some('\u{a0}'),
-            _ => entity
+        let decoded = named_entity(entity).or_else(|| {
+            entity
                 .strip_prefix("#x")
                 .or_else(|| entity.strip_prefix("#X"))
                 .and_then(|h| u32::from_str_radix(h, 16).ok())
                 .or_else(|| entity.strip_prefix('#').and_then(|d| d.parse().ok()))
-                .and_then(char::from_u32),
-        };
+                .and_then(char::from_u32)
+        });
         match decoded {
             Some(c) => {
                 out.push(c);
@@ -186,8 +258,11 @@ fn float(v: &Value) -> Option<f64> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
+/// A string field, with UG's own escaping undone. Text inside the page's JSON
+/// is often HTML-escaped a second time (`I&rsquo;m`), separately from the
+/// attribute escaping `extract_store` removes.
 fn text(v: &Value) -> String {
-    v.as_str().unwrap_or("").trim().to_string()
+    decode_entities(v.as_str().unwrap_or("").trim())
 }
 
 fn hit(v: &Value) -> Option<SearchHit> {
@@ -261,7 +336,7 @@ pub fn parse_tab(store: &Value) -> Result<Tab, UgError> {
             .filter(|t| !t.is_empty())
             .map(str::to_string),
         url: tab["tab_url"].as_str().map(str::to_string),
-        content: content.replace("\r\n", "\n"),
+        content: decode_entities(&content.replace("\r\n", "\n")),
         versions,
     })
 }
@@ -496,6 +571,14 @@ mod tests {
     }
 
     #[test]
+    fn typographic_entities_are_decoded() {
+        assert_eq!(
+            decode_entities("I&rsquo;m &ldquo;here&rdquo; &hellip; caf&eacute; &ndash; x"),
+            "I’m “here” … café – x"
+        );
+    }
+
+    #[test]
     fn a_page_without_the_store_is_blocked() {
         assert_eq!(extract_store(BLOCKED), Err(UgError::Blocked));
     }
@@ -544,6 +627,11 @@ mod tests {
         assert!(tab.content.contains("[ch]Am[/ch]"));
         assert!(!tab.content.contains('\r'));
         assert!(tab.content.contains("café’s"), "multi-byte text survives");
+        assert!(
+            tab.content.contains("I’m the second escape"),
+            "entities escaped inside UG's JSON are decoded too"
+        );
+        assert!(!tab.content.contains("&rsquo;"));
         assert!(
             tab.content.contains("doesn't"),
             "entities inside the sheet are decoded"

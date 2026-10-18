@@ -45,9 +45,24 @@ export function transposeChord(chord, n) {
   return chord.replace(/(^|\/)([A-G][#b]?)/g, (_, pre, note) => pre + transposeNote(note, n));
 }
 
+let entityBox = null;
+/**
+ * Undo HTML entities left in a sheet (`I&rsquo;m`). Sheets saved before the
+ * coordinator decoded them still carry them. Each entity is decoded on its
+ * own through a <textarea>, which knows every named entity and, holding a
+ * single entity and no markup, can't be made to parse anything else.
+ */
+export function decodeEntities(s) {
+  return String(s ?? '').replace(/&(?:#\d{1,7}|#x[0-9a-f]{1,6}|[a-z][a-z0-9]{1,31});/gi, m => {
+    entityBox ??= document.createElement('textarea');
+    entityBox.innerHTML = m;
+    return entityBox.value;
+  });
+}
+
 /** Ultimate Guitar's sheet markup as HTML, chords moved `transpose` semitones. */
 export function renderSheet(content, transpose = 0) {
-  return esc(content ?? '')
+  return esc(decodeEntities(content))
     .replace(/\[\/?tab\]/g, '')
     .replace(/\[ch\]([^[]*?)\[\/ch\]/g, (_, c) => `<span class="songs-ch">${transposeChord(c, transpose)}</span>`)
     .replace(/^[ \t]*\[([^\]\n]{1,40})\][ \t]*$/gm, (_, s) => `<span class="songs-sec">${s}</span>`);
