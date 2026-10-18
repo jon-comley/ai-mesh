@@ -136,7 +136,10 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         rest = &rest[amp..];
-        let Some(semi) = rest[..rest.len().min(12)].find(';') else {
+        // Look for the `;` by byte: slicing the str at a fixed byte offset
+        // panics when that offset lands inside a multi-byte character, which
+        // real pages (’, é) have and ASCII fixtures never did.
+        let Some(semi) = rest.bytes().take(12).position(|b| b == b';') else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -478,6 +481,21 @@ mod tests {
     }
 
     #[test]
+    fn entities_next_to_multibyte_text_do_not_panic() {
+        // The panic seen on pi1 2026-10-18: 12 bytes after this `&` falls
+        // inside the fourth `’`.
+        assert_eq!(decode_entities("&’’’’ x"), "&’’’’ x");
+        assert_eq!(decode_entities("Beyoncé &amp; José’s"), "Beyoncé & José’s");
+        // Every split point of a mixed string, not just the ones thought of.
+        let text = "Don&#039;t &amp; ’é😀&x&é;&quot;ü&";
+        for i in 0..=text.len() {
+            if text.is_char_boundary(i) {
+                decode_entities(&text[i..]);
+            }
+        }
+    }
+
+    #[test]
     fn a_page_without_the_store_is_blocked() {
         assert_eq!(extract_store(BLOCKED), Err(UgError::Blocked));
     }
@@ -525,6 +543,7 @@ mod tests {
         assert_eq!(tab.tuning.as_deref(), Some("E A D G B E"));
         assert!(tab.content.contains("[ch]Am[/ch]"));
         assert!(!tab.content.contains('\r'));
+        assert!(tab.content.contains("café’s"), "multi-byte text survives");
         assert!(
             tab.content.contains("doesn't"),
             "entities inside the sheet are decoded"
