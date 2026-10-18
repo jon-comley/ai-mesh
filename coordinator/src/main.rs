@@ -53,6 +53,7 @@ async fn main() {
     tokio::spawn(runner.run());
 
     coordinator::http::rearm_ebay_hunts(dashboard.clone(), coord.registry.clone());
+    coordinator::http::seed_starter_songs(coord.registry.clone());
 
     tokio::spawn(coordinator::http::start(
         http_port,

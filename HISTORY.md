@@ -11,6 +11,35 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Songs tab: Ultimate Guitar chord sheets, versions and a saved library (2026-10-18)
+
+Jon plays and sings from Ultimate Guitar chord sheets. He wanted them in the
+dashboard: search for any song, switch between its versions, save one for next time,
+and browse saved songs A–Z or by artist. Usage is in `docs/chords.md`; the design,
+and what changed while building it, is in `plans/chords-songbook.md`.
+
+**UG has no API.** The coordinator reads the JSON UG embeds in its own pages
+(`js-store`), which survives restyling better than reading the markup does. The
+browser can't fetch UG itself (CORS), so the coordinator does. Fetches are refused
+for anything that isn't a UG `/tab/` URL. The endpoint takes a URL from the browser,
+and without that check it would fetch any address for anyone with a token.
+
+**Saving stores the whole sheet**, so a saved song opens instantly, offline, and
+after UG removes the version.
+
+**No lyrics are in the repo.** Lyrics are copyrighted and this repo is public:
+- the four starter songs are fetched on Jon's network at startup, and only their
+  URLs are committed;
+- the test fixtures use invented lyrics.
+
+**Built where UG can't be reached.** The fixtures were built to match UG's page
+structure rather than captured from it. The first live search is the real test of
+the parser.
+
+**"Without adverts" was answered honestly.** ai-mesh can't remove YouTube's
+adverts; Premium, signed in in that browser, does. The Spotify button plays through
+the existing music node instead, and that has no adverts.
+
 ## `just rotate-token` rotates the coordinator where it runs now, pi1 (2026-10-15)
 
 The mesh token had to be rotated: `firebase emulators:exec`, run from the guv repo,

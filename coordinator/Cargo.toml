@@ -7,6 +7,7 @@ edition = "2024"
 shared = { path = "../shared" }
 llm-rotation = { path = "../llm-rotation" }
 ebay = { path = "../ebay" }
+chords = { path = "../chords" }
 libc = "0.2"
 thiserror = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }

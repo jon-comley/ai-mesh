@@ -4604,3 +4604,122 @@ body {
 .rv-finding code, .rv-repo code { overflow-wrap: anywhere; }
 .rv-finding .rv-actions { margin-top: 2px; }
 .rv-answer .rv-quote { white-space: pre; }
+
+/* ── Songs tab (chords.js, plans/chords-songbook.md) ───────────────────────── */
+/* The panel itself doesn't scroll: each view does, so the player's toolbar
+   stays put while the sheet scrolls under it. */
+.panel-songs { padding: 0; overflow: hidden; }
+.panel-songs.active { display: flex; flex-direction: column; }
+.songs-view { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; }
+.songs-view[hidden], .songs-player[hidden] { display: none; }
+.songs-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.songs-head h2 { margin-bottom: 0; flex: 1; }
+
+.songs-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  min-height: 40px; min-width: 40px; padding: 6px 12px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 15px; cursor: pointer; text-decoration: none; white-space: nowrap;
+}
+.songs-btn:hover:not(:disabled) { border-color: var(--accent); }
+.songs-btn:active:not(:disabled) { transform: translateY(1px); }
+.songs-btn:disabled { opacity: .4; cursor: default; }
+.songs-btn.is-active, .songs-primary { background: color-mix(in srgb, var(--accent) 28%, var(--surface-2)); border-color: var(--accent); }
+.songs-danger { color: var(--red); }
+
+.songs-libbar, .songs-searchbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.songs-libbar input, .songs-searchbar input, .songs-paste input, .songs-paste textarea, .songs-listen input, .songs-toolbar select {
+  flex: 1; min-width: 0; min-height: 40px; padding: 8px 10px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; font-size: 15px;
+}
+.songs-seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.songs-mode { background: var(--surface-2); color: var(--text-muted); border: none; padding: 8px 14px; font-size: 14px; cursor: pointer; }
+.songs-mode.is-active { background: color-mix(in srgb, var(--accent) 28%, var(--surface-2)); color: var(--text); }
+
+.songs-subhead { font-size: 13px; color: var(--text-muted); font-weight: 600; margin: 4px 0 6px; }
+.songs-recent { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 8px; }
+.songs-chip {
+  flex: 0 0 auto; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+}
+.songs-letter { font-size: 13px; color: var(--accent); margin: 14px 0 4px; padding-bottom: 2px; border-bottom: 1px solid var(--border); }
+.songs-row, .songs-result-open {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; align-items: baseline;
+  width: 100%; text-align: left; cursor: pointer;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 6px; font-size: 15px;
+}
+.songs-row:hover, .songs-result-open:hover { border-color: var(--accent); }
+.songs-row-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.songs-row-artist { grid-column: 1; color: var(--text-muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.songs-row-meta { grid-column: 2; grid-row: 1; color: var(--text-muted); font-size: 12px; }
+.songs-artist {
+  display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 10px;
+  background: none; border: none; border-bottom: 1px solid var(--border);
+  color: var(--text); font-size: 16px; font-weight: 600; padding: 8px 2px; cursor: pointer; text-align: left;
+}
+.songs-artist > span:nth-child(2) { flex: 1; }
+.songs-chev { width: 14px; color: var(--text-muted); }
+.songs-count { color: var(--text-muted); font-size: 13px; font-weight: 400; }
+.songs-artist-body { padding-left: 14px; }
+
+.songs-result { margin-top: 8px; }
+.songs-result-more { background: none; border: none; color: var(--accent); font-size: 13px; padding: 6px 4px; cursor: pointer; }
+.songs-versions { display: flex; flex-direction: column; gap: 4px; padding-left: 14px; }
+.songs-versions[hidden] { display: none; }
+.songs-version { text-align: left; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; cursor: pointer; font-size: 14px; }
+.songs-version:hover { border-color: var(--accent); }
+.songs-paste { margin-top: 20px; }
+.songs-paste summary { cursor: pointer; color: var(--text-muted); font-size: 14px; padding: 6px 0; }
+.songs-paste-form { display: flex; flex-direction: column; gap: 8px; }
+.songs-paste-names { display: flex; gap: 8px; }
+.songs-paste textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }
+
+.songs-player { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.songs-toolbar { flex: 0 0 auto; background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
+.songs-toolrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.songs-title { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.songs-title strong { font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.songs-title span { color: var(--text-muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.songs-versionrow select { flex: 1 1 180px; }
+.songs-onlyversion { color: var(--text-muted); font-size: 13px; flex: 1; }
+.songs-saved { color: var(--green); font-size: 14px; padding: 0 6px; }
+.songs-group { display: inline-flex; align-items: center; gap: 4px; }
+.songs-group[hidden] { display: none; }
+.songs-val { min-width: 28px; text-align: center; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.songs-switch { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 6px; cursor: pointer; font-size: 15px; }
+.songs-switch input { width: 20px; height: 20px; accent-color: var(--accent); }
+.songs-play { min-width: 92px; }
+.songs-moremenu { position: relative; }
+.songs-moremenu summary { list-style: none; }
+.songs-moremenu summary::-webkit-details-marker { display: none; }
+.songs-moremenu > div {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 5;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+}
+.songs-listen { display: flex; flex-direction: column; gap: 8px; }
+.songs-listen[hidden] { display: none; }
+.songs-listen-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.songs-hint { color: var(--text-muted); font-size: 12px; }
+.songs-video { position: relative; width: 100%; max-width: 480px; aspect-ratio: 16 / 9; }
+.songs-video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 8px; }
+
+.songs-sheet { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; outline: none; --songs-font: 16px; }
+.songs-sheet pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: var(--songs-font); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere;
+  padding-bottom: 60vh; /* lets the last lines scroll up to eye level */
+}
+.songs-ch { color: var(--accent); font-weight: 700; }
+.songs-sec { display: inline-block; color: var(--amber); font-weight: 600; margin-top: .4em; }
+
+/* Full screen for the music stand: the sheet and its toolbar only. */
+body.songs-fullscreen .app-header, body.songs-fullscreen .tab-bar { display: none; }
+@media (max-width: 600px) {
+  .songs-toolbar { padding: 6px 8px; }
+  .songs-sheet { padding: 12px 10px; }
+}

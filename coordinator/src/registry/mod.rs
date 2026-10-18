@@ -10,12 +10,14 @@ use tracing::warn;
 
 // Domain method groups split into sibling files (each an `impl Registry` block
 // sharing this module's struct + private fields/helpers).
+mod chords;
 mod ebay;
 mod effects;
 mod openings;
 mod scenes;
 mod switch_bindings;
 
+pub use chords::{ChordSong, ChordSongPrefs, ChordSongSummary};
 pub use ebay::EbayFindRecord;
 
 fn degrees_to_cardinal(deg: f32) -> &'static str {
@@ -406,7 +408,37 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             found_ms      INTEGER NOT NULL,
             reviewed      INTEGER NOT NULL DEFAULT 0
         );
-        CREATE INDEX IF NOT EXISTS idx_ebay_finds_hunt_found ON ebay_finds(hunt_id, found_ms);",
+        CREATE INDEX IF NOT EXISTS idx_ebay_finds_hunt_found ON ebay_finds(hunt_id, found_ms);
+        -- Songs tab (plans/chords-songbook.md): chord sheets saved from
+        -- Ultimate Guitar or pasted, stored whole so they open without UG.
+        -- `*_key` columns are the sort/group keys (lowercase, no leading
+        -- 'The '). Several versions of one song may be saved; one UG tab
+        -- id may not be saved twice.
+        CREATE TABLE IF NOT EXISTS chord_songs (
+            id              TEXT PRIMARY KEY,
+            artist          TEXT NOT NULL,
+            title           TEXT NOT NULL,
+            artist_key      TEXT NOT NULL,
+            title_key       TEXT NOT NULL,
+            ug_tab_id       INTEGER,
+            source_url      TEXT,
+            kind            TEXT,
+            version         INTEGER,
+            rating          REAL,
+            votes           INTEGER,
+            capo            INTEGER,
+            tuning          TEXT,
+            tonality        TEXT,
+            content         TEXT NOT NULL,
+            transpose       INTEGER NOT NULL DEFAULT 0,
+            scroll_speed    REAL,
+            youtube_url     TEXT,
+            notes           TEXT,
+            saved_ms        INTEGER NOT NULL,
+            last_played_ms  INTEGER
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chord_songs_ug ON chord_songs(ug_tab_id)
+            WHERE ug_tab_id IS NOT NULL;",
     )?;
 
     // Migration: what a hunt is FOR, and how well each find serves it.

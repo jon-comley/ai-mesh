@@ -26,6 +26,10 @@ orchestration. The same coordinator drives natural-language home automation
   covering nodes, health, models, home devices, security, and chat.
 - **Music & DAW control** — natural-language playback control over a
   Spotify-backed player, and REAPER integration for audio/DAW work.
+- **Chord sheets to play along to** — search Ultimate Guitar for any song,
+  switch between its versions, save favourites into a library (A–Z or by
+  artist), and play with transpose, auto-scroll and YouTube or Spotify
+  alongside ([`docs/chords.md`](docs/chords.md)).
 - **A real security model, not an afterthought** — TLS with trust-on-first-
   contact fingerprint pinning, a shared auth token with zero-downtime
   rotation, and HMAC-signed messages on top of that (closing the window where
@@ -60,6 +64,7 @@ shared/          Wire protocol, message types, HMAC signing
 agent/           Runs on every node — hardware detection, heartbeats, inference
 coordinator/     Central orchestrator — TLS server, registry, scheduler, dashboard
 cli/             CLI + the adversarial chaos-test binary
+chords/          Ultimate Guitar chord sheets (Songs tab)
 capabilities/    Pluggable capabilities: llm, lighting, zigbee, music, voice, audio, art, reaper
 frontend/        Real-time dashboard (PWA)
 docs/            Architecture, protocol, security, and setup documentation

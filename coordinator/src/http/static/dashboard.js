@@ -12,6 +12,7 @@ import * as chat from '/static/chat.js';
 import * as reaper from '/static/reaper.js';
 import * as gateway from '/static/gateway.js';
 import * as ebay from '/static/ebay.js';
+import * as chords from '/static/chords.js';
 import * as reviews from '/static/reviews.js';
 import { registerSwitchAction } from '/static/devicewidgets.js';
 
@@ -190,6 +191,7 @@ chat.init(document.getElementById('panel-chat'));
 reaper.init(document.getElementById('panel-reaper'));
 gateway.init(document.getElementById('panel-gateway'));
 ebay.init(document.getElementById('panel-ebay'));
+chords.init(document.getElementById('panel-chords'));
 reviews.init(document.getElementById('panel-reviews'));
 
 // Ask for token on very first visit when auth is likely needed.

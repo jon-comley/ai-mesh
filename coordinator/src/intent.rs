@@ -1111,7 +1111,7 @@ async fn dispatch_art_search(
     }
 }
 
-async fn dispatch_music_command(
+pub(crate) async fn dispatch_music_command(
     request_id: &str,
     args: &serde_json::Value,
     registry: &Arc<Mutex<Registry>>,

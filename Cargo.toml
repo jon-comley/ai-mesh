@@ -13,6 +13,7 @@ members = [
     "capabilities/music",
     "capabilities/review",
     "ebay",
+    "chords",
     "codereview",
     "llm-rotation",
     "agent",

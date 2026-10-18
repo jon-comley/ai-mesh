@@ -52,6 +52,7 @@ const PREFS_JS: &str = include_str!("static/prefs.js");
 const REAPER_JS: &str = include_str!("static/reaper.js");
 const GATEWAY_JS: &str = include_str!("static/gateway.js");
 const EBAY_JS: &str = include_str!("static/ebay.js");
+const CHORDS_JS: &str = include_str!("static/chords.js");
 const REVIEWS_JS: &str = include_str!("static/reviews.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
@@ -236,6 +237,24 @@ pub fn router(
             "/api/ebay/config",
             get(api::ebay::get_config).post(api::ebay::set_config),
         )
+        // Songs tab (plans/chords-songbook.md): Ultimate Guitar chord sheets.
+        .route("/api/chords/search", get(api::chords::search))
+        .route("/api/chords/fetch", get(api::chords::fetch))
+        .route(
+            "/api/chords/songs",
+            get(api::chords::list_songs).post(api::chords::save_song),
+        )
+        .route(
+            "/api/chords/songs/{id}",
+            get(api::chords::get_song)
+                .patch(api::chords::update_song)
+                .delete(api::chords::delete_song),
+        )
+        .route(
+            "/api/chords/songs/{id}/refresh",
+            post(api::chords::refresh_song),
+        )
+        .route("/api/chords/spotify", post(api::chords::spotify))
         // Reviews tab (docs/code-review.md): mac1 owns the data, these relay.
         .route("/api/reviews", get(api::reviews::get_reviews))
         .route("/api/reviews/run-now", post(api::reviews::run_now))
@@ -311,6 +330,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/reaper.js", REAPER_JS, JS),
         ("/static/gateway.js", GATEWAY_JS, JS),
         ("/static/ebay.js", EBAY_JS, JS),
+        ("/static/chords.js", CHORDS_JS, JS),
         ("/static/reviews.js", REVIEWS_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
@@ -331,6 +351,12 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         );
     }
     r
+}
+
+/// Fetch the Songs tab's starter songs into the library, once each, in the
+/// background — see `api::chords::seed_starter_songs`.
+pub fn seed_starter_songs(registry: Arc<Mutex<Registry>>) {
+    api::chords::seed_starter_songs(registry);
 }
 
 /// Re-arm every enabled eBay hunt's background search timer from persisted
