@@ -24,6 +24,7 @@ async fn send_load(
     });
     match crate::connection::send_recv(&mut stream, &msg).await? {
         MeshMessage::Acknowledge => Ok(()),
+        MeshMessage::Error(reason) => Err(format!("load refused: {reason}").into()),
         other => Err(format!("Unexpected response: {:?}", other).into()),
     }
 }

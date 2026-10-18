@@ -24,7 +24,12 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
     // not simply half the RAM.
     let max_model_size_gb = model_ceiling_gb(
         hw.ram_gb,
-        hw.gpu_vram_gb,
+        hw.gpu_vram_gb.or_else(|| {
+            unified_gpu_budget_gb(
+                hw.ram_gb,
+                cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            )
+        }),
         std::env::var("MAX_MODEL_SIZE_GB").ok().as_deref(),
     );
 
@@ -70,6 +75,19 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
         audio_backends,
         llm_ctx_size,
     })
+}
+
+/// How much of an Apple Silicon Mac's unified memory its GPU may use, in GB —
+/// the figure that decides what a Metal model can hold. There is no separate
+/// VRAM to report, so without this a Mac fell back to half its RAM: mac1 (64 GB)
+/// advertised 32 GB and the coordinator refused qwen3-coder-next:80b (36.6 GB)
+/// though it fits (2026-10-18). macOS's default limit is about three-quarters
+/// of memory on larger Macs and about two-thirds on smaller ones.
+fn unified_gpu_budget_gb(ram_gb: f32, apple_silicon: bool) -> Option<f32> {
+    if !apple_silicon || ram_gb <= 0.0 {
+        return None;
+    }
+    Some(ram_gb * if ram_gb > 36.0 { 0.75 } else { 0.67 })
 }
 
 /// How large a model this node should admit, in GB.
@@ -134,6 +152,19 @@ mod tests {
         // A 24 GB card in a 64 GB box: 21.6 against 32, so RAM wins and a node
         // that can hold a big model is not told otherwise by a modest GPU.
         assert_eq!(model_ceiling_gb(64.0, Some(24.0), None), 32.0);
+    }
+
+    #[test]
+    fn an_apple_silicon_mac_is_judged_by_its_gpu_share_of_unified_memory() {
+        // mac1: 64 GB, GPU may use ~48 GB, 90% of that is the ceiling — room
+        // for qwen3-coder-next:80b (36.6 GB), where half the RAM (32) was not.
+        let budget = unified_gpu_budget_gb(64.0, true);
+        assert_eq!(budget, Some(48.0));
+        let c = model_ceiling_gb(64.0, budget, None);
+        assert!((c - 43.2).abs() < 0.01, "got {c}");
+        // A smaller Mac gets the smaller share; anything else gets nothing.
+        assert!((unified_gpu_budget_gb(16.0, true).unwrap() - 10.72).abs() < 0.01);
+        assert_eq!(unified_gpu_budget_gb(64.0, false), None);
     }
 
     #[test]

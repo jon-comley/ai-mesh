@@ -90,15 +90,20 @@ impl<'a> Scheduler<'a> {
                 node.identity.hostname, node.identity.role
             ));
         }
-        let headroom = self.model_headroom_mb(node_id).ok_or_else(|| {
+        // An explicit load replaces the node's current model — an agent runs
+        // one at a time — so measure against its whole ceiling, not what is
+        // left beside the model it is about to drop. Counting that model made
+        // mac1 refuse a 36.6 GB model while a 22 GB one was loaded.
+        let caps = node.capabilities.as_ref().ok_or_else(|| {
             format!(
                 "node '{}' has not reported its model capabilities yet",
                 node.identity.hostname
             )
         })?;
-        if headroom < model_size_mb {
+        let ceiling_mb = (caps.max_model_size_gb * 1024.0) as u64;
+        if ceiling_mb < model_size_mb {
             return Err(format!(
-                "model needs {model_size_mb} MB but node '{}' has only {headroom} MB of model headroom left",
+                "model needs {model_size_mb} MB but node '{}' can hold at most {ceiling_mb} MB",
                 node.identity.hostname
             ));
         }
@@ -425,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn check_node_for_model_rejects_when_headroom_exhausted() {
+    fn check_node_for_model_lets_a_load_replace_the_resident_model() {
         let mut registry = Registry::new();
         let compute = make_identity("compute", NodeRole::Compute);
         registry.update_heartbeat(compute.clone());
@@ -437,10 +442,30 @@ mod tests {
             },
         );
         registry.update_model_status(&compute.id, "resident", 3072, ModelLifecycleState::Ready);
+        // 3 GB loaded + 2 GB asked for is over 4 GB, but the load replaces it.
+        assert!(
+            Scheduler::new(&registry)
+                .check_node_for_model(&compute.id, 2048)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn check_node_for_model_rejects_a_model_bigger_than_the_node() {
+        let mut registry = Registry::new();
+        let compute = make_identity("compute", NodeRole::Compute);
+        registry.update_heartbeat(compute.clone());
+        registry.update_capabilities(
+            &compute.id,
+            NodeCapabilities {
+                max_model_size_gb: 4.0,
+                ..NodeCapabilities::default()
+            },
+        );
         let err = Scheduler::new(&registry)
-            .check_node_for_model(&compute.id, 2048)
+            .check_node_for_model(&compute.id, 5000)
             .unwrap_err();
-        assert!(err.contains("headroom"), "unexpected reason: {err}");
+        assert!(err.contains("at most 4096 MB"), "unexpected reason: {err}");
     }
 
     #[test]

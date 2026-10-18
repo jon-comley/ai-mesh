@@ -755,7 +755,10 @@ async fn handle_model_load(
             }
             None => {
                 warn!(model_name = %req.model_name, "no node has capacity for auto-placed ModelLoad");
-                return Some(MeshMessage::Acknowledge);
+                return Some(MeshMessage::Error(format!(
+                    "no node has room for {} ({} MB)",
+                    req.model_name, req.model_size_mb
+                )));
             }
         }
     } else if let Some(id) = req.node_id.as_deref() {
@@ -765,9 +768,12 @@ async fn handle_model_load(
             let reg = registry.lock().unwrap();
             Scheduler::new(&reg).check_node_for_model(id, req.model_size_mb)
         };
+        // Refusals go back to the caller: `just load-model` used to print
+        // "acknowledged" for a load pi1 had refused, with the reason only in
+        // pi1's log.
         if let Err(reason) = capacity {
             warn!(node_id = %id, model_name = %req.model_name, %reason, "refusing ModelLoad");
-            return Some(MeshMessage::Acknowledge);
+            return Some(MeshMessage::Error(reason));
         }
     }
     let target_id = req.node_id.as_deref().unwrap_or("");
@@ -783,6 +789,9 @@ async fn handle_model_load(
         }
         None => {
             warn!(node_id = %target_id, "ModelLoad target node not connected");
+            return Some(MeshMessage::Error(format!(
+                "node {target_id} is not connected"
+            )));
         }
     }
     Some(MeshMessage::Acknowledge)
@@ -3063,10 +3072,10 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "live TCP — run with --include-ignored"]
-    async fn model_load_without_node_id_is_acknowledged() {
+    async fn model_load_with_no_room_anywhere_says_so() {
         // Auto-placement: coordinator receives ModelLoad with node_id=None.
-        // No compute node is registered so auto-placement finds nothing and
-        // returns Acknowledge (fail-silent, so the CLI doesn't hang). The important thing is it doesn't panic.
+        // No compute node is registered, so auto-placement finds nothing and
+        // answers with the reason (still an answer, so the CLI doesn't hang).
         let registry = Arc::new(Mutex::new(Registry::new()));
         let server = Server::new("127.0.0.1:9005", registry.clone());
         tokio::spawn(async move {
@@ -3087,8 +3096,8 @@ mod tests {
         .await;
 
         assert!(
-            matches!(ack, Some(MeshMessage::Acknowledge)),
-            "auto-placement failure should still acknowledge so the CLI doesn't hang"
+            matches!(&ack, Some(MeshMessage::Error(e)) if e.contains("no node has room")),
+            "auto-placement failure should answer with the reason: {ack:?}"
         );
     }
 
