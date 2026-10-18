@@ -122,7 +122,8 @@ These need the real machines; none of them could be checked from the code.
      leaves mac1 ~9 GB for everything else. It also needs the GPU limit raised,
      which resets at every reboot:
      `sudo sysctl iogpu.wired_limit_mb=57344`. Then
-     `just load-model mac1 hf:unsloth/Qwen3-Coder-Next-GGUF:Qwen3-Coder-Next-UD-Q4_K_XL.gguf`.
+     `just load-model mac1 hf:unsloth/Qwen3-Coder-Next-GGUF:Qwen3-Coder-Next-UD-Q4_K_XL.gguf 47303`
+     (its size in MB).
    - **Work roles:** if you set them with the old model name, update them to
      `qwen3-coder-next:80b`. `just work-roles` shows the current lists.
 2. **Bench it** and record the results in `docs/model-selection.md`:

@@ -1161,8 +1161,11 @@ update-llama node:
     echo "llama.cpp updated to $LATEST on {{node}}"
 
 # Auto-place a model — coordinator picks the best-fit node. No SSH needed.
+# A model not in the list below can be given as hf:<org>/<repo>:<file.gguf>
+# with its size in MB (the coordinator places it by size).
 # Usage: just load qwen3:8b
-load model:
+#        just load hf:<org>/<repo>:<file.gguf> <size_mb>
+load model size="":
     #!/usr/bin/env bash
     set -e
     case "{{model}}" in
@@ -1188,14 +1191,25 @@ load model:
         deepseek-r1:8b)   SIZE_MB=4692  ;;
         deepseek-r1:14b)  SIZE_MB=8572  ;;
         deepseek-r1:32b)  SIZE_MB=18934 ;;
+        hf:*)
+            SIZE_MB="{{size}}"
+            if ! [[ "$SIZE_MB" =~ ^[0-9]+$ ]]; then
+                echo "Models given as hf:… need their size in MB, e.g.:"
+                echo "  just load hf:org/repo:file.gguf 47303"
+                exit 1
+            fi
+            ;;
         *) echo "Unknown model: {{model}}"; exit 1 ;;
     esac
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" load "{{model}}" "$SIZE_MB"
 
 # Load a model on a named node (looks up live node ID from coordinator).
+# A model not in the list below can be given as hf:<org>/<repo>:<file.gguf>
+# with its size in MB (used for placement and the memory warning).
 # Usage: just load-model pi1 qwen2.5:1.5b
 #        just load-model beelink1 qwen2.5:7b
-load-model node model:
+#        just load-model mac1 hf:<org>/<repo>:<file.gguf> <size_mb>
+load-model node model size="":
     #!/usr/bin/env bash
     set -e
     source nodes/{{node}}.env
@@ -1224,6 +1238,14 @@ load-model node model:
         deepseek-r1:8b)   SIZE_MB=4692  ;;
         deepseek-r1:14b)  SIZE_MB=8572  ;;
         deepseek-r1:32b)  SIZE_MB=18934 ;;
+        hf:*)
+            SIZE_MB="{{size}}"
+            if ! [[ "$SIZE_MB" =~ ^[0-9]+$ ]]; then
+                echo "Models given as hf:… need their size in MB, e.g.:"
+                echo "  just load-model <node> hf:org/repo:file.gguf 47303"
+                exit 1
+            fi
+            ;;
         *) echo "Unknown model: $MODEL"; exit 1 ;;
     esac
     # Retry for up to 120s — allow time for reconnect after coordinator restart.
