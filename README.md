@@ -8,7 +8,8 @@ workspace.
 Point any OpenAI-SDK client at the coordinator and it routes requests to
 whichever node actually has the right model loaded, with no manual
 orchestration. The same coordinator drives natural-language home automation
-(lighting, sensors, music, a DAW), exposed through a real-time web dashboard.
+(lighting, sensors, music, a DAW, voice), exposed through a real-time web
+dashboard.
 
 ## What it does
 
@@ -22,14 +23,35 @@ orchestration. The same coordinator drives natural-language home automation
   lights off") are routed through the LLM and executed as real device
   commands (Zigbee lighting, sensors), with target validation before dispatch
   rather than a silent no-op on typos.
-- **Live web dashboard** — a real-time, installable PWA (WebSocket-driven)
-  covering nodes, health, models, home devices, security, and chat.
-- **Music & DAW control** — natural-language playback control over a
-  Spotify-backed player, and REAPER integration for audio/DAW work.
+- **Live web dashboard** — a real-time, installable PWA (WebSocket-driven),
+  organised into five categories on its bottom bar:
+  - **Home:** rooms and lighting, Devices
+  - **Chat**
+  - **Music:** Songs, REAPER
+  - **Tools:** Hunts, Reviews
+  - **System:** Nodes, Health, Models, Online AI, Security, Errors
+
+  New errors and security events put a dot on System.
+- **Music, DAW & voice** — natural-language playback control over a
+  Spotify-backed player, REAPER integration for audio/DAW work, and a Home
+  Assistant Voice PE puck for speaking to the house.
 - **Chord sheets to play along to** — search Ultimate Guitar for any song,
   switch between its versions, save favourites into a library (A–Z or by
   artist), and play with transpose, auto-scroll and YouTube or Spotify
   alongside ([`docs/chords.md`](docs/chords.md)).
+- **Online AI, off by default** — forward a chat to a hosted model (OpenRouter,
+  Anthropic, Groq, Gemini or any OpenAI-compatible endpoint) with the history
+  compressed first. Tool calls still run locally, and a failed call falls back
+  to local inference. `llm-rotation` tries free tiers before paid ones
+  ([`docs/online-ai-gateway.md`](docs/online-ai-gateway.md)).
+- **Code reviews on the mesh** — mac1 reviews GitHub repos on a schedule or on
+  demand, and answers questions about their code, sharing the work across the
+  mesh's machines using local models only. Home commands always come first
+  ([`docs/code-review.md`](docs/code-review.md)).
+- **eBay Hunts** — describe something you want (or paste a listing). An LLM
+  suggests search terms, including the misspellings sellers use, and saved
+  hunts search on a daily schedule. Matches arrive in a live feed and as a
+  phone push via ntfy ([`docs/ebay-hunts.md`](docs/ebay-hunts.md)).
 - **A real security model, not an afterthought** — TLS with trust-on-first-
   contact fingerprint pinning, a shared auth token with zero-downtime
   rotation, and HMAC-signed messages on top of that (closing the window where
@@ -51,7 +73,8 @@ and (adversarially tested) tampering rather than only good weather.
 
 ## Quality bar
 
-- **1,300+ tests** across the workspace
+- **1,500+ Rust tests** across the workspace, plus a Vitest suite for the
+  dashboard's modules
 - Extensive `docs/` covering architecture, wire protocol, security design,
   and per-crate reference
 - An adversarial chaos-test suite (`just chaos`) that actively tries to break
@@ -62,11 +85,20 @@ and (adversarially tested) tampering rather than only good weather.
 ```
 shared/          Wire protocol, message types, HMAC signing
 agent/           Runs on every node — hardware detection, heartbeats, inference
-coordinator/     Central orchestrator — TLS server, registry, scheduler, dashboard
+coordinator/     Central orchestrator — TLS server, registry, scheduler, and the
+                 dashboard itself (coordinator/src/http/static)
 cli/             CLI + the adversarial chaos-test binary
+capabilities/    Pluggable capabilities: core, llm, lighting, sensors, zigbee,
+                 music, voice, audio, art, reaper, review
 chords/          Ultimate Guitar chord sheets (Songs tab)
-capabilities/    Pluggable capabilities: llm, lighting, zigbee, music, voice, audio, art, reaper
-frontend/        Real-time dashboard (PWA)
+ebay/            eBay Browse API client and hunt scheduling (Hunts tab)
+codereview/      Review logic: chunking, prompts, findings, reports (Reviews tab)
+llm-rotation/    One OpenAI-compatible client across many hosted LLM providers
+frontend/        Vitest unit tests for the dashboard's modules
+nodes/           Per-machine settings for deploys (nodes/<name>.env)
+systemd/         The coordinator's service unit
+scripts/         Node installers and helper scripts behind the justfile
+plans/           Design notes for features, before and as they were built
 docs/            Architecture, protocol, security, and setup documentation
 ```
 
