@@ -43,6 +43,9 @@ pub enum RunKind {
     Path(String),
     /// On demand: what a branch changes compared with the repo's main branch.
     Branch(String),
+    /// After every test passed at this commit: the new commits up to it, the
+    /// way a nightly run reviews up to the newest. Moves the bookmark to it.
+    Tested(String),
 }
 
 impl RunKind {
@@ -53,11 +56,14 @@ impl RunKind {
             RunKind::Manual => "manual",
             RunKind::Path(_) => "path",
             RunKind::Branch(_) => "branch",
+            RunKind::Tested(_) => "tested",
         }
     }
 
     /// Back from the database after a restart. Path and branch runs are not
-    /// queued again: they were asked for once, by hand.
+    /// queued again: they were asked for once, by hand. Nor is a tested run,
+    /// whose commit isn't stored: the bookmark hasn't moved, so the next pass
+    /// covers its commits.
     pub fn parse(s: &str) -> Option<RunKind> {
         match s {
             "nightly" => Some(RunKind::Nightly),
@@ -297,6 +303,22 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
             let base = repo.merge_base(&head, &bhead).await?;
             (bhead, Some(base))
         }
+        RunKind::Tested(c) => {
+            let not_on = || {
+                format!(
+                    "commit {c} is not on {}: push it, then ask again",
+                    spec.branch
+                )
+            };
+            if !files::valid_commit(c) {
+                return Err(format!("'{c}' is not a commit id"));
+            }
+            let sha = repo.resolve(c).await.map_err(|_| not_on())?;
+            if !repo.is_ancestor(&sha, &head).await {
+                return Err(not_on());
+            }
+            (sha, None)
+        }
         _ => (head.clone(), None),
     };
 
@@ -336,21 +358,29 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     let mut targets: Vec<SourceFile> = Vec::new();
     let mut sweep_folder = None;
     let scope = match &req.kind {
-        RunKind::Nightly | RunKind::Manual => {
-            let base = match row.last_reviewed_commit.as_deref() {
-                Some(c) if repo.has_commit(c).await => c.to_string(),
+        // Up to `rev`: the branch's newest commit, or the one that passed the tests.
+        RunKind::Nightly | RunKind::Manual | RunKind::Tested(_) => {
+            let bookmark = match row.last_reviewed_commit.as_deref() {
+                Some(c) if repo.has_commit(c).await => Some(c.to_string()),
+                _ => None,
+            };
+            if let Some(b) = &bookmark
+                && repo.is_ancestor(&rev, b).await
+            {
+                return finish_quiet(ctx, run_id, "nothing new since the last review");
+            }
+            // A bookmark off this history (a force-push) is no start either.
+            let base = match bookmark {
+                Some(b) if repo.is_ancestor(&b, &rev).await => b,
                 _ => {
-                    repo.commit_before(&head, ctx.limits.first_run_commits)
+                    repo.commit_before(&rev, ctx.limits.first_run_commits)
                         .await?
                 }
             };
-            if base == head {
-                return finish_quiet(ctx, run_id, "nothing new since the last review");
-            }
-            let changed = repo.changed_files(&base, &head).await?;
+            let changed = repo.changed_files(&base, &rev).await?;
             for path in changed.iter().filter(|p| files::is_reviewable(p)) {
-                if let Some(content) = load(&repo, &head, path).await {
-                    let diff = repo.diff(&base, &head, path).await.ok();
+                if let Some(content) = load(&repo, &rev, path).await {
+                    let diff = repo.diff(&base, &rev, path).await.ok();
                     targets.push(SourceFile {
                         repo: spec.name.clone(),
                         path: path.clone(),
@@ -360,17 +390,17 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
                     });
                 }
             }
-            let n = repo.commit_count(&base, &head).await.unwrap_or(0);
-            let label = if req.kind == RunKind::Manual {
-                "Run now"
-            } else {
-                "Nightly"
+            let n = repo.commit_count(&base, &rev).await.unwrap_or(0);
+            let label = match req.kind {
+                RunKind::Manual => "Run now",
+                RunKind::Tested(_) => "Tests passed",
+                _ => "Nightly",
             };
             format!(
                 "{label}: {n} new commit{} ({}..{})",
                 if n == 1 { "" } else { "s" },
                 short(&base),
-                short(&head)
+                short(&rev)
             )
         }
         RunKind::Sweep => {
@@ -462,8 +492,8 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     if targets.is_empty() {
         let out = finish_quiet(ctx, run_id, "no reviewable files changed");
         match &req.kind {
-            RunKind::Nightly | RunKind::Manual => {
-                ctx.store(|s| s.set_last_reviewed(&spec.name, &head))
+            RunKind::Nightly | RunKind::Manual | RunKind::Tested(_) => {
+                ctx.store(|s| s.set_last_reviewed(&spec.name, &rev))
             }
             RunKind::Sweep => {
                 if let Some(f) = &sweep_folder {
@@ -648,7 +678,9 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
                     s.set_sweep_cursor(&spec.name, f);
                 }
             }
-            RunKind::Nightly | RunKind::Manual => s.set_last_reviewed(&spec.name, &head),
+            RunKind::Nightly | RunKind::Manual | RunKind::Tested(_) => {
+                s.set_last_reviewed(&spec.name, &rev)
+            }
             // On-demand runs leave the nightly and sweep bookkeeping alone.
             RunKind::Path(_) | RunKind::Branch(_) => {}
         }
@@ -1407,6 +1439,81 @@ mod tests {
             "{scope}"
         );
         assert!(s.repo("app").unwrap().last_reviewed_commit.is_none());
+    }
+
+    fn rev_parse(dir: &Path, rev: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", rev])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_tested_review_stops_at_the_commit_that_passed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(tmp.path(), "app", &[("src/a.ts", "export const a = 1;\n")]);
+        let passed = rev_parse(&repo, "HEAD");
+        // Pushed after the test run started: not reviewed yet.
+        std::fs::write(repo.join("src/later.ts"), "export const l = 2;\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "later"]);
+        let store = Store::open_in_memory().unwrap();
+        add_repo(&store, "app", &repo, vec![]);
+        let mesh = plain_mesh();
+        let c = ctx(&tmp.path().join("home"), mesh.clone(), store);
+
+        let out = run_local(&c, "app", RunKind::Tested(passed[..7].into())).await;
+        assert_eq!(out.status, "done");
+        {
+            let s = c.store.lock().unwrap();
+            let scope = &s.runs(1)[0].scope;
+            assert!(scope.starts_with("Tests passed: 1 new commit ("), "{scope}");
+            assert!(scope.ends_with(&format!("..{})", &passed[..7])), "{scope}");
+            assert_eq!(
+                s.repo("app").unwrap().last_reviewed_commit.as_deref(),
+                Some(passed.as_str()),
+                "the bookmark stops at the commit that passed"
+            );
+        }
+        // The same commit again, or an older one, has nothing new.
+        let again = run_local(&c, "app", RunKind::Tested(passed.clone())).await;
+        assert_eq!(again.status, "nothing_new");
+
+        // A commit that isn't on main is refused, and moves nothing.
+        sh(&repo, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(repo.join("src/side.ts"), "export const s = 3;\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "side"]);
+        let side = rev_parse(&repo, "HEAD");
+        sh(&repo, &["checkout", "-q", "main"]);
+        let err = execute(
+            &c,
+            &RunRequest {
+                repo: "app".into(),
+                kind: RunKind::Tested(side),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("is not on main"), "{err}");
+
+        // The next passing commit reviews just what came after.
+        let newest = rev_parse(&repo, "main");
+        let next = run_local(&c, "app", RunKind::Tested(newest.clone())).await;
+        assert_eq!(next.status, "done");
+        let s = c.store.lock().unwrap();
+        assert!(
+            s.runs(1)[0]
+                .scope
+                .starts_with("Tests passed: 1 new commit (")
+        );
+        assert_eq!(
+            s.repo("app").unwrap().last_reviewed_commit.as_deref(),
+            Some(newest.as_str())
+        );
     }
 
     #[tokio::test]

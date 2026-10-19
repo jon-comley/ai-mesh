@@ -211,15 +211,45 @@ Besides the schedule, a review can be started any time — from the tab's
 | The next folder | The next top-level folder in turn | Yes (the sweep's) |
 | A folder or file | Everything under that path, at the latest commit | No |
 | A branch | What the branch changes since it left the main branch | No |
+| Up to a commit | Everything since the last review, up to that commit | Yes, to that commit |
 
 ```bash
 just review-now dashboard                     # new commits
 just review-now dashboard sweep               # the next folder
 just review-now dashboard path:src/services   # one folder or file
 just review-now guv branch:feature-x          # a branch against main
+just review-now guv commit:5c8cf4a            # new commits up to 5c8cf4a
 ```
 
-Runs queue one at a time; the same request twice is queued once.
+Runs queue one at a time; the same request twice is queued once. A second
+*up to a commit* request for a repo that already has one waiting replaces it,
+since the newer commit's run covers the older one's commits.
+
+### Only after the tests pass
+
+guv and the dashboard are reviewed only once every test has passed. guv's
+`just all-tests` (`scripts/all-tests.sh`) ends with
+`just review-now <repo> commit:<sha>` for each of them, at the commit it
+tested, when:
+
+- everything passed, the Maestro stage included (a skipped Maestro stage
+  isn't a pass here), and
+- the working tree was clean when the run started (the guv commit must also be
+  the one Maestro tested on mac1).
+
+Each review covers the commits since the last one, up to the commit that
+passed. A commit pushed while the tests ran waits for the next pass. A commit
+that isn't on the repo's branch on GitHub is refused ("push it, then ask
+again").
+
+For this, those two repos have no nightly times. Clear **Nightly times** in
+the repo's editor on the Reviews tab, which shows the repo as "Run now only".
+The weekly sweep, if set, still runs. all-tests.sh runs this repo's
+`just review-now` from `~/repos/ai-mesh` on the laptop.
+
+An *up to a commit* run left half-done by a restart isn't queued again,
+because the commit isn't stored. The bookmark hasn't moved, so the next pass
+reviews those commits.
 
 ## Asking questions
 
@@ -253,7 +283,8 @@ crate:
 
 1. **Fetch** the repo and any companion repos.
 2. **Choose files.** Nightly and *Run now*: files changed since the last
-   reviewed commit (the last 20 commits on a first run). Weekly sweep: every
+   reviewed commit (the last 20 commits on a first run). *Up to a commit*: the
+   same, stopping at that commit. Weekly sweep: every
    file in the next top-level folder, in turn. Tests, generated and vendored
    code are skipped as targets.
 3. **Context:** the files they import, two levels deep, including the
@@ -290,7 +321,7 @@ the tab stays dismissed when a later run reports it again.
 | `WorkInferenceDone` | pi1 → mac1 | Finished, Preempted, Failed or NoWorker, with the output |
 | `RequestWorkers` / `WorkerSnapshot` | mac1 ↔ pi1 | Machines with models: context, roles, busy, resting |
 | `ReviewSnapshot` | mac1 → pi1 | The whole review state, for the tab |
-| `ReviewCommand` | pi1 → mac1 | Run now (new commits, next folder, a path or a branch), ask a question, edit repos, finding status, settings, fetch report |
+| `ReviewCommand` | pi1 → mac1 | Run now (new commits, up to a commit, next folder, a path or a branch), ask a question, edit repos, finding status, settings, fetch report |
 | `ReviewReply` | mac1 → pi1 | A report, or why a command failed |
 
 pi1 streams each task from the worker, so the agent's 90 s non-streaming cap
@@ -304,6 +335,7 @@ just review-now dashboard                     # new commits since the last revie
 just review-now dashboard sweep               # the next folder of the whole repo
 just review-now dashboard path:src/services   # one folder or file
 just review-now guv branch:feature-x          # what a branch changes
+just review-now guv commit:5c8cf4a            # new commits up to one that passed the tests
 just ask dashboard "where is VAT added?"      # a question, waits for the answer
 just work-roles                               # show which models do what
 ```

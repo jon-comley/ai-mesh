@@ -183,6 +183,21 @@ impl Repo {
         Ok(run_text(cmd).await?.trim().to_string())
     }
 
+    /// The full id of `commit` (a short one is fine), if this clone has it.
+    pub async fn resolve(&self, commit: &str) -> Result<String, String> {
+        let mut cmd = self.git();
+        cmd.args(["rev-parse", "--verify", "--quiet"])
+            .arg(format!("{commit}^{{commit}}"));
+        Ok(run_text(cmd).await?.trim().to_string())
+    }
+
+    /// Whether `a` is `b` or comes before it in `b`'s history.
+    pub async fn is_ancestor(&self, a: &str, b: &str) -> bool {
+        let mut cmd = self.git();
+        cmd.args(["merge-base", "--is-ancestor", a, b]);
+        run(cmd).await.is_ok()
+    }
+
     /// Files at `rev` containing `term` (case-insensitive, fixed string), with
     /// how many lines match. No match is an empty list, not an error.
     pub async fn grep_count(&self, rev: &str, term: &str) -> Result<Vec<(String, u32)>, String> {
@@ -308,6 +323,11 @@ mod tests {
         sh(&origin, &["checkout", "-q", "main"]);
         let fhead = repo.fetch_branch("feature").await.unwrap();
         assert_eq!(repo.merge_base(&head, &fhead).await.unwrap(), head);
+        assert!(repo.is_ancestor(&first, &head).await);
+        assert!(repo.is_ancestor(&head, &head).await);
+        assert!(!repo.is_ancestor(&fhead, &head).await);
+        assert_eq!(repo.resolve(&head[..8]).await.unwrap(), head);
+        assert!(repo.resolve("deadbeef").await.is_err());
         assert_eq!(
             repo.changed_files(&head, &fhead).await.unwrap(),
             vec!["src/c.ts"]

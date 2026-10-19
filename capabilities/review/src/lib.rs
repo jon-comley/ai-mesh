@@ -184,6 +184,18 @@ impl Inner {
         if q.iter().any(|r| r.repo == req.repo && r.kind == req.kind) {
             return;
         }
+        // A newer passing commit covers a waiting one's commits too.
+        if let RunKind::Tested(c) = &req.kind
+            && let Some(waiting) = q
+                .iter_mut()
+                .find(|r| r.repo == req.repo && matches!(r.kind, RunKind::Tested(_)))
+        {
+            info!(repo = %req.repo, commit = %c, "queued tested review moved to a newer commit");
+            waiting.kind = req.kind;
+            drop(q);
+            self.changed.notify_one();
+            return;
+        }
         info!(repo = %req.repo, kind = req.kind.as_str(), "review queued");
         q.push_back(req);
         drop(q);
@@ -302,6 +314,7 @@ impl Inner {
                 sweep,
                 path,
                 branch,
+                commit,
             } => {
                 if self.store.lock().unwrap().repo(&repo).is_none() {
                     self.set_notice(format!("'{repo}' is not in the review list"));
@@ -313,19 +326,27 @@ impl Inner {
                 let branch = branch
                     .map(|b| b.trim().to_string())
                     .filter(|b| !b.is_empty());
-                let kind = match (path, branch) {
-                    (Some(p), _) if !files::valid_review_path(&p) => {
+                let commit = commit
+                    .map(|c| c.trim().to_ascii_lowercase())
+                    .filter(|c| !c.is_empty());
+                let kind = match (path, branch, commit) {
+                    (Some(p), _, _) if !files::valid_review_path(&p) => {
                         self.set_notice(format!("'{p}' is not a path inside the repo"));
                         return;
                     }
-                    (_, Some(b)) if !files::valid_branch(&b) => {
+                    (_, Some(b), _) if !files::valid_branch(&b) => {
                         self.set_notice(format!("'{b}' is not a valid branch name"));
                         return;
                     }
-                    (Some(p), _) => RunKind::Path(p),
-                    (None, Some(b)) => RunKind::Branch(b),
-                    (None, None) if sweep => RunKind::Sweep,
-                    (None, None) => RunKind::Manual,
+                    (_, _, Some(c)) if !files::valid_commit(&c) => {
+                        self.set_notice(format!("'{c}' is not a commit id"));
+                        return;
+                    }
+                    (Some(p), _, _) => RunKind::Path(p),
+                    (None, Some(b), _) => RunKind::Branch(b),
+                    (None, None, Some(c)) => RunKind::Tested(c),
+                    (None, None, None) if sweep => RunKind::Sweep,
+                    (None, None, None) => RunKind::Manual,
                 };
                 self.enqueue(RunRequest { repo, kind });
             }
@@ -773,6 +794,7 @@ mod tests {
                 sweep: false,
                 path: None,
                 branch: None,
+                commit: None,
             })
             .await;
         c.inner
@@ -781,6 +803,7 @@ mod tests {
                 sweep: false,
                 path: None,
                 branch: None,
+                commit: None,
             })
             .await;
         let snap = c.inner.snapshot();
@@ -833,6 +856,7 @@ mod tests {
                 sweep: false,
                 path: Some("/src/services/".into()),
                 branch: None,
+                commit: None,
             })
             .await;
         c.inner
@@ -841,6 +865,7 @@ mod tests {
                 sweep: false,
                 path: None,
                 branch: Some("--upload-pack=x".into()),
+                commit: None,
             })
             .await;
         let q = c.inner.queue.lock().unwrap().clone();
@@ -852,6 +877,36 @@ mod tests {
                 .notice
                 .unwrap()
                 .contains("not a valid branch")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newer_passing_commit_replaces_the_one_waiting() {
+        let (c, _tmp) = cap();
+        c.inner
+            .apply(ReviewCommand::UpsertRepo {
+                spec: spec("guv", "https://github.com/jon-comley/guv"),
+            })
+            .await;
+        let tested = |commit: &str| ReviewCommand::RunNow {
+            repo: "guv".into(),
+            sweep: false,
+            path: None,
+            branch: None,
+            commit: Some(commit.into()),
+        };
+        c.inner.apply(tested(" 5C8CF4A ")).await;
+        c.inner.apply(tested("acb3fbf")).await;
+        c.inner.apply(tested("HEAD~1")).await;
+        let q = c.inner.queue.lock().unwrap().clone();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].kind, RunKind::Tested("acb3fbf".into()));
+        assert!(
+            c.inner
+                .snapshot()
+                .notice
+                .unwrap()
+                .contains("not a commit id")
         );
     }
 

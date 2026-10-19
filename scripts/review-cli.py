@@ -16,8 +16,10 @@ def run_body(repo, mode):
         body["path"] = mode[len("path:"):]
     elif mode.startswith("branch:"):
         body["branch"] = mode[len("branch:"):]
+    elif mode.startswith("commit:"):
+        body["commit"] = mode[len("commit:"):]
     elif mode not in ("", "sweep"):
-        sys.exit("mode must be sweep, path:<folder-or-file> or branch:<name>")
+        sys.exit("mode must be sweep, path:<folder-or-file>, branch:<name> or commit:<sha>")
     return body
 
 

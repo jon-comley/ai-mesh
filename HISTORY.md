@@ -11,6 +11,19 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Reviews: guv and the dashboard only after the tests pass (2026-10-19)
+
+Jon: "i only want the review to run after orchestrator has all tests passing".
+- **The trigger:** guv's `just all-tests` asks mac1 to review each repo up to
+  the commit that passed (`just review-now <repo> commit:<sha>`, run kind
+  `tested`). The nightly times for those two repos are cleared.
+- **Why not review the newest commit:** a commit pushed while the tests ran
+  hasn't passed them yet. The bookmark stops at the commit that passed, and
+  the next pass reviews what came after it.
+- **Considered, and rejected:** mac1 checking the latest test result before
+  each nightly run. That needs somewhere to record a pass that both machines
+  can read, and still reviews at 02:15 rather than once the tests are done.
+
 ## Reviews: mac1 moves to Qwen3-Coder-Next (2026-10-18)
 
 mac1's review model goes from `qwen3-coder:30b` to `qwen3-coder-next:80b`, an

@@ -170,7 +170,7 @@ pub struct ReviewCounts {
 pub struct ReviewRunView {
     pub id: i64,
     pub repo: String,
-    /// "nightly", "sweep" or "manual".
+    /// "nightly", "sweep", "manual", "path", "branch" or "tested".
     pub kind: String,
     pub scope: String,
     /// "queued", "running", "done", "nothing_new" or "failed".
@@ -288,6 +288,10 @@ pub enum ReviewCommand {
         /// Review what this branch changes compared with the repo's main branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
+        /// Every test passed at this commit: review the new commits up to it,
+        /// not up to the newest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
     },
     /// Answer a question about a repo's code. The answer arrives in the
     /// snapshot's `questions`.
@@ -392,6 +396,14 @@ mod tests {
             sweep: false,
             path: None,
             branch: Some("feature-x".into()),
+            commit: None,
+        }));
+        roundtrip(MeshMessage::ReviewCommand(ReviewCommand::RunNow {
+            repo: "guv".into(),
+            sweep: false,
+            path: None,
+            branch: None,
+            commit: Some("5c8cf4a".into()),
         }));
         roundtrip(MeshMessage::ReviewCommand(ReviewCommand::Ask {
             id: "q1".into(),

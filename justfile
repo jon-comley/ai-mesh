@@ -2065,11 +2065,14 @@ chat text:
 
 # Ask mac1 to review a repo now (docs/code-review.md). With no mode it reviews
 # the commits since the last review; "sweep" does the next folder of the whole
-# repo; "path:<folder-or-file>" and "branch:<name>" review just that.
+# repo; "path:<folder-or-file>" and "branch:<name>" review just that;
+# "commit:<sha>" reviews the commits since the last review up to that one, for
+# a test run to send once every test has passed there (guv's all-tests.sh).
 # Usage: just review-now dashboard
 #        just review-now dashboard sweep
 #        just review-now dashboard path:src/services
 #        just review-now guv branch:feature-x
+#        just review-now guv commit:5c8cf4a
 review-now repo mode="":
     #!/usr/bin/env bash
     set -e

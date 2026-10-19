@@ -97,6 +97,9 @@ pub struct RunNowBody {
     /// Review what this branch changes compared with the main branch.
     #[serde(default)]
     branch: Option<String>,
+    /// Every test passed at this commit: review the new commits up to it.
+    #[serde(default)]
+    commit: Option<String>,
 }
 
 pub async fn run_now(
@@ -113,6 +116,7 @@ pub async fn run_now(
             sweep: body.sweep,
             path: body.path,
             branch: body.branch,
+            commit: body.commit,
         },
     )
     .await
@@ -391,6 +395,7 @@ mod tests {
                 sweep: true,
                 path: None,
                 branch: None,
+                commit: None,
             }))
         );
         let (status, body) = send_with_body(
@@ -449,14 +454,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_now_passes_a_path_or_branch_through() {
+    async fn run_now_passes_a_path_branch_or_commit_through() {
         let conns = empty_connections();
         let (tx, mut rx) = mpsc::channel(4);
         conns.lock().unwrap().insert("mac1".into(), tx);
         let state = make_state(vec![], conns);
         state.set_review_snapshot(snapshot("mac1"));
         send(
-            router(state, make_registry()),
+            router(state.clone(), make_registry()),
             "POST",
             "/api/reviews/run-now?token=",
             r#"{"repo":"guv","branch":"feature-x"}"#,
@@ -469,6 +474,24 @@ mod tests {
                 sweep: false,
                 path: None,
                 branch: Some("feature-x".into()),
+                commit: None,
+            }))
+        );
+        send(
+            router(state, make_registry()),
+            "POST",
+            "/api/reviews/run-now?token=",
+            r#"{"repo":"guv","commit":"5c8cf4a"}"#,
+        )
+        .await;
+        assert_eq!(
+            rx.recv().await,
+            Some(MeshMessage::ReviewCommand(ReviewCommand::RunNow {
+                repo: "guv".into(),
+                sweep: false,
+                path: None,
+                branch: None,
+                commit: Some("5c8cf4a".into()),
             }))
         );
     }

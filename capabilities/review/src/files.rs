@@ -133,6 +133,11 @@ pub fn valid_branch(name: &str) -> bool {
             .any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\@{".contains(c))
 }
 
+/// A commit id, full or short: hex only, so it can't be read as an option.
+pub fn valid_commit(c: &str) -> bool {
+    (7..=40).contains(&c.len()) && c.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
 /// A folder or file path inside the repo, for an on-demand review.
 pub fn valid_review_path(path: &str) -> bool {
     !path.is_empty()
@@ -264,6 +269,11 @@ mod tests {
         assert!(valid_review_path("firestore.rules"));
         for bad in ["", "/etc", "../x", "src/../x", "-rf", "src//x"] {
             assert!(!valid_review_path(bad), "{bad} accepted");
+        }
+        assert!(valid_commit("5c8cf4a"));
+        assert!(valid_commit("3d806ae1b2c4d5e6f708192a3b4c5d6e7f809a1b"));
+        for bad in ["", "abc12", "--all", "HEAD~1", "5c8cf4g", &"a".repeat(41)] {
+            assert!(!valid_commit(bad), "{bad} accepted");
         }
     }
 
