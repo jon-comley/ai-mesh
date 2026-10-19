@@ -1203,6 +1203,19 @@ load model size="":
     esac
     cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" load "{{model}}" "$SIZE_MB"
 
+# Internal: the largest model, in MB, the coordinator will let <node> load —
+# the ceiling its agent reports (`max_model_size_gb`, agent/src/capabilities.rs).
+# Prints 0 when the node isn't registered or hasn't reported yet.
+# Usage: just _node-ceiling-mb <node>
+_node-ceiling-mb node:
+    #!/usr/bin/env bash
+    source nodes/{{node}}.env
+    source scripts/mesh-env.sh
+    ID=$(cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" find-node "${NODE_HOST}" 2>/dev/null || true)
+    if [ -z "$ID" ]; then echo 0; exit 0; fi
+    cargo run -q -p cli -- --coordinator "{{coordinator_ip}}:{{coordinator_port}}" info "$ID" 2>/dev/null \
+        | awk '/Max model:/ { print int($3 * 1024); found = 1 } END { if (!found) print 0 }'
+
 # Load a model on a named node (looks up live node ID from coordinator).
 # A model not in the list below can be given as hf:<org>/<repo>:<file.gguf>
 # with its size in MB (used for placement and the memory warning).
@@ -1263,35 +1276,11 @@ load-model node model size="":
     fi
     printf "\r>>> ${NODE_HOST} registered.                              \n"
 
-    # Detect hardware to determine this node's capability ceiling.
-    # Outputs mb:gpu_flag (gpu_flag=1 when VRAM detected, 0 for CPU/unified RAM).
-    case "$NODE_OS" in
-      linux)
-        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} '
-            mem=0; gpu=0
-            for f in /sys/class/drm/card*/device/mem_info_vram_total; do
-                [ -f "$f" ] || continue
-                v=$(( $(cat "$f") / 1048576 ))
-                [ "$v" -gt "$mem" ] && mem="$v" && gpu=1
-            done
-            if [ "$gpu" -eq 0 ] && command -v nvidia-smi &>/dev/null; then
-                v=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d " ")
-                [ -n "$v" ] && [ "$v" -gt 0 ] && mem="$v" && gpu=1
-            fi
-            [ "$gpu" -eq 0 ] && mem=$(awk "/MemTotal/{print int(\$2/1024)}" /proc/meminfo)
-            echo "${mem}:${gpu}"
-        ' 2>/dev/null || echo "0:0")
-        ;;
-      windows)
-        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"' 2>/dev/null || echo "0:0")
-        ;;
-      macos)
-        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'echo "$(( $(sysctl -n hw.memsize) / 1048576 )):1"' 2>/dev/null || echo "0:0")
-        ;;
-      *) HW_INFO="0:0" ;;
-    esac
-    HW_MB=$(echo "$HW_INFO" | cut -d: -f1 | tr -d '[:space:]'); HW_MB="${HW_MB:-0}"
-    HW_GPU=$(echo "$HW_INFO" | cut -d: -f2 | tr -d '[:space:]'); HW_GPU="${HW_GPU:-0}"
+    # The most this node may load: the ceiling its agent reports, which is what
+    # the coordinator checks. Asking it rather than probing the machine over SSH
+    # keeps this note and the coordinator's decision from disagreeing (beelink1
+    # was told it had 4 GB by Windows' 32-bit AdapterRAM, 2026-10-19).
+    CEILING_MB=$(just _node-ceiling-mb {{node}})
 
     # All known models sorted by size descending — used to suggest fallbacks.
     ALL_MODELS=(
@@ -1303,11 +1292,11 @@ load-model node model size="":
         "gemma3:4b:2374"     "llama3.2:3b:1926"    "qwen2.5:1.5b:986"
         "llama3.2:1b:770"    "qwen2.5:0.5b:500"
     )
-    THRESHOLD=$(( HW_MB * 80 / 100 ))
+    THRESHOLD=$CEILING_MB
 
     echo ">>> Loading ${MODEL} (${SIZE_MB} MB) on {{node}} (${NODE_ID})..."
-    if [ "$SIZE_MB" -gt "$THRESHOLD" ]; then
-        echo ">>> NOTE: ${MODEL} (${SIZE_MB} MB) exceeds 80% of detected memory (${THRESHOLD} MB)."
+    if [ "$THRESHOLD" -gt 0 ] && [ "$SIZE_MB" -gt "$THRESHOLD" ]; then
+        echo ">>> NOTE: ${MODEL} (${SIZE_MB} MB) is more than {{node}} can hold (${THRESHOLD} MB)."
         echo ">>> Fallbacks that fit this node:"
         for entry in "${ALL_MODELS[@]}"; do
             m="${entry%:*}"; s="${entry##*:}"
@@ -1324,43 +1313,13 @@ auto-load-model node:
     set -e
     source nodes/{{node}}.env
     source scripts/mesh-env.sh
-    case "$NODE_OS" in
-      linux)
-        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} '
-            mem=0; gpu=0
-            for base in /sys/class/drm/card*/device; do
-                [ -f "$base/mem_info_vram_total" ] || continue
-                tf="$base/mem_info_vis_vram_total"
-                [ -f "$tf" ] || tf="$base/mem_info_vram_total"
-                total=$(( $(cat "$tf") / 1048576 ))
-                [ "$total" -eq 0 ] && continue
-                uf="$base/mem_info_vis_vram_used"
-                [ -f "$uf" ] || uf="$base/mem_info_vram_used"
-                used=0; [ -f "$uf" ] && used=$(( $(cat "$uf") / 1048576 ))
-                free=$(( total - used ))
-                [ "$free" -gt "$mem" ] && mem="$free" && gpu=1
-            done
-            if [ "$gpu" -eq 0 ] && command -v nvidia-smi &>/dev/null; then
-                v=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d " ")
-                [ -n "$v" ] && [ "$v" -gt 0 ] && mem="$v" && gpu=1
-            fi
-            [ "$gpu" -eq 0 ] && mem=$(awk "/MemAvailable/{print int(\$2/1024); exit}" /proc/meminfo)
-            echo "${mem}:${gpu}"
-        ')
-        ;;
-      windows)
-        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'powershell -NoProfile -Command "$sysRam=[int]((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1MB);$vramBytes=(Get-ChildItem '"'"'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}'"'"' -ErrorAction SilentlyContinue|ForEach-Object{$_.GetValue('"'"'HardwareInformation.qwMemorySize'"'"')}|Where-Object{$_ -gt 0}|Select-Object -First 1);$vram=if($vramBytes){[int]($vramBytes/1MB)}else{0};if($vram -eq 0){$g=(Get-WmiObject Win32_VideoController|Where-Object{$_.AdapterRAM -gt 0}|Sort-Object AdapterRAM -Descending|Select-Object -First 1);if($g){$vram=[int]($g.AdapterRAM/1MB)}};$gpu=if($vram -gt 0){1}else{0};$m=if($vram -gt 0){$vram}else{$sysRam};Write-Output ($m.ToString()+[char]58+$gpu.ToString())"')
-        ;;
-      macos)
-        # Unified memory: leave a quarter for macOS and whatever else runs
-        # (mac1 is also the iOS simulator runner).
-        HW_INFO=$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'echo "$(( $(sysctl -n hw.memsize) / 1048576 * 3 / 4 )):1"')
-        ;;
-      *)
-        echo "Unknown NODE_OS: $NODE_OS"; exit 1 ;;
-    esac
-    HW_MB=$(echo "$HW_INFO" | cut -d: -f1 | tr -d '[:space:]'); HW_MB="${HW_MB:-0}"
-    HW_GPU=$(echo "$HW_INFO" | cut -d: -f2 | tr -d '[:space:]'); HW_GPU="${HW_GPU:-0}"
+    # Choose by the ceiling the node's agent reports — what the coordinator
+    # will accept — rather than probing the machine over SSH (see load-model).
+    HW_MB=$(just _node-ceiling-mb {{node}})
+    if [ "$HW_MB" -eq 0 ]; then
+        echo ">>> {{node}} has not reported its capabilities to the coordinator — is its agent running?"
+        exit 1
+    fi
 
     # Free disk space on the model directory (need 2× model size: .tmp + final .gguf).
     case "$NODE_OS" in
@@ -1391,11 +1350,7 @@ auto-load-model node:
         "gemma3:4b:2374"     "llama3.2:3b:1926"    "qwen2.5:1.5b:986"
         "llama3.2:1b:770"    "qwen2.5:0.5b:500"
     )
-    if [ "$HW_GPU" = "1" ]; then
-        THRESHOLD=$HW_MB
-    else
-        THRESHOLD=$(( HW_MB * 90 / 100 ))
-    fi
+    THRESHOLD=$HW_MB
     MODEL=""
     for entry in "${CANDIDATE_MODELS[@]}"; do
         m="${entry%:*}"; s="${entry##*:}"
@@ -1404,10 +1359,10 @@ auto-load-model node:
         fi
     done
     if [ -z "$MODEL" ]; then
-        echo ">>> {{node}}: free_mem=${HW_MB}MB disk_free=${DISK_FREE_MB}MB — no model fits both constraints"
+        echo ">>> {{node}}: can hold ${HW_MB}MB, disk_free=${DISK_FREE_MB}MB — no model fits both constraints"
         exit 1
     fi
-    echo ">>> {{node}}: detected ${HW_MB} MB ($([ "$HW_GPU" = "1" ] && echo GPU || echo CPU), threshold ${THRESHOLD} MB) → selecting ${MODEL}"
+    echo ">>> {{node}}: can hold ${THRESHOLD} MB → selecting ${MODEL}"
     just load-model {{node}} ${MODEL}
 
 # Tail live logs from a node.

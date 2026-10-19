@@ -92,7 +92,7 @@ NODE_ROLE=compute    # or controller
 
 Models are downloaded as GGUF shards from Hugging Face on first `load-model`. Nothing is pre-cached during provisioning.
 
-`just auto-load-model <node>` detects available GPU VRAM (or system RAM for CPU-only nodes) and selects the largest model that fits. The same thresholds are baked into the install scripts, which log the selected model and the `auto-load-model` command to run after provisioning.
+`just auto-load-model <node>` selects the largest model that fits under the node's model ceiling — the figure its agent reports to the coordinator (GPU memory, unified memory on a Mac, or half the RAM for CPU-only nodes), which is also what the coordinator checks every load against — and that leaves room on disk to download it. `just load-model` warns, with smaller suggestions, when a model is bigger than that ceiling; the coordinator then refuses it with the reason. The install scripts log a recommended model and the `auto-load-model` command to run after provisioning.
 
 **Windows AMD GPU nodes:** GPU acceleration requires AMD Adrenalin driver 26.5.2+. The install script installs llama-server with the Vulkan backend automatically. The driver must be installed manually before running `just deploy-node`. See `docs/windows-node-setup.md` for details and measured performance figures.
 
