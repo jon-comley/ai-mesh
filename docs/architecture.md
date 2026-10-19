@@ -239,6 +239,8 @@ Agent (sysinfo crate + gpu.rs)                             ← C2 ✓ / C7 ✓
                        gpu_usage_pct?, gpu_vram_used_gb?, gpu_vram_total_gb? }
     Linux GPU: amdgpu sysfs (/sys/class/drm/card0/device/gpu_busy_percent etc.)
     Windows GPU: PowerShell perf counter query (no extra crates)
+    macOS GPU: `ioreg -c IOAccelerator` PerformanceStatistics (busy %, memory in use);
+               total = the GPU's share of unified memory (iogpu.wired_limit_mb, else ~3/4 of RAM)
     CPU-only nodes: GPU fields omitted (serde(default) → None on coordinator)
 
 Coordinator (HealthStore in DashboardState)               ← C3 ✓ / C7 ✓

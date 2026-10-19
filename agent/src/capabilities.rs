@@ -83,7 +83,7 @@ pub fn detect_capabilities() -> Result<NodeCapabilities, CapabilityError> {
 /// advertised 32 GB and the coordinator refused qwen3-coder-next:80b (36.6 GB)
 /// though it fits (2026-10-18). macOS's default limit is about three-quarters
 /// of memory on larger Macs and about two-thirds on smaller ones.
-fn unified_gpu_budget_gb(ram_gb: f32, apple_silicon: bool) -> Option<f32> {
+pub(crate) fn unified_gpu_budget_gb(ram_gb: f32, apple_silicon: bool) -> Option<f32> {
     if !apple_silicon || ram_gb <= 0.0 {
         return None;
     }
