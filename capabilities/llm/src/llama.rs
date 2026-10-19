@@ -31,7 +31,7 @@ fn llama_host() -> String {
     std::env::var("LLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:8080".into())
 }
 
-fn model_dir() -> PathBuf {
+pub(crate) fn model_dir() -> PathBuf {
     if let Ok(d) = std::env::var("LLAMA_MODEL_DIR") {
         return PathBuf::from(d);
     }
@@ -307,6 +307,13 @@ impl GgufSpec {
 /// to try a new model. (Multi-shard custom models aren't supported this way —
 /// there's no reliable way to know the shard count/order without querying the
 /// HF API, so those still need a curated entry below.)
+/// The error `resolve_gguf` gives for `model_name`, for tests outside this
+/// module that check how load failures are classified.
+#[cfg(test)]
+pub(crate) fn pull_model_error_for_tests(model_name: &str) -> String {
+    resolve_gguf(model_name).err().unwrap_or_default()
+}
+
 fn resolve_gguf(model_name: &str) -> Result<GgufSpec, String> {
     if let Some(rest) = model_name.strip_prefix("hf:") {
         let bad_format = || {

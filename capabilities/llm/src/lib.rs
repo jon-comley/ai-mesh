@@ -8,7 +8,9 @@ use shared::{
     InferenceChunk, InferenceRequest, InferenceResult, MeshMessage, ModelLifecycleState,
     ModelStatusReport, WIRE_VERSION,
 };
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Semaphore, mpsc, mpsc::Sender};
 use tracing::{info, warn};
 
@@ -150,6 +152,176 @@ fn unload_status_for(node_id: &str, previous: &Option<(String, u64)>) -> Option<
     })
 }
 
+// ── Keeping a node's model loaded ─────────────────────────────────────────────
+// The model a node should run outlives the agent: a load records it in
+// `<model dir>/.wanted-model`, an unload removes it. An agent that starts with
+// nothing loaded loads it again — an update or a reboot used to leave the node
+// empty until someone noticed (mac1, 2026-10-19). A load that fails for a
+// reason time can cure (most often memory: mac1 shares its GPU with browser
+// test runs) is retried every few minutes until it succeeds or a newer load or
+// unload replaces it.
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+struct WantedModel {
+    model: String,
+    size_mb: u64,
+}
+
+fn wanted_path() -> PathBuf {
+    llama::model_dir().join(".wanted-model")
+}
+
+fn read_wanted(path: &Path) -> Option<WantedModel> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn write_wanted(path: &Path, wanted: Option<&WantedModel>) {
+    let result = match wanted {
+        Some(w) => path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(path, serde_json::to_string(w).unwrap_or_default())),
+        None => match std::fs::remove_file(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        },
+    };
+    if let Err(e) = result {
+        warn!(error = %e, path = %path.display(), "could not record the node's wanted model");
+    }
+}
+
+/// Bumped by every load or unload the coordinator sends. A scheduled retry
+/// runs only if nothing has superseded the request it serves.
+static LOAD_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// The current connection. A load can outlive the connection it started on (a
+/// reconnect mid-download, or a retry minutes later), so its status goes to
+/// whichever connection is current, not the one it was started from.
+static CURRENT_TX: OnceLock<std::sync::Mutex<Option<Sender<MeshMessage>>>> = OnceLock::new();
+
+fn set_current_tx(tx: &Sender<MeshMessage>) {
+    *CURRENT_TX
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap() = Some(tx.clone());
+}
+
+async fn report(node_id: &str, model_name: &str, size_mb: u64, state: ModelLifecycleState) {
+    let tx = CURRENT_TX
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap()
+        .clone();
+    if let Some(tx) = tx {
+        let _ = tx
+            .send(MeshMessage::ModelStatus(ModelStatusReport {
+                node_id: node_id.to_string(),
+                model_name: model_name.to_string(),
+                size_mb,
+                state,
+                wire_version: WIRE_VERSION,
+            }))
+            .await;
+    }
+}
+
+/// Seconds between attempts to load a model that failed (`LLAMA_LOAD_RETRY_SECS`).
+fn retry_secs() -> u64 {
+    parse_retry_secs(std::env::var("LLAMA_LOAD_RETRY_SECS").ok().as_deref())
+}
+
+fn parse_retry_secs(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(300)
+}
+
+/// Failures a retry cannot cure: the name does not resolve to a model.
+fn is_permanent_load_error(error: &str) -> bool {
+    error.starts_with("unknown model") || error.starts_with("custom model")
+}
+
+/// Load `model_name`, or confirm it is already loaded, and report the outcome.
+/// `generation` is `LOAD_GEN` as of the request this attempt serves; a failure
+/// a retry can cure schedules another attempt for the same generation.
+fn spawn_load(node_id: String, model_name: String, size_mb: u64, generation: u64) {
+    tokio::spawn(load_once(node_id, model_name, size_mb, generation));
+}
+
+async fn load_once(nid: String, mname: String, size: u64, generation: u64) {
+    report(&nid, &mname, size, ModelLifecycleState::Loading).await;
+    // Hold the load guard for the whole pull so loads run one at a time
+    // instead of racing the same download temp file or stomping each other's
+    // server.
+    let mut loaded = match load_guard().try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            info!(model = %mname, "another model load in progress — queuing behind it");
+            load_guard().lock().await
+        }
+    };
+    if loaded.as_ref().map(|(n, _)| n.as_str()) == Some(mname.as_str()) {
+        info!(model = %mname, "model already loaded — skipping duplicate load");
+        report(&nid, &mname, size, ModelLifecycleState::Ready).await;
+        return;
+    }
+    // A switch to a different model invalidates the current one; clear it up
+    // front so a mid-load crash doesn't leave a stale "loaded" marker that
+    // would suppress a later reload.
+    let previous = loaded.clone();
+    *loaded = None;
+    // pull_model()'s kill_existing() is about to SIGKILL whatever was running,
+    // but that's silent to the coordinator — its registry only ever upserts the
+    // model named in a status report, so without this the OLD model's entry
+    // stays "Ready" forever after an implicit switch. Tell the coordinator the
+    // old one is gone before starting the new.
+    if let Some(report_old) = unload_status_for(&nid, &previous) {
+        report(
+            &nid,
+            &report_old.model_name,
+            report_old.size_mb,
+            report_old.state,
+        )
+        .await;
+    }
+    let state = match llama::pull_model(&mname, size).await {
+        Ok(()) => {
+            info!(model = %mname, "llama pull complete");
+            *loaded = Some((mname.clone(), size));
+            Some(ModelLifecycleState::Ready)
+        }
+        Err(e) if e == "unloaded" => {
+            info!(model = %mname, "load cancelled by unload — suppressing Failed status");
+            None
+        }
+        Err(e) if is_permanent_load_error(&e) => {
+            warn!(model = %mname, error = %e, "llama pull failed");
+            Some(ModelLifecycleState::Failed { reason: e })
+        }
+        Err(e) => {
+            let secs = retry_secs();
+            warn!(model = %mname, error = %e, retry_in_secs = secs, "llama pull failed — will retry");
+            let (nid2, mname2) = (nid.clone(), mname.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                if LOAD_GEN.load(Ordering::SeqCst) == generation {
+                    info!(model = %mname2, "retrying model load");
+                    spawn_load(nid2, mname2, size, generation);
+                }
+            });
+            Some(ModelLifecycleState::Failed {
+                reason: format!("{e} — retrying in {} min", secs.div_ceil(60)),
+            })
+        }
+    };
+    drop(loaded);
+    if let Some(state) = state {
+        report(&nid, &mname, size, state).await;
+    }
+}
+
 pub struct LlmCapability {
     node_id: String,
 }
@@ -179,6 +351,7 @@ impl Capability for LlmCapability {
     }
 
     async fn start(&self, tx: Sender<MeshMessage>) -> Result<(), String> {
+        set_current_tx(&tx);
         // Re-report a currently-loaded model on every (re)connect. The coordinator
         // clears a node's model state whenever its connection drops (e.g. a
         // read-timeout close while the node is briefly silent), so without this a
@@ -198,6 +371,16 @@ impl Capability for LlmCapability {
                     wire_version: WIRE_VERSION,
                 }))
                 .await;
+        } else if let Some(wanted) = read_wanted(&wanted_path()) {
+            // Nothing loaded, but this node was running a model: an agent
+            // restart (update, reboot, crash) stopped it. Load it again.
+            info!(model = %wanted.model, "reloading the model this node was running");
+            spawn_load(
+                self.node_id.clone(),
+                wanted.model,
+                wanted.size_mb,
+                LOAD_GEN.load(Ordering::SeqCst),
+            );
         }
         Ok(())
     }
@@ -209,87 +392,21 @@ impl Capability for LlmCapability {
                     "Received command to load model {} ({} MB)",
                     req.model_name, req.model_size_mb
                 );
-
-                let _ = tx
-                    .send(MeshMessage::ModelStatus(ModelStatusReport {
-                        node_id: self.node_id.clone(),
-                        model_name: req.model_name.clone(),
+                set_current_tx(&tx);
+                let generation = LOAD_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+                write_wanted(
+                    &wanted_path(),
+                    Some(&WantedModel {
+                        model: req.model_name.clone(),
                         size_mb: req.model_size_mb,
-                        state: ModelLifecycleState::Loading,
-                        wire_version: WIRE_VERSION,
-                    }))
-                    .await;
-
-                let tx2 = tx.clone();
-                let nid = self.node_id.clone();
-                let mname = req.model_name.clone();
-                let size = req.model_size_mb;
-                tokio::spawn(async move {
-                    // Hold the load guard for the whole pull so concurrent
-                    // ModelLoad messages run one at a time instead of racing the
-                    // same download temp file or stomping each other's server.
-                    let mut loaded = match load_guard().try_lock() {
-                        Ok(g) => g,
-                        Err(_) => {
-                            info!(model = %mname, "another model load in progress — queuing behind it");
-                            load_guard().lock().await
-                        }
-                    };
-                    if loaded.as_ref().map(|(n, _)| n.as_str()) == Some(mname.as_str()) {
-                        info!(model = %mname, "model already loaded — skipping duplicate load");
-                        let _ = tx2
-                            .send(MeshMessage::ModelStatus(ModelStatusReport {
-                                node_id: nid,
-                                model_name: mname,
-                                size_mb: size,
-                                state: ModelLifecycleState::Ready,
-                                wire_version: WIRE_VERSION,
-                            }))
-                            .await;
-                        return;
-                    }
-                    // A switch to a different model invalidates the current one;
-                    // clear it up front so a mid-load crash doesn't leave a stale
-                    // "loaded" marker that would suppress a later reload.
-                    let previous = loaded.clone();
-                    *loaded = None;
-                    // pull_model()'s kill_existing() is about to SIGKILL whatever
-                    // was running, but that's silent to the coordinator — its
-                    // registry only ever upserts the model named in a status
-                    // report, so without this the OLD model's entry stays
-                    // "Ready" forever after an implicit switch (only an explicit
-                    // ModelUnload message previously sent one). Tell the
-                    // coordinator the old one is gone before starting the new.
-                    if let Some(report) = unload_status_for(&nid, &previous) {
-                        let _ = tx2.send(MeshMessage::ModelStatus(report)).await;
-                    }
-                    let state = match llama::pull_model(&mname, size).await {
-                        Ok(()) => {
-                            info!(model = %mname, "llama pull complete");
-                            *loaded = Some((mname.clone(), size));
-                            Some(ModelLifecycleState::Ready)
-                        }
-                        Err(e) if e == "unloaded" => {
-                            info!(model = %mname, "load cancelled by unload — suppressing Failed status");
-                            None
-                        }
-                        Err(e) => {
-                            warn!(model = %mname, error = %e, "llama pull failed");
-                            Some(ModelLifecycleState::Failed { reason: e })
-                        }
-                    };
-                    if let Some(state) = state {
-                        let _ = tx2
-                            .send(MeshMessage::ModelStatus(ModelStatusReport {
-                                node_id: nid,
-                                model_name: mname,
-                                size_mb: size,
-                                state,
-                                wire_version: WIRE_VERSION,
-                            }))
-                            .await;
-                    }
-                });
+                    }),
+                );
+                spawn_load(
+                    self.node_id.clone(),
+                    req.model_name,
+                    req.model_size_mb,
+                    generation,
+                );
             }
 
             MeshMessage::RequestModelInference(req) => {
@@ -334,6 +451,10 @@ impl Capability for LlmCapability {
 
             MeshMessage::ModelUnload(req) => {
                 info!("Received command to unload model {}", req.model_name);
+                // Unloaded on purpose: cancel any pending retry, and don't
+                // reload it when the agent next starts.
+                LOAD_GEN.fetch_add(1, Ordering::SeqCst);
+                write_wanted(&wanted_path(), None);
                 // Drop the single-flight marker so a later load of the same
                 // model re-pulls instead of being deduped away.
                 *load_guard().lock().await = None;
@@ -366,6 +487,58 @@ mod tests {
 
     fn make_cap() -> LlmCapability {
         LlmCapability::new("node-1")
+    }
+
+    #[test]
+    fn the_wanted_model_is_remembered_and_forgotten() {
+        let dir = std::env::temp_dir().join(format!("wanted-{}", std::process::id()));
+        let path = dir.join(".wanted-model");
+        let wanted = WantedModel {
+            model: "qwen3-coder-next:80b".into(),
+            size_mb: 36621,
+        };
+        write_wanted(&path, Some(&wanted));
+        assert_eq!(read_wanted(&path), Some(wanted));
+        write_wanted(&path, None);
+        assert_eq!(read_wanted(&path), None);
+        write_wanted(&path, None); // forgetting twice is fine
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_garbled_wanted_file_means_nothing_wanted() {
+        let dir = std::env::temp_dir().join(format!("wanted-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".wanted-model");
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(read_wanted(&path), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn only_a_name_that_resolves_to_nothing_is_never_retried() {
+        // The errors resolve_gguf really gives for names that can't load.
+        let unknown = llama::pull_model_error_for_tests("llama3:8b");
+        let bad_hf = llama::pull_model_error_for_tests("hf:no-slash:x.gguf");
+        assert!(is_permanent_load_error(&unknown), "{unknown}");
+        assert!(is_permanent_load_error(&bad_hf), "{bad_hf}");
+        // Memory, a server that died at startup, a failed download: retry.
+        for e in [
+            "llama-server exited during startup: exit status: 1",
+            "insufficient disk space to download x: need 2 MB free, have 1 MB",
+            "download failed: HTTP 503",
+        ] {
+            assert!(!is_permanent_load_error(e), "{e}");
+        }
+    }
+
+    #[test]
+    fn retry_interval_defaults_to_five_minutes_and_ignores_rubbish() {
+        assert_eq!(parse_retry_secs(None), 300);
+        assert_eq!(parse_retry_secs(Some("60")), 60);
+        assert_eq!(parse_retry_secs(Some(" 120 ")), 120);
+        assert_eq!(parse_retry_secs(Some("0")), 300);
+        assert_eq!(parse_retry_secs(Some("soon")), 300);
     }
 
     #[test]

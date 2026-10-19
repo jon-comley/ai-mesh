@@ -75,6 +75,14 @@ The agent's behavior can be tuned via these environment variables:
 - `LLAMA_FLASH_ATTN`: (Default: `auto`) Flash-attention mode `on`/`off`/`auto`. `auto` lets llama.cpp enable it where supported (≈2× prefill on Qwen/Llama/Mistral) and skip it where it isn't — forcing `on` hangs Gemma-3 on the Vulkan backend.
 - `LLAMA_HEALTH_TIMEOUT_SECS`: (Default: `180`) How long to wait for the `/health` endpoint after starting the process.
 - `LLAMA_HOST`: (Default: `http://127.0.0.1:8080`) The URL the agent uses to talk to its local child process.
+- `LLAMA_LOAD_RETRY_SECS`: (Default: `300`) How long to wait before retrying a model load that failed.
+
+### Keeping the model loaded
+Each node remembers the model it was last told to load, in `<model dir>/.wanted-model`. An unload clears it.
+- **After a restart:** when the agent starts with nothing loaded (after an update, a reboot or a crash), it loads that model again by itself.
+- **After a failed load:** the dashboard shows the failure with "retrying in N min", and the agent tries again every `LLAMA_LOAD_RETRY_SECS`. This catches the common case of another program holding the memory, such as browser tests on mac1.
+  - **Not retried:** a name that isn't a known model.
+  - **Cancelling retries:** a newer load or an unload cancels any pending retry.
 
 ---
 
