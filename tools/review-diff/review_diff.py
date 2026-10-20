@@ -501,18 +501,21 @@ def label(r: dict) -> str:
 
 # ── a run ────────────────────────────────────────────────────────────────────
 
+def repo_name(repo: Path) -> str:
+    """The folder's name; a bare mirror (lenovo1's copy of a work repo)
+    without its .git."""
+    if git("rev-parse", "--is-bare-repository", repo=repo).strip() == "true":
+        return Path(git("rev-parse", "--absolute-git-dir", repo=repo).strip()).name.removesuffix(".git")
+    return Path(git("rev-parse", "--show-toplevel", repo=repo).strip()).name
+
+
 class Run:
     def __init__(self, repo: Path, cfg: dict, prompts: Path, out=print):
         self.repo = repo
         self.cfg = cfg
         self.out = out
-        git_dir = Path(git("rev-parse", "--absolute-git-dir", repo=repo).strip())
-        # A bare mirror (lenovo1's copy of a work repo) is named after its folder
-        if git("rev-parse", "--is-bare-repository", repo=repo).strip() == "true":
-            self.name = git_dir.name.removesuffix(".git")
-        else:
-            self.name = Path(git("rev-parse", "--show-toplevel", repo=repo).strip()).name
-        self.state_dir = git_dir / "review-diff"
+        self.name = repo_name(repo)
+        self.state_dir = Path(git("rev-parse", "--absolute-git-dir", repo=repo).strip()) / "review-diff"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.review_md = (prompts / "review.md").read_text(encoding="utf-8")
         self.verify_md = (prompts / "verify.md").read_text(encoding="utf-8")
@@ -934,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run", help="review the commits since the last run")
     run_p.add_argument("--upto", default="HEAD", help="the commit that passed the tests")
     run_p.add_argument("--dry-run", action="store_true", help="say what would be sent, send nothing")
+    run_p.add_argument("--only", help="ask just this reviewer from the config (e.g. copilot)")
     run_p.add_argument("--tested", action="store_true",
                        help="the tests passed at --upto (after-tests.sh says so)")
     mark_p = sub.add_parser("mark", help="record what became of a finding")
@@ -953,6 +957,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     repo = Path(a.repo).resolve()
     cfg = load_config(Path(a.config)) if a.cmd == "run" else {}
+    if a.cmd == "run" and a.only:
+        cfg["reviewers"] = [r for r in cfg.get("reviewers", []) if r["name"] == a.only]
+        if not cfg["reviewers"]:
+            raise SystemExit(f"no reviewer named {a.only} in {a.config}")
+        cfg["reviewers"][0].pop("disabled", None)
+    # One config for several repos: "contexts" says what each one is
+    if a.cmd == "run":
+        name = repo_name(Path(a.repo).resolve())
+        cfg["context"] = cfg.get("contexts", {}).get(name, cfg.get("context", ""))
     run = Run(repo, cfg, Path(a.prompts))
     if a.cmd == "run":
         run.review(a.upto, a.dry_run, a.tested)

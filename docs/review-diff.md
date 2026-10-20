@@ -70,6 +70,21 @@ gets 60 lines either side of the item, never a whole file.
 `REVIEW_BRIDGE_HOST` (default `work-laptop`), `REVIEW_BRIDGE_ROOTS` (`repos`)
 and `REVIEW_BRIDGE_HOME` (`~/work-review`) change where it looks.
 
+## Choosing a repo
+
+```bash
+just copilot-review guv                         # Copilot on beelink1 only
+just ai-review work:little-theo-firmware        # every reviewer in the config
+just copilot-review                             # lists what can be reviewed, asks
+just copilot-review guv HEAD                    # up to HEAD, tested or not
+```
+
+A name is looked for in `~/repos` here, reviewed up to its `tests-passed`
+branch (guv's all-tests pushes it to GitHub), and on the work laptop through
+lenovo1's bridge. A name in both places is refused until it's `home:<name>`
+or `work:<name>`, so work code never goes to the home reviewers by mistake.
+The report is printed at the end. `tools/review-diff/review-repo.sh` does it.
+
 ## Running it on one machine
 
 `review_diff.py` also runs where the code is, if that machine can reach the

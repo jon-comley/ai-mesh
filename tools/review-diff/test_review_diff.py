@@ -180,6 +180,19 @@ class ReviewDiffTest(unittest.TestCase):
         check = next(c[2] for c in fake.calls if c[1] == "check")
         self.assertIn("the lines around the item", check)
 
+    def test_only_asks_one_reviewer_and_contexts_pick_the_repo_line(self):
+        cfg_path = Path(self.tmp.name) / "config.json"
+        off = {**CFG["reviewers"][2], "disabled": True}
+        cfg_path.write_text(json.dumps({**CFG, "reviewers": CFG["reviewers"][:2] + [off],
+                                        "contexts": {"firmware": "Theo firmware."}}))
+        fake = Fake()
+        with mock.patch.object(rd, "ask", fake), mock.patch("sys.stdout"):
+            rd.main(["--repo", str(self.repo), "--config", str(cfg_path), "run", "--only", "copilot"])
+        self.assertEqual({c[0] for c in fake.calls}, {"copilot"})
+        self.assertIn("About this code: Theo firmware.", fake.calls[0][2])
+        with self.assertRaises(SystemExit):
+            rd.main(["--repo", str(self.repo), "--config", str(cfg_path), "run", "--only", "nobody"])
+
     def test_pieces(self):
         self.assertEqual(rd.finding_key("bug", "r", "a", "x = 1"), "08fdfd61b4b9ae76",
                          "the same id as the home system")

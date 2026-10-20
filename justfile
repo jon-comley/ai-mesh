@@ -2087,6 +2087,23 @@ review-now repo mode="":
         echo "✗ HTTP $CODE: $(cat /tmp/mesh-review-now.txt)"; exit 1
     fi
 
+# Review a repo's tested commits with Copilot on beelink1 (docs/review-diff.md,
+# "Choosing a repo"): a repo in ~/repos here, or on the work laptop through
+# lenovo1. No name lists what can be reviewed and asks; home:/work: settles a
+# name found in both. A commit reviews a home repo up to it, tested or not.
+# The report is printed when it's done.
+# Usage: just copilot-review guv
+#        just copilot-review work:little-theo-firmware
+#        just copilot-review
+# Copilot reviews a repo's tested commits, here or on the work laptop
+copilot-review repo="" commit="":
+    @tools/review-diff/review-repo.sh copilot {{quote(repo)}} {{quote(commit)}}
+
+# Usage: just ai-review guv
+# Every reviewer in the config (here, or lenovo1's for work repos) reviews a repo
+ai-review repo="" commit="":
+    @tools/review-diff/review-repo.sh all {{quote(repo)}} {{quote(commit)}}
+
 # Record what became of a review finding, for the reviewers' scorecard (the
 # id is in the report next to each item's location). On mac1 itself the
 # orchestrator can instead: echo fixed > ~/reviews/marks/<id>
