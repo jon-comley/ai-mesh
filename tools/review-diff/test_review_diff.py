@@ -133,6 +133,30 @@ class ReviewDiffTest(unittest.TestCase):
                          "openai's turn, out of quota, so copilot and then gemini")
         self.assertTrue(any("openai: HTTP 429" in line for line in self.log))
 
+    def test_a_first_run_stops_before_a_merge_that_brings_in_too_much(self):
+        # main moves on by 30 commits; the branch merges main, then makes 3 of its own
+        sh(self.repo, "checkout", "-qb", "dev")
+        sh(self.repo, "checkout", "-q", "main")
+        for i in range(30):
+            (self.repo / "src/main.c").write_text(f"int main(void) {{ return {i}; }}\n")
+            sh(self.repo, "commit", "-qam", f"main {i}")
+        sh(self.repo, "checkout", "-q", "dev")
+        sh(self.repo, "merge", "-q", "--no-ff", "--no-edit", "main")
+        for i in range(3):
+            (self.repo / "src/net.c").write_text(f"int net_send(int len) {{ return {i}; }}\n")
+            sh(self.repo, "commit", "-qam", f"dev {i}")
+        cfg = {**CFG, "first_run_commits": 20}
+        rd.Run(self.repo, cfg, PROMPTS, out=self.log.append).review("HEAD", dry_run=True)
+        self.assertTrue(self.log[0].startswith("3 new commits"), self.log[0])
+        self.assertIn("1 files", self.log[0], "main.c came in with the merge")
+
+    def test_the_scope_says_tests_passed_only_when_they_did(self):
+        rd.Run(self.repo, CFG, PROMPTS, out=self.log.append).review("HEAD", dry_run=True)
+        rd.Run(self.repo, CFG, PROMPTS, out=self.log.append).review(
+            "HEAD", dry_run=True, tested=True)
+        self.assertTrue(self.log[0].startswith("1 new commits"), self.log[0])
+        self.assertTrue(self.log[2].startswith("Tests passed: 1 new commits"), self.log[2])
+
     def test_pieces(self):
         self.assertEqual(rd.finding_key("bug", "r", "a", "x = 1"), "08fdfd61b4b9ae76",
                          "the same id as the home system")
@@ -193,6 +217,23 @@ class CallTest(unittest.TestCase):
             self.assertEqual(rd.ask(r, "SYSTEM-IS", "user"), "SYSTEM-IS")
             with self.assertRaises(rd.ReviewerOut):
                 rd.ask({**r, "command": ["no-such-copilot"]}, "s", "u")
+
+    def test_a_command_reviewer_on_a_windows_host_gets_the_prompt_on_stdin(self):
+        r = {"name": "copilot", "type": "command", "ssh_host": "beelink1",
+             "command": ["copilot", "-p", "it's context.md"]}
+        done = subprocess.CompletedProcess([], 0, stdout="PONG\n", stderr="")
+        with mock.patch.object(rd.subprocess, "run", return_value=done) as run:
+            self.assertEqual(rd.ask(r, "SYS", "user"), "PONG\n")
+        argv, kw = run.call_args[0][0], run.call_args[1]
+        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "beelink1"])
+        self.assertEqual(kw["input"], "SYS\n\nuser")
+        script = rd.base64.b64decode(argv[-1]).decode("utf-16-le")
+        self.assertIn("'-p' 'it''s context.md'", script, "quoted for PowerShell")
+        self.assertIn("-CommandType Application", script, "the .cmd, not the blocked .ps1")
+        unreachable = subprocess.CompletedProcess([], 255, stdout="", stderr="no route")
+        with mock.patch.object(rd.subprocess, "run", return_value=unreachable):
+            with self.assertRaisesRegex(rd.ReviewerOut, "can't reach beelink1"):
+                rd.ask(r, "s", "u")
 
 
 if __name__ == "__main__":

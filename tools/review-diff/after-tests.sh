@@ -19,5 +19,5 @@ if [ $was_clean = 0 ] || ! clean || [ "$(git rev-parse HEAD)" != "$start" ]; the
   exit 0
 fi
 PY=$(command -v python3 || command -v python)
-"$PY" "$HERE/review_diff.py" run --upto "$start" || echo "== the review could not run; the tests still passed"
+"$PY" "$HERE/review_diff.py" run --tested --upto "$start" || echo "== the review could not run; the tests still passed"
 exit 0

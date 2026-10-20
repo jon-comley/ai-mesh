@@ -15,7 +15,9 @@ explanation and a diff for each item, for Claude Code to fix or drop.
 tests have passed:
 
 1. **What to review:** the commits since the last review, up to the one that
-   passed (the last 20 on a first run). The bookmark is
+   passed. A first run goes back along the branch while the range holds
+   at most `first_run_commits` (20), so a merge of main doesn't bring in
+   hundreds. The bookmark is
    `.git/review-diff/state.json`, so it never leaves the repo and is never
    committed.
 2. **The prompt:** each changed file's diff, with each changed function whole
@@ -66,6 +68,20 @@ tests have passed:
 
 `review_diff.py run --dry-run` shows what would be sent, how big each prompt
 is and who looks first, without sending anything.
+
+## Copilot on another machine
+
+A command reviewer with `"ssh_host"` runs on that Windows machine instead,
+for Copilot signed in there (beelink1):
+
+```json
+{ "name": "copilot", "type": "command", "ssh_host": "beelink1", "command": ["copilot", "-p", "..."] }
+```
+
+The prompt goes over ssh on stdin, lands in `context.md` in a scratch folder
+under `%TEMP%`, and the folder is removed after. ssh must log in without a
+password (`BatchMode`). What is sent goes to the Copilot account signed in on
+that machine.
 
 ## Adding the work Claude later
 

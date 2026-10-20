@@ -30,6 +30,17 @@ add the work Claude later.
 - **Claude Code acts on the reports** through a skill (`SKILL.md`): verify,
   fix or drop with a reason, run the tests, record the outcome for the
   scorecard.
+- **A first run counts every commit, merged ones included.** Walking back 20
+  commits along the branch on the v6 firmware put 181 in range: one of the
+  20 was "Merge v5.x into v6". It now goes back only while the range holds
+  20, which on v6 stops after Dave's 13 commits since the last merge.
+- **"Tests passed" only when they did:** after-tests passes `--tested`; a
+  dry run or a run by hand no longer claims it.
+- **Copilot can run on beelink1** (Jon: "use beelink1 copilot for the review
+  stage"): `"ssh_host"` on a command reviewer sends the prompt over ssh on
+  stdin to a PowerShell script that writes `context.md` in a scratch folder
+  and runs the command there. It calls `copilot.cmd`, because beelink1's
+  script policy blocks npm's `copilot.ps1` under ssh.
 
 ## Reviews: a scorecard per reviewer (2026-10-20)
 

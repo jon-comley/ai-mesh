@@ -17,6 +17,7 @@ Standard library only, so it runs wherever Python 3.9+ and git do.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import json
 import os
@@ -425,23 +426,60 @@ def call_api(r: dict, system: str, user: str, max_tokens: int) -> str:
         raise ReviewerOut(f"{r['name']}: no answer in the reply") from e
 
 
+def windows_ssh_script(cmd: list[str]) -> str:
+    """PowerShell for a Windows host: the prompt arrives on stdin, goes in
+    context.md in a scratch folder, and the command runs beside it."""
+    quoted = " ".join("'" + a.replace("'", "''") + "'" for a in cmd[1:])
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        "[Console]::InputEncoding = [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false\n"
+        "$d = Join-Path $env:TEMP ('review-diff-' + [guid]::NewGuid())\n"
+        "New-Item -ItemType Directory $d | Out-Null\n"
+        "try {\n"
+        "  [IO.File]::WriteAllText((Join-Path $d 'context.md'), [Console]::In.ReadToEnd(),"
+        " (New-Object Text.UTF8Encoding $false))\n"
+        "  Set-Location $d\n"
+        # The program, not npm's .ps1 shim, which script policy blocks
+        f"  $exe = (Get-Command '{cmd[0]}' -CommandType Application | Select-Object -First 1).Source\n"
+        f"  & $exe {quoted}\n"
+        "  $rc = $LASTEXITCODE\n"
+        "} finally { Set-Location $env:TEMP; Remove-Item -Recurse -Force $d }\n"
+        "exit $rc\n"
+    )
+
+
 def call_command(r: dict, system: str, user: str) -> str:
     """A CLI reviewer (Copilot): the prompt goes in context.md, the command
-    runs beside it, and what it prints is the reply."""
+    runs beside it, and what it prints is the reply. With "ssh_host" the
+    command runs on that Windows machine instead (beelink1's Copilot)."""
     cmd = list(r["command"])
-    exe = shutil.which(cmd[0])
-    if not exe:
-        raise ReviewerOut(f"{r['name']}: {cmd[0]} is not installed")
-    cmd[0] = exe
-    if os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
-        cmd = ["cmd.exe", "/c", *cmd]
-    with tempfile.TemporaryDirectory() as d:
-        Path(d, "context.md").write_text(system + "\n\n" + user, encoding="utf-8")
+    prompt = system + "\n\n" + user
+    timeout = r.get("timeout_secs", 1800)
+    if r.get("ssh_host"):
+        script = windows_ssh_script(cmd).encode("utf-16-le")
+        remote = ["ssh", "-o", "BatchMode=yes", r["ssh_host"], "powershell", "-NoProfile",
+                  "-NonInteractive", "-EncodedCommand", base64.b64encode(script).decode()]
         try:
-            out = subprocess.run(cmd, cwd=d, capture_output=True, text=True, encoding="utf-8",
-                                 errors="replace", timeout=r.get("timeout_secs", 1800))
+            out = subprocess.run(remote, input=prompt, capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=timeout)
         except subprocess.TimeoutExpired as e:
             raise ReviewerOut(f"{r['name']}: timed out") from e
+        if out.returncode == 255:
+            raise ReviewerOut(f"{r['name']}: can't reach {r['ssh_host']}: {out.stderr.strip()[-300:]}")
+    else:
+        exe = shutil.which(cmd[0])
+        if not exe:
+            raise ReviewerOut(f"{r['name']}: {cmd[0]} is not installed")
+        cmd[0] = exe
+        if os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
+            cmd = ["cmd.exe", "/c", *cmd]
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "context.md").write_text(prompt, encoding="utf-8")
+            try:
+                out = subprocess.run(cmd, cwd=d, capture_output=True, text=True, encoding="utf-8",
+                                     errors="replace", timeout=timeout)
+            except subprocess.TimeoutExpired as e:
+                raise ReviewerOut(f"{r['name']}: timed out") from e
     text = out.stdout + out.stderr
     if re.search(r"(?i)quota|rate limit|insufficient.*credit|out of credits", text):
         raise ReviewerOut(f"{r['name']}: out of quota")
@@ -484,7 +522,24 @@ class Run:
     def save(self, name: str, value) -> None:
         (self.state_dir / name).write_text(json.dumps(value, indent=1), encoding="utf-8")
 
-    def review(self, upto: str, dry_run: bool = False) -> Path | None:
+    def first_run_base(self, upto: str) -> str:
+        """Where a first run starts: back along the branch while the range holds
+        at most first_run_commits commits. Counting the branch's own commits
+        alone would let one merge of main bring in hundreds; the commit at upto
+        is always reviewed, however big a merge it is."""
+        n = int(self.cfg.get("first_run_commits", 20))
+        line = git("rev-list", "--first-parent", f"--max-count={n + 1}", upto,
+                   repo=self.repo).split()
+        if len(line) < 2:
+            return line[-1]
+        base = line[1]
+        for c in line[2:]:
+            if int(git("rev-list", "--count", f"{c}..{upto}", repo=self.repo)) > n:
+                break
+            base = c
+        return base
+
+    def review(self, upto: str, dry_run: bool = False, tested: bool = False) -> Path | None:
         repo = self.repo
         upto = git("rev-parse", "--verify", f"{upto}^{{commit}}", repo=repo).strip()
         state = self.load("state.json", {})
@@ -495,14 +550,13 @@ class Run:
         if last and has_commit(repo, last) and is_ancestor(repo, last, upto):
             base = last
         else:
-            n = int(self.cfg.get("first_run_commits", 20))
-            commits = git("rev-list", "--first-parent", f"--max-count={n + 1}", upto,
-                          repo=repo).split()
-            base = commits[-1]
+            base = self.first_run_base(upto)
         paths = [p for p in git("diff", "--name-only", "--diff-filter=AMR", "-M", base, upto,
                                 repo=repo).splitlines() if p and reviewable(p)]
         count = git("rev-list", "--count", f"{base}..{upto}", repo=repo).strip()
-        scope = f"Tests passed: {count} new commits ({base[:7]}..{upto[:7]})"
+        scope = f"{count} new commits ({base[:7]}..{upto[:7]})"
+        if tested:
+            scope = "Tests passed: " + scope
         files = {}
         for p in paths:
             content = read_at(repo, upto, p)
@@ -850,6 +904,8 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run", help="review the commits since the last run")
     run_p.add_argument("--upto", default="HEAD", help="the commit that passed the tests")
     run_p.add_argument("--dry-run", action="store_true", help="say what would be sent, send nothing")
+    run_p.add_argument("--tested", action="store_true",
+                       help="the tests passed at --upto (after-tests.sh says so)")
     mark_p = sub.add_parser("mark", help="record what became of a finding")
     mark_p.add_argument("id")
     mark_p.add_argument("status", choices=["fixed", "dismissed", "open"])
@@ -869,7 +925,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(Path(a.config)) if a.cmd == "run" else {}
     run = Run(repo, cfg, Path(a.prompts))
     if a.cmd == "run":
-        run.review(a.upto, a.dry_run)
+        run.review(a.upto, a.dry_run, a.tested)
     elif a.cmd == "mark":
         ledger = run.load("ledger.json", {"raised": [], "findings": {}})
         if a.id not in ledger["findings"]:

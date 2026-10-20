@@ -16,6 +16,6 @@ if (-not $wasClean -or -not (Clean) -or (git rev-parse HEAD).Trim() -ne $start) 
   exit 0
 }
 $py = if (Get-Command py -ErrorAction SilentlyContinue) { 'py' } else { 'python' }
-& $py (Join-Path $PSScriptRoot 'review_diff.py') run --upto $start
+& $py (Join-Path $PSScriptRoot 'review_diff.py') run --tested --upto $start
 if ($LASTEXITCODE -ne 0) { Write-Output '== the review could not run; the tests still passed' }
 exit 0
