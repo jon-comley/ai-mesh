@@ -303,6 +303,9 @@ def locate_quote(content: str, quote: str, reported: int) -> int | None:
             continue
         window = ""
         for ln in lines[i:]:
+            # A blank line would add a second space, and a quote spanning one never matched
+            if not squash(ln):
+                continue
             window = (window + " " if window else "") + squash(ln)
             if len(window) >= len(q) + len(first) + 200:
                 break

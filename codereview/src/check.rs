@@ -30,10 +30,15 @@ pub fn locate_quote(content: &str, quote: &str, reported_line: u32) -> Option<u3
         // Gather enough following lines to hold the whole quote, then compare.
         let mut window = String::new();
         for l in lines.iter().skip(i) {
+            // A blank line would add a second space, and a quote spanning one never matched
+            let l = squash(l);
+            if l.is_empty() {
+                continue;
+            }
             if !window.is_empty() {
                 window.push(' ');
             }
-            window.push_str(&squash(l));
+            window.push_str(&l);
             if window.len() >= q.len() + first.len() + 200 {
                 break;
             }
@@ -188,6 +193,12 @@ mod tests {
             locate_quote(FILE, "const agreed = acceptance.amount;", 2),
             None
         );
+    }
+
+    #[test]
+    fn a_quote_spanning_a_blank_line_is_found() {
+        let content = "a();\n  pack_footer(&m, d);\n\ncleanup1:\n";
+        assert_eq!(locate_quote(content, "pack_footer(&m, d);\n\ncleanup1:", 9), Some(2));
     }
 
     #[test]

@@ -51,6 +51,12 @@ add the work Claude later.
   report into the repo's `.git/review-diff/inbox`. Claude's outcomes come
   back as files in `.git/review-diff/marks/`, since the laptop can't run
   `mark` against lenovo1's ledger.
+- **The quote check dropped any quote spanning a blank line**, here and in
+  the home `codereview` crate: joining lines added a second space for the
+  blank one, so the quote never matched. Found when reports began listing
+  what was thrown out: Copilot's one item on little-theo-firmware #150 (a
+  failed msgpack write still renaming an incomplete FNOL into place) quoted
+  the code exactly and was counted as made up.
 - **Diffs only for the work code** (`"whole_files": false`): the diff with
   each changed function whole and its callers, and the check sees 60 lines
   around the item.

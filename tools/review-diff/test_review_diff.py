@@ -215,6 +215,9 @@ class ReviewDiffTest(unittest.TestCase):
         self.assertFalse(rd.reviewable("build/net.c"))
         self.assertFalse(rd.reviewable("src/net.test.ts"))
         self.assertEqual(rd.parse_verdict("no, line 3 guards it")[0], "rejected")
+        self.assertEqual(rd.locate_quote("a();\n  pack_footer(&m, d);\n\ncleanup1:\n", 
+                                         "pack_footer(&m, d);\n\ncleanup1:", 9), 2,
+                         "a quote spanning a blank line")
 
 
 class CallTest(unittest.TestCase):
