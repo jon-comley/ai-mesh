@@ -37,8 +37,8 @@ add the work Claude later.
 - **"Tests passed" only when they did:** after-tests passes `--tested`; a
   dry run or a run by hand no longer claims it.
 - **Copilot can run on beelink1** (Jon: "use beelink1 copilot for the review
-  stage"): `"ssh_host"` on a command reviewer sends the prompt over ssh on
-  scp, as `context.md` in a scratch folder, and a PowerShell script runs the
+  stage"): `"ssh_host"` on a command reviewer sends the prompt over with
+  scp as `context.md` in a scratch folder, and a PowerShell script runs the
   command there. Stdin came first and hung: a 13k-token prompt never got
   past `[Console]::In`, and the first guv run timed out after 30 minutes with
   no Copilot process on beelink1 at all. It calls `copilot.cmd`, because beelink1's
