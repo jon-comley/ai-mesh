@@ -7,31 +7,52 @@
 # commits reviewed by review_diff.py with the reviewers in lenovo1's config, and
 # the report copied into that repo's .git/review-diff/inbox for Claude Code.
 # Claude's outcomes (.git/review-diff/marks/<id>) come back the same way.
-# Usage: tools/review-diff/bridge.sh
+# Usage: tools/review-diff/bridge.sh                 every repo with new tested commits
+#        tools/review-diff/bridge.sh little-theo-firmware ltf-bench-park-GD
+#        tools/review-diff/bridge.sh --list          the repos it can review
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 HOST=${REVIEW_BRIDGE_HOST:-work-laptop}
 ROOTS=${REVIEW_BRIDGE_ROOTS:-repos}
 MIRRORS=${REVIEW_BRIDGE_HOME:-$HOME/work-review}
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15)
+LIST=0
+if [ "${1:-}" = --list ]; then LIST=1; shift; fi
+WANT=("$@")
 mkdir -p "$MIRRORS"
-
-# Copilot calls take minutes; a second run started meanwhile leaves it be
-exec 9>"$MIRRORS/.lock"
-flock -n 9 || { echo "another bridge run is going"; exit 0; }
 
 # Repo paths relative to the work laptop's home, one per line
 globs=""
 for r in $ROOTS; do globs+="$r/*/ $r/*/*/ "; done
 repos=$("${SSH[@]}" "$HOST" "cd ~ && for d in $globs; do
   [ -e \"\$d.git\" ] && git -C \"\$d\" rev-parse -q --verify refs/heads/tests-passed >/dev/null && echo \"\${d%/}\"
-done") || { echo "can't reach $HOST"; exit 0; }
+done") || { echo "can't reach $HOST"; exit 1; }
+
+# repos/ltf-bench-park/GD is ltf-bench-park-GD; repos/st-bsp is st-bsp
+name_of() { local rel=${1#*/}; echo "${rel//\//-}"; }
+
+if [ $LIST = 1 ]; then
+  while read -r path; do [ -n "$path" ] && echo "$(name_of "$path")  ($path)"; done <<< "$repos"
+  exit 0
+fi
+for w in "${WANT[@]}"; do
+  found=0
+  while read -r path; do [ "$(name_of "$path")" = "$w" ] && found=1; done <<< "$repos"
+  if [ $found = 0 ]; then
+    echo "no work-laptop repo '$w' with a tests-passed branch; these have one:"
+    while read -r path; do [ -n "$path" ] && echo "  $(name_of "$path")"; done <<< "$repos"
+    exit 1
+  fi
+done
+
+# Copilot calls take minutes; a second run started meanwhile leaves it be
+exec 9>"$MIRRORS/.lock"
+flock -n 9 || { echo "another bridge run is going"; exit 0; }
 
 while read -r path; do
   [ -n "$path" ] || continue
-  # repos/ltf-bench-park/GD is ltf-bench-park-GD; repos/st-bsp is st-bsp
-  rel=${path#*/}
-  name=${rel//\//-}
+  name=$(name_of "$path")
+  if [ ${#WANT[@]} -gt 0 ] && [[ ! " ${WANT[*]} " == *" $name "* ]]; then continue; fi
   m="$MIRRORS/$name.git"
   [ -d "$m" ] || git init -q --bare "$m"
   echo "== $name ($HOST:$path)"

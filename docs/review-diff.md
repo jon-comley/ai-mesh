@@ -51,6 +51,7 @@ the reviewing:
    `~/repos` on the work laptop (two levels, so `ltf-bench-park/GD` too) with
    a `tests-passed` branch, fetches it into a bare mirror in `~/work-review`,
    and reviews the commits since the last review with `review_diff.py`.
+   `bridge.sh <name>...` reviews only those; `bridge.sh --list` lists them.
    Mirrors are named after the path: `repos/ltf-bench-park/GD` is
    `ltf-bench-park-GD`.
 3. **The report** is copied into that repo's `.git/review-diff/inbox` on the
