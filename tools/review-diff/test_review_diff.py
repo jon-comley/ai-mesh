@@ -94,15 +94,16 @@ class ReviewDiffTest(unittest.TestCase):
         self.assertIn("About this code: Firmware", prompt)
         self.assertIn("what changed (unified diff, each changed function whole)", prompt)
         self.assertIn("- src/main.c:2  return net_send(320);", prompt, "who calls it")
-        checks = [c for c in fake.calls if c[1] == "check"]
+        checks = [c for c in fake.calls if c[1] == "check" and "word for word" not in c[2]]
         self.assertTrue(checks and all(c[0] == "openai" for c in checks),
                         "a different model checks gemini's finds (openai found them too)")
         self.assertIn("## Bugs: high", report)
         self.assertIn("## Tests to add", report)
         self.assertIn("(applies cleanly)", report)
         self.assertIn("2 quoting code that is not in the file", report)
-        self.assertIn("## Thrown out: quoted code not in the file", report)
+        self.assertIn("## Misquoted: quoted code not in the file", report)
         self.assertIn("**Invented** (bug, gemini-pro@gemini): `src/net.c:9`", report)
+        self.assertIn("**Confirmed** by gpt-x@openai", report, "another reviewer judged it")
         self.assertIn("memcpy(buf, src, 4096);", report)
         inbox = list((self.repo / ".git/review-diff/inbox").iterdir())
         self.assertEqual(len(inbox), 1, "a copy waits for Claude Code")
@@ -203,6 +204,15 @@ class ReviewDiffTest(unittest.TestCase):
                               capture_output=True, text=True).stdout.strip()
         rd.Run(self.repo, CFG, PROMPTS, out=self.log.append).review("HEAD", dry_run=True, since=base)
         self.assertTrue(self.log[0].startswith(f"2 new commits ({base[:7]}.."), self.log[0])
+
+    def test_a_check_only_reviewer_checks_first_and_never_looks_first(self):
+        cfg = {**CFG, "checker": "coder", "reviewers": CFG["reviewers"][:1] + [
+            {"name": "coder", "type": "api", "model": "qwen-coder", "check_only": True}]}
+        fake = Fake()
+        with mock.patch.object(rd, "ask", fake):
+            rd.Run(self.repo, cfg, PROMPTS, out=self.log.append).review("HEAD")
+        self.assertEqual({c[0] for c in fake.calls if c[1] == "review"}, {"gemini"})
+        self.assertEqual({c[0] for c in fake.calls if c[1] == "check"}, {"coder"})
 
     def test_pieces(self):
         self.assertEqual(rd.finding_key("bug", "r", "a", "x = 1"), "08fdfd61b4b9ae76",

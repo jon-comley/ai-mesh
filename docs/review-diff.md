@@ -62,10 +62,19 @@ the reviewing:
    `.git/review-diff/marks/<id>`, and the next pass moves them into lenovo1's
    scorecard.
 
-lenovo1's config (`~/.config/review-diff/config.json`) has Copilot on
-beelink1 as its reviewer, with `"whole_files": false`: reviewers get the diff
-with each changed function whole and the lines that call them, and a checker
-gets 60 lines either side of the item, never a whole file.
+lenovo1's config (`~/.config/review-diff/config.json`) has the free AIs
+(Gemini, Mistral, OpenRouter, Groq) and Copilot on beelink1 taking turns at
+the first look, called straight, not through pi1. Their keys are in
+`~/.config/review-diff/keys.env` (mode 600), which the bridge loads. mac1's
+coder is `"check_only"` and the config's `"checker"`: it never looks first,
+and checks every item before anyone else, through a tunnel the bridge opens
+to mac1's `127.0.0.1:8080` for the run (`REVIEW_CODER_TUNNEL`, empty for
+none). `"prompt_tokens"` sizes the prompts; a reviewer whose budget is
+smaller (Groq's 6k) only checks. `"whole_files": false` sends diffs only.
+
+An item whose quote isn't in the file is still judged by another reviewer,
+with a note that a misquote alone is no reason to reject, and listed under
+*Misquoted* with the verdict.
 
 `REVIEW_BRIDGE_HOST` (default `work-laptop`), `REVIEW_BRIDGE_ROOTS` (`repos`)
 and `REVIEW_BRIDGE_HOME` (`~/work-review`) change where it looks.

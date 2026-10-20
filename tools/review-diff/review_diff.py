@@ -406,9 +406,10 @@ def callers(repo: Path, rev: str, names: list[str], exclude: set[str]) -> list[s
 # ── reviewers ────────────────────────────────────────────────────────────────
 
 def call_api(r: dict, system: str, user: str, max_tokens: int) -> str:
-    key = os.environ.get(r.get("key_env", ""), "")
+    # No key_env: a local server that needs none (mac1's coder)
+    key = os.environ.get(r["key_env"], "") if r.get("key_env") else "none"
     if not key:
-        raise ReviewerOut(f"{r['name']}: ${r.get('key_env')} is not set")
+        raise ReviewerOut(f"{r['name']}: ${r['key_env']} is not set")
     body = json.dumps({
         "model": r["model"], "temperature": 0.2, "max_tokens": max_tokens,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -613,7 +614,9 @@ class Run:
                 self.save("state.json", state)
             return None
 
-        reviewers = [r for r in self.cfg.get("reviewers", []) if not r.get("disabled")]
+        enabled = [r for r in self.cfg.get("reviewers", []) if not r.get("disabled")]
+        reviewers = [r for r in enabled if not r.get("check_only")]
+        checkers = [r for r in enabled if r.get("check_only")]
         if not reviewers:
             raise SystemExit("no reviewers in the config")
         turn = int(state.get("turn", 0))
@@ -656,7 +659,11 @@ class Run:
                     if line is None:
                         dropped.append({
                             "who": who, "kind": raw["kind"], "file": raw["file"],
-                            "line": raw["line"], "title": raw["title"], "quote": quote,
+                            "path": path, "line": raw["line"], "title": raw["title"],
+                            "quote": quote, "severity": raw["severity"],
+                            "scenario": raw["scenario"], "fix": raw["fix"],
+                            "patch": normalize_patch(raw["patch"], self.name),
+                            "found_model": r.get("model") or r["name"],
                             "why": "the quoted code is not in it" if path else
                                    "no such file under review",
                         })
@@ -679,7 +686,12 @@ class Run:
             raise SystemExit("no reviewer could answer; nothing reviewed, the bookmark stays")
 
         for f in findings.values():
-            self.check(f, files, order, done_by)
+            self.check(f, files, order + checkers, done_by)
+        # A misquote isn't proof of a made-up bug (one real one was lost that
+        # way): another reviewer judges each against the code all the same
+        for d in dropped:
+            if d["path"]:
+                self.check(d, files, order + checkers, done_by, misquoted=True)
             if f["patch"]:
                 f["patch_applies"] = patch_applies(repo, upto, f["patch"])
         kept, left_out = cap(dedupe(list(findings.values())))
@@ -717,8 +729,9 @@ class Run:
         """The review prompts: each changed file with its diff and whole
         text, and who calls the changed functions, grouped to stay under the
         smallest reviewer's budget."""
-        budget = min(int(r.get("budget_tokens", 60000))
-                     for r in self.cfg.get("reviewers", []) if not r.get("disabled"))
+        budget = int(self.cfg.get("prompt_tokens") or min(
+            int(r.get("budget_tokens", 60000)) for r in self.cfg.get("reviewers", [])
+            if not r.get("disabled") and not r.get("check_only")))
         budget -= estimate_tokens(self.review_md) + 2000
         head = f"Repository: {self.name}\nThis review covers: {scope}\n"
         if self.cfg.get("context"):
@@ -753,12 +766,14 @@ class Run:
             return name
         return next((p for p in files if p.endswith(name) or name.endswith(p)), None)
 
-    def check(self, f: dict, files: dict, order: list[dict], done_by: dict) -> None:
-        """Ask a different reviewer (an API one first, they are quicker) to
-        check a finding against the whole file; the finder only if no other
-        will answer."""
+    def check(self, f: dict, files: dict, order: list[dict], done_by: dict,
+              misquoted: bool = False) -> None:
+        """Ask a different reviewer to check a finding against the file: the
+        config's "checker" first (mac1's coder), then an API one (quicker);
+        the finder only if no other will answer."""
         others = [r for r in order if (r.get("model") or r["name"]) != f["found_model"]]
-        others.sort(key=lambda r: r.get("type", "api") == "command")
+        others.sort(key=lambda r: (r["name"] != self.cfg.get("checker"),
+                                   r.get("type", "api") == "command"))
         same = [r for r in order if r not in others]
         content = files[f["path"]]
         user = (f"The item:\n- kind: {f['kind']}\n- location: {self.name}/{f['path']}:{f['line']}\n"
@@ -767,6 +782,9 @@ class Run:
                 f"- suggested change: {f['fix']}\n")
         if f["patch"]:
             user += "- the reviewer's patch:\n" + f["patch"].rstrip() + "\n"
+        if misquoted:
+            user += ("- note: the quoted code is not in the file word for word. Judge the "
+                     "claim against the code as it is; a misquote alone is not a reason to reject.\n")
         if not self.cfg.get("whole_files", True):
             shown, what = excerpt(content, f["line"], 60), "the lines around the item"
         elif estimate_tokens(content) < 40_000:
@@ -894,11 +912,19 @@ def dropped_section(dropped: list[dict]) -> str:
     be told from one making things up. Not items to act on."""
     if not dropped:
         return ""
-    out = ("\n## Thrown out: quoted code not in the file\n\nNot checked and not to act "
-           "on; listed to show what each reviewer claimed.\n\n")
+    out = ("\n## Misquoted: quoted code not in the file\n\nAnother reviewer judged each "
+           "against the code anyway. A confirmed one is worth a look, with the most doubt of "
+           "anything here.\n\n")
     for d in dropped:
         out += (f"- **{d['title'] or '(no title)'}** ({d['kind']}, {d['who']}): "
-                f"`{d['file']}:{d['line']}`, {d['why']}. Quoted:\n\n")
+                f"`{d['file']}:{d['line']}`, {d['why']}.")
+        if d.get("verdict"):
+            out += f" **{d['verdict'].capitalize()}** by {d['checked_by']}: {d['verdict_reason']}"
+        elif d.get("path"):
+            out += " No other reviewer answered."
+        if d.get("scenario"):
+            out += f"\n  {d['scenario']}"
+        out += " Quoted:\n\n"
         out += "  ```\n" + "\n".join("  " + l for l in (d["quote"] or "(nothing)").splitlines()) + "\n  ```\n"
     return out
 

@@ -51,6 +51,24 @@ done
 exec 9>"$MIRRORS/.lock"
 flock -n 9 || { echo "another bridge run is going"; exit 0; }
 
+# The free AIs' keys (GEMINI_API_KEY and the rest), kept out of the config
+KEYS=${REVIEW_KEYS:-$HOME/.config/review-diff/keys.env}
+if [ -f "$KEYS" ]; then set -a; . "$KEYS"; set +a; fi
+
+# mac1's coder listens on its own 127.0.0.1:8080 only: reach it through a
+# tunnel for the length of the run (the config's reviewer uses this port)
+TUNNEL=${REVIEW_CODER_TUNNEL:-18080:127.0.0.1:8080 mac1}
+if [ -n "$TUNNEL" ]; then
+  sock="$MIRRORS/.coder-tunnel"
+  read -r fwd host <<< "$TUNNEL"
+  if ssh -fNM -S "$sock" -o BatchMode=yes -o ConnectTimeout=15 -o ExitOnForwardFailure=yes \
+       -L "$fwd" "$host"; then
+    trap 'ssh -S "$sock" -O exit "$host" 2>/dev/null' EXIT
+  else
+    echo "no tunnel to $host's coder: it will be skipped"
+  fi
+fi
+
 while read -r path; do
   [ -n "$path" ] || continue
   name=$(name_of "$path")

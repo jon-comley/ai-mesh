@@ -57,6 +57,12 @@ add the work Claude later.
   what was thrown out: Copilot's one item on little-theo-firmware #150 (a
   failed msgpack write still renaming an incomplete FNOL into place) quoted
   the code exactly and was counted as made up.
+- **Misquoted items are judged, not dropped** (Jon: "keep the thrown out
+  ones always, let one of the other ais judge if it good or not"), and
+  **the free AIs look first, mac1's coder checks** (Jon: "ai-loops, then mac1
+  local llm the coder one"), called straight from lenovo1 rather than through
+  pi1 ("i would rather go straight to the ais-loop and not via pi1"). The
+  coder is `check_only`, reached through an ssh tunnel to its loopback port.
 - **Diffs only for the work code** (`"whole_files": false`): the diff with
   each changed function whole and its callers, and the check sees 60 lines
   around the item.
