@@ -4600,6 +4600,11 @@ body {
   white-space: pre-wrap; word-break: break-word; overflow-x: auto; font-size: 12px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 4px 0;
 }
+.rv-diff summary { cursor: pointer; font-size: 13px; color: var(--muted, inherit); }
+.rv-diff pre {
+  white-space: pre; overflow-x: auto; font-size: 12px; max-height: 50vh; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 4px 0;
+}
 .rv-report { margin-bottom: 12px; }
 .rv-report-text { max-height: 60vh; overflow-y: auto; }
 .rv-role-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 14px; }

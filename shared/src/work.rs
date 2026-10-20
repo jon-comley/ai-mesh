@@ -160,10 +160,14 @@ pub struct ReviewTaskView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ReviewCounts {
+    /// Confirmed bugs by severity.
     pub high: u32,
     pub medium: u32,
     pub low: u32,
     pub unconfirmed: u32,
+    /// Confirmed tests, refactors, improvements and ideas.
+    #[serde(default)]
+    pub suggestions: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -188,6 +192,10 @@ pub struct ReviewRunView {
     pub error: Option<String>,
 }
 
+fn bug_kind() -> String {
+    "bug".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewFindingView {
     pub id: String,
@@ -195,12 +203,22 @@ pub struct ReviewFindingView {
     pub repo: String,
     pub path: String,
     pub line: u32,
-    /// "high", "medium" or "low".
+    /// "bug", "test", "refactor", "improvement" or "feature".
+    #[serde(default = "bug_kind")]
+    pub kind: String,
+    /// "high", "medium" or "low". Only bugs are ever more than low.
     pub severity: String,
     pub title: String,
     pub quote: String,
+    /// The explanation.
     pub scenario: String,
     pub fix: String,
+    /// The change as a unified diff, when the reviewer gave one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub patch: String,
+    /// Whether the diff applied to the code it was written for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_applies: Option<bool>,
     /// "confirmed", "unsure" or absent (not checked). Rejected findings are not sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<String>,

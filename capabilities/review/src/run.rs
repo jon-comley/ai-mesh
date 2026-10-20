@@ -104,6 +104,10 @@ pub struct Limits {
     /// Refuse repo URLs that are not GitHub. Only tests turn this off, to
     /// clone from a local folder.
     pub check_urls: bool,
+    /// The orchestrator's review inbox (`~/reviews/inbox` on mac1): each
+    /// finished report with something in it is copied there too. `None`
+    /// when there is no such folder.
+    pub inbox: Option<PathBuf>,
 }
 
 impl Default for Limits {
@@ -119,6 +123,7 @@ impl Default for Limits {
             stall: Duration::from_secs(20 * 60),
             poll: Duration::from_secs(5),
             check_urls: true,
+            inbox: None,
         }
     }
 }
@@ -631,7 +636,15 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     if gave_up_reviews == chunks.len() {
         return Err("every review task failed or could not be handed out".into());
     }
-    let findings = codereview::dedupe::dedupe(state.findings);
+    let mut findings = codereview::dedupe::dedupe(state.findings);
+    // Does each diff fit the code it was written for? Companion-repo
+    // findings are left unchecked: their clone is at its own head.
+    for f in findings.iter_mut().filter(|f| !f.patch.is_empty()) {
+        if f.repo == spec.name {
+            f.patch_applies = Some(repo.patch_applies(&rev, &f.patch).await);
+        }
+    }
+    let (findings, left_out_over_cap) = codereview::dedupe::cap_suggestions(findings);
     let finished = (ctx.now)().format("%Y-%m-%d %H:%M").to_string();
     let info = RunInfo {
         repo: spec.name.clone(),
@@ -648,6 +661,7 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
         chunks: chunks.len() as u32,
         dropped_by_quote_check: state.dropped,
         files_reviewed: targets.len() as u32,
+        left_out_over_cap: left_out_over_cap as u32,
     };
     let markdown = render(&info, &findings);
     let dir = ctx.home.join("reports").join(&spec.name);
@@ -655,6 +669,22 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     let report_path = dir.join(format!("{}-run{run_id}.md", (ctx.now)().format("%Y-%m-%d")));
     std::fs::write(&report_path, &markdown).map_err(|e| e.to_string())?;
     let _ = std::fs::write(dir.join("latest.md"), &markdown);
+    // The orchestrator works from its inbox: anything left after the checks
+    // goes there, named like beelink1's files so the two sort together.
+    if let Some(inbox) = ctx.limits.inbox.as_ref().filter(|d| d.is_dir())
+        && findings
+            .iter()
+            .any(|f| f.verdict != Some(Verdict::Rejected))
+    {
+        let name = format!(
+            "{}-{}-mesh-run{run_id}.md",
+            (ctx.now)().format("%Y%m%d-%H%M"),
+            spec.name
+        );
+        if let Err(e) = std::fs::write(inbox.join(&name), &markdown) {
+            warn!(error = %e, "could not copy the report to the review inbox");
+        }
+    }
 
     let counts = counts_of(&findings);
     let now = unix_now();
@@ -729,6 +759,7 @@ fn counts_of(findings: &[Finding]) -> ReviewCounts {
     let mut c = ReviewCounts::default();
     for f in findings {
         match f.verdict {
+            Some(Verdict::Confirmed) if f.kind != codereview::Kind::Bug => c.suggestions += 1,
             Some(Verdict::Confirmed) => match f.severity {
                 codereview::Severity::High => c.high += 1,
                 codereview::Severity::Medium => c.medium += 1,
@@ -963,8 +994,9 @@ async fn dispatch_all(
                                 st.dropped += 1;
                                 continue;
                             };
-                            let id =
-                                codereview::dedupe::finding_key(&file.repo, &file.path, &raw.quote);
+                            let id = codereview::dedupe::finding_key(
+                                raw.kind, &file.repo, &file.path, &raw.quote,
+                            );
                             if let Some(existing) = st.findings.iter_mut().find(|f| f.id == id) {
                                 if !existing.found_by.contains(&worker_label) {
                                     existing.found_by.push(worker_label.clone());
@@ -973,6 +1005,7 @@ async fn dispatch_all(
                             }
                             st.findings.push(Finding {
                                 id,
+                                kind: raw.kind,
                                 repo: file.repo.clone(),
                                 path: file.path.clone(),
                                 line,
@@ -981,6 +1014,8 @@ async fn dispatch_all(
                                 quote: raw.quote,
                                 scenario: raw.scenario,
                                 fix: raw.fix,
+                                patch: codereview::check::normalize_patch(&raw.patch, &file.repo),
+                                patch_applies: None,
                                 found_by: vec![worker_label.clone()],
                                 verdict: None,
                                 verdict_reason: None,
@@ -1137,12 +1172,18 @@ mod tests {
                   {"file":"dashboard/src/pages/JobDetailPage.tsx","line":5,"severity":"medium",
                    "title":"Invented","quote":"const nothing = invented();","scenario":"x","fix":"y"},
                   {"file":"dashboard/src/pages/JobDetailPage.tsx","line":2,"severity":"low",
-                   "title":"Rounding","quote":"import { parsePrice } from '@app/lib/money';","scenario":"x","fix":"y"}
+                   "title":"Rounding","quote":"import { parsePrice } from '@app/lib/money';","scenario":"x","fix":"y"},
+                  {"kind":"test","file":"dashboard/src/pages/JobDetailPage.tsx","line":2,"severity":"high",
+                   "title":"Test that raise uses the agreed amount","quote":"function raise(pricing) {",
+                   "explanation":"nothing tests raise()","fix":"add a test",
+                   "patch":"```diff\n--- /dev/null\n+++ b/dashboard/src/pages/raise.test.ts\n@@ -0,0 +1 @@\n+test('raise', () => {});\n```"}
                 ]"#
                 .into();
             } else {
                 self.checks.fetch_add(1, Ordering::SeqCst);
-                done.output = if user.contains("pricing?.amount") && user.contains("cheapest") {
+                done.output = if (user.contains("pricing?.amount") && user.contains("cheapest"))
+                    || user.contains("- kind: test")
+                {
                     r#"{"verdict":"confirmed","reason":"line 3 takes the headline price"}"#.into()
                 } else {
                     r#"{"verdict":"rejected","reason":"fine"}"#.into()
@@ -1272,13 +1313,16 @@ mod tests {
             seen_nodes: Mutex::new(Vec::new()),
         });
         let home = tmp.path().join("home");
-        let c = ctx(&home, mesh.clone(), store);
+        let mut c = ctx(&home, mesh.clone(), store);
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        c.limits.inbox = Some(inbox.clone());
         let out = run_local(&c, "dashboard", RunKind::Nightly).await;
 
         assert_eq!(out.status, "done");
-        // One review (after one pause), two findings past the quote check, two checks.
+        // One review (after one pause), three items past the quote check, three checks.
         assert_eq!(mesh.reviews.load(Ordering::SeqCst), 1);
-        assert_eq!(mesh.checks.load(Ordering::SeqCst), 2);
+        assert_eq!(mesh.checks.load(Ordering::SeqCst), 3);
         let seen = mesh.seen_nodes.lock().unwrap().clone();
         assert!(
             seen.iter()
@@ -1296,7 +1340,21 @@ mod tests {
             .iter()
             .filter(|f| f.verdict == Some(Verdict::Confirmed))
             .collect();
-        assert_eq!(confirmed.len(), 1);
+        assert_eq!(confirmed.len(), 2);
+        let test = confirmed[1];
+        assert_eq!(test.kind, codereview::Kind::Test);
+        assert_eq!(
+            test.severity,
+            codereview::Severity::Low,
+            "only bugs have a severity"
+        );
+        assert!(
+            test.patch
+                .starts_with("--- /dev/null\n+++ b/src/pages/raise.test.ts"),
+            "fences and the repo prefix are gone: {}",
+            test.patch
+        );
+        assert_eq!(test.patch_applies, Some(true));
         assert_eq!(
             confirmed[0].line, 3,
             "line corrected from 99 to where the quote is"
@@ -1310,17 +1368,23 @@ mod tests {
         assert!(md.contains("Invoice bills the cheapest option"));
         assert!(md.contains("1 quoting code that is not in the file"));
         assert!(md.contains("1 rejected by the checker"));
+        assert!(md.contains("## Tests to add"));
         assert!(home.join("reports/dashboard/latest.md").exists());
+        let copied: Vec<_> = std::fs::read_dir(&inbox).unwrap().collect();
+        assert_eq!(copied.len(), 1, "the report is in the orchestrator's inbox");
 
         {
             let s = c.store.lock().unwrap();
             let open = s.open_findings(10);
-            assert_eq!(open.len(), 1, "rejected findings are not listed");
+            assert_eq!(open.len(), 2, "rejected findings are not listed");
+            assert_eq!(open[1].kind, "test");
+            assert_eq!(open[1].patch_applies, Some(true));
             let row = s.repo("dashboard").unwrap();
             assert!(row.last_reviewed_commit.is_some());
             let run = &s.runs(1)[0];
             assert_eq!(run.status, "done");
             assert_eq!(run.counts.high, 1);
+            assert_eq!(run.counts.suggestions, 1);
         }
 
         // Nothing new the second time.

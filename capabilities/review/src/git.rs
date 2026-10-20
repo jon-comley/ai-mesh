@@ -133,6 +133,52 @@ impl Repo {
         run_text(cmd).await
     }
 
+    /// What changed between `base` and `head` in `paths`, with each changed
+    /// function shown whole (`-W`), for a reviewer that sees only the diff.
+    pub async fn diff_functions(
+        &self,
+        base: &str,
+        head: &str,
+        paths: &[String],
+    ) -> Result<String, String> {
+        let mut cmd = self.git();
+        cmd.args(["diff", "-W", base, head, "--"]).args(paths);
+        run_text(cmd).await
+    }
+
+    /// Whether `patch` applies to the tree at `rev`. Checked against a
+    /// scratch index beside the clone, so nothing in the repo changes; hunk
+    /// line counts are recounted, since models rarely get them right.
+    pub async fn patch_applies(&self, rev: &str, patch: &str) -> bool {
+        use tokio::io::AsyncWriteExt;
+        let index = self
+            .dir
+            .join(format!("patch-check-{}.index", uuid::Uuid::new_v4()));
+        let mut read = self.git();
+        read.env("GIT_INDEX_FILE", &index).args(["read-tree", rev]);
+        let ok = if run(read).await.is_ok() {
+            let mut cmd = self.git();
+            cmd.env("GIT_INDEX_FILE", &index)
+                .args(["apply", "--cached", "--check", "--recount", "-"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(patch.as_bytes()).await;
+                    }
+                    child.wait().await.is_ok_and(|s| s.success())
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        let _ = std::fs::remove_file(&index);
+        ok
+    }
+
     /// Every file at `rev`.
     pub async fn files(&self, rev: &str) -> Result<Vec<String>, String> {
         let mut cmd = self.git();
@@ -332,6 +378,33 @@ mod tests {
             repo.changed_files(&head, &fhead).await.unwrap(),
             vec!["src/c.ts"]
         );
+
+        // A reviewer's patch is checked against the tree, nothing is written.
+        let good =
+            "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-export const a = 3;\n+export const a = 9;\n";
+        let stale =
+            "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-export const a = 1;\n+export const a = 9;\n";
+        let new_file = "--- /dev/null\n+++ b/src/b.test.ts\n@@ -0,0 +1 @@\n+test('b', () => {});\n";
+        assert!(repo.patch_applies(&head, good).await);
+        assert!(!repo.patch_applies(&head, stale).await);
+        assert!(repo.patch_applies(&head, new_file).await);
+        assert!(
+            repo.patch_applies(&first, stale).await,
+            "it fits the older commit"
+        );
+        assert!(
+            std::fs::read_dir(&clone).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("patch-check")),
+            "the scratch index is removed"
+        );
+        let wd = repo
+            .diff_functions(&first, &head, &["a.ts".to_string()])
+            .await
+            .unwrap();
+        assert!(wd.contains("+export const a = 3;"));
 
         // A second sync fetches new commits into the existing clone.
         std::fs::write(origin.join("a.ts"), "export const a = 4;\n").unwrap();

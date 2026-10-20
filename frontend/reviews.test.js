@@ -56,6 +56,10 @@ function snapshot(overrides = {}) {
       { id: 'f2', run_id: 2, repo: 'dashboard', path: 'src/x.ts', line: 3, severity: 'low',
         title: '<script>alert(1)</script>', quote: 'x', scenario: '', fix: '',
         found_by: [], status: 'open', first_seen: 1 },
+      { id: 'f3', run_id: 2, repo: 'dashboard', path: 'src/vat.ts', line: 4, severity: 'low', kind: 'test',
+        title: 'Test the VAT rounding', quote: 'const vat = round(net * 0.2);', scenario: 'nothing tests the half-penny case',
+        fix: 'add a test', patch: '--- /dev/null\n+++ b/src/vat.test.ts\n@@ -0,0 +1 @@\n+<b>it</b>', patch_applies: true,
+        verdict: 'confirmed', found_by: ['gemini-flash-latest@gemini'], status: 'open', first_seen: 1 },
     ],
     settings: { ntfy_topic_set: false, max_review_tokens: 32000, evening_max_tokens: 16000 },
     questions: [
@@ -121,6 +125,17 @@ describe('Reviews tab', () => {
     expect(el.textContent).toContain('dashboard/src/pages/JobDetailPage.tsx:219');
     expect(el.querySelector('script')).toBeNull();
     expect(el.textContent).toContain('(not confirmed)');
+  });
+
+  it('puts suggestions after the bugs, with their diff and who found them', () => {
+    const el = panel.querySelector('#rv-findings');
+    const headings = [...el.querySelectorAll('h4')].map(h => h.textContent);
+    expect(headings).toEqual(['High bugs', 'Low bugs', 'Tests to add']);
+    const test = el.querySelector('.rv-finding[data-id="f3"]');
+    expect(test.querySelector('summary').textContent).toBe('Diff (applies cleanly)');
+    expect(test.querySelector('details pre').textContent).toContain('+<b>it</b>');
+    expect(test.querySelector('b')).toBeNull();
+    expect(test.textContent).toContain('found by gemini-flash-latest@gemini');
   });
 
   it('Run now and Dismiss call the API', async () => {

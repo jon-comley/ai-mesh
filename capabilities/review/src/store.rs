@@ -118,6 +118,15 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self, String> {
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
+        // Columns added since the first release; "duplicate column" on a
+        // database that already has them is expected and ignored.
+        for column in [
+            "kind TEXT NOT NULL DEFAULT 'bug'",
+            "patch TEXT NOT NULL DEFAULT ''",
+            "patch_applies INTEGER",
+        ] {
+            let _ = conn.execute(&format!("ALTER TABLE findings ADD COLUMN {column}"), []);
+        }
         Ok(Self { conn })
     }
 
@@ -325,13 +334,16 @@ impl Store {
         let found_by = serde_json::to_string(&f.found_by).unwrap_or_else(|_| "[]".into());
         let _ = self.conn.execute(
             "INSERT INTO findings (id, run_id, repo, path, line, severity, title, quote, scenario,
-                                   fix, verdict, checked_by, found_by_json, status, first_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'open', ?14)
+                                   fix, verdict, checked_by, found_by_json, status, first_seen,
+                                   kind, patch, patch_applies)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'open', ?14,
+                     ?15, ?16, ?17)
              ON CONFLICT (id) DO UPDATE SET
                 run_id = excluded.run_id, line = excluded.line, severity = excluded.severity,
                 title = excluded.title, scenario = excluded.scenario, fix = excluded.fix,
                 verdict = excluded.verdict, checked_by = excluded.checked_by,
-                found_by_json = excluded.found_by_json",
+                found_by_json = excluded.found_by_json, kind = excluded.kind,
+                patch = excluded.patch, patch_applies = excluded.patch_applies",
             params![
                 f.id,
                 run_id,
@@ -346,7 +358,10 @@ impl Store {
                 verdict_str(f.verdict),
                 f.checked_by,
                 found_by,
-                now
+                now,
+                f.kind.as_str(),
+                f.patch,
+                f.patch_applies
             ],
         );
     }
@@ -368,9 +383,11 @@ impl Store {
     pub fn open_findings(&self, limit: u32) -> Vec<ReviewFindingView> {
         let mut stmt = match self.conn.prepare(
             "SELECT id, run_id, repo, path, line, severity, title, quote, scenario, fix, verdict,
-                    checked_by, found_by_json, status, first_seen
+                    checked_by, found_by_json, status, first_seen, kind, patch, patch_applies
              FROM findings WHERE status = 'open' AND COALESCE(verdict, '') != 'rejected'
-             ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+             ORDER BY CASE kind WHEN 'bug' THEN 0 WHEN 'test' THEN 1 WHEN 'refactor' THEN 2
+                                WHEN 'improvement' THEN 3 ELSE 4 END,
+                      CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
                       run_id DESC, repo, path, line
              LIMIT ?1",
         ) {
@@ -394,6 +411,9 @@ impl Store {
                 found_by: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or_default(),
                 status: r.get(13)?,
                 first_seen: r.get::<_, i64>(14)? as u64,
+                kind: r.get(15)?,
+                patch: r.get(16)?,
+                patch_applies: r.get(17)?,
             })
         })
         .map(|rows| rows.filter_map(Result::ok).collect())
@@ -501,7 +521,13 @@ mod tests {
 
     fn finding(quote: &str, verdict: Option<Verdict>) -> Finding {
         Finding {
-            id: codereview::dedupe::finding_key("dashboard", "src/a.ts", quote),
+            id: codereview::dedupe::finding_key(
+                codereview::Kind::Bug,
+                "dashboard",
+                "src/a.ts",
+                quote,
+            ),
+            kind: codereview::Kind::Bug,
             repo: "dashboard".into(),
             path: "src/a.ts".into(),
             line: 3,
@@ -510,6 +536,8 @@ mod tests {
             quote: quote.into(),
             scenario: "s".into(),
             fix: "f".into(),
+            patch: String::new(),
+            patch_applies: None,
             found_by: vec!["m@mac1".into()],
             verdict,
             verdict_reason: None,

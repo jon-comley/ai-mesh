@@ -49,6 +49,43 @@ pub fn locate_quote(content: &str, quote: &str, reported_line: u32) -> Option<u3
     best
 }
 
+/// A reviewer's patch made ready for `git apply`: code fences taken off,
+/// a `repo/` prefix taken out of the paths (prompts name files `repo/path`,
+/// so models often copy that into the diff), and a final newline. Empty when
+/// what is left has no `@@` hunk, which is not a patch at all.
+pub fn normalize_patch(patch: &str, repo: &str) -> String {
+    let mut lines: Vec<&str> = patch.trim().lines().collect();
+    if lines
+        .first()
+        .is_some_and(|l| l.trim_start().starts_with("```"))
+    {
+        lines.remove(0);
+    }
+    if lines
+        .last()
+        .is_some_and(|l| l.trim_start().starts_with("```"))
+    {
+        lines.pop();
+    }
+    if !lines.iter().any(|l| l.starts_with("@@")) {
+        return String::new();
+    }
+    let mut out = String::new();
+    for l in lines {
+        let fixed = ["--- a/", "+++ b/", "--- ", "+++ "]
+            .iter()
+            .find_map(|p| {
+                let rest = l.strip_prefix(p)?;
+                let rest = rest.strip_prefix(&format!("{repo}/")).unwrap_or(rest);
+                Some(format!("{p}{rest}"))
+            })
+            .unwrap_or_else(|| l.to_string());
+        out.push_str(&fixed);
+        out.push('\n');
+    }
+    out
+}
+
 /// The lines around `line`, numbered, for a checking prompt.
 pub fn excerpt(content: &str, line: u32, radius: u32) -> String {
     let start = line.saturating_sub(radius).max(1);
@@ -66,6 +103,23 @@ pub fn excerpt(content: &str, line: u32, radius: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patches_lose_fences_and_the_repo_prefix() {
+        let p = "```diff\n--- a/guv/src/a.ts\n+++ b/guv/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n```";
+        assert_eq!(
+            normalize_patch(p, "guv"),
+            "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n"
+        );
+        assert_eq!(
+            normalize_patch(
+                "--- /dev/null\n+++ b/src/a.test.ts\n@@ -0,0 +1 @@\n+t\n",
+                "guv"
+            ),
+            "--- /dev/null\n+++ b/src/a.test.ts\n@@ -0,0 +1 @@\n+t\n"
+        );
+        assert_eq!(normalize_patch("use vatOf() instead", "guv"), "");
+    }
 
     const FILE: &str = "function a() {\n  const agreed = pricing?.amount;\n  return agreed;\n}\n\nfunction b() {\n  const agreed = pricing?.amount;\n}\n";
 

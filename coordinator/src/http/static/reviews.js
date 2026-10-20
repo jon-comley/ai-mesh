@@ -299,7 +299,8 @@ function runStatusText(run) {
   }
   if (run.status === 'done') {
     const c = run.counts ?? {};
-    return `done · ${c.high ?? 0} high, ${c.medium ?? 0} medium, ${c.low ?? 0} low, ${c.unconfirmed ?? 0} not confirmed`;
+    const more = c.suggestions ? `, ${c.suggestions} suggestion${c.suggestions === 1 ? '' : 's'}` : '';
+    return `done · ${c.high ?? 0} high, ${c.medium ?? 0} medium, ${c.low ?? 0} low${more}, ${c.unconfirmed ?? 0} not confirmed`;
   }
   if (run.status === 'nothing_new') return 'nothing to review';
   if (run.status === 'failed') return `failed: ${run.error ?? 'unknown error'}`;
@@ -329,23 +330,41 @@ function renderRuns(runs) {
     </div>`).join('') + queuedHtml;
 }
 
+// Bugs by severity, then the suggestions, each kind under its own heading.
+const FINDING_GROUPS = [
+  ['High bugs', f => (f.kind ?? 'bug') === 'bug' && f.severity === 'high'],
+  ['Medium bugs', f => (f.kind ?? 'bug') === 'bug' && f.severity === 'medium'],
+  ['Low bugs', f => (f.kind ?? 'bug') === 'bug' && f.severity === 'low'],
+  ['Tests to add', f => f.kind === 'test'],
+  ['Refactors', f => f.kind === 'refactor'],
+  ['Improvements', f => f.kind === 'improvement'],
+  ['Ideas', f => f.kind === 'feature'],
+];
+
+function diffHtml(f) {
+  if (!f.patch) return '';
+  const note = f.patch_applies === true ? ' (applies cleanly)'
+    : f.patch_applies === false ? ' (does not apply cleanly: a starting point)' : '';
+  return `<details class="rv-diff"><summary>Diff${note}</summary><pre>${esc(f.patch)}</pre></details>`;
+}
+
 function renderFindings(findings) {
   const el = document.getElementById('rv-findings');
   if (!el) return;
   if (!findings.length) { el.innerHTML = '<p class="placeholder">Nothing open.</p>'; return; }
-  const groups = [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']];
-  el.innerHTML = groups.map(([sev, label]) => {
-    const list = findings.filter(f => f.severity === sev);
+  el.innerHTML = FINDING_GROUPS.map(([label, inGroup]) => {
+    const list = findings.filter(inGroup);
     if (!list.length) return '';
     return `<h4>${label}</h4>` + list.map(f => `
       <div class="rv-finding" data-id="${esc(f.id)}">
         <div><strong>${esc(f.title)}</strong>${f.verdict === 'confirmed' ? '' : ' <span class="gw-hint">(not confirmed)</span>'}</div>
-        <div class="gw-hint"><code>${esc(`${f.repo}/${f.path}:${f.line}`)}</code></div>
+        <div class="gw-hint"><code>${esc(`${f.repo}/${f.path}:${f.line}`)}</code>${f.found_by?.length ? ` · found by ${esc(f.found_by.join(', '))}` : ''}</div>
         ${f.scenario ? `<div>${esc(f.scenario)}</div>` : ''}
-        ${f.fix ? `<div class="gw-hint">Fix: ${esc(f.fix)}</div>` : ''}
+        ${f.fix ? `<div class="gw-hint">Change: ${esc(f.fix)}</div>` : ''}
         <pre class="rv-quote">${esc(f.quote)}</pre>
+        ${diffHtml(f)}
         <div class="rv-actions">
-          <button type="button" data-act="fixed" data-id="${esc(f.id)}">Fixed</button>
+          <button type="button" data-act="fixed" data-id="${esc(f.id)}">${f.kind === 'feature' ? 'Done' : 'Fixed'}</button>
           <button type="button" data-act="dismiss" data-id="${esc(f.id)}">Dismiss</button>
         </div>
       </div>`).join('');

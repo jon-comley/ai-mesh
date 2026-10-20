@@ -3,7 +3,7 @@
 //! an array was asked for; all of that is tolerated here rather than wasting
 //! a task on a retry.
 
-use crate::{RawFinding, Severity, Verdict};
+use crate::{Kind, RawFinding, Severity, Verdict};
 use serde_json::Value;
 
 /// The first JSON value of the wanted kind (`[` or `{`) in `text`, found by
@@ -77,7 +77,8 @@ fn line_field(v: &Value) -> u32 {
 }
 
 /// Findings from a review reply. Entries missing a file, a title or a quote
-/// are dropped: without a quote the finding cannot be checked.
+/// are dropped: without a quote the finding cannot be checked. A suggestion
+/// (anything but a bug) has no severity of its own and is filed as low.
 pub fn parse_findings(text: &str) -> Vec<RawFinding> {
     let value = extract_json(text, '[').or_else(|| {
         extract_json(text, '{').map(|obj| match obj.get("findings") {
@@ -107,14 +108,30 @@ pub fn parse_findings(text: &str) -> Vec<RawFinding> {
             if file.is_empty() || title.is_empty() || quote.is_empty() {
                 return None;
             }
+            let kind = Kind::parse(&str_field(v, &["kind", "type", "category"]));
             Some(RawFinding {
+                kind,
                 file,
                 line,
-                severity: Severity::parse(&str_field(v, &["severity", "priority"])),
+                severity: if kind == Kind::Bug {
+                    Severity::parse(&str_field(v, &["severity", "priority"]))
+                } else {
+                    Severity::Low
+                },
                 title,
                 quote,
-                scenario: str_field(v, &["scenario", "failure_scenario", "impact", "why"]),
+                scenario: str_field(
+                    v,
+                    &[
+                        "explanation",
+                        "scenario",
+                        "failure_scenario",
+                        "impact",
+                        "why",
+                    ],
+                ),
                 fix: str_field(v, &["fix", "suggested_fix", "suggestion"]),
+                patch: str_field(v, &["patch", "diff"]),
             })
         })
         .collect()
@@ -169,6 +186,21 @@ mod tests {
         assert_eq!(f[0].file, "src/b.ts");
         assert_eq!(f[0].line, 40);
         assert_eq!(f[0].severity, Severity::Low);
+    }
+
+    #[test]
+    fn reads_kinds_explanations_and_patches() {
+        let reply = r#"[{"kind":"refactor","file":"guv/src/a.ts","line":3,"severity":"high","title":"Two copies of the VAT sum","quote":"const vat = net * 0.2;","explanation":"the same sum is in b.ts","patch":"--- a/src/a.ts\n+++ b/src/a.ts\n@@ -3 +3 @@\n-const vat = net * 0.2;\n+const vat = vatOf(net);\n"},
+          {"type":"unit test","file":"guv/src/a.ts","line":3,"title":"t","quote":"const vat = net * 0.2;"},
+          {"file":"guv/src/a.ts","line":3,"title":"t","quote":"const vat = net * 0.2;","scenario":"s"}]"#;
+        let f = parse_findings(reply);
+        assert_eq!(f[0].kind, Kind::Refactor);
+        assert_eq!(f[0].severity, Severity::Low, "only bugs have a severity");
+        assert_eq!(f[0].scenario, "the same sum is in b.ts");
+        assert!(f[0].patch.starts_with("--- a/src/a.ts\n+++ b/src/a.ts\n@@"));
+        assert_eq!(f[1].kind, Kind::Test);
+        assert_eq!(f[2].kind, Kind::Bug, "no kind means a bug, as before");
+        assert_eq!(f[2].scenario, "s");
     }
 
     #[test]

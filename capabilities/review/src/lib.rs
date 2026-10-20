@@ -175,6 +175,12 @@ impl Inner {
                 d.evening_max_tokens,
             ),
             allowed_owners: env_list("REVIEW_ALLOWED_OWNERS"),
+            inbox: std::env::var_os("REVIEW_INBOX")
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .map(|h| std::path::PathBuf::from(h).join("reviews").join("inbox"))
+                }),
             ..Limits::default()
         }
     }

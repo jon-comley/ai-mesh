@@ -79,6 +79,77 @@ impl Severity {
     }
 }
 
+/// What a finding is: a defect, or a suggestion to make the code better.
+/// Reports list them in this order, and a later kind never outranks an
+/// earlier one.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// Wrong behaviour for a real user.
+    #[default]
+    Bug,
+    /// A unit test or test case the changed code lacks.
+    Test,
+    /// The same behaviour in cleaner code: duplication, dead code, simpler logic.
+    Refactor,
+    /// Better behaviour: error handling, edge cases, speed, clearer messages.
+    Improvement,
+    /// Something new the code is close to supporting. An idea for Jon, never a fix.
+    Feature,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 5] = [
+        Kind::Bug,
+        Kind::Test,
+        Kind::Refactor,
+        Kind::Improvement,
+        Kind::Feature,
+    ];
+
+    pub fn parse(s: &str) -> Kind {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "test" | "tests" | "test case" | "unit test" | "missing test" => Kind::Test,
+            "refactor" | "refactoring" | "cleanup" | "simplification" => Kind::Refactor,
+            "improvement" | "enhancement" | "improve" => Kind::Improvement,
+            "feature" | "idea" | "new feature" => Kind::Feature,
+            _ => Kind::Bug,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Bug => "bug",
+            Kind::Test => "test",
+            Kind::Refactor => "refactor",
+            Kind::Improvement => "improvement",
+            Kind::Feature => "feature",
+        }
+    }
+
+    /// The report's heading for this kind.
+    pub fn heading(self) -> &'static str {
+        match self {
+            Kind::Bug => "Bugs",
+            Kind::Test => "Tests to add",
+            Kind::Refactor => "Refactors",
+            Kind::Improvement => "Improvements",
+            Kind::Feature => "Ideas",
+        }
+    }
+
+    /// How many of this kind a run keeps, so suggestions never bury the bugs.
+    pub fn cap(self) -> Option<usize> {
+        match self {
+            Kind::Bug => None,
+            Kind::Test | Kind::Refactor | Kind::Improvement => Some(3),
+            Kind::Feature => Some(2),
+        }
+    }
+}
+
 /// What the checking model said about a finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -91,6 +162,8 @@ pub enum Verdict {
 /// A finding as the reviewing model reported it, before any checking.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawFinding {
+    #[serde(default)]
+    pub kind: Kind,
     pub file: String,
     pub line: u32,
     pub severity: Severity,
@@ -98,12 +171,17 @@ pub struct RawFinding {
     pub quote: String,
     pub scenario: String,
     pub fix: String,
+    /// The change as a unified diff, paths from the repo root.
+    #[serde(default)]
+    pub patch: String,
 }
 
 /// A finding that passed the quote check, with who found and who checked it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Finding {
     pub id: String,
+    #[serde(default)]
+    pub kind: Kind,
     pub repo: String,
     /// Path inside `repo`.
     pub path: String,
@@ -112,8 +190,18 @@ pub struct Finding {
     pub severity: Severity,
     pub title: String,
     pub quote: String,
+    /// The explanation: for a bug, the inputs and the wrong result; for a
+    /// suggestion, what it changes and why that is better.
     pub scenario: String,
     pub fix: String,
+    /// The change as a unified diff, paths from the repo root. Empty when the
+    /// reviewer gave none.
+    #[serde(default)]
+    pub patch: String,
+    /// Whether `patch` applies to the code it was written for (`git apply
+    /// --check`). `None` when there is no patch or it was not tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_applies: Option<bool>,
     /// `model@node` of each reviewer that reported it (more than one after a merge).
     pub found_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -298,11 +298,38 @@ crate:
 6. **Quote check:** a finding whose quoted code is not in the file is dropped
    without asking anyone; one that is found gets its line number corrected.
 7. **Check** each finding (`prompts/verify.md`): confirmed, rejected or unsure.
-8. **Report:** duplicates merged, rejected ones left out, the rest by
-   severity; unchecked and unsure ones in a separate *Not confirmed* section.
-   Saved as `reports/<repo>/<date>-run<id>.md` and `latest.md`.
+   The checker rejects only on evidence in the code (the quote isn't there, a
+   guard makes the case impossible, it already exists, the patch would break
+   something); a matter of judgement is unsure, not rejected.
+8. **Diff check:** each item's diff is tried with `git apply --check` against
+   the commit reviewed, in a scratch index, and marked as applying cleanly or
+   not. One that doesn't apply is kept, as a starting point.
+9. **Report:** duplicates merged, rejected ones left out, suggestions over
+   their limit left out, then bugs by severity, then tests, refactors,
+   improvements and ideas; unchecked and unsure ones in a separate *Not
+   confirmed* section. Saved as `reports/<repo>/<date>-run<id>.md` and
+   `latest.md`, and copied to the orchestrator's inbox (`~/reviews/inbox` on
+   mac1, or `REVIEW_INBOX`) when there's something in it.
 
 The prompts live in `codereview/prompts/` so they can be tuned without code.
+
+### What a review reports
+
+Five kinds of item, in this order; a later kind never outranks an earlier one:
+
+| Kind | What it is | Per run |
+|---|---|---|
+| Bug | Wrong behaviour for a real user (money, lost data, security, hidden failures, UK dates) | All |
+| Test | A unit test or test case the changed code lacks, written as a new test | Up to 3 |
+| Refactor | The same behaviour in cleaner code: duplication, dead code, simpler logic | Up to 3 |
+| Improvement | Better behaviour: error messages, edge cases, needless work, accessibility | Up to 3 |
+| Idea | A feature the code is close to supporting; for Jon to choose, never a fix | Up to 2 |
+
+Each item has the file and line, the quoted code, an explanation (for a bug,
+the inputs and the wrong result) and the change as a unified diff. The
+orchestrator works from the inbox copy: it fixes each bug, test, refactor
+and improvement, using the diff as a starting point, or drops it with the
+reason.
 
 **Schedule:** every minute mac1 checks whether a nightly slot (default 02:15)
 or the weekly sweep (default Sunday 03:15) has come round since the last
@@ -310,7 +337,8 @@ scheduled run, in local time. A slot missed while mac1 was asleep runs once
 when it wakes. A run left half-done by a restart is marked failed and queued
 again.
 
-**Findings** have a stable id (repo, path, quoted code), so one dismissed on
+**Findings** have a stable id (kind, repo, path, quoted code; a bug's id
+leaves the kind out, as it did before kinds existed), so one dismissed on
 the tab stays dismissed when a later run reports it again.
 
 ## Wire messages (v13)

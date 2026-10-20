@@ -52,7 +52,36 @@ pub fn review_prompt(repo: &str, scope: &str, chunk: &Chunk, files: &[SourceFile
     for &c in &chunk.context {
         render_file(&files[c], "CONTEXT", &mut user);
     }
-    user.push_str("\nReport the real bugs in the files UNDER REVIEW as a JSON array.");
+    user.push_str("\nReport what you find in the files UNDER REVIEW as a JSON array.");
+    Prompt {
+        system: REVIEW_INSTRUCTIONS.to_string(),
+        user,
+    }
+}
+
+/// The review prompt for a reviewer that sees only what changed: the diff,
+/// with each changed function whole (`git diff -W`), and a short note on the
+/// code around it (what it imports, what calls it) in place of the files.
+/// For the cloud reviewers, so a passing run's change is all that leaves the
+/// house.
+pub fn diff_prompt(repo: &str, scope: &str, diff: &str, note: &str) -> Prompt {
+    let mut user = format!("Repository: {repo}\nThis review covers: {scope}\n");
+    if !note.trim().is_empty() {
+        user.push_str("\n=== CONTEXT NOTE: the code around the change, summarised ===\n");
+        user.push_str(note.trim_end());
+        user.push('\n');
+    }
+    user.push_str("\n=== DIFF: what changed, each changed function shown whole ===\n");
+    user.push_str(diff.trim_end());
+    user.push_str(
+        "\n\nYou see only the diff and the note, not the whole files. Name files as `repo/path` \
+         (here `",
+    );
+    user.push_str(repo);
+    user.push_str(
+        "/` and the path from the diff header). Quote lines as they are now, without the leading \
+         + or space. Report what you find in the changed code as a JSON array.",
+    );
     Prompt {
         system: REVIEW_INSTRUCTIONS.to_string(),
         user,
@@ -71,7 +100,8 @@ pub fn verify_prompt(
     budget: usize,
 ) -> Prompt {
     let mut user = format!(
-        "The finding:\n- location: {}\n- severity: {}\n- title: {}\n- quoted code: {}\n- what goes wrong: {}\n- suggested fix: {}\n",
+        "The item:\n- kind: {}\n- location: {}\n- severity: {}\n- title: {}\n- quoted code: {}\n- explanation: {}\n- suggested change: {}\n",
+        finding.kind.as_str(),
         finding.location(),
         finding.severity.label(),
         finding.title,
@@ -79,6 +109,11 @@ pub fn verify_prompt(
         finding.scenario,
         finding.fix,
     );
+    if !finding.patch.trim().is_empty() {
+        user.push_str("- the reviewer's patch:\n");
+        user.push_str(finding.patch.trim_end());
+        user.push('\n');
+    }
     if file_cost(file) <= budget / 2 {
         render_file(file, "the file the finding is in", &mut user);
     } else {
@@ -94,7 +129,7 @@ pub fn verify_prompt(
         }
         render_file(f, "CONTEXT", &mut user);
     }
-    user.push_str("\nIs this finding a real bug? Answer with the JSON object only.");
+    user.push_str("\nDoes this item hold up against the code? Answer with the JSON object only.");
     Prompt {
         system: VERIFY_INSTRUCTIONS.to_string(),
         user,
@@ -167,6 +202,7 @@ mod tests {
         let f = file("src/a.ts", "const agreed = pricing?.amount;", true);
         let finding = Finding {
             id: "f1".into(),
+            kind: crate::Kind::Bug,
             repo: "dashboard".into(),
             path: "src/a.ts".into(),
             line: 1,
@@ -175,6 +211,8 @@ mod tests {
             quote: "const agreed = pricing?.amount;".into(),
             scenario: "s".into(),
             fix: "x".into(),
+            patch: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n".into(),
+            patch_applies: None,
             found_by: vec!["qwen3-coder@mac1".into()],
             verdict: None,
             verdict_reason: None,
@@ -184,7 +222,25 @@ mod tests {
         assert!(p.tokens() > 0);
         assert!(p.user.contains("dashboard/src/a.ts:1"));
         assert!(p.user.contains("Bills the cheapest option"));
+        assert!(p.user.contains("- kind: bug"));
+        assert!(p.user.contains("the reviewer's patch:\n--- a/src/a.ts"));
         assert!(p.system.contains("\"verdict\""));
+    }
+
+    #[test]
+    fn a_diff_prompt_carries_the_note_and_the_diff_but_no_files() {
+        let p = diff_prompt(
+            "guv",
+            "Tests passed: 2 new commits",
+            "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@ function f() {\n-x\n+y\n",
+            "src/a.ts is called by src/b.ts:12 `f(order)`",
+        );
+        let note_at = p.user.find("CONTEXT NOTE").unwrap();
+        let diff_at = p.user.find("=== DIFF").unwrap();
+        assert!(note_at < diff_at);
+        assert!(p.user.contains("`guv/`"));
+        assert!(!p.user.contains("=== FILE"));
+        assert!(p.system.contains("\"kind\""));
     }
 
     #[test]
@@ -196,6 +252,7 @@ mod tests {
         let f = file("src/big.ts", &content, true);
         let finding = Finding {
             id: "f".into(),
+            kind: crate::Kind::Bug,
             repo: "dashboard".into(),
             path: "src/big.ts".into(),
             line: 1000,
@@ -204,6 +261,8 @@ mod tests {
             quote: "const line1000 = 1000;".into(),
             scenario: String::new(),
             fix: String::new(),
+            patch: String::new(),
+            patch_applies: None,
             found_by: vec![],
             verdict: None,
             verdict_reason: None,

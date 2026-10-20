@@ -11,6 +11,25 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Reviews: tests, refactors, improvements and ideas, each with a diff (2026-10-20)
+
+Jon wanted more than bugs from the reviews ("code refactor and … code
+improvements and features", then "a unit test or test case"), and every item
+as "a clear explanation and a diff".
+- **Five kinds in a fixed order:** bugs, tests, refactors, improvements,
+  ideas. The suggestion kinds are capped per run (3, 3, 3 and 2) so they
+  never bury the bugs. Ideas are never fixes: they're for Jon to choose.
+- **Every item carries a diff.** mac1 checks each one with `git apply --check`
+  against a scratch index in its bare clone, so the report says whether it
+  applies. One that doesn't is kept as a starting point: a bug is worth
+  reporting even when the model's patch is off by a line.
+- **The checker rejects only on evidence.** Some reviewers will be stronger
+  models than the checker, and a weaker model judging a stronger one's
+  findings tends to throw out the subtle, correct ones. A matter of judgement
+  comes back unsure, not rejected.
+- **The report goes to the orchestrator's inbox** on mac1, the same folder
+  beelink1's findings go to, so one place holds everything to fix or drop.
+
 ## Reviews: guv and the dashboard only after the tests pass (2026-10-19)
 
 Jon: "i only want the review to run after orchestrator has all tests passing".
