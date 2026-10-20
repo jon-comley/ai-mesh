@@ -427,24 +427,22 @@ def call_api(r: dict, system: str, user: str, max_tokens: int) -> str:
         raise ReviewerOut(f"{r['name']}: no answer in the reply") from e
 
 
-def windows_ssh_script(cmd: list[str]) -> str:
-    """PowerShell for a Windows host: the prompt arrives on stdin, goes in
-    context.md in a scratch folder, and the command runs beside it."""
+def windows_ssh_script(cmd: list[str], folder: str) -> str:
+    """PowerShell for a Windows host: run the command in the folder scp just
+    copied context.md into (under the home folder), then remove the folder.
+    Not stdin: a prompt of 13k tokens on stdin hung [Console]::In for good."""
     quoted = " ".join("'" + a.replace("'", "''") + "'" for a in cmd[1:])
     return (
         "$ErrorActionPreference = 'Stop'\n"
-        "[Console]::InputEncoding = [Console]::OutputEncoding = New-Object Text.UTF8Encoding $false\n"
-        "$d = Join-Path $env:TEMP ('review-diff-' + [guid]::NewGuid())\n"
-        "New-Item -ItemType Directory $d | Out-Null\n"
+        "[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false\n"
+        f"$d = Join-Path $HOME '{folder}'\n"
         "try {\n"
-        "  [IO.File]::WriteAllText((Join-Path $d 'context.md'), [Console]::In.ReadToEnd(),"
-        " (New-Object Text.UTF8Encoding $false))\n"
         "  Set-Location $d\n"
         # The program, not npm's .ps1 shim, which script policy blocks
         f"  $exe = (Get-Command '{cmd[0]}' -CommandType Application | Select-Object -First 1).Source\n"
         f"  & $exe {quoted}\n"
         "  $rc = $LASTEXITCODE\n"
-        "} finally { Set-Location $env:TEMP; Remove-Item -Recurse -Force $d }\n"
+        "} finally { Set-Location $HOME; Remove-Item -Recurse -Force $d }\n"
         "exit $rc\n"
     )
 
@@ -457,16 +455,27 @@ def call_command(r: dict, system: str, user: str) -> str:
     prompt = system + "\n\n" + user
     timeout = r.get("timeout_secs", 1800)
     if r.get("ssh_host"):
-        script = windows_ssh_script(cmd).encode("utf-16-le")
-        remote = ["ssh", "-o", "BatchMode=yes", r["ssh_host"], "powershell", "-NoProfile",
-                  "-NonInteractive", "-EncodedCommand", base64.b64encode(script).decode()]
+        host = r["ssh_host"]
+        ssh_opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
+        with tempfile.TemporaryDirectory() as d:
+            folder = "review-diff-" + os.urandom(6).hex()
+            Path(d, folder).mkdir()
+            Path(d, folder, "context.md").write_text(prompt, encoding="utf-8")
+            sent = subprocess.run(["scp", "-q", "-r", *ssh_opts, str(Path(d, folder)), f"{host}:"],
+                                  capture_output=True, text=True, timeout=120)
+            if sent.returncode != 0:
+                raise ReviewerOut(f"{r['name']}: can't copy the prompt to {host}: "
+                                  f"{sent.stderr.strip()[-300:]}")
+        script = windows_ssh_script(cmd, folder).encode("utf-16-le")
+        remote = ["ssh", *ssh_opts, host, "powershell", "-NoProfile", "-NonInteractive",
+                  "-EncodedCommand", base64.b64encode(script).decode()]
         try:
-            out = subprocess.run(remote, input=prompt, capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace", timeout=timeout)
+            out = subprocess.run(remote, stdin=subprocess.DEVNULL, capture_output=True,
+                                 text=True, encoding="utf-8", errors="replace", timeout=timeout)
         except subprocess.TimeoutExpired as e:
             raise ReviewerOut(f"{r['name']}: timed out") from e
         if out.returncode == 255:
-            raise ReviewerOut(f"{r['name']}: can't reach {r['ssh_host']}: {out.stderr.strip()[-300:]}")
+            raise ReviewerOut(f"{r['name']}: can't reach {host}: {out.stderr.strip()[-300:]}")
     else:
         exe = shutil.which(cmd[0])
         if not exe:

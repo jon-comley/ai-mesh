@@ -103,8 +103,8 @@ for Copilot signed in there (beelink1):
 { "name": "copilot", "type": "command", "ssh_host": "beelink1", "command": ["copilot", "-p", "..."] }
 ```
 
-The prompt goes over ssh on stdin, lands in `context.md` in a scratch folder
-under `%TEMP%`, and the folder is removed after. ssh must log in without a
+The prompt goes over with scp as `context.md` in a scratch folder in the
+home folder there, and the folder is removed after. ssh must log in without a
 password (`BatchMode`). What is sent goes to the Copilot account signed in on
 that machine.
 

@@ -38,8 +38,10 @@ add the work Claude later.
   dry run or a run by hand no longer claims it.
 - **Copilot can run on beelink1** (Jon: "use beelink1 copilot for the review
   stage"): `"ssh_host"` on a command reviewer sends the prompt over ssh on
-  stdin to a PowerShell script that writes `context.md` in a scratch folder
-  and runs the command there. It calls `copilot.cmd`, because beelink1's
+  scp, as `context.md` in a scratch folder, and a PowerShell script runs the
+  command there. Stdin came first and hung: a 13k-token prompt never got
+  past `[Console]::In`, and the first guv run timed out after 30 minutes with
+  no Copilot process on beelink1 at all. It calls `copilot.cmd`, because beelink1's
   script policy blocks npm's `copilot.ps1` under ssh.
 - **The work laptop never dials out; lenovo1 bridges** (Jon: "all the
   reviews are done in ai-mesh, why don't we just paste results to

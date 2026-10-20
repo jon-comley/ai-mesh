@@ -254,21 +254,31 @@ class CallTest(unittest.TestCase):
             with self.assertRaises(rd.ReviewerOut):
                 rd.ask({**r, "command": ["no-such-copilot"]}, "s", "u")
 
-    def test_a_command_reviewer_on_a_windows_host_gets_the_prompt_on_stdin(self):
+    def test_a_command_reviewer_on_a_windows_host_gets_the_prompt_by_scp(self):
         r = {"name": "copilot", "type": "command", "ssh_host": "beelink1",
              "command": ["copilot", "-p", "it's context.md"]}
-        done = subprocess.CompletedProcess([], 0, stdout="PONG\n", stderr="")
-        with mock.patch.object(rd.subprocess, "run", return_value=done) as run:
+        sent = {}
+
+        def fake_run(argv, **kw):
+            if argv[0] == "scp":
+                folder = Path(argv[-2])
+                sent["folder"] = folder.name
+                sent["prompt"] = (folder / "context.md").read_text(encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            sent["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, stdout="PONG\n", stderr="")
+
+        with mock.patch.object(rd.subprocess, "run", side_effect=fake_run):
             self.assertEqual(rd.ask(r, "SYS", "user"), "PONG\n")
-        argv, kw = run.call_args[0][0], run.call_args[1]
-        self.assertEqual(argv[:4], ["ssh", "-o", "BatchMode=yes", "beelink1"])
-        self.assertEqual(kw["input"], "SYS\n\nuser")
-        script = rd.base64.b64decode(argv[-1]).decode("utf-16-le")
+        self.assertEqual(sent["prompt"], "SYS\n\nuser")
+        self.assertIn("beelink1", sent["argv"])
+        script = rd.base64.b64decode(sent["argv"][-1]).decode("utf-16-le")
+        self.assertIn(sent["folder"], script, "runs in the folder scp made")
         self.assertIn("'-p' 'it''s context.md'", script, "quoted for PowerShell")
         self.assertIn("-CommandType Application", script, "the .cmd, not the blocked .ps1")
         unreachable = subprocess.CompletedProcess([], 255, stdout="", stderr="no route")
         with mock.patch.object(rd.subprocess, "run", return_value=unreachable):
-            with self.assertRaisesRegex(rd.ReviewerOut, "can't reach beelink1"):
+            with self.assertRaisesRegex(rd.ReviewerOut, "can't copy the prompt to beelink1"):
                 rd.ask(r, "s", "u")
 
 
