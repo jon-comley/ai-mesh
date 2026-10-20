@@ -44,10 +44,14 @@ dashboard.
   compressed first. Tool calls still run locally, and a failed call falls back
   to local inference. `llm-rotation` tries free tiers before paid ones
   ([`docs/online-ai-gateway.md`](docs/online-ai-gateway.md)).
-- **Code reviews on the mesh** — mac1 reviews GitHub repos on a schedule or on
-  demand, and answers questions about their code, sharing the work across the
-  mesh's machines using local models only. Home commands always come first
-  ([`docs/code-review.md`](docs/code-review.md)).
+- **Code reviews on the mesh** — mac1 reviews GitHub repos once their tests
+  pass, on a schedule or on demand, and answers questions about their code,
+  sharing the work across the mesh's machines. It reports bugs, tests to add,
+  refactors, improvements and ideas, each with a diff, and keeps a scorecard
+  per reviewer. Cloud AIs can see a repo's diffs if it allows them. Home
+  commands always come first ([`docs/code-review.md`](docs/code-review.md)).
+  The same review runs off the mesh with your own AI accounts
+  ([`docs/review-diff.md`](docs/review-diff.md)).
 - **eBay Hunts** — describe something you want (or paste a listing). An LLM
   suggests search terms, including the misspellings sellers use, and saved
   hunts search on a daily schedule. Matches arrive in a live feed and as a

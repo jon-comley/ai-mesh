@@ -11,6 +11,26 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## review-diff: the same review on the work laptop (2026-10-20)
+
+Jon wanted the review for the work laptop's code too, with the work's paid
+AI accounts ("gemini only as thats the paid for work ai atm", then "still use
+copilot and open ai"), the reports for Claude Code to act on, and room to
+add the work Claude later.
+- **One Python file, standard library only** (`tools/review-diff`), so the
+  work laptop needs nothing installed and the work code never touches the
+  home mesh. It reads the same prompts from `codereview/prompts`, and ports
+  the parsing, quote check, ids, caps and report from the `codereview`
+  crate, so a report reads the same at work as at home.
+- **Two kinds of reviewer:** any OpenAI-compatible API (Gemini, OpenAI, and
+  Anthropic later, by adding an entry), and a command (the Copilot CLI,
+  driven through `context.md` as beelink1 does).
+- **Whole files go out, not just the diff:** these are paid work accounts,
+  not free tiers, so there's no reason to starve them of context.
+- **Claude Code acts on the reports** through a skill (`SKILL.md`): verify,
+  fix or drop with a reason, run the tests, record the outcome for the
+  scorecard.
+
 ## Reviews: a scorecard per reviewer (2026-10-20)
 
 Jon: "keep some figures on results, how many false alarms, how many success,
