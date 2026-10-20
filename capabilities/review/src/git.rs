@@ -244,6 +244,40 @@ impl Repo {
         run(cmd).await.is_ok()
     }
 
+    /// Lines at `rev` that use `word` (whole word, case-sensitive), as
+    /// `(path, line number, text)`, at most `max`. For the context note's
+    /// "called by". No match is an empty list, not an error.
+    pub async fn grep_lines(
+        &self,
+        rev: &str,
+        word: &str,
+        max: usize,
+    ) -> Result<Vec<(String, u32, String)>, String> {
+        let mut cmd = self.git();
+        cmd.args(["grep", "-n", "-w", "-I", "-F", "-e", word, rev, "--"]);
+        let out = cmd
+            .output()
+            .await
+            .map_err(|e| format!("could not run git: {e}"))?;
+        if !out.status.success() && out.status.code() != Some(1) {
+            return Err(format!(
+                "git grep failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let prefix = format!("{rev}:");
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let l = l.strip_prefix(&prefix).unwrap_or(l);
+                let (path, rest) = l.split_once(':')?;
+                let (n, text) = rest.split_once(':')?;
+                Some((path.to_string(), n.parse().ok()?, text.trim().to_string()))
+            })
+            .take(max)
+            .collect())
+    }
+
     /// Files at `rev` containing `term` (case-insensitive, fixed string), with
     /// how many lines match. No match is an empty list, not an error.
     pub async fn grep_count(&self, rev: &str, term: &str) -> Result<Vec<(String, u32)>, String> {
@@ -347,6 +381,17 @@ mod tests {
         assert_eq!(repo.read(&head, "bin.dat").await.unwrap(), None);
         assert_eq!(repo.files(&head).await.unwrap().len(), 3);
         assert_eq!(repo.commit_count(&first, &head).await.unwrap(), 1);
+
+        assert_eq!(
+            repo.grep_lines(&head, "b", 5).await.unwrap(),
+            vec![("src/b.ts".to_string(), 1, "export const b = 2;".to_string())]
+        );
+        assert!(
+            repo.grep_lines(&head, "nowhere", 5)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let mut hits = repo.grep_count(&head, "EXPORT CONST").await.unwrap();
         hits.sort();

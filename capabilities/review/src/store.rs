@@ -516,6 +516,7 @@ mod tests {
             sweep_slot: Some(195),
             enabled: true,
             aliases: vec![],
+            cloud: false,
         }
     }
 

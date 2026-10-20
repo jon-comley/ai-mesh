@@ -749,6 +749,7 @@ mod tests {
                 repo: "guv".into(),
                 dir: "src".into(),
             }],
+            cloud: false,
         }
     }
 

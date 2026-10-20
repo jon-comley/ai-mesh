@@ -292,6 +292,7 @@ mod tests {
             sweep_slot: None,
             enabled: true,
             aliases: vec![],
+            cloud: false,
         });
         let mesh = Arc::new(AskMesh {
             calls: AtomicU32::new(0),

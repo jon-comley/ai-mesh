@@ -151,9 +151,12 @@ describe('Reviews tab', () => {
   it('editing a repo sends the whole spec back', async () => {
     panel.querySelector('button[data-act="edit"]').click();
     panel.querySelector('#rv-e-times').value = '01:30, 04:00';
+    expect(panel.querySelector('#rv-e-cloud').checked).toBe(false);
+    panel.querySelector('#rv-e-cloud').checked = true;
     panel.querySelector('button[data-act="save-repo"]').click();
     await flush();
     const body = apiCalls.find(c => c.path === '/reviews/repos').opts.body;
+    expect(body.cloud).toBe(true);
     expect(body.name).toBe('dashboard');
     expect(body.timeslots).toEqual([90, 240]);
     expect(body.sweep_day).toBe(6);

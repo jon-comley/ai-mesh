@@ -2,9 +2,11 @@
 
 mac1 reviews your GitHub repos on a schedule or whenever you ask, answers
 questions about their code, and shares the work out across the mesh's
-machines like a team of agents, using local models only. Findings and answers
-show on the dashboard's **Reviews** tab; reports are also Markdown files on
-mac1, and an ntfy push gives the headline numbers. Nothing leaves the house.
+machines like a team of agents. Findings and answers show on the dashboard's
+**Reviews** tab; reports are also Markdown files on mac1, and an ntfy push
+gives the headline numbers. Only local models are used unless a repo turns
+on cloud reviewers (below), and then only that repo's diff and a short note
+leave the house.
 
 Written by local models: treat every finding as a lead to check, not a verdict.
 
@@ -312,6 +314,40 @@ crate:
    mac1, or `REVIEW_INBOX`) when there's something in it.
 
 The prompts live in `codereview/prompts/` so they can be tuned without code.
+
+### Cloud reviewers
+
+A repo with **cloud reviewers see the diff** ticked in its editor (`cloud` in
+the spec) also has each change reviewed by the free cloud providers on the
+**Online AI** tab, alongside mac1's own review of the whole files:
+
+1. **mac1 prepares** the diff, with each changed function shown whole
+   (`git diff -W`), and a context note: per changed file, its opening
+   comment, the signatures of what it imports, and the lines elsewhere that
+   call what it exports (`codereview::note`). Signatures and call sites, not
+   bodies.
+2. **pi1 sends it** to a provider with that provider's key. Every free preset
+   with a key takes part (Gemini, Mistral, Groq, OpenRouter); paid ones
+   (Anthropic, OpenAI) never do. The provider that goes first takes turns run
+   by run, and when there are two, the next one gives a second opinion. A
+   provider that fails (out of quota, timed out) is rested, as for chat, and
+   the next one is tried.
+3. **mac1 checks** every cloud finding against the whole file and its
+   imports, on the biggest machine (it waits for mac1 rather than giving the
+   check to a small model), with the usual rule: rejected only on evidence.
+
+| Provider | Model | Most a prompt holds |
+|---|---|---|
+| Gemini | `gemini-flash-latest` | 200k tokens |
+| Mistral | `mistral-medium-latest` | 100k |
+| Groq | `openai/gpt-oss-120b` | 6k (its free tokens-a-minute) |
+| OpenRouter | the preset's free model | 30k |
+
+A diff too big for a provider skips it. A gateway preference
+`review_model:<preset id>` changes a provider's model. pi1 lists the
+providers to mac1 as workers named `cloud:<preset id>`; they never take a
+chunk of whole files. Free tiers may keep what they're sent to train on, so
+the setting is off until a repo turns it on.
 
 ### What a review reports
 

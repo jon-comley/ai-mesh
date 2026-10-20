@@ -250,24 +250,93 @@ pub fn worker_snapshot(
     connections: &Connections,
 ) -> WorkerSnapshot {
     let connected = connected_ids(connections);
-    let cands = work_router::candidates(&registry.lock().unwrap(), &connected);
+    let (cands, clouds) = {
+        let reg = registry.lock().unwrap();
+        (
+            work_router::candidates(&reg, &connected),
+            crate::cloud::review_clouds(&reg),
+        )
+    };
     let st = work_router::state().lock().unwrap();
     let now = std::time::Instant::now();
-    WorkerSnapshot {
-        workers: cands
-            .into_iter()
-            .map(|c| WorkerInfo {
-                busy: st.busy(&c.node_id),
-                resting: st.resting(&c.node_id, now),
-                control: st.roles.is_control(&c.model_name),
-                work: st.roles.is_work(&c.model_name),
-                node_id: c.node_id,
-                hostname: c.hostname,
-                model_name: c.model_name,
-                ctx_size: c.ctx_size,
-            })
-            .collect(),
+    let mut workers: Vec<WorkerInfo> = cands
+        .into_iter()
+        .map(|c| WorkerInfo {
+            busy: st.busy(&c.node_id),
+            resting: st.resting(&c.node_id, now),
+            control: st.roles.is_control(&c.model_name),
+            work: st.roles.is_work(&c.model_name),
+            node_id: c.node_id,
+            hostname: c.hostname,
+            model_name: c.model_name,
+            ctx_size: c.ctx_size,
+        })
+        .collect();
+    // The cloud providers with a key, for the diff of a repo that allows it.
+    // Not `work`: they never take a chunk of whole files.
+    workers.extend(clouds.into_iter().map(|c| WorkerInfo {
+        node_id: c.worker_id,
+        hostname: c.name.to_string(),
+        model_name: c.provider.model().to_string(),
+        ctx_size: Some(c.budget),
+        control: false,
+        work: false,
+        busy: false,
+        resting: c.resting,
+    }));
+    WorkerSnapshot { workers }
+}
+
+/// Run one review task on a cloud provider (`cloud:<preset id>`) with the
+/// Online AI tab's key for it, and report how it ended on `origin`. A
+/// provider that has run out is rested, as the gateway does for chat.
+async fn run_cloud_work(
+    req: WorkInferenceRequest,
+    worker_id: &str,
+    origin: mpsc::Sender<MeshMessage>,
+    registry: Arc<Mutex<Registry>>,
+) {
+    let started = std::time::Instant::now();
+    let cloud = crate::cloud::review_clouds(&registry.lock().unwrap())
+        .into_iter()
+        .find(|c| c.worker_id == worker_id);
+    let mut done = WorkInferenceDone {
+        request_id: req.request_id.clone(),
+        node_id: worker_id.to_string(),
+        model_name: String::new(),
+        outcome: WorkOutcome::Finished,
+        output: String::new(),
+        prompt_tokens: 0,
+        tokens_generated: 0,
+        duration_ms: 0,
+    };
+    match cloud {
+        None => {
+            done.outcome = WorkOutcome::NoWorker {
+                reason: format!("{worker_id} has no key on the Online AI tab"),
+            };
+        }
+        Some(c) => {
+            done.model_name = c.provider.model().to_string();
+            let temperature = req.temperature.unwrap_or(0.2);
+            match c.provider.complete(&req.messages, temperature).await {
+                Ok(reply) => {
+                    done.output = reply.text;
+                    done.prompt_tokens = reply.prompt_tokens;
+                    done.tokens_generated = reply.completion_tokens;
+                }
+                Err(e) => {
+                    crate::cloud::rest_if_out(&c.provider, &e);
+                    warn!(worker = %worker_id, error = %e, "cloud review task failed");
+                    done.outcome = WorkOutcome::Failed {
+                        reason: e.to_string(),
+                    };
+                }
+            }
+        }
     }
+    done.duration_ms = started.elapsed().as_millis() as u64;
+    let _ = origin.send(MeshMessage::WorkInferenceDone(done)).await;
 }
 
 /// Run one review-work request from an agent (mac1) and report how it ended
@@ -280,6 +349,13 @@ pub async fn run_work_request(
     connections: Connections,
     pending_streams: PendingStreams,
 ) {
+    if let Some(worker_id) = req
+        .node_id
+        .clone()
+        .filter(|n| n.starts_with(shared::CLOUD_WORKER_PREFIX))
+    {
+        return run_cloud_work(req, &worker_id, origin, registry).await;
+    }
     let started = std::time::Instant::now();
     let reply =
         |outcome: WorkOutcome, node: &str, model: &str, res: Option<&shared::InferenceResult>| {
@@ -653,6 +729,41 @@ mod tests {
             ("wt3-beelink", "wt3-small")
         );
         assert!(work_router::state().lock().unwrap().busy("wt3-mac"));
+    }
+
+    #[tokio::test]
+    async fn cloud_work_without_a_key_reports_no_worker_and_keyed_ones_are_listed() {
+        let (registry, conns, _rxs) = mesh(&[("wt6-mac", "wt6-coder")]);
+        let streams: PendingStreams = Arc::new(Mutex::new(HashMap::new()));
+        let (otx, mut orx) = mpsc::channel(4);
+        run_work_request(
+            work_req("r6", "cloud:mistral"),
+            otx,
+            registry.clone(),
+            conns.clone(),
+            streams,
+        )
+        .await;
+        let MeshMessage::WorkInferenceDone(done) = recv(&mut orx).await else {
+            panic!("expected WorkInferenceDone");
+        };
+        assert_eq!(done.node_id, "cloud:mistral");
+        assert!(matches!(done.outcome, WorkOutcome::NoWorker { .. }));
+
+        crate::cloud::set_gateway_pref(
+            &registry.lock().unwrap(),
+            &crate::cloud::provider_key_name("https://api.mistral.ai/v1"),
+            "m-key",
+        );
+        let snap = worker_snapshot(&registry, &conns);
+        let cloud = snap.workers.iter().find(|w| w.is_cloud()).unwrap();
+        assert_eq!(cloud.node_id, "cloud:mistral");
+        assert_eq!(cloud.hostname, "mistral");
+        assert!(
+            !cloud.work && !cloud.control,
+            "cloud workers never take chunks or lights"
+        );
+        assert!(snap.workers.iter().any(|w| w.node_id == "wt6-mac"));
     }
 
     #[tokio::test]

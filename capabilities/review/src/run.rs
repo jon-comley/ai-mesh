@@ -11,6 +11,8 @@ use crate::store::{RunUpdate, Store};
 use async_trait::async_trait;
 use codereview::assign::{self, TaskKind, TaskNeed, Worker};
 use codereview::chunk::{Chunk, ImportAlias, plan_chunks, resolve_imports};
+use codereview::note::{self, NoteEntry};
+use codereview::prompt::Prompt;
 use codereview::report::{RunInfo, headline, render};
 use codereview::{Finding, SourceFile, Verdict};
 use shared::{
@@ -185,7 +187,21 @@ struct Task {
     attempts: u32,
     state: TState,
     avoid_model: Option<String>,
+    /// A check to give to the biggest machine (a cloud reviewer's finding).
+    prefer_large: bool,
+    /// A review of the diff sent to a cloud provider, not a mesh machine.
+    cloud: Option<CloudPlan>,
     label: String,
+}
+
+/// A review sent to a cloud provider instead of a mesh machine: its prompt,
+/// and the providers to try in turn as `(worker id, model, name)`. One that
+/// fails (out of quota, timed out) is dropped and the next is tried, like the
+/// gateway's rotation.
+#[derive(Debug, Clone)]
+struct CloudPlan {
+    prompt: Prompt,
+    queue: Vec<(String, String, String)>,
 }
 
 /// What a run produced, for the caller's logs and tests.
@@ -209,6 +225,20 @@ impl Ctx {
     fn set_progress(&self, f: impl FnOnce(&mut Progress)) {
         f(&mut self.progress.lock().unwrap());
         self.touch();
+    }
+
+    /// The cloud providers pi1 has keys for, resting ones included, by id.
+    async fn cloud_workers(&self) -> Vec<WorkerInfo> {
+        let mut out: Vec<WorkerInfo> = self
+            .mesh
+            .workers()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(WorkerInfo::is_cloud)
+            .collect();
+        out.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        out
     }
 
     pub(crate) async fn workers(&self) -> Vec<Worker> {
@@ -362,6 +392,8 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     let all_paths = repo.files(&rev).await?;
     let mut targets: Vec<SourceFile> = Vec::new();
     let mut sweep_folder = None;
+    // Where the change under review starts, for the cloud reviewers' diff.
+    let mut diff_base: Option<String> = None;
     let scope = match &req.kind {
         // Up to `rev`: the branch's newest commit, or the one that passed the tests.
         RunKind::Nightly | RunKind::Manual | RunKind::Tested(_) => {
@@ -382,6 +414,7 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
                         .await?
                 }
             };
+            diff_base = Some(base.clone());
             let changed = repo.changed_files(&base, &rev).await?;
             for path in changed.iter().filter(|p| files::is_reviewable(p)) {
                 if let Some(content) = load(&repo, &rev, path).await {
@@ -462,6 +495,7 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
             if base == rev {
                 return finish_quiet(ctx, run_id, "the branch has nothing the main branch lacks");
             }
+            diff_base = Some(base.clone());
             let changed = repo.changed_files(&base, &rev).await?;
             for path in changed.iter().filter(|p| files::is_reviewable(p)) {
                 if let Some(content) = load(&repo, &rev, path).await {
@@ -618,8 +652,20 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
             attempts: 0,
             state: TState::Pending,
             avoid_model: None,
+            prefer_large: false,
+            cloud: None,
             label: chunk_label(c, &all_files),
         });
+    }
+
+    // ── cloud reviewers: only the diff, for a repo that allows it ───────────
+    if spec.cloud
+        && let Some(base) = diff_base.as_deref()
+    {
+        plan_cloud_reviews(
+            ctx, &repo, &rev, base, &spec.name, &scope, &all_files, &aliases, &exists, &mut state,
+        )
+        .await;
     }
 
     dispatch_all(
@@ -631,7 +677,9 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     let gave_up_reviews = state
         .tasks
         .iter()
-        .filter(|t| t.kind == TaskKind::Review && matches!(t.state, TState::GaveUp))
+        .filter(|t| {
+            t.kind == TaskKind::Review && t.chunk.is_some() && matches!(t.state, TState::GaveUp)
+        })
         .count();
     if gave_up_reviews == chunks.len() {
         return Err("every review task failed or could not be handed out".into());
@@ -784,6 +832,134 @@ fn chunk_label(c: &Chunk, files: &[SourceFile]) -> String {
     }
 }
 
+/// Queue the cloud reviews of a run's diff: one to the provider whose turn
+/// it is to go first (the turn moves on every run, so no one model always
+/// looks first), and a second opinion from the next when there are two. Each
+/// falls back along the rest of the list if its provider has run out.
+#[allow(clippy::too_many_arguments)]
+async fn plan_cloud_reviews(
+    ctx: &Ctx,
+    repo: &Repo,
+    rev: &str,
+    base: &str,
+    name: &str,
+    scope: &str,
+    files: &[SourceFile],
+    aliases: &[ImportAlias],
+    exists: &(dyn Fn(&str, &str) -> bool + Sync),
+    st: &mut RunState,
+) {
+    let clouds = ctx.cloud_workers().await;
+    let paths: Vec<String> = files
+        .iter()
+        .filter(|f| f.target && f.repo == name)
+        .map(|f| f.path.clone())
+        .collect();
+    if clouds.is_empty() || paths.is_empty() {
+        return;
+    }
+    let diff = repo
+        .diff_functions(base, rev, &paths)
+        .await
+        .unwrap_or_default();
+    if diff.trim().is_empty() {
+        return;
+    }
+    let note = context_note(repo, rev, name, files, aliases, exists).await;
+    let prompt = codereview::prompt::diff_prompt(name, scope, &diff, &note);
+    let tokens = prompt.tokens();
+    let start = ctx.store(|s| {
+        let n: usize = s
+            .setting("cloud_next")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        s.set_setting("cloud_next", &(n + 1).to_string());
+        n
+    });
+    let mut order = clouds;
+    let len = order.len();
+    order.rotate_left(start % len);
+    let queue: Vec<(String, String, String)> = order
+        .into_iter()
+        .filter(|w| !w.resting && w.ctx_size.unwrap_or(0) as usize >= tokens)
+        .map(|w| (w.node_id, w.model_name, w.hostname))
+        .collect();
+    if queue.is_empty() {
+        info!(repo = %name, tokens, "no cloud reviewer free with room for this diff");
+        return;
+    }
+    let reviews = queue.len().min(2);
+    for k in 0..reviews {
+        let mut q = queue.clone();
+        q.rotate_left(k);
+        let id = st.next_id;
+        st.next_id += 1;
+        st.tasks.push(Task {
+            id,
+            kind: TaskKind::Review,
+            chunk: None,
+            finding: None,
+            tokens,
+            attempts: 0,
+            state: TState::Pending,
+            avoid_model: None,
+            prefer_large: false,
+            cloud: Some(CloudPlan {
+                prompt: prompt.clone(),
+                queue: q,
+            }),
+            label: format!(
+                "the diff of {} file{}",
+                paths.len(),
+                if paths.len() == 1 { "" } else { "s" }
+            ),
+        });
+    }
+}
+
+/// The note that goes with the diff: per changed file, its opening comment,
+/// the signatures of what it imports, and the lines elsewhere that use what
+/// it exports.
+async fn context_note(
+    repo: &Repo,
+    rev: &str,
+    name: &str,
+    files: &[SourceFile],
+    aliases: &[ImportAlias],
+    exists: &(dyn Fn(&str, &str) -> bool + Sync),
+) -> String {
+    let mut entries = Vec::new();
+    for f in files.iter().filter(|f| f.target && f.repo == name) {
+        let uses: Vec<(String, Vec<String>)> = resolve_imports(f, aliases, exists)
+            .into_iter()
+            .filter_map(|(r, p)| files.iter().find(|s| s.repo == r && s.path == p))
+            .map(|s| (s.display_name(), note::signatures(&s.content)))
+            .filter(|(_, sigs)| !sigs.is_empty())
+            .collect();
+        let mut called_by: Vec<(String, u32, String)> = Vec::new();
+        for word in note::exported_names(&f.content)
+            .into_iter()
+            .filter(|w| w.len() >= 3)
+            .take(5)
+        {
+            if let Ok(hits) = repo.grep_lines(rev, &word, 40).await {
+                for hit in hits.into_iter().filter(|(p, _, _)| *p != f.path).take(4) {
+                    if !called_by.contains(&hit) {
+                        called_by.push(hit);
+                    }
+                }
+            }
+        }
+        entries.push(NoteEntry {
+            name: f.display_name(),
+            purpose: note::purpose(&f.content),
+            uses,
+            called_by,
+        });
+    }
+    note::render(&entries)
+}
+
 struct RunState {
     tasks: Vec<Task>,
     findings: Vec<Finding>,
@@ -826,20 +1002,28 @@ async fn dispatch_all(
         .map(|f| (f.repo.clone(), f.path.clone()))
         .collect();
     let exists = |r: &str, p: &str| exists_set.contains(&(r.to_string(), p.to_string()));
+    // Cloud providers this run has sent a review to: a second opinion goes
+    // to a different one.
+    let mut cloud_used: HashSet<String> = HashSet::new();
 
     loop {
         let pending: Vec<TaskNeed> = st
             .tasks
             .iter()
-            .filter(|t| matches!(t.state, TState::Pending))
+            .filter(|t| matches!(t.state, TState::Pending) && t.cloud.is_none())
             .map(|t| TaskNeed {
                 id: t.id,
                 kind: t.kind,
                 tokens: t.tokens,
                 avoid_model: t.avoid_model.clone(),
+                prefer_large: t.prefer_large,
             })
             .collect();
-        if pending.is_empty() && running.is_empty() {
+        let cloud_waiting = st
+            .tasks
+            .iter()
+            .any(|t| matches!(t.state, TState::Pending) && t.cloud.is_some());
+        if pending.is_empty() && running.is_empty() && !cloud_waiting {
             break;
         }
         ctx.set_progress(|p| {
@@ -850,6 +1034,56 @@ async fn dispatch_all(
                 .filter(|t| matches!(t.state, TState::Done | TState::GaveUp))
                 .count() as u32;
         });
+
+        // Cloud reviews go straight out: they use no machine on the mesh.
+        for task in st
+            .tasks
+            .iter_mut()
+            .filter(|t| matches!(t.state, TState::Pending) && t.cloud.is_some())
+        {
+            let plan = task.cloud.as_ref().expect("filtered on cloud");
+            let Some((node_id, model, name)) = plan
+                .queue
+                .iter()
+                .find(|(n, _, _)| !cloud_used.contains(n))
+                .cloned()
+            else {
+                task.state = TState::GaveUp;
+                continue;
+            };
+            cloud_used.insert(node_id.clone());
+            last_progress = Instant::now();
+            task.state = TState::Running;
+            running.insert(task.id, node_id.clone());
+            let label = format!("{model}@{name}");
+            let view = ReviewTaskView {
+                kind: "review".into(),
+                node_id: node_id.clone(),
+                worker: label.clone(),
+                label: task.label.clone(),
+            };
+            let task_id = task.id;
+            ctx.set_progress(|p| {
+                p.running.insert(task_id, view);
+            });
+            let req = WorkInferenceRequest {
+                request_id: format!("review-{}", uuid::Uuid::new_v4()),
+                node_id: Some(node_id),
+                model_name: Some(model),
+                messages: vec![
+                    ChatTurn::system(plan.prompt.system.clone()),
+                    ChatTurn::user(plan.prompt.user.clone()),
+                ],
+                max_tokens: REVIEW_MAX_TOKENS_OUT,
+                temperature: Some(0.2),
+            };
+            let mesh = ctx.mesh.clone();
+            let rtx = rtx.clone();
+            tokio::spawn(async move {
+                let done = mesh.infer(req).await;
+                let _ = rtx.send((task_id, label, done)).await;
+            });
+        }
 
         // A question is waiting: hand out nothing new so a machine frees up
         // for it. Tasks already running carry on.
@@ -968,17 +1202,37 @@ async fn dispatch_all(
         let Some(ti) = st.tasks.iter().position(|t| t.id == task_id) else {
             continue;
         };
+        let from_cloud = st.tasks[ti].cloud.is_some();
+        // A cloud provider that failed (out of quota, timed out, no key) is
+        // dropped from the task's list, and the next one is tried.
+        if from_cloud && done.outcome != WorkOutcome::Finished {
+            warn!(task = task_id, %node, outcome = ?done.outcome, "cloud review failed; trying the next provider");
+            if let Some(plan) = st.tasks[ti].cloud.as_mut() {
+                plan.queue.retain(|(n, _, _)| *n != node);
+            }
+            st.tasks[ti].state = TState::Pending;
+            continue;
+        }
         match done.outcome {
             WorkOutcome::Finished => {
-                ctx.record_speed(&node, &done);
+                if !from_cloud {
+                    ctx.record_speed(&node, &done);
+                }
                 *st.worker_tasks.entry(worker_label.clone()).or_insert(0) += 1;
                 st.tasks[ti].state = TState::Done;
                 match st.tasks[ti].kind {
                     TaskKind::Review => {
-                        let c = &chunks[st.tasks[ti].chunk.unwrap_or(0)];
-                        let in_chunk: Vec<usize> =
-                            c.targets.iter().chain(c.context.iter()).copied().collect();
-                        for raw in codereview::parse::parse_findings(&done.output) {
+                        let in_chunk: Vec<usize> = match st.tasks[ti].chunk {
+                            Some(ci) => {
+                                let c = &chunks[ci];
+                                c.targets.iter().chain(c.context.iter()).copied().collect()
+                            }
+                            None => all_idx.clone(),
+                        };
+                        for mut raw in codereview::parse::parse_findings(&done.output) {
+                            if from_cloud {
+                                raw.quote = codereview::check::strip_diff_markers(&raw.quote);
+                            }
                             let Some(fi) = find_file(&raw.file, &in_chunk, files)
                                 .or_else(|| find_file(&raw.file, &all_idx, files))
                             else {
@@ -1041,6 +1295,8 @@ async fn dispatch_all(
                                 attempts: 0,
                                 state: TState::Pending,
                                 avoid_model: Some(done.model_name.clone()),
+                                prefer_large: from_cloud,
+                                cloud: None,
                                 label,
                             });
                         }
@@ -1100,6 +1356,10 @@ mod tests {
         preempt_first: AtomicU32,
         expect_companion: bool,
         seen_nodes: Mutex<Vec<(String, String)>>,
+        /// Cloud providers pi1 lists, e.g. `cloud:gemini`.
+        clouds: Vec<&'static str>,
+        /// A cloud provider that answers every task with a failure.
+        failing_cloud: Option<&'static str>,
     }
 
     #[async_trait]
@@ -1126,7 +1386,22 @@ mod tests {
                     busy: false,
                     resting: false,
                 },
-            ])
+            ]
+            .into_iter()
+            .chain(self.clouds.iter().map(|id| {
+                let name = id.trim_start_matches("cloud:");
+                WorkerInfo {
+                    node_id: (*id).into(),
+                    hostname: name.into(),
+                    model_name: format!("{name}-model"),
+                    ctx_size: Some(200_000),
+                    control: false,
+                    work: false,
+                    busy: false,
+                    resting: false,
+                }
+            }))
+            .collect())
         }
 
         async fn infer(&self, req: WorkInferenceRequest) -> WorkInferenceDone {
@@ -1148,6 +1423,30 @@ mod tests {
                 tokens_generated: 0,
                 duration_ms: 10,
             };
+            if node.starts_with("cloud:") {
+                self.seen_nodes
+                    .lock()
+                    .unwrap()
+                    .push(("cloud".into(), node.clone()));
+                if self.failing_cloud == Some(node.as_str()) {
+                    done.outcome = WorkOutcome::Failed {
+                        reason: "rate limited".into(),
+                    };
+                    return done;
+                }
+                assert!(user.contains("=== DIFF"), "the diff is sent");
+                assert!(user.contains("CONTEXT NOTE"), "with the note");
+                assert!(!user.contains("=== FILE"), "but no whole files");
+                assert!(
+                    user.contains("- src/b.ts:") && user.contains("total([1, 2])"),
+                    "the note says who calls the changed code: {user}"
+                );
+                done.output = r#"[{"kind":"improvement","file":"app/src/a.ts","line":3,
+                  "title":"Say what an empty list totals to","quote":"+  for (const x of xs) t += x;",
+                  "explanation":"callers pass empty lists","fix":"document it","patch":""}]"#
+                    .into();
+                return done;
+            }
             if is_review {
                 if self
                     .preempt_first
@@ -1183,6 +1482,7 @@ mod tests {
                 self.checks.fetch_add(1, Ordering::SeqCst);
                 done.output = if (user.contains("pricing?.amount") && user.contains("cheapest"))
                     || user.contains("- kind: test")
+                    || user.contains("- kind: improvement")
                 {
                     r#"{"verdict":"confirmed","reason":"line 3 takes the headline price"}"#.into()
                 } else {
@@ -1268,6 +1568,7 @@ mod tests {
             sweep_slot: None,
             enabled: true,
             aliases,
+            cloud: false,
         });
     }
 
@@ -1311,6 +1612,8 @@ mod tests {
             preempt_first: AtomicU32::new(1),
             expect_companion: true,
             seen_nodes: Mutex::new(Vec::new()),
+            clouds: vec![],
+            failing_cloud: None,
         });
         let home = tmp.path().join("home");
         let mut c = ctx(&home, mesh.clone(), store);
@@ -1411,6 +1714,8 @@ mod tests {
             preempt_first: AtomicU32::new(0),
             expect_companion: false,
             seen_nodes: Mutex::new(Vec::new()),
+            clouds: vec![],
+            failing_cloud: None,
         });
         let c = ctx(&tmp.path().join("home"), mesh.clone(), store);
         let first = run_local(&c, "app", RunKind::Sweep).await;
@@ -1432,13 +1737,19 @@ mod tests {
     }
 
     fn plain_mesh() -> Arc<FakeMesh> {
-        Arc::new(FakeMesh {
+        Arc::new(plain_mesh_fields())
+    }
+
+    fn plain_mesh_fields() -> FakeMesh {
+        FakeMesh {
             reviews: AtomicU32::new(0),
             checks: AtomicU32::new(0),
             preempt_first: AtomicU32::new(0),
             expect_companion: false,
             seen_nodes: Mutex::new(Vec::new()),
-        })
+            clouds: vec![],
+            failing_cloud: None,
+        }
     }
 
     #[tokio::test]
@@ -1577,6 +1888,126 @@ mod tests {
         assert_eq!(
             s.repo("app").unwrap().last_reviewed_commit.as_deref(),
             Some(newest.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_reviewers_see_the_diff_take_turns_and_are_checked_on_mac1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(
+            tmp.path(),
+            "app",
+            &[
+                (
+                    "src/a.ts",
+                    "// Sums a list.\nexport function total(xs) {\n  return xs.length;\n}\n",
+                ),
+                (
+                    "src/b.ts",
+                    "import { total } from './a';\nexport const n = total([1, 2]);\n",
+                ),
+            ],
+        );
+        let store = Store::open_in_memory().unwrap();
+        add_repo(&store, "app", &repo, vec![]);
+        let mut spec = store.repo("app").unwrap().spec;
+        spec.cloud = true;
+        store.upsert_repo(&spec);
+        store.set_last_reviewed("app", &rev_parse(&repo, "HEAD"));
+        std::fs::write(
+            repo.join("src/a.ts"),
+            "// Sums a list.\nexport function total(xs) {\n  let t = 0;\n  for (const x of xs) t += x;\n  return t;\n}\n",
+        )
+        .unwrap();
+        sh(&repo, &["commit", "-qam", "sum"]);
+        let mesh = Arc::new(FakeMesh {
+            clouds: vec!["cloud:gemini", "cloud:mistral"],
+            ..plain_mesh_fields()
+        });
+        let c = ctx(&tmp.path().join("home"), mesh.clone(), store);
+        let out = run_local(&c, "app", RunKind::Tested(rev_parse(&repo, "HEAD"))).await;
+        assert_eq!(out.status, "done");
+
+        let seen = mesh.seen_nodes.lock().unwrap().clone();
+        let clouds: Vec<&str> = seen
+            .iter()
+            .filter(|(k, _)| k == "cloud")
+            .map(|(_, n)| n.as_str())
+            .collect();
+        assert_eq!(
+            clouds,
+            vec!["cloud:gemini", "cloud:mistral"],
+            "first look and a second opinion"
+        );
+        let f = out
+            .findings
+            .iter()
+            .find(|f| f.kind == codereview::Kind::Improvement)
+            .expect("the cloud finding survived the quote check");
+        assert_eq!(f.line, 4, "the + came off the quote and the line was found");
+        assert_eq!(
+            f.found_by,
+            vec!["gemini-model@gemini", "mistral-model@mistral"]
+        );
+        assert_eq!(
+            f.checked_by.as_deref(),
+            Some("qwen3-coder-30b@mac1"),
+            "checked on the machine that holds the whole file"
+        );
+        assert_eq!(c.store(|s| s.setting("cloud_next")).as_deref(), Some("1"));
+
+        // Next run: mistral's turn to go first. Gemini is out of quota, so
+        // only mistral reviews, and the run still finishes.
+        std::fs::write(repo.join("src/a.ts"), "// Sums a list.\nexport function total(xs) {\n  let t = 0;\n  for (const x of xs) t += x;\n  return t; // the sum\n}\n").unwrap();
+        sh(&repo, &["commit", "-qam", "comment"]);
+        let mesh2 = Arc::new(FakeMesh {
+            clouds: vec!["cloud:gemini", "cloud:mistral"],
+            failing_cloud: Some("cloud:gemini"),
+            ..plain_mesh_fields()
+        });
+        let c2 = Ctx {
+            mesh: mesh2.clone(),
+            ..c
+        };
+        let out = run_local(&c2, "app", RunKind::Tested(rev_parse(&repo, "HEAD"))).await;
+        assert_eq!(out.status, "done");
+        let clouds: Vec<String> = mesh2
+            .seen_nodes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k == "cloud")
+            .map(|(_, n)| n.clone())
+            .collect();
+        assert_eq!(clouds[0], "cloud:mistral", "the turn moved on");
+        assert!(clouds.contains(&"cloud:gemini".to_string()));
+        let f = out
+            .findings
+            .iter()
+            .find(|f| f.kind == codereview::Kind::Improvement)
+            .unwrap();
+        assert_eq!(f.found_by, vec!["mistral-model@mistral"]);
+    }
+
+    #[tokio::test]
+    async fn a_repo_without_cloud_sends_nothing_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(tmp.path(), "app", &[("src/a.ts", "export const a = 1;\n")]);
+        let store = Store::open_in_memory().unwrap();
+        add_repo(&store, "app", &repo, vec![]);
+        let mesh = Arc::new(FakeMesh {
+            clouds: vec!["cloud:gemini"],
+            ..plain_mesh_fields()
+        });
+        let c = ctx(&tmp.path().join("home"), mesh.clone(), store);
+        run_local(&c, "app", RunKind::Manual).await;
+        assert!(
+            mesh.seen_nodes
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(k, _)| k != "cloud"),
+            "cloud is off unless the repo turns it on"
         );
     }
 

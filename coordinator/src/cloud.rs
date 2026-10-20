@@ -212,6 +212,67 @@ pub async fn complete_rotating(
     rotation().complete(providers, messages, temperature).await
 }
 
+/// What each free provider gets for code review: its model, and the most a
+/// prompt may hold. The limit is the free tier's tokens-a-minute where that
+/// is smaller than the context (Groq), so one request never trips it. Paid
+/// providers aren't used for reviews. A `review_model:<preset id>` gateway
+/// preference overrides the model.
+/// `None` for the model means the preset's own fallback model.
+fn review_profile(preset_id: &str) -> Option<(Option<&'static str>, u32)> {
+    match preset_id {
+        "gemini" => Some((Some("gemini-flash-latest"), 200_000)),
+        "mistral" => Some((Some("mistral-medium-latest"), 100_000)),
+        "groq" => Some((Some("openai/gpt-oss-120b"), 6_000)),
+        "openrouter" => Some((None, 30_000)),
+        _ => None,
+    }
+}
+
+/// A cloud provider mac1 may send review work to.
+pub struct ReviewCloud {
+    /// `cloud:<preset id>`, its worker id.
+    pub worker_id: String,
+    /// The preset id (`gemini`), shown as its hostname.
+    pub name: &'static str,
+    pub provider: OpenAiCompatProvider,
+    /// The most a prompt may hold, in tokens.
+    pub budget: u32,
+    /// Ran out recently (rate limit, quota, timeout): mac1 skips it for now.
+    pub resting: bool,
+}
+
+/// Every free provider with a saved key and a review profile, in preset
+/// order. Reviews wait minutes for a long prompt, so the timeout is 10 minutes
+/// rather than the gateway's.
+pub fn review_clouds(reg: &Registry) -> Vec<ReviewCloud> {
+    let prefs: std::collections::HashMap<String, String> =
+        reg.get_all_preferences(GATEWAY_USER).into_iter().collect();
+    provider_presets()
+        .iter()
+        .filter(|p| p.free)
+        .filter_map(|p| {
+            let (model, budget) = review_profile(p.id)?;
+            let key = prefs
+                .get(&provider_key_name(p.base_url))
+                .filter(|k| !k.is_empty())?;
+            let model = prefs
+                .get(&format!("review_model:{}", p.id))
+                .filter(|m| !m.is_empty())
+                .map(String::as_str)
+                .or(model)
+                .unwrap_or(p.fallback_model);
+            let provider = provider(p.base_url, key, model).with_timeout(Duration::from_secs(600));
+            Some(ReviewCloud {
+                worker_id: format!("{}{}", shared::CLOUD_WORKER_PREFIX, p.id),
+                name: p.id,
+                resting: rotation().is_resting(p.base_url),
+                provider,
+                budget,
+            })
+        })
+        .collect()
+}
+
 /// Persist a single gateway config field (writes through the registry K/V store).
 pub fn set_gateway_pref(reg: &Registry, key: &str, value: &str) {
     reg.set_preference(GATEWAY_USER, key, value);
@@ -230,6 +291,35 @@ pub struct GatewayInvocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_clouds_are_the_free_providers_with_a_key() {
+        let reg = Registry::new();
+        assert!(review_clouds(&reg).is_empty());
+        let key = |base: &str| provider_key_name(base);
+        set_gateway_pref(
+            &reg,
+            &key("https://generativelanguage.googleapis.com/v1beta/openai"),
+            "g-key",
+        );
+        set_gateway_pref(&reg, &key("https://api.groq.com/openai/v1"), "q-key");
+        set_gateway_pref(&reg, &key("https://api.anthropic.com/v1"), "paid-key");
+        set_gateway_pref(&reg, "review_model:groq", "qwen/qwen3.6-27b");
+        let clouds = review_clouds(&reg);
+        let got: Vec<(&str, &str, u32)> = clouds
+            .iter()
+            .map(|c| (c.worker_id.as_str(), c.provider.model(), c.budget))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("cloud:groq", "qwen/qwen3.6-27b", 6_000),
+                ("cloud:gemini", "gemini-flash-latest", 200_000),
+            ],
+            "paid providers are never used for reviews; a preference overrides the model"
+        );
+        assert!(clouds.iter().all(|c| !c.resting));
+    }
 
     fn cfg_with_key(key: Option<&str>) -> GatewayConfig {
         GatewayConfig {

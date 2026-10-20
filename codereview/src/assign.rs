@@ -46,6 +46,10 @@ pub struct TaskNeed {
     pub tokens: usize,
     /// For a check: the model that raised the finding.
     pub avoid_model: Option<String>,
+    /// For a check: give it to the biggest machine that fits rather than the
+    /// smallest. A cloud reviewer saw only the diff; its findings need the
+    /// machine that can hold the whole file and what it imports (mac1).
+    pub prefer_large: bool,
 }
 
 /// Tokens kept free for the answer.
@@ -107,13 +111,20 @@ pub fn assign(
                 // busy right now: a model checking its own finding mostly agrees
                 // with itself.
                 let a_different_model_exists = workers.iter().filter(fits).any(|w| other_model(&w));
-                workers
-                    .iter()
-                    .filter(free)
-                    .filter(fits)
-                    .filter(|w| !a_different_model_exists || other_model(w))
-                    // Smallest machine that fits, keeping big ones for reviews.
-                    .min_by_key(|w| (capacity(w, TaskKind::Verify), w.node_id.clone()))
+                let key = |w: &&Worker| (capacity(w, TaskKind::Verify), w.node_id.clone());
+                let suitable = || {
+                    workers
+                        .iter()
+                        .filter(fits)
+                        .filter(|w| !a_different_model_exists || other_model(w))
+                };
+                if task.prefer_large {
+                    // The biggest suitable machine, waiting for it if it is busy.
+                    suitable().max_by_key(key).filter(free)
+                } else {
+                    // Smallest free machine that fits, keeping big ones for reviews.
+                    suitable().filter(free).min_by_key(key)
+                }
             }
         };
         if let Some(w) = choice {
@@ -158,6 +169,7 @@ mod tests {
             kind: TaskKind::Review,
             tokens,
             avoid_model: None,
+            prefer_large: false,
         }
     }
 
@@ -167,7 +179,28 @@ mod tests {
             kind: TaskKind::Verify,
             tokens,
             avoid_model: Some(avoid.into()),
+            prefer_large: false,
         }
+    }
+
+    #[test]
+    fn a_cloud_finding_is_checked_on_the_biggest_machine() {
+        let mut check = verify(1, 2_000, "gemini-flash-latest");
+        assert_eq!(
+            assign(&[check.clone()], &[mac1(), beelink1()], &HashSet::new()),
+            vec![(1, "beelink1".to_string())],
+            "an ordinary check goes to the smallest"
+        );
+        check.prefer_large = true;
+        assert_eq!(
+            assign(&[check.clone()], &[mac1(), beelink1()], &HashSet::new()),
+            vec![(1, "mac1".to_string())]
+        );
+        let busy: HashSet<String> = ["mac1".to_string()].into();
+        assert!(
+            assign(&[check], &[mac1(), beelink1()], &busy).is_empty(),
+            "it waits for mac1 rather than going to the small machine"
+        );
     }
 
     #[test]

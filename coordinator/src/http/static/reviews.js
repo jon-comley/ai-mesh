@@ -239,7 +239,7 @@ function renderRepos(repos) {
   el.innerHTML = repos.map(r => `
     <div class="rv-repo${r.enabled ? '' : ' ebay-hunt-off'}" data-repo="${esc(r.name)}">
       <div class="rv-repo-head"><strong>${esc(r.name)}</strong> <span class="gw-hint">${esc(r.branch)}</span></div>
-      <div class="gw-hint">${esc(scheduleText(r))}</div>
+      <div class="gw-hint">${esc(scheduleText(r))}${r.cloud ? ' · cloud reviewers see the diff' : ''}</div>
       <div class="gw-hint">${r.last_reviewed_commit ? `reviewed to <code>${esc(r.last_reviewed_commit.slice(0, 7))}</code>` : 'not reviewed yet'}${r.last_sweep_folder ? ` · last swept ${esc(r.last_sweep_folder)}` : ''}</div>
       <div class="rv-actions">
         <button type="button" data-act="run" data-repo="${esc(r.name)}">Run now</button>
@@ -426,6 +426,7 @@ function openEditor(name) {
     <div class="gw-field"><label>Imports from other repos</label>
       <textarea id="rv-e-aliases" rows="2" placeholder="@app/ = guv:src">${esc(formatAliases(spec.aliases))}</textarea></div>
     <label><input id="rv-e-enabled" type="checkbox" ${spec.enabled ? 'checked' : ''}> scheduled runs on</label>
+    <label><input id="rv-e-cloud" type="checkbox" ${spec.cloud ? 'checked' : ''}> cloud reviewers see the diff (Online AI keys)</label>
     <div class="rv-actions">
       <button type="button" data-act="save-repo">Save</button>
       <button type="button" data-act="cancel-edit">Cancel</button>
@@ -446,6 +447,7 @@ function editorSpec() {
     sweep_slot: day === '' || !sweep.length ? null : sweep[0],
     enabled: document.getElementById('rv-e-enabled')?.checked ?? true,
     aliases: parseAliases(v('rv-e-aliases')),
+    cloud: document.getElementById('rv-e-cloud')?.checked ?? false,
   };
 }
 

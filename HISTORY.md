@@ -11,6 +11,25 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Reviews: cloud reviewers see the diff, mac1 checks them (2026-10-20)
+
+Jon, on the free cloud AIs: "maybe we should just send them the diffs and get
+mac1 to figure them out", and "alternate which ai is the starting ai so we
+don't always only get one ai looking at it".
+- **Only the diff goes out**, with each changed function whole and a note of
+  signatures and call sites. That fits the free tiers (a passing run's diff
+  is a request or two), keeps most of the code at home, and the note answers
+  most of the "can this be null?" false alarms a bare hunk causes.
+- **mac1 checks every cloud finding on the biggest machine.** A diff-only
+  reviewer can't see callers; mac1 can. The check waits for mac1 rather than
+  going to beelink1's 7B model, which is too weak to judge a stronger model.
+- **The first look takes turns**, run by run, with a second opinion from the
+  next provider, so no single model's blind spots decide what is found.
+- **pi1 makes the calls**, because it already holds the Online AI keys and
+  routes mac1's work. Cloud providers are listed to mac1 as `cloud:<id>`
+  workers with `work: false`, so nothing hands them whole files by accident.
+- **Per repo, off by default.** Free tiers may train on what they're sent.
+
 ## Reviews: tests, refactors, improvements and ideas, each with a diff (2026-10-20)
 
 Jon wanted more than bugs from the reviews ("code refactor and … code

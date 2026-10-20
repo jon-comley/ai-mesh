@@ -88,6 +88,19 @@ pub struct WorkerInfo {
     pub resting: bool,
 }
 
+/// Workers whose id starts with this are cloud providers that pi1 calls with
+/// the Online AI tab's keys (`cloud:gemini`), not machines on the mesh.
+pub const CLOUD_WORKER_PREFIX: &str = "cloud:";
+
+impl WorkerInfo {
+    /// A cloud provider rather than a mesh machine. Cloud workers are listed
+    /// with `work: false`, so nothing hands them review chunks by accident;
+    /// mac1 sends them only the diff of a repo that allows it.
+    pub fn is_cloud(&self) -> bool {
+        self.node_id.starts_with(CLOUD_WORKER_PREFIX)
+    }
+}
+
 /// Coordinator → agent: the machines that could take work right now.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct WorkerSnapshot {
@@ -125,6 +138,10 @@ pub struct ReviewRepoSpec {
     pub enabled: bool,
     #[serde(default)]
     pub aliases: Vec<ReviewAlias>,
+    /// Also send what changed (the diff, and a note on the code around it) to
+    /// the cloud providers on the Online AI tab. Off: nothing leaves the house.
+    #[serde(default)]
+    pub cloud: bool,
 }
 
 fn default_branch() -> String {
@@ -456,6 +473,7 @@ mod tests {
                         repo: "guv".into(),
                         dir: "src".into(),
                     }],
+                    cloud: true,
                 },
                 last_reviewed_commit: Some("cdcf9e8".into()),
                 last_sweep_folder: None,

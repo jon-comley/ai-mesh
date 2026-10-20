@@ -24,6 +24,7 @@ pub mod assign;
 pub mod check;
 pub mod chunk;
 pub mod dedupe;
+pub mod note;
 pub mod parse;
 pub mod prompt;
 pub mod report;

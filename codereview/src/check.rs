@@ -86,6 +86,28 @@ pub fn normalize_patch(patch: &str, repo: &str) -> String {
     out
 }
 
+/// A quote copied out of a diff with its markers: when every line starts
+/// with `+` or a space and at least one with `+`, the first character goes.
+/// Anything else is returned as it was.
+pub fn strip_diff_markers(quote: &str) -> String {
+    let lines: Vec<&str> = quote.lines().filter(|l| !l.is_empty()).collect();
+    let marked = !lines.is_empty()
+        && lines
+            .iter()
+            .all(|l| l.starts_with('+') || l.starts_with(' '))
+        && lines
+            .iter()
+            .any(|l| l.starts_with('+') && !l.starts_with("++"));
+    if !marked {
+        return quote.to_string();
+    }
+    quote
+        .lines()
+        .map(|l| l.get(1..).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The lines around `line`, numbered, for a checking prompt.
 pub fn excerpt(content: &str, line: u32, radius: u32) -> String {
     let start = line.saturating_sub(radius).max(1);
@@ -103,6 +125,25 @@ pub fn excerpt(content: &str, line: u32, radius: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_markers_come_off_a_quote_copied_from_a_diff() {
+        assert_eq!(
+            strip_diff_markers("+const a = 1;\n+if (a) {"),
+            "const a = 1;\nif (a) {"
+        );
+        assert_eq!(
+            strip_diff_markers(" const a = 1;\n+const b = 2;"),
+            "const a = 1;\nconst b = 2;"
+        );
+        assert_eq!(strip_diff_markers("const a = +1;"), "const a = +1;");
+        assert_eq!(
+            strip_diff_markers("  indented();"),
+            "  indented();",
+            "no + line: left alone"
+        );
+        assert_eq!(strip_diff_markers("++i;"), "++i;");
+    }
 
     #[test]
     fn patches_lose_fences_and_the_repo_prefix() {

@@ -133,6 +133,15 @@ just measure-compression
 
 ---
 
+## Code reviews
+
+The keys saved here also serve mac1's code reviews, for a repo that has
+**cloud reviewers see the diff** ticked on the Reviews tab: every *free*
+provider with a key reviews that repo's diffs, taking turns to go first
+(`docs/code-review.md`, "Cloud reviewers"). Paid providers are never used for
+reviews. The review model per provider is separate from the chat model chosen
+here; a `review_model:<preset id>` preference overrides it.
+
 ## Notes & limits
 
 - The API key is stored server-side and is **never** sent back to the browser — the
