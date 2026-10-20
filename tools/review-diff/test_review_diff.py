@@ -193,6 +193,15 @@ class ReviewDiffTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             rd.main(["--repo", str(self.repo), "--config", str(cfg_path), "run", "--only", "nobody"])
 
+    def test_since_reviews_from_a_given_commit(self):
+        for i in range(3):
+            (self.repo / "src/net.c").write_text(f"int net_send(int len) {{ return {i}; }}\n")
+            sh(self.repo, "commit", "-qam", f"pr {i}")
+        base = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD~2"],
+                              capture_output=True, text=True).stdout.strip()
+        rd.Run(self.repo, CFG, PROMPTS, out=self.log.append).review("HEAD", dry_run=True, since=base)
+        self.assertTrue(self.log[0].startswith(f"2 new commits ({base[:7]}.."), self.log[0])
+
     def test_pieces(self):
         self.assertEqual(rd.finding_key("bug", "r", "a", "x = 1"), "08fdfd61b4b9ae76",
                          "the same id as the home system")

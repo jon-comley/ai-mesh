@@ -575,12 +575,16 @@ class Run:
             base = c
         return base
 
-    def review(self, upto: str, dry_run: bool = False, tested: bool = False) -> Path | None:
+    def review(self, upto: str, dry_run: bool = False, tested: bool = False,
+               since: str | None = None) -> Path | None:
         repo = self.repo
         upto = git("rev-parse", "--verify", f"{upto}^{{commit}}", repo=repo).strip()
         self.apply_marks()
         state = self.load("state.json", {})
         last = state.get("last")
+        if since:
+            # A PR: everything since it left its base, bookmark or not
+            last = git("rev-parse", "--verify", f"{since}^{{commit}}", repo=repo).strip()
         if last and has_commit(repo, last) and is_ancestor(repo, upto, last):
             self.out(f"nothing new since the last review ({last[:7]})")
             return None
@@ -946,6 +950,7 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run", help="review the commits since the last run")
     run_p.add_argument("--upto", default="HEAD", help="the commit that passed the tests")
     run_p.add_argument("--dry-run", action="store_true", help="say what would be sent, send nothing")
+    run_p.add_argument("--since", help="review from this commit (a PR's base), not the bookmark")
     run_p.add_argument("--only", help="ask just this reviewer from the config (e.g. copilot)")
     run_p.add_argument("--tested", action="store_true",
                        help="the tests passed at --upto (after-tests.sh says so)")
@@ -977,7 +982,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg["context"] = cfg.get("contexts", {}).get(name, cfg.get("context", ""))
     run = Run(repo, cfg, Path(a.prompts))
     if a.cmd == "run":
-        run.review(a.upto, a.dry_run, a.tested)
+        run.review(a.upto, a.dry_run, a.tested, a.since)
     elif a.cmd == "mark":
         ledger = run.load("ledger.json", {"raised": [], "findings": {}})
         if a.id not in ledger["findings"]:

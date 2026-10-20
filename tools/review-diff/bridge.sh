@@ -11,6 +11,7 @@
 #        tools/review-diff/bridge.sh little-theo-firmware ltf-bench-park-GD
 #        tools/review-diff/bridge.sh --list          the repos it can review
 #        REVIEW_ONLY=copilot tools/review-diff/bridge.sh st-bsp   one reviewer only
+#        REVIEW_SINCE=<sha> tools/review-diff/bridge.sh st-bsp    from a PR's base
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 HOST=${REVIEW_BRIDGE_HOST:-work-laptop}
@@ -67,7 +68,7 @@ while read -r path; do
       && "${SSH[@]}" "$HOST" "rm -f '$path/.git/review-diff/marks/$id'"
   done
   python3 -u "$HERE/review_diff.py" --repo "$m" run --tested --upto tests-passed \
-    ${REVIEW_ONLY:+--only "$REVIEW_ONLY"}
+    ${REVIEW_ONLY:+--only "$REVIEW_ONLY"} ${REVIEW_SINCE:+--since "$REVIEW_SINCE"}
   # Reports waiting here go over; one that can't stays for the next run
   mkdir -p "$m/review-diff/sent"
   for f in "$m/review-diff/inbox"/*.md; do
