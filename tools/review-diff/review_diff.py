@@ -854,7 +854,7 @@ def block(n: int, f: dict, repo_name: str, label_kind: bool) -> str:
                else f"rejected by {by}" if v == "rejected" else "not checked (no other reviewer answered)")
     out += f"- **Found by:** {', '.join(f['found_by'])}; {checked}"
     if f.get("verdict_reason"):
-        out += f" — {f['verdict_reason']}"
+        out += f": {f['verdict_reason']}"
     lang = f["path"].rsplit(".", 1)[-1]
     out += f"\n\n```{lang}\n{f['quote'].rstrip()}\n```\n"
     if f["patch"].strip():
@@ -888,7 +888,8 @@ def render(repo_name: str, scope: str, done_by: dict, n_files: int, dropped: lis
             "reason. Ideas are for Jon to choose from. Record what became of each item for the "
             "reviewers' scorecard: `review_diff.py mark <id> fixed` (or `dismissed`).\n\n")
     if not confirmed and not unconfirmed:
-        return out + "Nothing found in this run.\n" + dropped_section(dropped)
+        return (out + "Nothing found in this run.\n" + rejected_section(findings, repo_name)
+                + dropped_section(dropped))
     n = 0
     for sev in SEVERITIES:
         group = [f for f in confirmed if f["kind"] == "bug" and f["severity"] == sev]
@@ -910,7 +911,20 @@ def render(repo_name: str, scope: str, done_by: dict, n_files: int, dropped: lis
         for f in unconfirmed:
             n += 1
             out += block(n, f, repo_name, True)
-    return out + dropped_section(dropped)
+    return out + rejected_section(findings, repo_name) + dropped_section(dropped)
+
+
+def rejected_section(findings: list[dict], repo_name: str) -> str:
+    """What the checker rejected, kept for the final review: a checker can be
+    wrong both ways, so its verdict ranks an item but never removes it."""
+    rejected = [f for f in findings if f.get("verdict") == "rejected"]
+    if not rejected:
+        return ""
+    out = ("\n## Rejected by the checker\n\nKept for the final review: the checker's reason "
+           "is under each one.\n\n")
+    for n, f in enumerate(rejected, 1):
+        out += block(n, f, repo_name, True)
+    return out
 
 
 def dropped_section(dropped: list[dict]) -> str:

@@ -70,6 +70,12 @@ add the work Claude later.
   choices his comments explained. The checker had only the file, so it could
   not tell a bug from one the change removed. Shared prompts, so the home
   reviews get this too once mac1 is redeployed.
+- **A verdict ranks an item, never removes it** (Jon: "don't rule anything
+  out because of mac1 coder ... check that also in for the final claude
+  review"). On the rerun mac1's coder confirmed all nine st-bsp items,
+  "no fix needed" ones included, so its verdicts filter nothing either way.
+  Rejected items now get their own section, the coder takes a first look as
+  well as checking, and Claude judges everything at the end.
 - **Diffs only for the work code** (`"whole_files": false`): the diff with
   each changed function whole and its callers, and the check sees 60 lines
   around the item.

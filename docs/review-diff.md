@@ -66,8 +66,9 @@ lenovo1's config (`~/.config/review-diff/config.json`) has the free AIs
 (Gemini, Mistral, OpenRouter) and Copilot on beelink1 taking turns at
 the first look, called straight, not through pi1. Their keys are in
 `~/.config/review-diff/keys.env` (mode 600), which the bridge loads. mac1's
-coder is `"check_only"` and the config's `"checker"`: it never looks first,
-and checks every item before anyone else, through a tunnel the bridge opens
+coder looks too, and is the config's `"checker"`: it checks every item it
+didn't raise before anyone else (`"check_only"` would keep it to checking),
+through a tunnel the bridge opens
 to mac1's `127.0.0.1:8080` for the run (`REVIEW_CODER_TUNNEL`, empty for
 none). `"prompt_tokens"` sizes the prompts; a reviewer whose budget is
 smaller is skipped for the first look. Groq isn't in it: its free tier's 6k
@@ -75,7 +76,9 @@ tokens a minute holds neither a review nor a check prompt. `"whole_files": false
 
 An item whose quote isn't in the file is still judged by another reviewer,
 with a note that a misquote alone is no reason to reject, and listed under
-*Misquoted* with the verdict.
+*Misquoted* with the verdict. Nothing is removed on a verdict: rejected items
+are listed under *Rejected by the checker* with the reason, since a checker
+can be wrong both ways, and Claude makes the final call on every item.
 
 `REVIEW_BRIDGE_HOST` (default `work-laptop`), `REVIEW_BRIDGE_ROOTS` (`repos`)
 and `REVIEW_BRIDGE_HOME` (`~/work-review`) change where it looks.

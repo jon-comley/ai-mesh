@@ -208,6 +208,20 @@ class ReviewDiffTest(unittest.TestCase):
         rd.Run(self.repo, CFG, PROMPTS, out=self.log.append).review("HEAD", dry_run=True, since=base)
         self.assertTrue(self.log[0].startswith(f"2 new commits ({base[:7]}.."), self.log[0])
 
+    def test_a_rejected_item_stays_in_the_report_for_the_final_review(self):
+        class Rejecting(Fake):
+            def __call__(self, r, system, user, max_tokens=8192):
+                if '"verdict"' in system:
+                    self.calls.append((r["name"], "check", user))
+                    return '{"verdict": "rejected", "reason": "line 2 guards it"}'
+                return super().__call__(r, system, user, max_tokens)
+        with mock.patch.object(rd, "ask", Rejecting()):
+            report = rd.Run(self.repo, CFG, PROMPTS, out=self.log.append).review("HEAD")
+        text = report.read_text(encoding="utf-8")
+        self.assertIn("## Rejected by the checker", text)
+        self.assertIn("A negative length is sent on", text)
+        self.assertIn("rejected by gpt-x@openai: line 2 guards it", text)
+
     def test_a_check_only_reviewer_checks_first_and_never_looks_first(self):
         cfg = {**CFG, "checker": "coder", "reviewers": CFG["reviewers"][:1] + [
             {"name": "coder", "type": "api", "model": "qwen-coder", "check_only": True}]}
