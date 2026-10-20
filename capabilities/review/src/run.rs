@@ -354,6 +354,18 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
             }
             (sha, None)
         }
+        // The sweep reads the code as of the last review: for a repo
+        // reviewed after its tests pass, the last commit that passed. With no
+        // bookmark, or one no longer in the history, the newest.
+        RunKind::Sweep => {
+            let at = match row.last_reviewed_commit.as_deref() {
+                Some(b) if repo.has_commit(b).await && repo.is_ancestor(b, &head).await => {
+                    repo.resolve(b).await.unwrap_or_else(|_| head.clone())
+                }
+                _ => head.clone(),
+            };
+            (at, None)
+        }
         _ => (head.clone(), None),
     };
 
@@ -449,7 +461,7 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
                 .iter()
                 .filter(|p| files::is_reviewable(p) && files::in_folder(p, &folder))
             {
-                if let Some(content) = load(&repo, &head, path).await {
+                if let Some(content) = load(&repo, &rev, path).await {
                     targets.push(SourceFile {
                         repo: spec.name.clone(),
                         path: path.clone(),
@@ -465,7 +477,7 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
             } else {
                 &folder
             };
-            format!("Weekly sweep: {shown} at {}", short(&head))
+            format!("Weekly sweep: {shown} at {}", short(&rev))
         }
         RunKind::Path(path) => {
             let path = path.trim_matches('/');
@@ -1768,6 +1780,26 @@ mod tests {
         let s = c.store.lock().unwrap();
         assert!(s.runs(1)[0].scope.starts_with("Weekly sweep: src"));
         assert_eq!(s.repo("app").unwrap().sweep_cursor.as_deref(), Some("src"));
+    }
+
+    #[tokio::test]
+    async fn a_sweep_reads_the_code_as_of_the_last_review() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(tmp.path(), "app", &[("src/a.ts", "export const a = 1;\n")]);
+        let store = Store::open_in_memory().unwrap();
+        add_repo(&store, "app", &repo, vec![]);
+        let passed = rev_parse(&repo, "HEAD");
+        store.set_last_reviewed("app", &passed);
+        // Pushed since, not yet through the tests: the sweep doesn't see it.
+        std::fs::write(repo.join("src/later.ts"), "export const l = 2;\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "later"]);
+        let c = ctx(&tmp.path().join("home"), plain_mesh(), store);
+        let out = run_local(&c, "app", RunKind::Sweep).await;
+        assert_eq!(out.status, "done");
+        let s = c.store.lock().unwrap();
+        let scope = &s.runs(1)[0].scope;
+        assert_eq!(scope, &format!("Weekly sweep: src at {}", &passed[..7]));
     }
 
     fn plain_mesh() -> Arc<FakeMesh> {

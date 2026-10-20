@@ -246,7 +246,9 @@ again").
 
 For this, those two repos have no nightly times. Clear **Nightly times** in
 the repo's editor on the Reviews tab, which shows the repo as "Run now only".
-The weekly sweep, if set, still runs. all-tests.sh runs this repo's
+The weekly sweep, if set, still runs every week, a different folder each
+time, but reads the code as of the last review: the last commit that passed
+the tests, never newer, untested code. all-tests.sh runs this repo's
 `just review-now` from `~/repos/ai-mesh` on the laptop.
 
 An *up to a commit* run left half-done by a restart isn't queued again,
@@ -287,8 +289,9 @@ crate:
 2. **Choose files.** Nightly and *Run now*: files changed since the last
    reviewed commit (the last 20 commits on a first run). *Up to a commit*: the
    same, stopping at that commit. Weekly sweep: every
-   file in the next top-level folder, in turn. Tests, generated and vendored
-   code are skipped as targets.
+   file in the next top-level folder, in turn, as of the last reviewed commit
+   (the newest when there isn't one). Tests, generated and vendored code are
+   skipped as targets.
 3. **Context:** the files they import, two levels deep, including the
    companion repo's (`@app/…` → guv).
 4. **Plan chunks** (`codereview::chunk`): targets that import each other or
