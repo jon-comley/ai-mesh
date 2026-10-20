@@ -41,6 +41,17 @@ add the work Claude later.
   stdin to a PowerShell script that writes `context.md` in a scratch folder
   and runs the command there. It calls `copilot.cmd`, because beelink1's
   script policy blocks npm's `copilot.ps1` under ssh.
+- **The work laptop never dials out; lenovo1 bridges** (Jon: "all the
+  reviews are done in ai-mesh, why don't we just paste results to
+  work-laptop"). The tailnet doesn't let `tag:work` start connections, and
+  that stays. after-tests moves a local `tests-passed` branch; lenovo1's
+  `bridge.sh` fetches it into a bare mirror, reviews it, and copies the
+  report into the repo's `.git/review-diff/inbox`. Claude's outcomes come
+  back as files in `.git/review-diff/marks/`, since the laptop can't run
+  `mark` against lenovo1's ledger.
+- **Diffs only for the work code** (`"whole_files": false`): the diff with
+  each changed function whole and its callers, and the check sees 60 lines
+  around the item.
 
 ## Reviews: a scorecard per reviewer (2026-10-20)
 

@@ -11,7 +11,7 @@ explanation and a diff for each item, for Claude Code to fix or drop.
 
 ## What a run does
 
-`review_diff.py run --upto <commit>`, normally from `after-tests.sh` once the
+`review_diff.py run --upto <commit>`, normally from lenovo1's bridge once the
 tests have passed:
 
 1. **What to review:** the commits since the last review, up to the one that
@@ -37,37 +37,46 @@ tests have passed:
    with a copy in `.git/review-diff/inbox/` for Claude Code.
 8. **Scorecard:** every item raised is noted in `.git/review-diff/ledger.json`.
 
-## Setting it up on the work laptop
+## The lenovo1 bridge: work repos, reviewed from home
 
-1. **Get the code.** ai-mesh is public:
-   `git clone https://github.com/jon-comley/ai-mesh`.
-2. **Check Python** is 3.9 or newer: `python --version`, or `py --version` on
-   Windows. Nothing else needs installing.
-3. **Write the config:**
-   `python ai-mesh/tools/review-diff/review_diff.py init`. That writes
-   `~/.config/review-diff/config.json` with three reviewers: Gemini, OpenAI and
-   Copilot. Edit it:
-   - `context`: a sentence or two on what the code is (e.g. "STM32 firmware
-     for a data logger: FreeRTOS, MQTT, OTA").
-   - each reviewer's `model`. `gemini-pro-latest` and `gpt-4.1` are
-     placeholders; use the models the work accounts have.
-   - `budget_tokens`: the most one prompt may hold for that reviewer.
-4. **Keys** go in environment variables, never in the file: `GEMINI_API_KEY`
-   and `OPENAI_API_KEY`, or whatever each reviewer's `key_env` names.
-5. **Copilot** runs as the `copilot` command-line tool, signed in with the
-   work account. It reads the prompt from `context.md` in a scratch folder,
-   the way beelink1's morning review does.
-6. **Hook it to the tests.** Run the tests through the wrapper:
-   `ai-mesh/tools/review-diff/after-tests.sh make test`, or on Windows
-   `ai-mesh\tools\review-diff\after-tests.ps1 npm test`. It reviews only when
-   every test passed, on a clean committed tree; otherwise it says why not.
-7. **Install the Claude Code skill:** copy `tools/review-diff/SKILL.md` to
-   `~/.claude/skills/review-inbox/SKILL.md`. Then "go through the review
-   inbox" has Claude verify each item, fix or drop it, run the tests, and
-   record the outcome.
+The work laptop never connects out: the tailnet lets only Jon's own devices
+start connections, and `tag:work` can't. So lenovo1, which reaches it, does
+the reviewing:
 
-`review_diff.py run --dry-run` shows what would be sent, how big each prompt
-is and who looks first, without sending anything.
+1. **On the work laptop** the tests run through the wrapper,
+   `~/ai-mesh/tools/review-diff/after-tests.sh make test`. When every test
+   passes on a clean commit it moves the local `tests-passed` branch there.
+   Nothing else happens on the laptop.
+2. **On lenovo1** `tools/review-diff/bridge.sh` finds each repo under
+   `~/repos` on the work laptop (two levels, so `ltf-bench-park/GD` too) with
+   a `tests-passed` branch, fetches it into a bare mirror in `~/work-review`,
+   and reviews the commits since the last review with `review_diff.py`.
+   Mirrors are named after the path: `repos/ltf-bench-park/GD` is
+   `ltf-bench-park-GD`.
+3. **The report** is copied into that repo's `.git/review-diff/inbox` on the
+   work laptop, where "go through the review inbox" has Claude Code verify,
+   fix or drop each item (`SKILL.md`, copied to
+   `~/.claude/skills/review-inbox/SKILL.md` there).
+4. **Outcomes** come back: Claude writes `fixed` or `dismissed` to
+   `.git/review-diff/marks/<id>`, and the next pass moves them into lenovo1's
+   scorecard.
+
+lenovo1's config (`~/.config/review-diff/config.json`) has Copilot on
+beelink1 as its reviewer, with `"whole_files": false`: reviewers get the diff
+with each changed function whole and the lines that call them, and a checker
+gets 60 lines either side of the item, never a whole file.
+
+`REVIEW_BRIDGE_HOST` (default `work-laptop`), `REVIEW_BRIDGE_ROOTS` (`repos`)
+and `REVIEW_BRIDGE_HOME` (`~/work-review`) change where it looks.
+
+## Running it on one machine
+
+`review_diff.py` also runs where the code is, if that machine can reach the
+reviewers: `review_diff.py init` writes an example config, keys go in
+environment variables (`GEMINI_API_KEY`, `OPENAI_API_KEY`, or each
+reviewer's `key_env`), and `review_diff.py run --upto <commit>` reviews.
+`--dry-run` shows what would be sent, how big each prompt is and who looks
+first, without sending anything.
 
 ## Copilot on another machine
 
@@ -105,8 +114,8 @@ takes a reviewer out without deleting it.
 ## The scorecard
 
 ```bash
-python review_diff.py score                 # each reviewer's record
-python review_diff.py mark <id> fixed       # or dismissed: Claude Code does this
+python3 review_diff.py --repo ~/work-review/<name>.git score   # on lenovo1
+python3 review_diff.py mark <id> fixed       # or a file in .git/review-diff/marks/<id>
 ```
 
 The columns are the same as the Reviews tab at home: raised, made up (quoted
@@ -115,9 +124,10 @@ the two rates. A finding raised again by the same reviewer counts once.
 
 ## What leaves the laptop
 
-Only what goes to the reviewers in the config: the changed files, their
-diffs, and the lines that call them. Check that each account is one the work
-allows code to go to.
+The tested commits go to lenovo1's mirror. From there, only what goes to the
+reviewers in its config: with `"whole_files": false`, the diffs, the lines
+that call the changed functions, and the lines around each item for the
+check.
 
 ## Tests
 

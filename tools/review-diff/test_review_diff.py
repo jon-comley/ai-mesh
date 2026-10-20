@@ -118,6 +118,15 @@ class ReviewDiffTest(unittest.TestCase):
         self.assertEqual((row["raised"], row["invented"], row["confirmed"], row["fixed"]),
                          (2, 1, 1, 1))
 
+        # A mark left as a file, the way the work laptop records one
+        (self.repo / ".git/review-diff/marks").mkdir()
+        (self.repo / ".git/review-diff/marks" / bug).write_text("dismissed\n")
+        (self.repo / ".git/review-diff/marks/nosuchid").write_text("fixed")
+        rd.Run(self.repo, CFG, PROMPTS, out=self.log.append).apply_marks()
+        ledger = json.loads((self.repo / ".git/review-diff/ledger.json").read_text())
+        self.assertEqual(ledger["findings"][bug]["status"], "dismissed")
+        self.assertEqual(list((self.repo / ".git/review-diff/marks").iterdir()), [])
+
         # The bookmark moved: nothing new the second time, and the turn moved on.
         self.assertIsNone(self.run_once(Fake()))
         state = json.loads((self.repo / ".git/review-diff/state.json").read_text())
@@ -156,6 +165,20 @@ class ReviewDiffTest(unittest.TestCase):
             "HEAD", dry_run=True, tested=True)
         self.assertTrue(self.log[0].startswith("1 new commits"), self.log[0])
         self.assertTrue(self.log[2].startswith("Tests passed: 1 new commits"), self.log[2])
+
+    def test_a_bare_mirror_is_reviewed_diffs_only(self):
+        mirror = Path(self.tmp.name) / "little-theo-firmware.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(self.repo), str(mirror)], check=True)
+        fake = Fake()
+        with mock.patch.object(rd, "ask", fake):
+            report = rd.Run(mirror, {**CFG, "whole_files": False}, PROMPTS,
+                            out=self.log.append).review("HEAD", tested=True)
+        self.assertTrue((mirror / "review-diff/inbox").is_dir(), "state lives in the bare repo")
+        self.assertIn("little-theo-firmware", report.read_text(encoding="utf-8"))
+        review = next(c[2] for c in fake.calls if c[1] == "review")
+        self.assertNotIn("full file as it is now", review)
+        check = next(c[2] for c in fake.calls if c[1] == "check")
+        self.assertIn("the lines around the item", check)
 
     def test_pieces(self):
         self.assertEqual(rd.finding_key("bug", "r", "a", "x = 1"), "08fdfd61b4b9ae76",

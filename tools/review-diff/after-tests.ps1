@@ -1,5 +1,6 @@
-# Run the tests; if every one passes on a clean, committed tree, review the
-# commits since the last review up to that one (docs/review-diff.md).
+# Run the tests; if every one passes on a clean, committed tree, move the
+# tests-passed branch to that commit, for lenovo1's bridge to review the commits
+# since the last review (docs/review-diff.md). Nothing leaves this machine.
 # Usage: tools\review-diff\after-tests.ps1 <test command...>
 #   e.g. C:\src\ai-mesh\tools\review-diff\after-tests.ps1 npm test
 if ($args.Count -eq 0) { Write-Output 'usage: after-tests.ps1 <test command...>'; exit 2 }
@@ -15,7 +16,11 @@ if (-not $wasClean -or -not (Clean) -or (git rev-parse HEAD).Trim() -ne $start) 
   Write-Output '== tests passed, but not on a clean commit: no review (commit, then run them again)'
   exit 0
 }
-$py = if (Get-Command py -ErrorAction SilentlyContinue) { 'py' } else { 'python' }
-& $py (Join-Path $PSScriptRoot 'review_diff.py') run --tested --upto $start
-if ($LASTEXITCODE -ne 0) { Write-Output '== the review could not run; the tests still passed' }
+if ((git branch --show-current).Trim() -eq 'tests-passed') {
+  Write-Output '== tests passed, but on the tests-passed branch itself: no review'
+  exit 0
+}
+# lenovo1's bridge picks this up and reviews the commits since the last one
+git branch -f tests-passed $start
+if ($LASTEXITCODE -eq 0) { Write-Output "== tests passed: tests-passed is now $($start.Substring(0,7)), for review" }
 exit 0

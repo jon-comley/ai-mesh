@@ -57,6 +57,7 @@ EXAMPLE_CONFIG = {
     "context": "What this code is, in a sentence or two, for the reviewers.",
     "branch": "main",
     "first_run_commits": 20,
+    "whole_files": True,
     "reviews_per_run": 2,
     "reviewers": [
         {
@@ -505,8 +506,13 @@ class Run:
         self.repo = repo
         self.cfg = cfg
         self.out = out
-        self.name = Path(git("rev-parse", "--show-toplevel", repo=repo).strip()).name
-        self.state_dir = Path(git("rev-parse", "--absolute-git-dir", repo=repo).strip()) / "review-diff"
+        git_dir = Path(git("rev-parse", "--absolute-git-dir", repo=repo).strip())
+        # A bare mirror (lenovo1's copy of a work repo) is named after its folder
+        if git("rev-parse", "--is-bare-repository", repo=repo).strip() == "true":
+            self.name = git_dir.name.removesuffix(".git")
+        else:
+            self.name = Path(git("rev-parse", "--show-toplevel", repo=repo).strip()).name
+        self.state_dir = git_dir / "review-diff"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.review_md = (prompts / "review.md").read_text(encoding="utf-8")
         self.verify_md = (prompts / "verify.md").read_text(encoding="utf-8")
@@ -521,6 +527,24 @@ class Run:
 
     def save(self, name: str, value) -> None:
         (self.state_dir / name).write_text(json.dumps(value, indent=1), encoding="utf-8")
+
+    def apply_marks(self) -> None:
+        """Outcomes left as files, review-diff/marks/<id> holding fixed or
+        dismissed: how Claude Code records them on the work laptop, whose
+        marks the lenovo1 bridge copies into its mirror."""
+        d = self.state_dir / "marks"
+        if not d.is_dir():
+            return
+        ledger = self.load("ledger.json", {"raised": [], "findings": {}})
+        for f in sorted(d.iterdir()):
+            status = f.read_text(encoding="utf-8", errors="replace").strip()
+            if f.name in ledger["findings"] and status in ("fixed", "dismissed", "open"):
+                ledger["findings"][f.name]["status"] = status
+                self.out(f"{f.name} marked {status}")
+            else:
+                self.out(f"mark {f.name} ({status!r}) matches no finding, dropped")
+            f.unlink()
+        self.save("ledger.json", ledger)
 
     def first_run_base(self, upto: str) -> str:
         """Where a first run starts: back along the branch while the range holds
@@ -542,6 +566,7 @@ class Run:
     def review(self, upto: str, dry_run: bool = False, tested: bool = False) -> Path | None:
         repo = self.repo
         upto = git("rev-parse", "--verify", f"{upto}^{{commit}}", repo=repo).strip()
+        self.apply_marks()
         state = self.load("state.json", {})
         last = state.get("last")
         if last and has_commit(repo, last) and is_ancestor(repo, upto, last):
@@ -683,7 +708,8 @@ class Run:
             block += diff.rstrip() + "\n"
             if calls:
                 block += "--- where the changed functions are called ---\n" + "\n".join(calls) + "\n"
-            block += "--- full file as it is now ---\n" + numbered(content) + "\n"
+            if self.cfg.get("whole_files", True):
+                block += "--- full file as it is now ---\n" + numbered(content) + "\n"
             blocks.append(block)
         groups, cur = [], head
         for b in blocks:
@@ -717,9 +743,13 @@ class Run:
                 f"- suggested change: {f['fix']}\n")
         if f["patch"]:
             user += "- the reviewer's patch:\n" + f["patch"].rstrip() + "\n"
-        shown = (numbered(content) if estimate_tokens(content) < 40_000
-                 else excerpt(content, f["line"], 120))
-        user += f"\n=== FILE: {self.name}/{f['path']} (the file the item is in) ===\n{shown}\n"
+        if not self.cfg.get("whole_files", True):
+            shown, what = excerpt(content, f["line"], 60), "the lines around the item"
+        elif estimate_tokens(content) < 40_000:
+            shown, what = numbered(content), "the file the item is in"
+        else:
+            shown, what = excerpt(content, f["line"], 120), "the file the item is in"
+        user += f"\n=== FILE: {self.name}/{f['path']} ({what}) ===\n{shown}\n"
         user += "\nDoes this item hold up against the code? Answer with the JSON object only."
         for r in others + same:
             try:
@@ -935,6 +965,7 @@ def main(argv: list[str] | None = None) -> int:
         run.save("ledger.json", ledger)
         print(f"{a.id} marked {a.status}")
     elif a.cmd == "score":
+        run.apply_marks()
         print(score_text(run.load("ledger.json", {})))
     return 0
 

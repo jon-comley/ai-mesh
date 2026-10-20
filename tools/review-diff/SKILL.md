@@ -5,9 +5,10 @@ description: Work through the AI code-review reports waiting for this repo (revi
 
 # Review inbox
 
-`review_diff.py` (ai-mesh `tools/review-diff`) reviews each change that passed
-the tests with the AI accounts in its config, and leaves a report in
-`.git/review-diff/inbox/` (inside `.git`, so it is never committed). Each
+lenovo1 reviews each change that passed the tests (after-tests.sh moves the
+`tests-passed` branch; ai-mesh `tools/review-diff/bridge.sh` picks it up) and
+leaves a report in `.git/review-diff/inbox/` (inside `.git`, so it is never
+committed). Each
 item has a kind (bug, test, refactor, improvement, idea), a location, an id,
 an explanation, the quoted code, who found and checked it, and usually a
 diff.
@@ -25,9 +26,10 @@ The reports are leads, not verdicts. Treat every item as a claim to verify.
      the fix where the code can be tested.
    - **Run the repo's tests** after each fix, or after a group of small ones.
      Never commit with tests failing.
-   - **Record the outcome** so the reviewers' scorecard stays true:
-     `python <ai-mesh>/tools/review-diff/review_diff.py mark <id> fixed`
-     or `... mark <id> dismissed`.
+   - **Record the outcome** so the reviewers' scorecard stays true: write
+     `fixed` or `dismissed` to `.git/review-diff/marks/<id>`
+     (`mkdir -p .git/review-diff/marks && echo fixed > .git/review-diff/marks/<id>`).
+     The reviews run on lenovo1, which collects the marks on its next pass.
 3. **Ideas** are for the user to choose. Don't build them. List them in your
    summary.
 4. Move the report to `.git/review-diff/inbox/done/` when every item in it
@@ -42,4 +44,5 @@ For each item, in this shape:
 - **The diff applied**, for a fix, or the reason it doesn't need one.
 
 End with the ideas from the reports, and the scorecard
-(`review_diff.py score`) if the user asks how the reviewers are doing.
+(`review_diff.py score`, run on lenovo1) if the user asks how the
+reviewers are doing.
