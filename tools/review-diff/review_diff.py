@@ -623,6 +623,7 @@ class Run:
         order = reviewers[turn % len(reviewers):] + reviewers[:turn % len(reviewers)]
         wanted = max(1, int(self.cfg.get("reviews_per_run", 2)))
 
+        self.range = (base, upto)
         groups = self.prompts_for(base, upto, files, scope)
         if dry_run:
             self.out(f"{scope}: {len(files)} files, {len(groups)} prompt(s), "
@@ -791,7 +792,12 @@ class Run:
             shown, what = numbered(content), "the file the item is in"
         else:
             shown, what = excerpt(content, f["line"], 120), "the file the item is in"
-        user += f"\n=== FILE: {self.name}/{f['path']} ({what}) ===\n{shown}\n"
+        # The change too, or a checker can't tell a bug from one the change fixed
+        diff = git("diff", "-W", *self.range, "--", f["path"], repo=self.repo).rstrip()
+        if diff and estimate_tokens(diff) < 20_000:
+            user += (f"\n=== WHAT CHANGED in {self.name}/{f['path']} "
+                     f"(- lines are gone, + lines are new) ===\n{diff}\n")
+        user += f"\n=== FILE: {self.name}/{f['path']} ({what}, after the change) ===\n{shown}\n"
         user += "\nDoes this item hold up against the code? Answer with the JSON object only."
         for r in others + same:
             try:

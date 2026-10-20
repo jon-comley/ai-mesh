@@ -63,6 +63,13 @@ add the work Claude later.
   local llm the coder one"), called straight from lenovo1 rather than through
   pi1 ("i would rather go straight to the ais-loop and not via pi1"). The
   coder is `check_only`, reached through an ssh tunnel to its loopback port.
+- **The prompts now say `-` lines are gone, and the checker sees the diff.**
+  The first full run on st-bsp #13 reported 4 high and 6 medium, all
+  confirmed by mac1's coder, and none was real: seven were Dave's own fixes
+  read off the `-` lines, one misread correct offset maths, and the rest were
+  choices his comments explained. The checker had only the file, so it could
+  not tell a bug from one the change removed. Shared prompts, so the home
+  reviews get this too once mac1 is redeployed.
 - **Diffs only for the work code** (`"whole_files": false`): the diff with
   each changed function whole and its callers, and the check sees 60 lines
   around the item.

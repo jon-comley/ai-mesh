@@ -97,6 +97,9 @@ class ReviewDiffTest(unittest.TestCase):
         checks = [c for c in fake.calls if c[1] == "check" and "word for word" not in c[2]]
         self.assertTrue(checks and all(c[0] == "openai" for c in checks),
                         "a different model checks gemini's finds (openai found them too)")
+        self.assertIn("=== WHAT CHANGED in firmware/src/net.c", checks[0][2],
+                      "the checker sees the change, so a fixed bug isn't confirmed")
+        self.assertIn("+  if (len > 512) return -1;", checks[0][2])
         self.assertIn("## Bugs: high", report)
         self.assertIn("## Tests to add", report)
         self.assertIn("(applies cleanly)", report)

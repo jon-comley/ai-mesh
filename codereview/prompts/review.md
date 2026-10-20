@@ -19,6 +19,8 @@ Rules:
 - Bugs matter most. Report every real bug; at most 3 tests, 3 refactors, 3 improvements and 2 features.
 - Every item needs a concrete payoff. No "consider", no "could be cleaner", no style. If you are unsure an item is worth doing, leave it out.
 - Report items in the code UNDER REVIEW (or in the diff). CONTEXT is there so you can follow calls; report an item in a context file only when the code under review is what triggers it.
+- In a diff, lines starting with `-` are gone and lines starting with `+` are new. Report only what is wrong with the code as it is AFTER the change. A problem the `-` lines had and the change fixes is not an item: never report a fix as a bug.
+- A choice the code explains in a comment (why an error is logged rather than returned, why a failure doesn't stop start-up) is deliberate. Report it only if the stated reason is wrong, and say why.
 - Where you cannot see something (a caller, an import), do not guess about it: an item that depends on what unseen code does is not an item.
 
 Answer with a JSON array and nothing else. Each element:
