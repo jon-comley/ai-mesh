@@ -101,7 +101,9 @@ class ReviewDiffTest(unittest.TestCase):
         self.assertIn("## Tests to add", report)
         self.assertIn("(applies cleanly)", report)
         self.assertIn("2 quoting code that is not in the file", report)
-        self.assertNotIn("Invented", report)
+        self.assertIn("## Thrown out: quoted code not in the file", report)
+        self.assertIn("**Invented** (bug, gemini-pro@gemini): `src/net.c:9`", report)
+        self.assertIn("memcpy(buf, src, 4096);", report)
         inbox = list((self.repo / ".git/review-diff/inbox").iterdir())
         self.assertEqual(len(inbox), 1, "a copy waits for Claude Code")
 

@@ -67,7 +67,10 @@ while read -r path; do
     scp -q -o BatchMode=yes "$HOST:$path/.git/review-diff/marks/$id" "$m/review-diff/marks/" \
       && "${SSH[@]}" "$HOST" "rm -f '$path/.git/review-diff/marks/$id'"
   done
-  python3 -u "$HERE/review_diff.py" --repo "$m" run --tested --upto tests-passed \
+  # A review from a given commit (a PR) is asked for by hand, not a test pass
+  tested=--tested
+  [ -z "${REVIEW_SINCE:-}" ] || tested=
+  python3 -u "$HERE/review_diff.py" --repo "$m" run $tested --upto tests-passed \
     ${REVIEW_ONLY:+--only "$REVIEW_ONLY"} ${REVIEW_SINCE:+--since "$REVIEW_SINCE"}
   # Reports waiting here go over; one that can't stays for the next run
   mkdir -p "$m/review-diff/sent"

@@ -627,7 +627,7 @@ class Run:
 
         raised: list[tuple[str, str, str | None]] = []
         findings: dict[str, dict] = {}
-        dropped = 0
+        dropped: list[dict] = []
         done_by: dict[str, int] = {}
         reviewed = 0
         for r in order:
@@ -651,7 +651,12 @@ class Run:
                     quote = strip_diff_markers(raw["quote"])
                     line = locate_quote(files[path], quote, raw["line"]) if path else None
                     if line is None:
-                        dropped += 1
+                        dropped.append({
+                            "who": who, "kind": raw["kind"], "file": raw["file"],
+                            "line": raw["line"], "title": raw["title"], "quote": quote,
+                            "why": "the quoted code is not in it" if path else
+                                   "no such file under review",
+                        })
                         raised.append((who, raw["kind"], None))
                         continue
                     fid = finding_key(raw["kind"], self.name, path, quote)
@@ -833,7 +838,7 @@ def block(n: int, f: dict, repo_name: str, label_kind: bool) -> str:
     return out + "\n"
 
 
-def render(repo_name: str, scope: str, done_by: dict, n_files: int, dropped: int,
+def render(repo_name: str, scope: str, done_by: dict, n_files: int, dropped: list[dict],
            left_out: int, findings: list[dict]) -> str:
     """The report, laid out as the home system's (codereview::report::render)."""
     confirmed = [f for f in findings if f.get("verdict") == "confirmed"]
@@ -850,13 +855,13 @@ def render(repo_name: str, scope: str, done_by: dict, n_files: int, dropped: int
             f"{of['improvement']} improvements, {of['feature']} ideas.\n")
     extra = f", {left_out} suggestions over the per-kind limit" if left_out else ""
     out += (f"- **Not confirmed:** {len(unconfirmed)}. **Thrown out:** {rejected} rejected by the "
-            f"checker, {dropped} quoting code that is not in the file{extra}.\n\n")
+            f"checker, {len(dropped)} quoting code that is not in the file{extra}.\n\n")
     out += ("Written by models. Treat every item as a lead to check, not a verdict: fix each bug, "
             "test, refactor and improvement (the diff is a starting point), or drop it with the "
             "reason. Ideas are for Jon to choose from. Record what became of each item for the "
             "reviewers' scorecard: `review_diff.py mark <id> fixed` (or `dismissed`).\n\n")
     if not confirmed and not unconfirmed:
-        return out + "Nothing found in this run.\n"
+        return out + "Nothing found in this run.\n" + dropped_section(dropped)
     n = 0
     for sev in SEVERITIES:
         group = [f for f in confirmed if f["kind"] == "bug" and f["severity"] == sev]
@@ -878,6 +883,20 @@ def render(repo_name: str, scope: str, done_by: dict, n_files: int, dropped: int
         for f in unconfirmed:
             n += 1
             out += block(n, f, repo_name, True)
+    return out + dropped_section(dropped)
+
+
+def dropped_section(dropped: list[dict]) -> str:
+    """What the quote check threw out, so a reviewer misquoting a real bug can
+    be told from one making things up. Not items to act on."""
+    if not dropped:
+        return ""
+    out = ("\n## Thrown out: quoted code not in the file\n\nNot checked and not to act "
+           "on; listed to show what each reviewer claimed.\n\n")
+    for d in dropped:
+        out += (f"- **{d['title'] or '(no title)'}** ({d['kind']}, {d['who']}): "
+                f"`{d['file']}:{d['line']}`, {d['why']}. Quoted:\n\n")
+        out += "  ```\n" + "\n".join("  " + l for l in (d["quote"] or "(nothing)").splitlines()) + "\n  ```\n"
     return out
 
 
