@@ -26,7 +26,7 @@ globs=""
 for r in $ROOTS; do globs+="$r/*/ $r/*/*/ "; done
 repos=$("${SSH[@]}" "$HOST" "cd ~ && for d in $globs; do
   [ -e \"\$d.git\" ] && git -C \"\$d\" rev-parse -q --verify refs/heads/tests-passed >/dev/null && echo \"\${d%/}\"
-done") || { echo "can't reach $HOST"; exit 1; }
+done; true") || { echo "can't reach $HOST"; exit 1; }
 
 # repos/ltf-bench-park/GD is ltf-bench-park-GD; repos/st-bsp is st-bsp
 name_of() { local rel=${1#*/}; echo "${rel//\//-}"; }
