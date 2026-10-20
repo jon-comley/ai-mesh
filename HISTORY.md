@@ -11,6 +11,20 @@ a couple of the third-party review backlogs) had both finished and still-open pa
 the finished sub-sections are reproduced here under their original heading — the open
 remainder of the same heading is in ROADMAP.md.
 
+## Reviews: a scorecard per reviewer (2026-10-20)
+
+Jon: "keep some figures on results, how many false alarms, how many success,
+what ai used has the greatest detection percentage".
+- **Every item raised is recorded** with who raised it, including the ones
+  the quote check throws out, which were only counted before. Everything
+  else (the checker's verdict, Fixed or Dismissed) was already on the
+  finding, so the scorecard is one query.
+- **A finding raised again counts once** per reviewer, so a bug reported on
+  five nights running doesn't look like five detections.
+- **Outcomes come from the orchestrator too.** It runs on mac1 without the
+  dashboard's token, so it records what it fixed or dropped as a file in
+  `~/reviews/marks/`, which mac1 applies each minute.
+
 ## Reviews: cloud reviewers see the diff, mac1 checks them (2026-10-20)
 
 Jon, on the free cloud AIs: "maybe we should just send them the diffs and get

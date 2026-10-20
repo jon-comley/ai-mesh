@@ -367,6 +367,25 @@ orchestrator works from the inbox copy: it fixes each bug, test, refactor
 and improvement, using the diff as a starting point, or drops it with the
 reason.
 
+### Scorecard
+
+The Reviews tab keeps a record of every reviewer (`model@machine`, or
+`model@provider` for a cloud one), by kind:
+
+| Column | Meaning |
+|---|---|
+| Raised | Items it reported; the same finding raised again later counts once |
+| Made up | Thrown out by the quote check: the quoted code isn't in the file |
+| Rejected / Confirmed | What the checker said |
+| Fixed / Dismissed | What was done with it afterwards |
+| Confirmed % | Confirmed, of everything raised |
+| Fixed % | Fixed, of everything marked Fixed or Dismissed |
+
+Fixed and Dismissed come from the tab's buttons, from `just review-mark <id>
+fixed|dismissed`, or, on mac1, from a file: the orchestrator writes
+`echo fixed > ~/reviews/marks/<id>` and mac1 applies it within a minute and
+removes the file. Each item's id is in the report next to its location.
+
 **Schedule:** every minute mac1 checks whether a nightly slot (default 02:15)
 or the weekly sweep (default Sunday 03:15) has come round since the last
 scheduled run, in local time. A slot missed while mac1 was asleep runs once
@@ -400,6 +419,7 @@ just review-now dashboard sweep               # the next folder of the whole rep
 just review-now dashboard path:src/services   # one folder or file
 just review-now guv branch:feature-x          # what a branch changes
 just review-now guv commit:5c8cf4a            # new commits up to one that passed the tests
+just review-mark 08fdfd61b4b9ae76 fixed       # what became of a finding, for the scorecard
 just ask dashboard "where is VAT added?"      # a question, waits for the answer
 just work-roles                               # show which models do what
 ```

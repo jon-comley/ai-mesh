@@ -2087,6 +2087,26 @@ review-now repo mode="":
         echo "✗ HTTP $CODE: $(cat /tmp/mesh-review-now.txt)"; exit 1
     fi
 
+# Record what became of a review finding, for the reviewers' scorecard (the
+# id is in the report next to each item's location). On mac1 itself the
+# orchestrator can instead: echo fixed > ~/reviews/marks/<id>
+# Usage: just review-mark 08fdfd61b4b9ae76 fixed
+#        just review-mark 08fdfd61b4b9ae76 dismissed
+review-mark id status:
+    #!/usr/bin/env bash
+    set -e
+    source scripts/mesh-env.sh
+    [[ {{quote(id)}} =~ ^[0-9a-f]{16}$ ]] || { echo "✗ an id is 16 hex characters, as in the report"; exit 1; }
+    case {{quote(status)}} in fixed|dismissed|open) ;; *) echo "✗ status must be fixed, dismissed or open"; exit 1;; esac
+    CODE=$(curl -s -o /tmp/mesh-review-mark.txt -w '%{http_code}' -X POST \
+        "http://{{coordinator_ip}}:9001/api/reviews/findings/{{id}}?token=${TOKEN}" \
+        -H 'Content-Type: application/json' -d "{\"status\":\"{{status}}\"}")
+    if [ "$CODE" = "202" ] || [ "$CODE" = "200" ]; then
+        echo "✓ {{id}} marked {{status}}"
+    else
+        echo "✗ HTTP $CODE: $(cat /tmp/mesh-review-mark.txt)"; exit 1
+    fi
+
 # Ask mac1 a question about a repo's code and wait for the answer (it reads
 # the files that mention the question's words; a few minutes on a busy night).
 # Usage: just ask dashboard "where is the invoice total worked out?"

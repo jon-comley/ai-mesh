@@ -137,6 +137,8 @@ export function init(panel) {
         <div id="rv-report" class="rv-report" hidden></div>
         <h3>Open findings</h3>
         <div id="rv-findings"><p class="placeholder">Nothing open.</p></div>
+        <h3>Scorecard</h3>
+        <div id="rv-scorecard"><p class="placeholder">No findings raised yet.</p></div>
       </section>
     </div>
   `;
@@ -228,6 +230,7 @@ function render() {
   renderQuestions(snap?.questions ?? []);
   renderRuns(snap?.runs ?? []);
   renderFindings(snap?.findings ?? []);
+  renderScorecard(snap?.scorecard ?? []);
   renderSettings(snap?.settings);
   renderRoles();
 }
@@ -369,6 +372,47 @@ function renderFindings(findings) {
         </div>
       </div>`).join('');
   }).join('');
+}
+
+const SCORE_FIELDS = ['raised', 'invented', 'rejected', 'unsure', 'confirmed', 'fixed', 'dismissed'];
+const KIND_LABELS = { bug: 'Bugs', test: 'Tests', refactor: 'Refactors', improvement: 'Improvements', feature: 'Ideas' };
+
+/**
+ * The scorecard rows added up by `key` ('reviewer' or 'kind'), most raised
+ * first, with two rates: how much of what was raised the checker confirmed,
+ * and how much of what was decided on was fixed rather than dismissed.
+ */
+export function scoreRows(scorecard, key) {
+  const totals = new Map();
+  for (const row of scorecard) {
+    const t = totals.get(row[key]) ?? Object.fromEntries([[key, row[key]], ...SCORE_FIELDS.map(f => [f, 0])]);
+    for (const f of SCORE_FIELDS) t[f] += row[f] ?? 0;
+    totals.set(row[key], t);
+  }
+  const pct = (n, d) => (d ? Math.round((100 * n) / d) : null);
+  return [...totals.values()]
+    .map(t => ({ ...t, confirmedPct: pct(t.confirmed, t.raised), fixedPct: pct(t.fixed, t.fixed + t.dismissed) }))
+    .sort((a, b) => b.raised - a.raised);
+}
+
+function scoreTable(rows, key, label) {
+  const pct = v => (v == null ? '—' : `${v}%`);
+  const name = r => (key === 'kind' ? KIND_LABELS[r.kind] ?? r.kind : r.reviewer);
+  return `<table class="rv-score"><thead><tr><th>${label}</th><th>Raised</th><th>Made up</th><th>Rejected</th>
+    <th>Confirmed</th><th>Fixed</th><th>Dismissed</th><th>Confirmed %</th><th>Fixed %</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td>${esc(name(r))}</td><td>${r.raised}</td><td>${r.invented}</td><td>${r.rejected}</td>
+      <td>${r.confirmed}</td><td>${r.fixed}</td><td>${r.dismissed}</td><td>${pct(r.confirmedPct)}</td><td>${pct(r.fixedPct)}</td></tr>`).join('')}
+    </tbody></table>`;
+}
+
+function renderScorecard(scorecard) {
+  const el = document.getElementById('rv-scorecard');
+  if (!el) return;
+  if (!scorecard.length) { el.innerHTML = '<p class="placeholder">No findings raised yet.</p>'; return; }
+  el.innerHTML = `<p class="gw-hint">Made up: quoted code that isn't in the file. Confirmed %: of everything raised.
+      Fixed %: of the items marked Fixed or Dismissed.</p>
+    <div class="rv-score-wrap">${scoreTable(scoreRows(scorecard, 'reviewer'), 'reviewer', 'Reviewer')}</div>
+    <div class="rv-score-wrap">${scoreTable(scoreRows(scorecard, 'kind'), 'kind', 'Kind')}</div>`;
 }
 
 function renderSettings(settings) {

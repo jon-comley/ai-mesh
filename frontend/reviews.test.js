@@ -23,7 +23,7 @@ function json(body) {
   return { ok: true, status: 200, json: () => Promise.resolve(body), text: () => Promise.resolve('') };
 }
 
-const { init, handleUpdate, parseTimes, formatTime, parseAliases, formatAliases, scheduleText, onDemandBody, answerHtml } =
+const { init, handleUpdate, scoreRows, parseTimes, formatTime, parseAliases, formatAliases, scheduleText, onDemandBody, answerHtml } =
   await import('/static/reviews.js');
 
 const flush = () => new Promise(r => setTimeout(r, 0));
@@ -62,6 +62,11 @@ function snapshot(overrides = {}) {
         verdict: 'confirmed', found_by: ['gemini-flash-latest@gemini'], status: 'open', first_seen: 1 },
     ],
     settings: { ntfy_topic_set: false, max_review_tokens: 32000, evening_max_tokens: 16000 },
+    scorecard: [
+      { reviewer: 'qwen3-coder@mac1', kind: 'bug', raised: 10, invented: 2, rejected: 3, unsure: 1, confirmed: 4, fixed: 3, dismissed: 1 },
+      { reviewer: 'qwen3-coder@mac1', kind: 'test', raised: 2, invented: 0, rejected: 0, unsure: 0, confirmed: 2, fixed: 0, dismissed: 0 },
+      { reviewer: 'gemini-flash-latest@gemini', kind: 'bug', raised: 4, invented: 0, rejected: 1, unsure: 0, confirmed: 3, fixed: 1, dismissed: 1 },
+    ],
     questions: [
       { id: 'q2', repo: 'dashboard', question: 'Is VAT rounded per line?', status: 'thinking', sources: [], asked_at: 2 },
       { id: 'q1', repo: 'dashboard', question: 'Where is the invoice total worked out?', status: 'answered',
@@ -73,6 +78,19 @@ function snapshot(overrides = {}) {
 }
 
 describe('helpers', () => {
+  it('adds the scorecard up by reviewer or by kind, with rates', () => {
+    const rows = [
+      { reviewer: 'a@x', kind: 'bug', raised: 4, invented: 1, rejected: 1, unsure: 0, confirmed: 2, fixed: 0, dismissed: 0 },
+      { reviewer: 'b@y', kind: 'bug', raised: 1, invented: 0, rejected: 0, unsure: 0, confirmed: 1, fixed: 1, dismissed: 0 },
+    ];
+    const byKind = scoreRows(rows, 'kind');
+    expect(byKind).toHaveLength(1);
+    expect(byKind[0]).toMatchObject({ kind: 'bug', raised: 5, confirmed: 3, confirmedPct: 60, fixedPct: 100 });
+    const byReviewer = scoreRows(rows, 'reviewer');
+    expect(byReviewer.map(r => r.reviewer)).toEqual(['a@x', 'b@y']);
+    expect(byReviewer[0].fixedPct).toBeNull();
+  });
+
   it('reads and writes times', () => {
     expect(parseTimes('02:15, 6:00, 25:00, nonsense')).toEqual([135, 360]);
     expect(formatTime(135)).toBe('02:15');
@@ -125,6 +143,17 @@ describe('Reviews tab', () => {
     expect(el.textContent).toContain('dashboard/src/pages/JobDetailPage.tsx:219');
     expect(el.querySelector('script')).toBeNull();
     expect(el.textContent).toContain('(not confirmed)');
+  });
+
+  it('shows each reviewer\'s scorecard and the totals by kind', () => {
+    const tables = panel.querySelectorAll('#rv-scorecard table');
+    expect(tables).toHaveLength(2);
+    const mac = [...tables[0].querySelectorAll('tbody tr')][0].textContent;
+    expect(mac).toContain('qwen3-coder@mac1');
+    expect(mac).toContain('50%'); // 6 confirmed of 12 raised
+    expect(mac).toContain('75%'); // 3 fixed of 4 decided
+    expect(tables[1].textContent).toContain('Bugs');
+    expect(tables[1].textContent).toContain('Tests');
   });
 
   it('puts suggestions after the bugs, with their diff and who found them', () => {

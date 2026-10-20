@@ -272,6 +272,7 @@ impl Inner {
                 .collect(),
             runs: queued_views,
             findings: store.open_findings(SNAPSHOT_FINDINGS),
+            scorecard: store.scorecard(),
             settings: ReviewSettingsView {
                 ntfy_hint: topic.as_ref().map(|t| {
                     let tail: String = t
@@ -627,8 +628,42 @@ async fn scheduler(inner: Arc<Inner>) {
                 });
             }
         }
+        if let Some(dir) = inner
+            .limits()
+            .inbox
+            .and_then(|i| i.parent().map(|p| p.join("marks")))
+        {
+            let marked = apply_marks(&inner.store.lock().unwrap(), &dir);
+            if marked > 0 {
+                inner.changed.notify_one();
+            }
+        }
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
+}
+
+/// Outcomes the orchestrator has recorded as files in `~/reviews/marks`:
+/// each file is named after a finding's id and holds `fixed`, `dismissed`
+/// or `open`. Applied, then removed; a file that isn't one of those is left
+/// for a person to see. Returns how many were applied.
+fn apply_marks(store: &Store, dir: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut applied = 0;
+    for e in entries.flatten() {
+        let id = e.file_name().to_string_lossy().trim().to_string();
+        let status = std::fs::read_to_string(e.path())
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let known = id.len() == 16 && id.chars().all(|c| c.is_ascii_hexdigit());
+        if known && store.set_finding_status(&id, &status) {
+            let _ = std::fs::remove_file(e.path());
+            applied += 1;
+        }
+    }
+    applied
 }
 
 async fn snapshot_pusher(inner: Arc<Inner>) {
@@ -885,6 +920,47 @@ mod tests {
                 .unwrap()
                 .contains("not a valid branch")
         );
+    }
+
+    #[test]
+    fn marks_from_the_orchestrator_set_a_findings_status() {
+        let store = Store::open_in_memory().unwrap();
+        let f = codereview::Finding {
+            id: "0123456789abcdef".into(),
+            kind: codereview::Kind::Bug,
+            repo: "guv".into(),
+            path: "src/a.ts".into(),
+            line: 1,
+            severity: codereview::Severity::High,
+            title: "t".into(),
+            quote: "q".into(),
+            scenario: String::new(),
+            fix: String::new(),
+            patch: String::new(),
+            patch_applies: None,
+            found_by: vec!["m@mac1".into()],
+            verdict: Some(codereview::Verdict::Confirmed),
+            verdict_reason: None,
+            checked_by: None,
+        };
+        store.upsert_finding(1, &f, 1);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("0123456789abcdef"), "Fixed\n").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "fixed").unwrap();
+        assert_eq!(apply_marks(&store, tmp.path()), 1);
+        assert!(
+            !tmp.path().join("0123456789abcdef").exists(),
+            "applied marks are removed"
+        );
+        assert!(
+            tmp.path().join("notes.txt").exists(),
+            "anything else is left alone"
+        );
+        assert!(
+            store.open_findings(10).is_empty(),
+            "a fixed finding is no longer open"
+        );
+        assert_eq!(apply_marks(&store, &tmp.path().join("missing")), 0);
     }
 
     #[tokio::test]

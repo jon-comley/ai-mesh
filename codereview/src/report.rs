@@ -32,7 +32,11 @@ fn finding_block(n: usize, f: &Finding, label_kind: bool, out: &mut String) {
         String::new()
     };
     out.push_str(&format!("### {n}. {kind}{}\n", f.title));
-    out.push_str(&format!("- **Where:** `{}`\n", f.location()));
+    out.push_str(&format!(
+        "- **Where:** `{}` (id `{}`)\n",
+        f.location(),
+        f.id
+    ));
     if !f.scenario.is_empty() {
         let what = if f.kind == Kind::Bug {
             "What goes wrong"
@@ -138,7 +142,9 @@ pub fn render(info: &RunInfo, findings: &[Finding]) -> String {
     out.push_str(
         "Written by models. Treat every item as a lead to check, not a verdict: fix each bug, \
          test, refactor and improvement (the diff is a starting point), or drop it with the \
-         reason. Ideas are for Jon to choose from.\n\n",
+         reason. Ideas are for Jon to choose from. Record what became of each item for the \
+         reviewers' scorecard: on mac1, `echo fixed > ~/reviews/marks/<id>` (or `dismissed`); \
+         elsewhere, `just review-mark <id> fixed`.\n\n",
     );
     if confirmed.is_empty() && unconfirmed.is_empty() {
         out.push_str("Nothing found in this run.\n");

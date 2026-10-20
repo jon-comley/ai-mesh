@@ -3,7 +3,10 @@
 
 use codereview::{Finding, Verdict};
 use rusqlite::{Connection, OptionalExtension, params};
-use shared::{ReviewCounts, ReviewFindingView, ReviewQuestionView, ReviewRepoSpec, ReviewRunView};
+use shared::{
+    ReviewCounts, ReviewFindingView, ReviewQuestionView, ReviewRepoSpec, ReviewRunView,
+    ReviewerScore,
+};
 use std::path::Path;
 
 pub struct Store {
@@ -120,6 +123,16 @@ impl Store {
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
         // Columns added since the first release; "duplicate column" on a
         // database that already has them is expected and ignored.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS raised (
+                run_id INTEGER NOT NULL,
+                reviewer TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                finding_id TEXT,
+                UNIQUE (reviewer, finding_id)
+            );",
+        )
+        .map_err(|e| e.to_string())?;
         for column in [
             "kind TEXT NOT NULL DEFAULT 'bug'",
             "patch TEXT NOT NULL DEFAULT ''",
@@ -364,6 +377,52 @@ impl Store {
                 f.patch_applies
             ],
         );
+    }
+
+    /// Note what a reviewer raised in a run: the finding it became, or `None`
+    /// for one thrown out by the quote check. The same finding raised again
+    /// by the same reviewer is not counted twice.
+    pub fn record_raised(&self, run_id: i64, reviewer: &str, kind: &str, finding_id: Option<&str>) {
+        let _ = self.conn.execute(
+            "INSERT OR IGNORE INTO raised (run_id, reviewer, kind, finding_id) VALUES (?1, ?2, ?3, ?4)",
+            params![run_id, reviewer, kind, finding_id],
+        );
+    }
+
+    /// Every reviewer's record, by kind, for the Reviews tab.
+    pub fn scorecard(&self) -> Vec<ReviewerScore> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT r.reviewer, r.kind, COUNT(*),
+                    SUM(r.finding_id IS NULL),
+                    SUM(f.verdict = 'rejected'), SUM(f.verdict = 'unsure'),
+                    SUM(f.verdict = 'confirmed'),
+                    SUM(f.status = 'fixed'), SUM(f.status = 'dismissed')
+             FROM raised r LEFT JOIN findings f ON f.id = r.finding_id
+             GROUP BY r.reviewer, r.kind
+             ORDER BY r.reviewer,
+                      CASE r.kind WHEN 'bug' THEN 0 WHEN 'test' THEN 1 WHEN 'refactor' THEN 2
+                                  WHEN 'improvement' THEN 3 ELSE 4 END",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let n =
+            |r: &rusqlite::Row, i: usize| r.get::<_, Option<i64>>(i).map(|v| v.unwrap_or(0) as u32);
+        stmt.query_map([], |r| {
+            Ok(ReviewerScore {
+                reviewer: r.get(0)?,
+                kind: r.get(1)?,
+                raised: n(r, 2)?,
+                invented: n(r, 3)?,
+                rejected: n(r, 4)?,
+                unsure: n(r, 5)?,
+                confirmed: n(r, 6)?,
+                fixed: n(r, 7)?,
+                dismissed: n(r, 8)?,
+            })
+        })
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
     }
 
     pub fn set_finding_status(&self, id: &str, status: &str) -> bool {

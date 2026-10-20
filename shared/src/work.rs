@@ -282,6 +282,28 @@ pub struct ReviewSnapshot {
     /// Recent questions, newest first.
     #[serde(default)]
     pub questions: Vec<ReviewQuestionView>,
+    /// How each reviewer's items have fared, by kind, over every run.
+    #[serde(default)]
+    pub scorecard: Vec<ReviewerScore>,
+}
+
+/// One reviewer's record for one kind of item: what it raised and what
+/// became of it. A finding raised again in a later run counts once.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ReviewerScore {
+    /// `model@machine`, or `model@provider` for a cloud reviewer.
+    pub reviewer: String,
+    /// "bug", "test", "refactor", "improvement" or "feature".
+    pub kind: String,
+    pub raised: u32,
+    /// Quoted code that is not in the file: thrown out before any check.
+    pub invented: u32,
+    pub rejected: u32,
+    pub unsure: u32,
+    pub confirmed: u32,
+    /// Marked Fixed (or Done, for an idea) on the tab or with `just review-mark`.
+    pub fixed: u32,
+    pub dismissed: u32,
 }
 
 /// A question about a repo and, once ready, its answer.

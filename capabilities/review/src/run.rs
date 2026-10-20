@@ -636,6 +636,7 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     let mut state = RunState {
         tasks: Vec::new(),
         findings: Vec::new(),
+        raised: Vec::new(),
         dropped: 0,
         worker_tasks: BTreeMap::new(),
         next_id: 1,
@@ -684,6 +685,7 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     if gave_up_reviews == chunks.len() {
         return Err("every review task failed or could not be handed out".into());
     }
+    let raised = std::mem::take(&mut state.raised);
     let mut findings = codereview::dedupe::dedupe(state.findings);
     // Does each diff fit the code it was written for? Companion-repo
     // findings are left unchecked: their clone is at its own head.
@@ -739,6 +741,9 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     ctx.store(|s| {
         for f in &findings {
             s.upsert_finding(run_id, f, now);
+        }
+        for (reviewer, kind, id) in &raised {
+            s.record_raised(run_id, reviewer, kind.as_str(), id.as_deref());
         }
         s.update_run(
             run_id,
@@ -963,6 +968,9 @@ async fn context_note(
 struct RunState {
     tasks: Vec<Task>,
     findings: Vec<Finding>,
+    /// Every item a reviewer raised: who, what kind, and the finding it
+    /// became (`None` when the quote check threw it out), for the scorecard.
+    raised: Vec<(String, codereview::Kind, Option<String>)>,
     dropped: u32,
     worker_tasks: BTreeMap<String, u32>,
     next_id: u64,
@@ -1237,6 +1245,7 @@ async fn dispatch_all(
                                 .or_else(|| find_file(&raw.file, &all_idx, files))
                             else {
                                 st.dropped += 1;
+                                st.raised.push((worker_label.clone(), raw.kind, None));
                                 continue;
                             };
                             let file = &files[fi];
@@ -1246,11 +1255,14 @@ async fn dispatch_all(
                                 raw.line,
                             ) else {
                                 st.dropped += 1;
+                                st.raised.push((worker_label.clone(), raw.kind, None));
                                 continue;
                             };
                             let id = codereview::dedupe::finding_key(
                                 raw.kind, &file.repo, &file.path, &raw.quote,
                             );
+                            st.raised
+                                .push((worker_label.clone(), raw.kind, Some(id.clone())));
                             if let Some(existing) = st.findings.iter_mut().find(|f| f.id == id) {
                                 if !existing.found_by.contains(&worker_label) {
                                     existing.found_by.push(worker_label.clone());
@@ -1688,6 +1700,28 @@ mod tests {
             assert_eq!(run.status, "done");
             assert_eq!(run.counts.high, 1);
             assert_eq!(run.counts.suggestions, 1);
+
+            // The scorecard: mac1 raised three bugs (one made up, one rejected,
+            // one confirmed) and one test; marking the bug fixed counts too.
+            let invoice = &open[0].id;
+            assert!(s.set_finding_status(invoice, "fixed"));
+            let card = s.scorecard();
+            let bug = card
+                .iter()
+                .find(|r| r.reviewer == "qwen3-coder-30b@mac1" && r.kind == "bug")
+                .unwrap();
+            assert_eq!(
+                (
+                    bug.raised,
+                    bug.invented,
+                    bug.rejected,
+                    bug.confirmed,
+                    bug.fixed
+                ),
+                (3, 1, 1, 1, 1)
+            );
+            let test = card.iter().find(|r| r.kind == "test").unwrap();
+            assert_eq!((test.raised, test.confirmed), (1, 1));
         }
 
         // Nothing new the second time.

@@ -4600,6 +4600,10 @@ body {
   white-space: pre-wrap; word-break: break-word; overflow-x: auto; font-size: 12px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin: 4px 0;
 }
+.rv-score-wrap { overflow-x: auto; margin-bottom: 8px; }
+.rv-score { border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+.rv-score th, .rv-score td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: right; }
+.rv-score th:first-child, .rv-score td:first-child { text-align: left; }
 .rv-diff summary { cursor: pointer; font-size: 13px; color: var(--muted, inherit); }
 .rv-diff pre {
   white-space: pre; overflow-x: auto; font-size: 12px; max-height: 50vh; overflow-y: auto;
