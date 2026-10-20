@@ -4,3 +4,4 @@
 *.db-wal
 node_modules/
 .wrangler/
+__pycache__/
