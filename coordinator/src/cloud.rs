@@ -54,7 +54,9 @@ fn provider(base_url: &str, api_key: &str, model: &str) -> OpenAiCompatProvider 
     let referer = std::env::var("CLOUD_HTTP_REFERER")
         .unwrap_or_else(|_| "https://github.com/ai-mesh".into());
     let title = std::env::var("CLOUD_X_TITLE").unwrap_or_else(|_| "ai-mesh".into());
-    OpenAiCompatProvider::new(base_url, api_key, model)
+    // Workers AI's URL carries the account id, from CLOUDFLARE_ACCOUNT_ID.
+    let base_url = llm_rotation::resolve_base_url(base_url).unwrap_or_else(|| base_url.to_string());
+    OpenAiCompatProvider::new(&base_url, api_key, model)
         .with_timeout(Duration::from_secs(timeout))
         .with_attribution(referer, title)
 }
@@ -116,7 +118,9 @@ impl GatewayConfig {
     /// True when a key is present and a model is chosen — i.e. a cloud call could
     /// actually be made.
     pub fn is_configured(&self) -> bool {
-        self.api_key.as_deref().is_some_and(|k| !k.is_empty()) && !self.selected_model.is_empty()
+        self.api_key.as_deref().is_some_and(|k| !k.is_empty())
+            && !self.selected_model.is_empty()
+            && llm_rotation::resolve_base_url(&self.base_url).is_some()
     }
 
     /// Last 4 characters of the key, for a non-revealing "key set" hint.
@@ -163,6 +167,7 @@ pub fn fallback_providers(reg: &Registry, exclude_base_url: &str) -> Vec<OpenAiC
     let paid = provider_presets().iter().filter(|p| !p.free);
     free.chain(paid)
         .filter(|p| llm_rotation::normalize_url(p.base_url) != exclude)
+        .filter(|p| llm_rotation::resolve_base_url(p.base_url).is_some())
         .filter_map(|p| {
             let key = prefs
                 .get(&provider_key_name(p.base_url))
@@ -265,7 +270,9 @@ pub fn review_clouds(reg: &Registry) -> Vec<ReviewCloud> {
             Some(ReviewCloud {
                 worker_id: format!("{}{}", shared::CLOUD_WORKER_PREFIX, p.id),
                 name: p.id,
-                resting: rotation().is_resting(p.base_url),
+                resting: rotation().is_resting(
+                    &llm_rotation::resolve_base_url(p.base_url).unwrap_or_else(|| p.base_url.to_string()),
+                ),
                 provider,
                 budget,
             })
@@ -472,12 +479,15 @@ mod tests {
         let fb = fallback_providers(&reg, "https://api.groq.com/openai/v1");
         let free = provider_presets().iter().filter(|p| p.free);
         let paid = provider_presets().iter().filter(|p| !p.free);
-        let expected: Vec<&str> = free
+        // A preset whose URL needs a setting not given here (Workers AI's
+        // account id) is left out rather than tried with the placeholder.
+        let expected: Vec<String> = free
             .chain(paid)
             .map(|p| p.base_url)
             .filter(|&u| u != "https://api.groq.com/openai/v1")
+            .filter_map(llm_rotation::resolve_base_url)
             .collect();
-        let got: Vec<&str> = fb.iter().map(|p| p.base_url()).collect();
+        let got: Vec<String> = fb.iter().map(|p| p.base_url().to_string()).collect();
         assert_eq!(got, expected);
     }
 }

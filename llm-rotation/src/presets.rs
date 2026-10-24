@@ -74,6 +74,36 @@ pub fn presets() -> &'static [Preset] {
             free: true,
             fallback_model: "mistral-small-latest",
         },
+        Preset {
+            id: "nvidia",
+            label: "NVIDIA (free)",
+            base_url: "https://integrate.api.nvidia.com/v1",
+            // Off integrate.api.nvidia.com/v1/models, 2026-10-24. Free with
+            // no card, about 40 requests a minute across the account.
+            models: &[
+                "nvidia/nemotron-3-super-120b-a12b",
+                "deepseek-ai/deepseek-v4.1-flash",
+                "moonshotai/kimi-k2.6",
+            ],
+            free: true,
+            fallback_model: "nvidia/nemotron-3-super-120b-a12b",
+        },
+        Preset {
+            id: "workersai",
+            label: "Cloudflare Workers AI (free)",
+            // The account id is filled in by `resolve_base_url`; the key is a
+            // Cloudflare API token with Workers AI read. 10,000 neurons a day
+            // free, reset at midnight UTC. Off `wrangler ai models list`,
+            // 2026-10-24.
+            base_url: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1",
+            models: &[
+                "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                "@cf/openai/gpt-oss-120b",
+                "@cf/qwen/qwen3.8-27b",
+            ],
+            free: true,
+            fallback_model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        },
     ]
 }
 
@@ -81,6 +111,26 @@ pub fn presets() -> &'static [Preset] {
 /// compare equal.
 pub fn normalize_url(url: &str) -> &str {
     url.trim_end_matches('/')
+}
+
+/// A preset's base URL with any `{NAME}` in it filled from the environment,
+/// or None while one is unset (Workers AI needs `CLOUDFLARE_ACCOUNT_ID`).
+pub fn resolve_base_url(base_url: &str) -> Option<String> {
+    resolve_with(base_url, |name| std::env::var(name).ok())
+}
+
+fn resolve_with(base_url: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = base_url;
+    while let Some(start) = rest.find('{') {
+        let end = start + rest[start..].find('}')?;
+        let value = lookup(&rest[start + 1..end]).filter(|v| !v.is_empty())?;
+        out.push_str(&rest[..start]);
+        out.push_str(&value);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// The preset for an endpoint, if it is a known one.
@@ -106,6 +156,18 @@ mod tests {
         for p in presets() {
             assert!(p.models.contains(&p.fallback_model), "{}", p.id);
         }
+    }
+
+    #[test]
+    fn a_template_is_filled_or_refused() {
+        let url = "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1";
+        assert_eq!(
+            resolve_with(url, |_| Some("abc".into())).as_deref(),
+            Some("https://api.cloudflare.com/client/v4/accounts/abc/ai/v1")
+        );
+        assert_eq!(resolve_with(url, |_| None), None);
+        assert_eq!(resolve_with(url, |_| Some(String::new())), None);
+        assert_eq!(resolve_with("https://api.mistral.ai/v1", |_| None).as_deref(), Some("https://api.mistral.ai/v1"));
     }
 
     #[test]

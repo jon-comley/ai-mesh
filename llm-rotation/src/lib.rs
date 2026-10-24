@@ -31,6 +31,6 @@ mod rotation;
 
 pub use error::Error;
 pub use message::{Message, Role};
-pub use presets::{models_for, normalize_url, preset_for, presets, Preset};
+pub use presets::{models_for, normalize_url, preset_for, presets, resolve_base_url, Preset};
 pub use provider::{Provider, Reply};
 pub use rotation::Rotation;
