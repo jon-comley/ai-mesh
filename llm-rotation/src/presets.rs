@@ -28,10 +28,12 @@ pub fn presets() -> &'static [Preset] {
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
             // First, so the fallback tries it before the other free ones
             // (Jon, 2026-10-24). The -latest names follow Google's current
-            // Flash, as gemini-2.0-flash was retired under them.
-            models: &["gemini-flash-latest", "gemini-flash-lite-latest"],
+            // Flash, as gemini-2.0-flash was retired under them. Lite leads:
+            // free Flash allows 20 requests a day per project, shared with
+            // beelink1's reviews and glebefish, and was gone by midday.
+            models: &["gemini-flash-lite-latest", "gemini-flash-latest"],
             free: true,
-            fallback_model: "gemini-flash-latest",
+            fallback_model: "gemini-flash-lite-latest",
         },
         Preset {
             id: "openrouter",
