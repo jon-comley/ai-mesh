@@ -78,15 +78,16 @@ pub fn presets() -> &'static [Preset] {
             id: "nvidia",
             label: "NVIDIA (free)",
             base_url: "https://integrate.api.nvidia.com/v1",
-            // Off integrate.api.nvidia.com/v1/models, 2026-10-24. Free with
-            // no card, about 40 requests a minute across the account.
+            // Free with no card, about 40 requests a minute across the
+            // account. /v1/models lists more than a free key can call: on
+            // 2026-10-24 nemotron-3-super and kimi-k2.6 answered 404 and
+            // deepseek-v4.1-flash never answered, so only these two.
             models: &[
-                "nvidia/nemotron-3-super-120b-a12b",
-                "deepseek-ai/deepseek-v4.1-flash",
-                "moonshotai/kimi-k2.6",
+                "nvidia/nemotron-3-ultra-550b-a55b",
+                "nvidia/nemotron-3.5-lightning-30b-a3b",
             ],
             free: true,
-            fallback_model: "nvidia/nemotron-3-super-120b-a12b",
+            fallback_model: "nvidia/nemotron-3-ultra-550b-a55b",
         },
         Preset {
             id: "workersai",
