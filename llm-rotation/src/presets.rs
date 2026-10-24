@@ -23,6 +23,17 @@ pub struct Preset {
 pub fn presets() -> &'static [Preset] {
     &[
         Preset {
+            id: "gemini",
+            label: "Google Gemini (free)",
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+            // First, so the fallback tries it before the other free ones
+            // (Jon, 2026-10-24). The -latest names follow Google's current
+            // Flash, as gemini-2.0-flash was retired under them.
+            models: &["gemini-flash-latest", "gemini-flash-lite-latest"],
+            free: true,
+            fallback_model: "gemini-flash-latest",
+        },
+        Preset {
             id: "openrouter",
             label: "OpenRouter (free)",
             base_url: "https://openrouter.ai/api/v1",
@@ -45,26 +56,19 @@ pub fn presets() -> &'static [Preset] {
             id: "openai",
             label: "OpenAI (ChatGPT)",
             base_url: "https://api.openai.com/v1",
-            models: &["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3-mini"],
+            // Paid only: OpenAI has no free API models.
+            models: &["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4"],
             free: false,
-            fallback_model: "gpt-4o-mini",
+            fallback_model: "gpt-5.4-nano",
         },
         Preset {
             id: "groq",
             label: "Groq (free)",
             base_url: "https://api.groq.com/openai/v1",
-            // Off Groq's own /models, 2026-09-14.
-            models: &["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"],
+            // Off Groq's own /models, 2026-10-24.
+            models: &["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
             free: true,
             fallback_model: "openai/gpt-oss-120b",
-        },
-        Preset {
-            id: "gemini",
-            label: "Google Gemini (free)",
-            base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-            models: &["gemini-2.0-flash", "gemini-2.0-flash-lite"],
-            free: true,
-            fallback_model: "gemini-2.0-flash",
         },
         Preset {
             id: "mistral",

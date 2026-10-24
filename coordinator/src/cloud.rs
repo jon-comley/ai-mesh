@@ -320,8 +320,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                ("cloud:groq", "qwen/qwen3.6-27b", 6_000),
                 ("cloud:gemini", "gemini-flash-latest", 200_000),
+                ("cloud:groq", "qwen/qwen3.6-27b", 6_000),
             ],
             "paid providers are never used for reviews; a preference overrides the model"
         );

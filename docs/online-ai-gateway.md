@@ -91,7 +91,7 @@ context tokens in → out, tokens saved (with %), last call time, and the last e
 | OpenRouter | `https://openrouter.ai/api/v1` | `meta-llama/llama-3.3-70b-instruct:free` (fast, strong tool use) |
 | Anthropic | `https://api.anthropic.com/v1` | `claude-opus-4-8` (best), `claude-sonnet-4-6`, `claude-haiku-4-5` |
 | Groq | `https://api.groq.com/openai/v1` | `llama-3.3-70b-versatile` |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-2.0-flash` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | `gemini-flash-latest` |
 
 Any OpenAI-compatible provider works — just set the **endpoint** box to its base URL
 and type the model id.
