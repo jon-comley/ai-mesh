@@ -2078,9 +2078,17 @@ review-now repo mode="":
     set -e
     source scripts/mesh-env.sh
     BODY=$(python3 scripts/review-cli.py run-body {{quote(repo)}} {{quote(mode)}})
-    CODE=$(curl -s -o /tmp/mesh-review-now.txt -w '%{http_code}' -X POST \
+    CODE=$(curl -s --connect-timeout 5 -m 30 -o /tmp/mesh-review-now.txt -w '%{http_code}' -X POST \
         "http://{{coordinator_ip}}:9001/api/reviews/run-now?token=${TOKEN}" \
-        -H 'Content-Type: application/json' -d "$BODY")
+        -H 'Content-Type: application/json' -d "$BODY") || true
+    # Not reachable from here (WSL does not resolve pi1.local, and pi1's wifi
+    # drops: 28 Oct 2026): the same request made on pi1 itself, over ssh, whose
+    # config goes through mac1 when pi1 is not direct. The token goes on stdin.
+    if [ "$CODE" = "000" ]; then
+        CODE=$({ printf '%s\n' "$TOKEN"; printf '%s' "$BODY"; } | ssh -o BatchMode=yes -o ConnectTimeout=15 pi1 \
+            'read -r T; B=$(cat); curl -s -m 30 -o /tmp/mesh-review-now.txt -w "%{http_code}" -X POST -H "Content-Type: application/json" -d "$B" "http://127.0.0.1:9001/api/reviews/run-now?token=$T"; echo; cat /tmp/mesh-review-now.txt >&2' \
+            2>/tmp/mesh-review-now.txt | head -1) || true
+    fi
     if [ "$CODE" = "202" ]; then
         echo "✓ {{repo}} queued on the review machine — follow it on the dashboard's Reviews tab"
     else
