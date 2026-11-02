@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -45,5 +45,18 @@ describe('agent watch page helpers', () => {
     expect(t.querySelector('b')).toBeNull();
     expect(t.querySelector('.badge').textContent).toBe('2');
     expect(tile({ name: 'X', purpose: 'p', state: 'ok', waiting: 0 }).querySelector('.badge')).toBeNull();
+  });
+
+  it('adds the worker words, its tool use and errors to the chat it was sent in', () => {
+    const state = { name: 'Desk', messages: [], busy: true };
+    chatEvent({ kind: 'text', text: 'Looking now.' }, state);
+    chatEvent({ kind: 'tool', text: 'Editing HUB.md' }, state);
+    chatEvent({ kind: 'done', session: 'abc', text: 'Looking now.' }, state);
+    chatEvent({ kind: 'error', text: 'claude stopped' }, state);
+    expect(state.messages).toEqual([
+      { role: 'worker', text: 'Looking now.' },
+      { role: 'tool', text: 'Editing HUB.md' },
+      { role: 'error', text: 'claude stopped' },
+    ]);
   });
 });

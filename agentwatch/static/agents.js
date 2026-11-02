@@ -8,6 +8,8 @@ const REFRESH_MS = 60_000;
 
 let agents = [];
 let checkedAt = null;
+// The open worker's chat: { name, messages: [{role, text}], busy, loaded }.
+let chat = null;
 
 // ── Pure helpers (tested in frontend/agentwatch.test.js) ────────────────────
 
@@ -154,6 +156,7 @@ function renderAgent(main, name) {
       a.repo_url ? el('a', { class: 'button', href: a.repo_url, target: '_blank', rel: 'noopener' }, 'Repo') : null,
     ),
     a.error ? el('section', {}, el('h3', {}, 'Problem'), el('p', { class: 'error' }, a.error)) : null,
+    chatSection(a),
     a.line ? el('section', {}, el('h3', {}, 'Last run'), el('p', {}, a.line)) : null,
     waitingSection(a),
     a.report ? reportSection(a) : null,
@@ -179,14 +182,16 @@ function waitingSection(a) {
       el('ul', { class: 'log' }, a.waiting_lines.map((l) => el('li', {}, l))));
   }
   if (!a.rows.length) return el('section', {}, el('h3', {}, 'Waiting on you'), el('p', { class: 'muted' }, 'Nothing.'));
-  return el('section', {}, el('h3', {}, 'Waiting on you'), a.rows.map((r) => replyRow(a, r)));
+  return el('section', {}, el('h3', {}, 'Waiting on you'),
+    el('p', { class: 'muted' }, 'A reply here goes into its hub on GitHub and is read at its next run. To sort something out now, use the chat above.'),
+    a.rows.map((r) => replyRow(a, r)));
 }
 
 function replyRow(a, row) {
   const meta = row.headers.map((h, i) => [h, row.cells[i]])
     .filter(([h, c]) => c && !/^(#|what|item|idea|your reply)$/i.test(h))
     .map(([h, c]) => `${h}: ${plain(c)}`).join(' · ');
-  const input = el('input', { type: 'text', placeholder: 'Your reply', value: row.reply || '' });
+  const input = el('input', { type: 'text', placeholder: 'Reply for its next run' });
   const runNow = el('input', { type: 'checkbox' });
   const send = (text) => sendReply(a, row.number, text, a.can_run && runNow.checked);
   return el('div', { class: 'row' },
@@ -242,6 +247,101 @@ async function renderSettings(main) {
   try { area.value = (await api('GET', '/api/config')).text; } catch (e) { toast(e.message, true); }
 }
 
+// ── Chat ────────────────────────────────────────────────────────────────────
+
+function chatSection(a) {
+  if (a.kind !== 'cloud') {
+    return el('section', {}, el('h3', {}, 'Chat'), el('p', { class: 'muted' }, `Chat with ${a.name} comes next: it runs on its own machine.`));
+  }
+  if (!chat || chat.name !== a.name) {
+    chat = { name: a.name, messages: [], busy: false, loaded: false };
+    api('GET', `/api/agents/${encodeURIComponent(a.name)}/chat`).then((r) => {
+      if (chat.name !== a.name) return;
+      chat.messages = r.messages;
+      chat.busy = r.busy;
+      chat.loaded = true;
+      drawChat();
+    }).catch((e) => toast(e.message, true));
+  }
+  const box = el('textarea', { id: 'chat-input', rows: '3', placeholder: `Talk to ${a.name}…` });
+  box.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(a, box); }
+  });
+  return el('section', { class: 'chat' },
+    el('div', { class: 'chat-head' }, el('h3', {}, `Talk to ${a.name}`),
+      el('button', { type: 'button', onclick: () => newChat(a) }, 'New conversation')),
+    el('div', { id: 'chat-log', class: 'chat-log' }),
+    el('div', { class: 'chat-send' }, box,
+      el('button', { id: 'chat-send', type: 'button', class: 'primary', onclick: () => sendChat(a, box) }, 'Send')),
+    el('p', { class: 'muted' }, 'Enter sends, Shift+Enter for a new line. It can change its own repo while you talk, and keeps what you agree for its next run.'),
+  );
+}
+
+/** Redraws the chat log from `chat`, keeping the view at the bottom. */
+function drawChat() {
+  const log = document.getElementById('chat-log');
+  if (!log || !chat) return;
+  const items = chat.messages.map((m) => el('div', { class: `msg ${m.role}` }, m.text));
+  if (chat.busy) items.push(el('div', { class: 'msg tool' }, 'Thinking…'));
+  if (!items.length) items.push(el('p', { class: 'muted' }, chat.loaded ? 'No conversation yet.' : 'Loading…'));
+  log.replaceChildren(...items);
+  log.scrollTop = log.scrollHeight;
+  const send = document.getElementById('chat-send');
+  if (send) send.disabled = chat.busy;
+}
+
+async function sendChat(a, box) {
+  const text = box.value.trim();
+  if (!text || chat.busy) return;
+  box.value = '';
+  // Keep writing into this conversation even if Jon opens another worker meanwhile.
+  const state = chat;
+  state.messages.push({ role: 'jon', text });
+  state.busy = true;
+  drawChat();
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(a.name)}/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: text }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (line) chatEvent(JSON.parse(line), state);
+      }
+    }
+  } catch (e) {
+    state.messages.push({ role: 'error', text: e.message });
+  }
+  state.busy = false;
+  drawChat();
+  load();
+}
+
+export function chatEvent(event, state = chat) {
+  if (event.kind === 'text') state.messages.push({ role: 'worker', text: event.text });
+  else if (event.kind === 'tool') state.messages.push({ role: 'tool', text: event.text });
+  else if (event.kind === 'error') state.messages.push({ role: 'error', text: event.text });
+  if (state === chat) drawChat();
+}
+
+async function newChat(a) {
+  if (chat?.busy) return;
+  try {
+    await api('POST', `/api/agents/${encodeURIComponent(a.name)}/chat/new`);
+    chat = { name: a.name, messages: [], busy: false, loaded: true };
+    drawChat();
+  } catch (e) { toast(e.message, true); }
+}
+
 // ── Actions ─────────────────────────────────────────────────────────────────
 
 async function act(a, action, done) {
@@ -272,7 +372,7 @@ function render() {
   if (main.contains(document.activeElement) && document.activeElement.matches('input[type=text], textarea')) return;
   main.replaceChildren();
   const route = parseRoute(location.hash);
-  if (route.view === 'agent') renderAgent(main, route.name);
+  if (route.view === 'agent') { renderAgent(main, route.name); drawChat(); }
   else if (route.view === 'settings') renderSettings(main);
   else renderTiles(main);
   document.getElementById('checked').textContent = checkedAt ? `checked ${relTime(checkedAt)}` : '';

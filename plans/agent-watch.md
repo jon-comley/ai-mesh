@@ -18,9 +18,16 @@ start from the coordinator).
 The ai-mesh dashboard has a **Workers** sub-tab under Tools that shows this page in a
 frame; the data still comes straight from lenovo1.
 
-**Not yet:** Run now for the two cloud agents needs `claude` installed and logged in
-on lenovo1 (the button says so until then); Run now, Pause and Resume for the
-orchestrator work now. Next: step 6, chat, then step 7, memory, then step 8, the doc.
+**Chat, live for Desk and Standards** (2 Nov): "Talk to <name>" at the top of each
+worker's page. `claude` on lenovo1 (logged in as Jon) answers in a clone kept for chats
+(`~/.ai-mesh/agents/chats/<name>`), resuming one conversation per worker until "New
+conversation". Each message carries its brief and what its tile shows. It may edit and
+push its own repo, and writes what is agreed to `conversations/<date>.md`, which both
+briefs now read first. Reply boxes stay, labelled as read at the next run. Run now for
+Desk and Standards works (tested 2 Nov, a real Desk run).
+
+**Not yet:** chat with the two local workers (Orchestrator and Reviews, on mac1); Desk's
+chat reading the other repos (it sees only its own); step 7, memory; step 8, the doc.
 
 ## Goal
 

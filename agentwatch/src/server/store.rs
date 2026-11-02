@@ -27,7 +27,11 @@ impl Store {
                  agent TEXT NOT NULL, at TEXT NOT NULL, state TEXT NOT NULL,
                  line TEXT NOT NULL, waiting INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS history_agent ON history (agent, at);
-             CREATE TABLE IF NOT EXISTS runs (agent TEXT PRIMARY KEY, started TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS runs (agent TEXT PRIMARY KEY, started TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS chats (agent TEXT PRIMARY KEY, session TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS messages (
+                 agent TEXT NOT NULL, at TEXT NOT NULL, role TEXT NOT NULL, text TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS messages_agent ON messages (agent, at);",
         )?;
         Ok(Store { db })
     }
@@ -95,6 +99,71 @@ impl Store {
     }
 }
 
+/// One message in a worker's chat, as the page shows it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Message {
+    pub at: DateTime<Utc>,
+    /// `jon`, `worker` or `tool`.
+    pub role: String,
+    pub text: String,
+}
+
+impl Store {
+    /// The `claude` session the worker's chat resumes, if one is open.
+    pub fn chat_session(&self, agent: &str) -> rusqlite::Result<Option<String>> {
+        self.db
+            .query_row(
+                "SELECT session FROM chats WHERE agent = ?1",
+                params![agent],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    pub fn set_chat_session(&self, agent: &str, session: &str) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT INTO chats (agent, session) VALUES (?1, ?2) ON CONFLICT (agent) DO UPDATE SET session = ?2",
+            params![agent, session],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_message(&self, agent: &str, role: &str, text: &str) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT INTO messages (agent, at, role, text) VALUES (?1, ?2, ?3, ?4)",
+            params![agent, Utc::now().to_rfc3339(), role, text],
+        )?;
+        Ok(())
+    }
+
+    /// The open conversation's messages, oldest first.
+    pub fn messages(&self, agent: &str) -> rusqlite::Result<Vec<Message>> {
+        let mut q = self
+            .db
+            .prepare("SELECT at, role, text FROM messages WHERE agent = ?1 ORDER BY at, rowid")?;
+        let rows = q.query_map(params![agent], |r| {
+            let at: String = r.get(0)?;
+            Ok(Message {
+                at: DateTime::parse_from_rfc3339(&at)
+                    .map(|t| t.with_timezone(&Utc))
+                    .unwrap_or_default(),
+                role: r.get(1)?,
+                text: r.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Starts a new conversation: forgets the session and the messages.
+    pub fn clear_chat(&self, agent: &str) -> rusqlite::Result<()> {
+        self.db
+            .execute("DELETE FROM chats WHERE agent = ?1", params![agent])?;
+        self.db
+            .execute("DELETE FROM messages WHERE agent = ?1", params![agent])?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +202,27 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].waiting, 1);
         assert_eq!(r[1].line, "first");
+    }
+
+    #[test]
+    fn keeps_one_chat_per_agent_until_cleared() {
+        let s = Store::open(Path::new(":memory:")).unwrap();
+        assert_eq!(s.chat_session("Desk").unwrap(), None);
+        s.set_chat_session("Desk", "a").unwrap();
+        s.set_chat_session("Desk", "b").unwrap();
+        s.add_message("Desk", "jon", "hello").unwrap();
+        s.add_message("Desk", "worker", "hi").unwrap();
+        s.add_message("Standards", "jon", "other").unwrap();
+        assert_eq!(s.chat_session("Desk").unwrap().as_deref(), Some("b"));
+        let m = s.messages("Desk").unwrap();
+        assert_eq!(
+            m.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+            ["jon", "worker"]
+        );
+        s.clear_chat("Desk").unwrap();
+        assert_eq!(s.chat_session("Desk").unwrap(), None);
+        assert!(s.messages("Desk").unwrap().is_empty());
+        assert_eq!(s.messages("Standards").unwrap().len(), 1);
     }
 
     #[test]

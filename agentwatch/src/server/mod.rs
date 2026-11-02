@@ -2,6 +2,7 @@
 //! nothing from pi1 or the coordinator.
 
 pub mod actions;
+pub mod chat;
 pub mod poll;
 pub mod repo;
 pub mod run;
@@ -26,6 +27,8 @@ pub struct App {
     store: Mutex<Store>,
     /// One read or write at a time, so a poll never resets a clone mid-reply.
     pub work: tokio::sync::Mutex<()>,
+    /// Workers with an answer on its way: one message at a time each.
+    pub chatting: Mutex<std::collections::HashSet<String>>,
     http: reqwest::Client,
 }
 
@@ -37,6 +40,7 @@ impl App {
             views: RwLock::new(HashMap::new()),
             store: Mutex::new(store),
             work: tokio::sync::Mutex::new(()),
+            chatting: Mutex::new(std::collections::HashSet::new()),
             http: reqwest::Client::new(),
         }
     }

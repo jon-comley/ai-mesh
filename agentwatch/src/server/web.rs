@@ -12,6 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_stream::StreamExt;
 
 use super::{App, actions, run};
 
@@ -49,6 +50,11 @@ pub fn router(app: Shared) -> Router {
             "/api/agents/{name}/resume",
             post(|s, p| set_paused(s, p, false)),
         )
+        .route(
+            "/api/agents/{name}/chat",
+            get(chat_messages).post(chat_send),
+        )
+        .route("/api/agents/{name}/chat/new", post(chat_new))
         .route("/api/config", get(get_config).put(put_config))
         .with_state(app)
 }
@@ -215,4 +221,89 @@ async fn put_config(State(app): State<Shared>, Json(c): Json<ConfigText>) -> Api
     *app.config.write().unwrap_or_else(|p| p.into_inner()) = config;
     app.refresh_all().await;
     Ok(Json(json!({ "agents": app.views() })))
+}
+
+fn chat_busy(app: &App, name: &str) -> bool {
+    app.chatting
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(name)
+}
+
+async fn chat_messages(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
+    let a = agent(&app, &name)?;
+    let messages = app
+        .store()
+        .messages(&a.name)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(
+        json!({ "messages": messages, "busy": chat_busy(&app, &a.name), "can_chat": a.kind == Kind::Cloud }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ChatMessage {
+    message: String,
+}
+
+/// Sends a message and streams the answer back as it comes, one JSON event
+/// per line. The answer carries on, and is kept, if the page is closed.
+async fn chat_send(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+    Json(m): Json<ChatMessage>,
+) -> Result<Response, (StatusCode, Json<Value>)> {
+    let a = agent(&app, &name)?;
+    let message = m.message.trim().to_string();
+    if message.is_empty() {
+        return Err(fail(StatusCode::BAD_REQUEST, "say something first"));
+    }
+    if !app
+        .chatting
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(a.name.clone())
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!("{} is still answering", a.name),
+        ));
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let worker = app.clone();
+    tokio::spawn(async move {
+        super::chat::talk(&worker, &a, &message, tx).await;
+        worker
+            .chatting
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&a.name);
+    });
+    let lines = tokio_stream::wrappers::ReceiverStream::new(rx).map(|event| {
+        let mut line = serde_json::to_string(&event).unwrap_or_default();
+        line.push('\n');
+        Ok::<_, std::convert::Infallible>(line)
+    });
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        axum::body::Body::from_stream(lines),
+    )
+        .into_response())
+}
+
+async fn chat_new(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
+    let a = agent(&app, &name)?;
+    if chat_busy(&app, &a.name) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!("{} is still answering", a.name),
+        ));
+    }
+    app.store()
+        .clear_chat(&a.name)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(json!({ "messages": [] })))
 }
