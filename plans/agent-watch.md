@@ -57,6 +57,7 @@ Standards already does all of this. A new agent's brief must say the same.
 ```toml
 [[agent]]
 name = "Standards"
+purpose = "Writes the Cyber Essentials, UK GDPR, ISO 27001 and ISO 9001 documents"
 repo = "git@github.com:jon-comley/standards.git"
 key = "standards"
 every = "7d"        # how often it is meant to run (Standards is weekly)
@@ -85,10 +86,24 @@ so the page can show a run history.
 
 ## The page
 
-One card per agent: name, state light, last run ("2 Nov, 06:12"), the top log line,
-needs-you count, and links to the latest report (opens in the page) and the hub on GitHub.
-Below the cards, a combined run history. Settings: add or remove an agent (writes
-`agents.toml`), the ntfy topic.
+Two layers.
+
+**Top level: one tile per agent.** The tile says what the agent is: its name and its
+`purpose` line from `agents.toml` ("Writes the Cyber Essentials, UK GDPR, ISO 27001 and
+ISO 9001 documents"). A state light in the corner (`ok`, `late`, `broken`,
+`unreachable`) and a needs-you badge when that count is above zero. Nothing else, so a
+row of tiles reads at a glance.
+
+**Click a tile: that agent's detail.**
+- What it does, how often, and when it is next due.
+- Its last run: when, and the top log line.
+- What it is waiting on from Jon: the rows under the hub's `## Needs you`, each linking
+  to the hub on GitHub where he replies.
+- The latest report, rendered.
+- Its run history (one line per run from `agent-log.md`, with its state at the time).
+- A back button to the tiles.
+
+Settings (from the top level): add or remove an agent (writes `agents.toml`), the ntfy topic.
 
 **ntfy push** when an agent turns `late`, `broken` or `unreachable`, and when needs-you
 grows. One push per change, not one per poll.
@@ -115,8 +130,9 @@ Served by `agentwatch` on lenovo1:
 one page, `HUB.md`, saying what only Jon can do today, with each item ready to act on, plus
 the tidy-up it has already done for him.
 
-- **Reads** (through jon-comley, read-only): guv, admin, dashboard, ai-mesh, ventures and
-  `~/repos/HANDOVER.md`'s repo copy if one exists. Never ThingCo or the work laptop.
+- **Reads** (through jon-comley, read-only): every jon-comley repo, ai-mesh included
+  (guv, admin, dashboard, ai-mesh, ventures, standards and any added later). Never ThingCo:
+  not the ThingCo repos, `~/repos/thingco` or the work laptop.
 - **"Only you" (at most five):** things blocked on Jon, from ROADMAP rows, `docs/builds.md`,
   and "waits on Jon" lines. Each comes with what he needs to act at once: the command, the
   direct URL, or the draft message as plain text to paste.
@@ -125,7 +141,7 @@ the tidy-up it has already done for him.
   - ROADMAP rows whose work has landed, moved to HISTORY.md with the write-up.
   - Tracking lines that git now contradicts (a "not deployed" with a later deploy commit, a
     "waits on" for something already merged), with the corrected line.
-  - The handover rewritten to one screen from the current state.
+  - The handover rewritten to one screen from the current state, ThingCo left out.
 
   Jon says "apply the desk patches" in a local session, which applies them with `git am`, runs
   the checks and commits as jon. He reads one diff instead of writing it.
