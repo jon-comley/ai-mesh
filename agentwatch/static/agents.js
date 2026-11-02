@@ -3,7 +3,6 @@
 // only HTML from the server is the report, which it renders with raw HTML
 // shown as text.
 
-const QUICK_REPLIES = ['Approved', 'Done', 'No', 'Later'];
 const REFRESH_MS = 60_000;
 
 let agents = [];
@@ -199,7 +198,6 @@ function replyRow(a, row) {
     meta ? el('p', { class: 'meta' }, meta) : null,
     row.reply ? el('p', { class: 'answered' }, `You replied: ${row.reply}`) : null,
     el('div', { class: 'reply' },
-      QUICK_REPLIES.map((q) => el('button', { type: 'button', onclick: () => send(q) }, q)),
       input,
       el('button', { type: 'button', class: 'primary', onclick: () => send(input.value) }, 'Send'),
       a.can_run ? el('label', {}, runNow, ' and run now') : null,
