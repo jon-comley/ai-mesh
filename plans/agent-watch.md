@@ -63,6 +63,7 @@ key = "standards"
 every = "7d"        # how often it is meant to run (Standards is weekly)
 grace = "6h"        # late after every + grace with no new log line
 hub = "HUB.md"
+routine = "trig_0127dkvNe1icdcbGrV2NT3De"   # the cloud routine, for Run now
 ```
 
 ## What it works out
@@ -101,7 +102,22 @@ row of tiles reads at a glance.
   to the hub on GitHub where he replies.
 - The latest report, rendered.
 - Its run history (one line per run from `agent-log.md`, with its state at the time).
+- **Run now**: starts the agent's cloud routine immediately. The tile shows `running`
+  until its next log line lands, then the new report.
 - A back button to the tiles.
+
+**How Run now starts a run.** The routine runs in Anthropic's cloud, not on lenovo1;
+lenovo1 only asks for it to start. Two ways, in order of preference:
+
+1. The routine's own API trigger token, if claude.ai offers one per routine (the routine
+   carries an `api_token_hint` field; check its page before building). lenovo1 keeps the
+   token in `~/.ai-mesh/agents/keys/<agent>.trigger`, mode 600, and POSTs to it.
+2. Otherwise, `claude` on lenovo1, logged in once as Jon, asked headless to run the
+   routine by its id through its RemoteTrigger tool. This is how runs are started from a
+   local session today, so it is known to work.
+
+One run at a time per agent: the button is disabled while one is `running`.
+
 
 Settings (from the top level): add or remove an agent (writes `agents.toml`), the ntfy topic.
 
@@ -116,6 +132,7 @@ Served by `agentwatch` on lenovo1:
 - `GET /api/agents`: the cards and recent history.
 - `GET /api/agents/{name}/report`: the latest report's Markdown.
 - `POST /api/agents/refresh`: fetch now.
+- `POST /api/agents/{name}/run`: Run now.
 - `POST /api/agents`, `DELETE /api/agents/{name}`: edit `agents.toml`.
 
 ## Adding an agent
