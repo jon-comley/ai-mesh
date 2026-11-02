@@ -68,7 +68,7 @@ impl App {
         }
     }
 
-    /// Every tile, in `agents.toml` order.
+    /// Every tile, in `agents.toml` order; one not read yet shows as checking.
     pub fn views(&self) -> Vec<View> {
         let config = self
             .config
@@ -79,7 +79,12 @@ impl App {
         config
             .agents
             .iter()
-            .filter_map(|a| views.get(&a.name).cloned())
+            .map(|a| {
+                views
+                    .get(&a.name)
+                    .cloned()
+                    .unwrap_or_else(|| poll::blank(a, chrono::Utc::now()))
+            })
             .collect()
     }
 

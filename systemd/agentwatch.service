@@ -11,6 +11,8 @@ User=jonno
 Environment=AGENTWATCH_DIR=/home/jonno/.ai-mesh/agents
 Environment=AGENTWATCH_ADDR=0.0.0.0:80
 Environment=RUST_LOG=info
+# claude (Run now, chat) is installed per user in ~/.local/bin.
+Environment=PATH=/home/jonno/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/agentwatch
 Restart=on-failure
 RestartSec=10

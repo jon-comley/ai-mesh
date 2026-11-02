@@ -19,6 +19,7 @@ export const STATE_LABELS = {
   running: 'Running',
   paused: 'Paused',
   new: 'Not run yet',
+  checking: 'Checking…',
 };
 
 export function stateLabel(state) {

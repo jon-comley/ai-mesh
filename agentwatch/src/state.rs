@@ -24,6 +24,8 @@ pub enum State {
     Paused,
     /// No run yet.
     New,
+    /// The page has not read it yet since it started.
+    Checking,
 }
 
 /// How long after Run now a run counts as broken if nothing has landed.

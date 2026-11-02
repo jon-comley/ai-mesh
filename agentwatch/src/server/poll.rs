@@ -56,14 +56,13 @@ pub struct EntryView {
 const ENTRIES: usize = 20;
 pub const HISTORY: usize = 30;
 
-pub async fn view(app: &App, agent: &Agent) -> View {
-    let now = Utc::now();
-    let run_started = app.store().run_started(&agent.name).ok().flatten();
-    let mut v = View {
+/// The tile before its first read: shown at once, as "checking".
+pub fn blank(agent: &Agent, now: DateTime<Utc>) -> View {
+    View {
         name: agent.name.clone(),
         purpose: agent.purpose.clone(),
         kind: agent.kind,
-        state: State::New,
+        state: State::Checking,
         every: agentwatch::config::format_duration(agent.every),
         last_run: None,
         next_due: None,
@@ -87,7 +86,14 @@ pub async fn view(app: &App, agent: &Agent) -> View {
         can_pause: agent.kind == Kind::Local && agent.pause.is_some(),
         paused: false,
         checked_at: now,
-    };
+    }
+}
+
+pub async fn view(app: &App, agent: &Agent) -> View {
+    let now = Utc::now();
+    let run_started = app.store().run_started(&agent.name).ok().flatten();
+    let mut v = blank(agent, now);
+    v.state = State::New;
     match agent.kind {
         Kind::Cloud => cloud(app, agent, &mut v, run_started, now).await,
         Kind::Local => local(agent, &mut v, run_started, now).await,

@@ -87,6 +87,7 @@ main { padding: 16px; max-width: 1100px; margin: 0 auto; }
 }
 .light.ok { background: var(--green); }
 .light.running { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.light.checking { animation: pulse 1.2s ease-in-out infinite; }
 .light.late, .light.paused { background: var(--amber); }
 .light.broken, .light.unreachable { background: var(--red); }
 @keyframes pulse { 50% { opacity: 0.35; } }
