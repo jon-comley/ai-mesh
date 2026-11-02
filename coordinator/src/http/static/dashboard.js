@@ -14,6 +14,7 @@ import * as gateway from '/static/gateway.js';
 import * as ebay from '/static/ebay.js';
 import * as chords from '/static/chords.js';
 import * as reviews from '/static/reviews.js';
+import * as workers from '/static/workers.js';
 import * as nav from '/static/nav.js';
 import { registerSwitchAction } from '/static/devicewidgets.js';
 
@@ -190,6 +191,7 @@ gateway.init(document.getElementById('panel-gateway'));
 ebay.init(document.getElementById('panel-ebay'));
 chords.init(document.getElementById('panel-chords'));
 reviews.init(document.getElementById('panel-reviews'));
+workers.init(document.getElementById('panel-workers'));
 
 // Ask for token on very first visit when auth is likely needed.
 if (!localStorage.getItem('meshToken')) {

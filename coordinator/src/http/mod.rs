@@ -55,6 +55,7 @@ const EBAY_JS: &str = include_str!("static/ebay.js");
 const CHORDS_JS: &str = include_str!("static/chords.js");
 const NAV_JS: &str = include_str!("static/nav.js");
 const REVIEWS_JS: &str = include_str!("static/reviews.js");
+const WORKERS_JS: &str = include_str!("static/workers.js");
 const MANIFEST_JSON: &str = include_str!("static/manifest.json");
 const SERVICE_WORKER_JS: &str = include_str!("static/service-worker.js");
 
@@ -334,6 +335,7 @@ fn static_asset_routes() -> Router<Arc<DashboardState>> {
         ("/static/chords.js", CHORDS_JS, JS),
         ("/static/nav.js", NAV_JS, JS),
         ("/static/reviews.js", REVIEWS_JS, JS),
+        ("/static/workers.js", WORKERS_JS, JS),
         ("/manifest.json", MANIFEST_JSON, "application/manifest+json"),
         ("/service-worker.js", SERVICE_WORKER_JS, JS),
     ];

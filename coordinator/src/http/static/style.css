@@ -4817,3 +4817,9 @@ body.songs-fullscreen .app-header, body.songs-fullscreen .subtab-bar, body.songs
 @media (max-width: 600px) {
   .songs-sheet { padding: 6px 12px; }
 }
+
+/* Workers tab: the agent watch page on lenovo1, in a frame filling the panel. */
+.panel-workers.active { display: flex; flex-direction: column; padding: 0; }
+.workers-bar { display: flex; align-items: baseline; gap: 16px; padding: 12px 16px 8px; }
+.workers-bar h2 { margin: 0; }
+.workers-frame { flex: 1; width: 100%; border: 0; min-height: 0; }

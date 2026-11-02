@@ -8,7 +8,7 @@ export const GROUPS = [
   { id: 'home', label: 'Home', panels: [['home', 'Home'], ['devices', 'Devices']] },
   { id: 'chat', label: 'Chat', panels: [['chat', 'Chat']] },
   { id: 'music', label: 'Music', panels: [['chords', 'Songs'], ['reaper', 'REAPER']] },
-  { id: 'tools', label: 'Tools', panels: [['ebay', 'Hunts'], ['reviews', 'Reviews']] },
+  { id: 'tools', label: 'Tools', panels: [['ebay', 'Hunts'], ['reviews', 'Reviews'], ['workers', 'Workers']] },
   {
     id: 'system', label: 'System', panels: [
       ['nodes', 'Nodes'], ['health', 'Health'], ['models', 'Models'],

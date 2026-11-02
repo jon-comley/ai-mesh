@@ -33,7 +33,7 @@ describe('navigation', () => {
     const all = GROUPS.flatMap(g => g.panels.map(([p]) => p));
     expect(new Set(all).size).toBe(all.length);
     expect(all.sort()).toEqual(['chat', 'chords', 'devices', 'ebay', 'errors', 'gateway', 'health',
-      'home', 'models', 'nodes', 'reaper', 'reviews', 'security'].sort());
+      'home', 'models', 'nodes', 'reaper', 'reviews', 'security', 'workers'].sort());
   });
 
   it('shows a category\'s sub-tabs and switches panels with them', () => {
