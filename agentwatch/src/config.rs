@@ -63,6 +63,23 @@ pub struct Agent {
     #[serde(default)]
     pub kickstart: Option<String>,
 
+    // Chat with a local worker, which runs `claude` on `host`.
+    /// Where the chat works on `host` (`~/guv`).
+    #[serde(default)]
+    pub chat_dir: Option<String>,
+    /// A file sourced first (`~/orchestrator-env.sh`).
+    #[serde(default)]
+    pub chat_env: Option<String>,
+    /// Its standing brief on `host` (`~/guv-orchestrator.md`).
+    #[serde(default)]
+    pub brief: Option<String>,
+    /// The chat may read but not change anything.
+    #[serde(default)]
+    pub chat_readonly: bool,
+    /// The memory clone on `host`.
+    #[serde(default = "default_memory_dir")]
+    pub memory_dir: String,
+
     /// How often it is meant to run: `7d`, `1d`, `20m`.
     #[serde(with = "duration_text")]
     pub every: Duration,
@@ -79,17 +96,42 @@ fn default_needs_heading() -> String {
     "Needs you".into()
 }
 
+fn default_memory_dir() -> String {
+    "~/.ai-mesh/memory".into()
+}
+
 fn default_grace() -> Duration {
     Duration::from_secs(6 * 3600)
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default, rename = "agent")]
     pub agents: Vec<Agent>,
     /// The ntfy topic URL for state-change pushes.
     #[serde(default)]
     pub ntfy: Option<String>,
+    /// The shared memory repo every worker reads (`git@github.com:jon-comley/memory.git`).
+    #[serde(default)]
+    pub memory: Option<String>,
+    /// Its deploy key under `keys/`.
+    #[serde(default = "default_memory_key")]
+    pub memory_key: String,
+}
+
+fn default_memory_key() -> String {
+    "memory".into()
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            agents: Vec::new(),
+            ntfy: None,
+            memory: None,
+            memory_key: default_memory_key(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -181,7 +223,7 @@ fn check(a: &Agent) -> Result<(), ConfigError> {
                 .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
     }
     type Check<'a> = (&'a str, &'a Option<String>, fn(&str) -> bool);
-    let checks: [Check; 8] = [
+    let checks: [Check; 11] = [
         ("host", &a.host, word_ok),
         ("key", &a.key, word_ok),
         ("kickstart", &a.kickstart, word_ok),
@@ -190,11 +232,17 @@ fn check(a: &Agent) -> Result<(), ConfigError> {
         ("pause", &a.pause, path_ok),
         ("ticks", &a.ticks, path_ok),
         ("reports", &a.reports, path_ok),
+        ("chat_dir", &a.chat_dir, path_ok),
+        ("chat_env", &a.chat_env, path_ok),
+        ("brief", &a.brief, path_ok),
     ];
     for (field, value, ok) in checks {
         if value.as_deref().is_some_and(|v| !ok(v)) {
             return bad(field);
         }
+    }
+    if !path_ok(&a.memory_dir) {
+        return bad("memory_dir");
     }
     if !path_ok(&a.hub) || a.hub.contains("..") {
         return bad("hub");

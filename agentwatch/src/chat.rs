@@ -121,8 +121,15 @@ fn result(v: &Value) -> Event {
 
 /// The standing instructions a chat starts with: who it is (its brief), what
 /// Jon can see on its tile right now, and how a chat differs from a run.
-pub fn context(name: &str, brief: Option<&str>, tile: &str, today: &str) -> String {
-    let brief = brief.unwrap_or("(This worker has no brief in its repo.)");
+pub fn context(
+    name: &str,
+    brief: Option<&str>,
+    tile: &str,
+    today: &str,
+    memory: Option<&Memory>,
+) -> String {
+    let brief = brief.unwrap_or("(This worker has no brief.)");
+    let memory = memory.map(|m| m.context()).unwrap_or_default();
     format!(
         "You are the {name} worker, talking with Jon live from your tile on the agent watch page. \
 This is a conversation, not a scheduled run: answer what he asks, do what he asks while he \
@@ -145,9 +152,46 @@ know what was agreed.
 What your tile shows Jon right now:
 {tile}
 
-Your standing brief (it governs your scheduled runs; follow its rules here too):
+{memory}Your standing brief (it governs your scheduled runs; follow its rules here too):
 {brief}"
     )
+}
+
+/// The shared memory as a chat starts with it: the index and `jon/` only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Memory {
+    /// The memory clone's path where the chat runs.
+    pub path: String,
+    pub index: String,
+    /// `(file, contents)` for each file in `jon/`.
+    pub jon: Vec<(String, String)>,
+}
+
+impl Memory {
+    fn context(&self) -> String {
+        let jon: String = self
+            .jon
+            .iter()
+            .map(|(f, c)| format!("--- {f}\n{}\n", c.trim()))
+            .collect();
+        format!(
+            "Shared memory: {path} (its own git repo, shared by every worker). Below is its index \
+and the `jon/` folder, which is all you get up front. Open another file there only when what Jon \
+is talking about, or the job, is that file's subject: never read the whole memory, never just in \
+case. When Jon tells you something that should outlast this chat and matters beyond you (how he \
+wants things done, a decision about the business, a fact about a system), write it to memory: \
+update the file that covers it, or add one file in the right folder with `name`, `description` \
+and `updated` front matter, change its line in INDEX.md, then `git -C {path} pull --ff-only`, \
+commit as Jon and push. Never secrets, never ThingCo.
+
+{index}
+
+{jon}
+",
+            path = self.path,
+            index = self.index.trim(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -218,11 +262,26 @@ mod tests {
 
     #[test]
     fn context_carries_the_brief_the_tile_and_the_rules() {
-        let c = context("Desk", Some("BRIEF TEXT"), "TILE TEXT", "2026-11-03");
+        let c = context("Desk", Some("BRIEF TEXT"), "TILE TEXT", "2026-11-03", None);
         assert!(c.contains("You are the Desk worker"));
         assert!(c.contains("BRIEF TEXT") && c.contains("TILE TEXT"));
         assert!(c.contains("conversations/2026-11-03.md"));
         assert!(c.contains("never use an em dash"));
         assert!(!c.contains('\u{2014}'));
+        assert!(!c.contains("Shared memory"));
+    }
+
+    #[test]
+    fn context_carries_only_the_memory_index_and_jon() {
+        let m = Memory {
+            path: "~/.ai-mesh/memory".into(),
+            index: "# Memory\n- `money/eas-spend.md`: EAS costs".into(),
+            jon: vec![("jon/be-punchy.md".into(), "Keep it short.".into())],
+        };
+        let c = context("Reviews", None, "TILE", "2026-11-03", Some(&m));
+        assert!(c.contains("Shared memory: ~/.ai-mesh/memory"));
+        assert!(c.contains("- `money/eas-spend.md`: EAS costs"));
+        assert!(c.contains("--- jon/be-punchy.md\nKeep it short."));
+        assert!(c.contains("never read the whole memory"));
     }
 }

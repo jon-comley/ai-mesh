@@ -29,6 +29,8 @@ pub struct App {
     pub work: tokio::sync::Mutex<()>,
     /// Workers with an answer on its way: one message at a time each.
     pub chatting: Mutex<std::collections::HashSet<String>>,
+    /// Local workers whose tick a chat paused, and when that chat last spoke.
+    pub chat_paused: Mutex<HashMap<String, std::time::Instant>>,
     http: reqwest::Client,
 }
 
@@ -41,6 +43,7 @@ impl App {
             store: Mutex::new(store),
             work: tokio::sync::Mutex::new(()),
             chatting: Mutex::new(std::collections::HashSet::new()),
+            chat_paused: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
         }
     }
@@ -59,6 +62,16 @@ impl App {
             .unwrap_or_else(|p| p.into_inner())
             .agent(name)
             .cloned()
+    }
+
+    /// The shared memory's clone on lenovo1, if a memory repo is set.
+    pub fn memory_repo(&self) -> Option<Repo> {
+        let config = self.config.read().unwrap_or_else(|p| p.into_inner());
+        Some(Repo {
+            dir: self.dir.join("memory"),
+            key: self.dir.join("keys").join(&config.memory_key),
+            url: config.memory.clone()?,
+        })
     }
 
     pub fn repo(&self, agent: &Agent) -> Repo {

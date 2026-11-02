@@ -26,8 +26,19 @@ push its own repo, and writes what is agreed to `conversations/<date>.md`, which
 briefs now read first. Reply boxes stay, labelled as read at the next run. Run now for
 Desk and Standards works (tested 2 Nov, a real Desk run).
 
-**Not yet:** chat with the two local workers (Orchestrator and Reviews, on mac1); Desk's
-chat reading the other repos (it sees only its own); step 7, memory; step 8, the doc.
+**Chat on mac1, and memory** (2 Nov): Orchestrator and Reviews chat too, `claude` on mac1
+over ssh (`bash -s`, the context and message in quoted heredocs). The orchestrator's chat
+works in `~/guv` with its env and brief, refuses while a tick is running, and pauses the
+tick (resumed after 30 minutes quiet, or by Jon's own Pause or Resume). Reviews' chat is
+read-only except for memory. The shared memory is live: `jon-comley/memory`, 85 facts in
+`jon/`, `working/`, `vanround-guv/`, `infra/`, `money/`, `pointers/`, seeded from the
+laptop's Claude memory with ThingCo and secrets left out; deploy keys for lenovo1 and mac1;
+clones at `~/.ai-mesh/agents/memory` (lenovo1) and `~/.ai-mesh/memory` (mac1). Every chat
+starts with `INDEX.md` and `jon/` only and opens other files when the subject comes up;
+both cloud routines attach it and both briefs say the same.
+
+**Not yet:** Desk's chat reading the other repos (it sees only its own); the Memory tile;
+the orchestrator's scheduled ticks reading memory; step 8, the doc.
 
 ## Goal
 

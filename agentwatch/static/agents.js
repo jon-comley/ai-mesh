@@ -250,9 +250,7 @@ async function renderSettings(main) {
 // ── Chat ────────────────────────────────────────────────────────────────────
 
 function chatSection(a) {
-  if (a.kind !== 'cloud') {
-    return el('section', {}, el('h3', {}, 'Chat'), el('p', { class: 'muted' }, `Chat with ${a.name} comes next: it runs on its own machine.`));
-  }
+  if (!a.can_chat) return null;
   if (!chat || chat.name !== a.name) {
     chat = { name: a.name, messages: [], busy: false, loaded: false };
     api('GET', `/api/agents/${encodeURIComponent(a.name)}/chat`).then((r) => {

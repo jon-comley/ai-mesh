@@ -196,6 +196,11 @@ async fn set_paused(
     paused: bool,
 ) -> ApiResult {
     let a = agent(&app, &name)?;
+    // Jon's own Pause or Resume wins over a chat's: the chat no longer resumes it.
+    app.chat_paused
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&a.name);
     let _work = app.work.lock().await;
     actions::set_paused(&a, paused)
         .await
@@ -237,7 +242,7 @@ async fn chat_messages(State(app): State<Shared>, Path(name): Path<String>) -> A
         .messages(&a.name)
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(
-        json!({ "messages": messages, "busy": chat_busy(&app, &a.name), "can_chat": a.kind == Kind::Cloud }),
+        json!({ "messages": messages, "busy": chat_busy(&app, &a.name), "can_chat": a.kind == Kind::Cloud || a.chat_dir.is_some() }),
     ))
 }
 

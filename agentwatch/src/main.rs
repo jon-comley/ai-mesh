@@ -50,6 +50,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let idle = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            server::chat::resume_idle(&idle).await;
+        }
+    });
+
     let addr = std::env::var("AGENTWATCH_ADDR").unwrap_or_else(|_| "0.0.0.0:80".into());
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("agent watch on http://{addr}/");

@@ -25,11 +25,32 @@ impl Repo {
             cmd.args(["clone", "--branch", "main", &self.url])
                 .arg(&self.dir);
             run::output(cmd, GIT_LIMIT).await?;
-            return Ok(());
+        } else {
+            self.git(&["fetch", "origin", "main"]).await?;
+            self.git(&["reset", "--hard", "origin/main"]).await?;
         }
-        self.git(&["fetch", "origin", "main"]).await?;
-        self.git(&["reset", "--hard", "origin/main"]).await?;
+        // So any git run in the clone (a chat's own commits included) uses this
+        // repo's key and commits as Jon.
+        let ssh = format!(
+            "ssh -i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+            self.key.display()
+        );
+        self.git(&["config", "core.sshCommand", &ssh]).await?;
+        self.git(&["config", "user.name", "jon"]).await?;
+        self.git(&["config", "user.email", "joncomley@googlemail.com"])
+            .await?;
         Ok(())
+    }
+
+    /// Brings a clone up to date without throwing away local commits: for
+    /// clones a chat writes in.
+    pub async fn sync_keep(&self) -> Result<()> {
+        if !self.dir.join(".git").exists() {
+            return self.sync().await;
+        }
+        self.git(&["pull", "--ff-only", "origin", "main"])
+            .await
+            .map(|_| ())
     }
 
     pub fn read(&self, path: &str) -> Option<String> {

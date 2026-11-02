@@ -40,6 +40,7 @@ pub struct View {
     pub repo_url: Option<String>,
     pub hub_url: Option<String>,
     pub can_reply: bool,
+    pub can_chat: bool,
     pub can_run: bool,
     pub can_pause: bool,
     pub paused: bool,
@@ -79,6 +80,7 @@ pub fn blank(agent: &Agent, now: DateTime<Utc>) -> View {
             .web_url()
             .map(|u| format!("{u}/blob/main/{}", agent.hub)),
         can_reply: agent.kind == Kind::Cloud,
+        can_chat: agent.kind == Kind::Cloud || agent.chat_dir.is_some(),
         can_run: match agent.kind {
             Kind::Cloud => agent.routine.is_some(),
             Kind::Local => agent.kickstart.is_some(),
