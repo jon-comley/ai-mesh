@@ -29,13 +29,13 @@ paths are awkward, and it carries STT.
 
 ## Access
 
-**One read-only deploy key per agent repo**, not an account token. A deploy key opens one
-repo, cannot write and does not expire, and the repo's owner adds it under the repo's
+**One deploy key per agent repo**, not an account token. A deploy key opens one
+repo and does not expire, and the repo's owner adds it under the repo's
 Settings, Deploy keys. So no account token is needed, and a leaked key
-exposes one repo read-only.
+exposes one agent repo, which holds only that agent's documents.
 
 - lenovo1 makes the key: `ssh-keygen -t ed25519 -f ~/.ai-mesh/agents/keys/<agent> -N ""`.
-- Jon pastes the `.pub` into `https://github.com/<owner>/<repo>/settings/keys`, read-only.
+- Jon pastes the `.pub` into `https://github.com/<owner>/<repo>/settings/keys` and ticks "Allow write access" (the page writes replies to the hub).
 - `agents.toml` names the key per agent. The clone uses
   `GIT_SSH_COMMAND="ssh -i <key> -o IdentitiesOnly=yes"`, so no `~/.ssh/config` entries are needed.
 
@@ -102,6 +102,17 @@ row of tiles reads at a glance.
   to the hub on GitHub where he replies.
 - The latest report, rendered.
 - Its run history (one line per run from `agent-log.md`, with its state at the time).
+- **Talk to it**, from the tile:
+  - **Reply** under each item it is waiting on (Standards' "Needs you", Desk's "Only
+    you"): a text box and quick buttons (Approve, Done, No, Later). The reply is written
+    into that row's "Your reply" cell in `HUB.md`, exactly as if Jon had edited it on
+    GitHub, and the agent acts on it at its next run.
+  - **Tell it**: a free-text box for anything else ("write the access control policy
+    next", "stop raising X"). It is added to a `## From Jon` section at the top of
+    `HUB.md` with the date. The agent reads that section first, acts on each note, and
+    moves it to Done with what it did.
+  - Both have a "and run now" tick, so the answer comes back in minutes, not at the
+    next scheduled run.
 - **Run now**: starts the agent's cloud routine immediately. The tile shows `running`
   until its next log line lands, then the new report.
 - A back button to the tiles.
@@ -117,6 +128,16 @@ lenovo1 only asks for it to start. Two ways, in order of preference:
    local session today, so it is known to work.
 
 One run at a time per agent: the button is disabled while one is `running`.
+
+**Writing to the hub.** Replies and notes need write access to the agent's own repo, so
+each agent's deploy key is **read-write on that repo only**. The agent repos hold only
+the agents' documents, never code or secrets, and every other repo stays out of
+lenovo1's reach. lenovo1 commits as `jon <joncomley@googlemail.com>`, message
+`Hub: reply from Jon` or `Hub: note from Jon`, pulling first and retrying once if the
+agent pushed in between. The page never changes anything else in the repo.
+
+Desk's patches are not applied from the page: that needs write access to the other
+repos, which lenovo1 never gets. They stay "apply the desk patches" in a local session.
 
 
 Settings (from the top level): add or remove an agent (writes `agents.toml`), the ntfy topic.
@@ -138,7 +159,7 @@ Served by `agentwatch` on lenovo1:
 ## Adding an agent
 
 1. Create its repo with the contract files and point the routine at it.
-2. On lenovo1, make a deploy key and add it to the repo, read-only.
+2. On lenovo1, make a deploy key and add it to the repo with write access.
 3. Add the agent in the page's settings.
 
 ## A second agent: Desk
@@ -180,8 +201,12 @@ flags "git says X, check it" rather than asserting what is live.
    in with `include_str!`, with vitest tests as for `reviews.js`.
 3. `systemd/agentwatch.service` and a `just deploy-agentwatch` recipe that builds and
    installs it on lenovo1.
-4. Make the Standards deploy key on lenovo1 and add it to the repo.
-5. `docs/agent-watch.md`: setup and the contract, for the next agent's brief to point at.
+4. Make the Standards and Desk deploy keys on lenovo1 and add them to their repos,
+   read-write.
+5. Add the `## From Jon` section to both hubs, and one step to both briefs: read it
+   first, act on each note, move it to Done with what was done. (Each brief says to
+   change it only when Jon asks; this plan is that ask.)
+6. `docs/agent-watch.md`: setup and the contract, for the next agent's brief to point at.
 
 ## Checks before calling it done
 
