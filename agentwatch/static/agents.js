@@ -137,7 +137,6 @@ function renderAgent(main, name) {
   }
   const busy = a.state === 'running';
   const detail = el('div', { class: 'detail' },
-    el('p', {}, el('a', { href: '#/' }, '← All workers')),
     el('h1', {}, a.name),
     el('p', { class: 'purpose' }, a.purpose),
     el('div', { class: 'facts' },
@@ -164,6 +163,7 @@ function renderAgent(main, name) {
     a.history.length ? el('section', {}, el('h3', {}, 'What this page has seen'),
       el('ul', { class: 'log' }, a.history.map((h) => el('li', {},
         el('span', { class: 'when' }, clock(h.at)), `${stateLabel(h.state)}, ${h.waiting} waiting. ${h.line}`)))) : null,
+    el('p', {}, el('a', { href: '#/', class: 'button' }, '← All workers')),
   );
   main.append(detail);
 }
@@ -228,7 +228,6 @@ function showReport(a, path) {
 async function renderSettings(main) {
   const area = el('textarea', { class: 'config', spellcheck: 'false' });
   main.append(
-    el('p', {}, el('a', { href: '#/' }, '← All workers')),
     el('h1', {}, 'Settings'),
     el('p', { class: 'muted' }, 'agents.toml on lenovo1. One [[agent]] per worker; see plans/agent-watch.md for the fields.'),
     area,
@@ -277,6 +276,7 @@ function render() {
   else if (route.view === 'settings') renderSettings(main);
   else renderTiles(main);
   document.getElementById('checked').textContent = checkedAt ? `checked ${relTime(checkedAt)}` : '';
+  document.getElementById('back').hidden = route.view === 'tiles';
 }
 
 async function load(path = '/api/agents', method = 'GET') {
@@ -289,7 +289,7 @@ async function load(path = '/api/agents', method = 'GET') {
 }
 
 if (typeof window !== 'undefined' && document.getElementById('main')) {
-  window.addEventListener('hashchange', render);
+  window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
   document.getElementById('refresh').addEventListener('click', () => load('/api/agents/refresh', 'POST'));
   load();
   setInterval(load, REFRESH_MS);

@@ -6,10 +6,5 @@
 export const WORKERS_URL = 'http://192.168.1.47/';
 
 export function init(panel) {
-  panel.innerHTML = `
-    <div class="workers-bar">
-      <h2>Workers</h2>
-      <a href="${WORKERS_URL}" target="_blank" rel="noopener">Open in its own tab</a>
-    </div>
-    <iframe class="workers-frame" title="Workers" src="${WORKERS_URL}"></iframe>`;
+  panel.innerHTML = `<iframe class="workers-frame" title="Workers" src="${WORKERS_URL}"></iframe>`;
 }
