@@ -208,6 +208,50 @@ the tidy-up it has already done for him.
 It cannot see deploy or console state (Cloudflare, Firebase, Stripe), only git. So it
 flags "git says X, check it" rather than asserting what is live.
 
+## Workers on our own machines: the mac1 orchestrator
+
+Not every worker is a cloud routine. The guv orchestrator on mac1 (`launchd`
+`com.jonno.orchestrator-tick`, a fresh `claude -p` step every 20 minutes, brief
+`mac1:~/guv-orchestrator.md`) is one already, and gets a tile like the others.
+
+`agents.toml` gives each worker a `kind`:
+
+```toml
+[[agent]]
+name = "Orchestrator"
+kind = "local"                # "cloud" (default) or "local"
+host = "mac1"
+purpose = "Runs the gated Maestro tests on guv, fixes failures, commits and pushes"
+status = "~/orchestrator-status.md"
+pause = "~/orchestrator-paused"
+```
+
+- **Tile and state** come from the top entry of its status file, read over ssh from
+  lenovo1 (`# STEP <date> (<kind>): <summary>`). `ok` when the top entry is under 30
+  minutes old, `late` past that, `paused` while the pause file exists, `broken` when
+  the latest tick log in `~/orchestrator-ticks/` ends in an error.
+- **Detail** shows the last ten entries, what it is waiting on (its "Waiting on Jon"
+  lines), and Pause / Resume buttons (create or delete the pause file).
+- **Talk to it** runs `claude` on mac1 itself, in `~/guv` with `~/orchestrator-env.sh`
+  and the orchestrator's brief, so it is the same worker with its repo, deploy key and
+  devices. While a chat is open the tick is paused (the page creates the pause file and
+  removes it when the chat ends or after 30 minutes idle), so the two never work in
+  `~/guv` at once. What Jon says that should outlast the chat is written into the status
+  file as an instruction, which is where the brief already says his instructions go.
+- **Run now** starts one tick at once: `launchctl kickstart gui/<uid>/com.jonno.orchestrator-tick`.
+- Its rules stay its own: it never starts a gated run without Jon's yes, and stops one
+  only with TERM to run-gated. The page has no "start gated run" button; Jon asks in the
+  chat, as he would now.
+
+**Workers handing work to each other.** In Desk's chat, Jon can say "give the guv patch
+to the orchestrator": the page writes it into the orchestrator's status file as an
+instruction (apply `patches/<file>` from jon-comley/desk, run the checks, commit and
+push), and the orchestrator does it at its next tick. That takes "apply the desk
+patches" off Jon too, for guv. Only on Jon's say-so, never automatic.
+
+lenovo1 already reaches mac1 over the LAN; the page uses lenovo1's existing ssh key to
+mac1, nothing new.
+
 ## Build order
 
 1. `agentwatch` crate, pure: parse `agent-log.md`, the hub's needs-you count and
@@ -220,11 +264,13 @@ flags "git says X, check it" rather than asserting what is live.
    installs it on lenovo1.
 4. Make the Standards and Desk deploy keys on lenovo1 and add them to their repos,
    read-write.
-5. Chat: `claude` on lenovo1, the per-agent resume, streaming to the page,
+5. Local workers: `kind = "local"`, the orchestrator's tile from its status file,
+   Pause / Resume, Run now by `launchctl kickstart`, chat on mac1 with the tick paused.
+6. Chat: `claude` on lenovo1, the per-agent resume, streaming to the page,
    `conversations/`. Add one step to both briefs: read `conversations/` since the last
    run first and keep what was agreed. (Each brief says to change it only when Jon asks;
    this plan is that ask.)
-6. `docs/agent-watch.md`: setup and the contract, for the next agent's brief to point at.
+7. `docs/agent-watch.md`: setup and the contract, for the next agent's brief to point at.
 
 ## Checks before calling it done
 
