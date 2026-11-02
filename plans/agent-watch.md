@@ -107,12 +107,10 @@ row of tiles reads at a glance.
     you"): a text box and quick buttons (Approve, Done, No, Later). The reply is written
     into that row's "Your reply" cell in `HUB.md`, exactly as if Jon had edited it on
     GitHub, and the agent acts on it at its next run.
-  - **Tell it**: a free-text box for anything else ("write the access control policy
-    next", "stop raising X"). It is added to a `## From Jon` section at the top of
-    `HUB.md` with the date. The agent reads that section first, acts on each note, and
-    moves it to Done with what it did.
-  - Both have a "and run now" tick, so the answer comes back in minutes, not at the
-    next scheduled run.
+  - **Talk to it**: a chat on the detail page, like talking to someone in the office.
+    Jon types, the agent answers there and then, and it can do the work while he
+    watches ("write the access control policy now", "why is that on my list?", "drop
+    X"). Details under "Chat" below.
 - **Run now**: starts the agent's cloud routine immediately. The tile shows `running`
   until its next log line lands, then the new report.
 - A back button to the tiles.
@@ -129,12 +127,31 @@ lenovo1 only asks for it to start. Two ways, in order of preference:
 
 One run at a time per agent: the button is disabled while one is `running`.
 
-**Writing to the hub.** Replies and notes need write access to the agent's own repo, so
+**Chat.** Each agent has one ongoing conversation, kept between visits, run by `claude`
+on lenovo1 (logged in once as Jon, his subscription):
+
+- It works in lenovo1's clone of the agent's repo, with the agent's `agent-brief.md` as
+  its standing instructions, so it is the same agent as the scheduled run.
+- One conversation per agent, resumed each time (`claude --resume <id>`, the id kept in
+  `agents.db`), streamed to the page as it answers. A "New conversation" button starts
+  fresh.
+- It may change its own repo while Jon talks to it: write a document, edit the hub,
+  then commit as `jon <joncomley@googlemail.com>` and push. Nothing else.
+- At the end of each chat (or after 30 minutes idle) it adds a short summary to
+  `conversations/<YYYY-MM-DD>.md` in its repo: what Jon said, what it did, what it
+  promised. The scheduled run reads that first, so the cloud agent knows what was
+  agreed in the office.
+- Desk's chat needs to read the other repos too. That is the one place lenovo1 needs
+  more than the agent repos: a fine-grained GitHub token, jon-comley, all repos,
+  **Contents: read-only**, kept in `~/.ai-mesh/agents/keys/read-all.token` (mode 600),
+  never ThingCo (those are on another account anyway).
+
+**Writing to the hub.** Replies and chat need write access to the agent's own repo, so
 each agent's deploy key is **read-write on that repo only**. The agent repos hold only
 the agents' documents, never code or secrets, and every other repo stays out of
-lenovo1's reach. lenovo1 commits as `jon <joncomley@googlemail.com>`, message
-`Hub: reply from Jon` or `Hub: note from Jon`, pulling first and retrying once if the
-agent pushed in between. The page never changes anything else in the repo.
+lenovo1's write reach. lenovo1 commits as `jon <joncomley@googlemail.com>`, message
+`Hub: reply from Jon`, pulling first and retrying once if the
+agent pushed in between. Reply buttons change only that row; chat changes only the agent's own repo.
 
 Desk's patches are not applied from the page: that needs write access to the other
 repos, which lenovo1 never gets. They stay "apply the desk patches" in a local session.
@@ -203,9 +220,10 @@ flags "git says X, check it" rather than asserting what is live.
    installs it on lenovo1.
 4. Make the Standards and Desk deploy keys on lenovo1 and add them to their repos,
    read-write.
-5. Add the `## From Jon` section to both hubs, and one step to both briefs: read it
-   first, act on each note, move it to Done with what was done. (Each brief says to
-   change it only when Jon asks; this plan is that ask.)
+5. Chat: `claude` on lenovo1, the per-agent resume, streaming to the page,
+   `conversations/`. Add one step to both briefs: read `conversations/` since the last
+   run first and keep what was agreed. (Each brief says to change it only when Jon asks;
+   this plan is that ask.)
 6. `docs/agent-watch.md`: setup and the contract, for the next agent's brief to point at.
 
 ## Checks before calling it done
