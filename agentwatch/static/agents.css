@@ -124,11 +124,9 @@ section h3 { margin: 0 0 10px; font-size: 15px; }
 
 .error { color: var(--red); white-space: pre-wrap; }
 
-.row { padding: 10px 0; border-top: 1px solid var(--border); }
-.row:first-of-type { border-top: 0; padding-top: 0; }
-.row .what { margin: 0 0 6px; }
-.row .meta { color: var(--muted); font-size: 13px; }
-.row .answered { color: var(--green); font-size: 14px; }
+ul.log .what { margin: 0 0 4px; }
+ul.log .meta { margin: 0; color: var(--muted); font-size: 13px; }
+ul.log .answered { margin: 4px 0 0; color: var(--green); font-size: 14px; }
 .reply { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
 .reply input[type=text] {
   flex: 1 1 220px;

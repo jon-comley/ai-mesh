@@ -23,8 +23,10 @@ worker's page. `claude` on lenovo1 (logged in as Jon) answers in a clone kept fo
 (`~/.ai-mesh/agents/chats/<name>`), resuming one conversation per worker until "New
 conversation". Each message carries its brief and what its tile shows. It may edit and
 push its own repo, and writes what is agreed to `conversations/<date>.md`, which both
-briefs now read first. Reply boxes stay, labelled as read at the next run. Run now for
-Desk and Standards works (tested 2 Nov, a real Desk run).
+briefs now read first. Run now for
+Desk and Standards works (tested 2 Nov, a real Desk run). The reply boxes and quick buttons
+were taken out the same evening: the chat is the one way to answer, and "Waiting on you" is a
+plain list (the reply route stays in the server, unused).
 
 **Chat on mac1, and memory** (2 Nov): Orchestrator and Reviews chat too, `claude` on mac1
 over ssh (`bash -s`, the context and message in quoted heredocs). The orchestrator's chat

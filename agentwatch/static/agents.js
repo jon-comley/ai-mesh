@@ -175,33 +175,23 @@ function fact(label, value) {
 }
 
 function waitingSection(a) {
-  if (!a.can_reply) {
-    if (!a.waiting_lines.length) return null;
-    return el('section', {}, el('h3', {}, 'Waiting on you'),
-      el('ul', { class: 'log' }, a.waiting_lines.map((l) => el('li', {}, l))));
-  }
-  if (!a.rows.length) return el('section', {}, el('h3', {}, 'Waiting on you'), el('p', { class: 'muted' }, 'Nothing.'));
+  const items = a.can_reply
+    ? a.rows.map((r) => waitingRow(r))
+    : a.waiting_lines.map((l) => el('li', {}, l));
+  if (!items.length) return el('section', {}, el('h3', {}, 'Waiting on you'), el('p', { class: 'muted' }, 'Nothing.'));
   return el('section', {}, el('h3', {}, 'Waiting on you'),
-    el('p', { class: 'muted' }, 'A reply here goes into its hub on GitHub and is read at its next run. To sort something out now, use the chat above.'),
-    a.rows.map((r) => replyRow(a, r)));
+    el('p', { class: 'muted' }, `To answer, tell ${a.name} in the chat above.`),
+    el('ul', { class: 'log' }, items));
 }
 
-function replyRow(a, row) {
+function waitingRow(row) {
   const meta = row.headers.map((h, i) => [h, row.cells[i]])
     .filter(([h, c]) => c && !/^(#|what|item|idea|your reply)$/i.test(h))
     .map(([h, c]) => `${h}: ${plain(c)}`).join(' · ');
-  const input = el('input', { type: 'text', placeholder: 'Reply for its next run' });
-  const runNow = el('input', { type: 'checkbox' });
-  const send = (text) => sendReply(a, row.number, text, a.can_run && runNow.checked);
-  return el('div', { class: 'row' },
+  return el('li', {},
     el('p', { class: 'what' }, `${row.number}. ${plain(rowWhat(row))}`),
     meta ? el('p', { class: 'meta' }, meta) : null,
     row.reply ? el('p', { class: 'answered' }, `You replied: ${row.reply}`) : null,
-    el('div', { class: 'reply' },
-      input,
-      el('button', { type: 'button', class: 'primary', onclick: () => send(input.value) }, 'Send'),
-      a.can_run ? el('label', {}, runNow, ' and run now') : null,
-    ),
   );
 }
 
@@ -345,17 +335,6 @@ async function act(a, action, done) {
     const r = await api('POST', `/api/agents/${encodeURIComponent(a.name)}/${action}`);
     replaceAgent(r.agent);
     toast(done);
-  } catch (e) { toast(e.message, true); }
-  render();
-}
-
-async function sendReply(a, number, text, runNow) {
-  if (!text.trim()) return;
-  try {
-    const r = await api('POST', `/api/agents/${encodeURIComponent(a.name)}/reply`, { number, text, run_now: runNow });
-    replaceAgent(r.agent);
-    if (r.run_error) toast(`Reply saved, but Run now failed: ${r.run_error}`, true);
-    else toast(runNow ? 'Reply saved, run started' : 'Reply saved');
   } catch (e) { toast(e.message, true); }
   render();
 }
