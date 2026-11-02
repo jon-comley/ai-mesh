@@ -3103,6 +3103,30 @@ update-coordinator target_host:
         systemctl is-active ai-mesh-coordinator"
     echo ">>> Coordinator on {{target_host}} updated (previous binary kept as ai-mesh-coordinator.prev)."
 
+# Build and install the agent watch page on lenovo1 (plans/agent-watch.md):
+# http://lenovo1/. Keeps the previous binary as agentwatch.prev.
+# Roll back with:  ssh lenovo1 'sudo cp -p /usr/local/bin/agentwatch.prev /usr/local/bin/agentwatch && sudo systemctl restart agentwatch'
+# Usage: just deploy-agentwatch
+deploy-agentwatch:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/lenovo1.env
+    cargo build --release --target x86_64-unknown-linux-gnu -p agentwatch 2>&1 | grep -E "^error|Finished"
+    scp {{ssh_opts}} -q target/x86_64-unknown-linux-gnu/release/agentwatch ${NODE_USER}@${NODE_HOST}:/tmp/agentwatch.new
+    scp {{ssh_opts}} -q systemd/agentwatch.service ${NODE_USER}@${NODE_HOST}:/tmp/agentwatch.service
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "set -e
+        [ -e /usr/local/bin/agentwatch ] && sudo cp -p /usr/local/bin/agentwatch /usr/local/bin/agentwatch.prev
+        sudo install -m 755 /tmp/agentwatch.new /usr/local/bin/agentwatch
+        sudo install -m 644 /tmp/agentwatch.service /etc/systemd/system/agentwatch.service
+        rm /tmp/agentwatch.new /tmp/agentwatch.service
+        mkdir -p ~/.ai-mesh/agents/keys && chmod 700 ~/.ai-mesh/agents/keys
+        sudo systemctl daemon-reload
+        sudo systemctl enable -q agentwatch
+        sudo systemctl restart agentwatch
+        sleep 3
+        systemctl is-active agentwatch"
+    echo ">>> Agent watch on lenovo1 updated: http://lenovo1/"
+
 # Verify coordinator health on the target host (Phase 2 health check).
 # Checks: connectivity, log output, agent connections, Zigbee → MQTT, dashboard access.
 # Usage: just verify-coordinator pi1

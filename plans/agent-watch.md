@@ -2,13 +2,16 @@
 
 ## Status (2026-11-02)
 
-**Building.** Steps 1 and 2 done: the `agentwatch` crate (config, log, hub rows and
-replies, status file, state rules, safe Markdown) and the server with its page (tiles,
-detail, replies, Run now, Pause/Resume, settings), 38 Rust tests and 6 page tests, run
-locally against the real repos and mac1. History rows are written when what a tile
-shows changes, not on every fetch. Next: step 3, deploy to lenovo1. Workers: Standards
-(`jon-comley/standards`, weekly) and Desk (`jon-comley/desk`, daily) are live as cloud
-routines; the mac1 orchestrator is the third tile.
+**Live on lenovo1** (steps 1 to 4): `http://192.168.1.47/` at home, and over Tailscale
+`http://lenovo1.tail3c4ee3.ts.net/` (the bare name `lenovo1` only resolves on a
+Tailscale client with MagicDNS). Three tiles: Desk, Standards, the mac1 orchestrator.
+Deploy keys `agentwatch on lenovo1` (read-write) are on jon-comley/desk and
+jon-comley/standards. History rows are written when what a tile shows changes, not on
+every fetch. 38 Rust tests, 6 page tests.
+
+**Not yet:** Run now for the two cloud agents needs `claude` installed and logged in
+on lenovo1 (the button says so until then); Run now, Pause and Resume for the
+orchestrator work now. Next: step 6, chat, then step 7, memory, then step 8, the doc.
 
 ## Goal
 
@@ -311,7 +314,8 @@ for secrets and ThingCo before it is copied. None go across unchecked.
    `agents.db`, ntfy on state change. The page (`static/agents.html`, `agents.js`) compiled
    in with `include_str!`, with vitest tests as for `reviews.js`.
 3. `systemd/agentwatch.service` and a `just deploy-agentwatch` recipe that builds and
-   installs it on lenovo1.
+   installs it on lenovo1. Port 80 is reached as `http://192.168.1.47/` from Windows,
+   which has no Tailscale.
 4. Make the Standards and Desk deploy keys on lenovo1 and add them to their repos,
    read-write.
 5. Local workers: `kind = "local"`, the orchestrator's tile from its status file,
