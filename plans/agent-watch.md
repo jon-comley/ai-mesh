@@ -132,6 +132,12 @@ on lenovo1 (logged in once as Jon, his subscription):
 
 - It works in lenovo1's clone of the agent's repo, with the agent's `agent-brief.md` as
   its standing instructions, so it is the same agent as the scheduled run.
+- **It starts with what the tile shows.** Each chat opens with the tile's current
+  view as context: state, last run and its log line, what it is waiting on from Jon,
+  the latest report, and for the orchestrator its last ten status entries. Updated
+  again on each message if the tile has changed since (a run finished mid-chat), so
+  "what did you just do?" is answered from what Jon can see, without it re-reading
+  the repo. Together with the memory index this is the whole starting context.
 - One conversation per agent, resumed each time (`claude --resume <id>`, the id kept in
   `agents.db`), streamed to the page as it answers. A "New conversation" button starts
   fresh.
@@ -252,6 +258,45 @@ patches" off Jon too, for guv. Only on Jon's say-so, never automatic.
 lenovo1 already reaches mac1 over the LAN; the page uses lenovo1's existing ssh key to
 mac1, nothing new.
 
+## Memory: shared, by subject, loaded only when needed
+
+Every worker (Desk, Standards, the orchestrator, and each tile's chat) shares one memory,
+so what Jon tells one of them is known to all. It lives in its own repo,
+`jon-comley/memory`, one folder per subject:
+
+```
+INDEX.md            the only file loaded at the start
+jon/                how Jon works: writing rules, replies, what to ask first
+vanround-guv/       release state, partners, builds, devices
+standards/          decisions behind the documents
+infra/              machines, accounts, where things run
+money/              spend, renewals, what costs money
+agents/<name>/      things only one worker needs
+```
+
+- **One fact per file**, with a short front matter: `name`, `description` (one line),
+  `updated`. Facts link to each other by name.
+- **`INDEX.md` is the directory:** one line per file, `path: description`, grouped by
+  folder, and nothing else. It is all a worker reads at the start of a run or a chat.
+  That keeps the starting context to a few hundred lines however big the memory grows.
+- **A subject is opened only when it is in play.** A worker opens a folder's files only
+  when the conversation or the job touches that subject ("the Vanround release" opens
+  `vanround-guv/`, not `money/`). It never reads the whole memory, and never "just in
+  case". `jon/` is the exception: always read, because it is how every reply is written.
+- **Writing:** when Jon says something that should outlast the chat (a decision, a
+  correction, a preference), the worker writes or updates one file, then rewrites that
+  line of `INDEX.md`, in the same commit. Update before adding: no duplicates. A fact
+  that turns out wrong is deleted, not left with a note.
+- **Never in memory:** secrets, personal data beyond names and roles, ThingCo.
+- **Access:** a write deploy key on lenovo1 (chats), the cloud routines attach it with
+  push access, and the orchestrator gets its own clone on mac1.
+- **On the page:** a Memory tile showing `INDEX.md` by folder; click a file to read or
+  edit it.
+
+**Seeding it:** the Vanround/Guv, infra and how-Jon-works memories from this laptop's
+Claude memory (`~/.claude/projects/-home-jonno-repos/memory/`), each one checked by hand
+for secrets and ThingCo before it is copied. None go across unchecked.
+
 ## Build order
 
 1. `agentwatch` crate, pure: parse `agent-log.md`, the hub's needs-you count and
@@ -270,7 +315,10 @@ mac1, nothing new.
    `conversations/`. Add one step to both briefs: read `conversations/` since the last
    run first and keep what was agreed. (Each brief says to change it only when Jon asks;
    this plan is that ask.)
-7. `docs/agent-watch.md`: setup and the contract, for the next agent's brief to point at.
+7. Memory: create `jon-comley/memory`, seed it (checked by hand), add a step to each brief
+   and each chat's instructions: read `INDEX.md` and `jon/`, open other folders only
+   when the subject comes up, write what should outlast the chat. The Memory tile.
+8. `docs/agent-watch.md`: setup and the contract, for the next agent's brief to point at.
 
 ## Checks before calling it done
 
