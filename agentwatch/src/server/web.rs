@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use agentwatch::config::Config;
-use agentwatch::markdown;
-use axum::extract::{Path, State};
+use agentwatch::config::Kind;
+use agentwatch::{markdown, reports};
+use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -12,7 +13,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{App, actions};
+use super::{App, actions, run};
 
 const INDEX_HTML: &str = include_str!("../../static/index.html");
 const AGENTS_JS: &str = include_str!("../../static/agents.js");
@@ -87,19 +88,60 @@ async fn refresh(State(app): State<Shared>) -> Json<Value> {
     list(State(app)).await
 }
 
-async fn report(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
+#[derive(Deserialize)]
+struct ReportQuery {
+    /// One of the reports the tile lists; the latest when left out.
+    path: Option<String>,
+}
+
+async fn report(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<ReportQuery>,
+) -> ApiResult {
     let a = agent(&app, &name)?;
-    let view = app.views().into_iter().find(|v| v.name == a.name);
-    let Some(path) = view.and_then(|v| v.report) else {
+    let Some(view) = app.views().into_iter().find(|v| v.name == a.name) else {
         return Err(fail(StatusCode::NOT_FOUND, "no report yet"));
     };
-    let _work = app.work.lock().await;
-    let md = app
-        .repo(&a)
-        .read(&path)
-        .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("{path} is not in the repo")))?;
-    let folder = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let base = a.web_url().map(|u| format!("{u}/blob/main/{folder}"));
+    let listed: Vec<String> = view
+        .report
+        .iter()
+        .cloned()
+        .chain(view.entries.iter().filter_map(|e| e.report.clone()))
+        .collect();
+    let path = match q.path {
+        Some(p) if listed.contains(&p) => p,
+        Some(_) => {
+            return Err(fail(
+                StatusCode::NOT_FOUND,
+                "that report is not one this tile lists",
+            ));
+        }
+        None => view
+            .report
+            .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no report yet"))?,
+    };
+    let (md, base) = match a.kind {
+        Kind::Cloud => {
+            let _work = app.work.lock().await;
+            let md = app
+                .repo(&a)
+                .read(&path)
+                .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("{path} is not in the repo")))?;
+            let folder = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            (md, a.web_url().map(|u| format!("{u}/blob/main/{folder}")))
+        }
+        Kind::Local => {
+            if !reports::safe_path(&path) {
+                return Err(fail(StatusCode::BAD_REQUEST, "not a report path"));
+            }
+            let host = a.host.as_deref().unwrap_or_default();
+            let md = run::output(run::ssh(host, &format!("cat {path}")), run::SSH_LIMIT)
+                .await
+                .map_err(|e| fail(StatusCode::BAD_GATEWAY, e))?;
+            (md, None)
+        }
+    };
     Ok(Json(
         json!({ "path": path, "html": markdown::render(&md, base.as_deref()) }),
     ))

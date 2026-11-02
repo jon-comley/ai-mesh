@@ -3,7 +3,7 @@
 use agentwatch::config::{Agent, Kind};
 use agentwatch::hub::{self, Row};
 use agentwatch::state::{self, CloudFacts, LocalFacts, State};
-use agentwatch::{log, status};
+use agentwatch::{log, reports, status};
 use chrono::{DateTime, Utc};
 use chrono_tz::Europe::London;
 use serde::Serialize;
@@ -165,18 +165,17 @@ async fn read_cloud(repo: &Repo, agent: &Agent, v: &mut View) -> run::Result<Clo
 
 const PAUSED: &str = "@@AGENTWATCH-PAUSED@@";
 const TICK: &str = "@@AGENTWATCH-TICK@@";
+const REPORTS: &str = "@@AGENTWATCH-REPORTS@@";
 
-async fn local(
-    agent: &Agent,
-    v: &mut View,
-    run_started: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) {
-    let host = agent.host.as_deref().expect("checked by Config::parse");
-    let status_path = agent.status.as_deref().expect("checked by Config::parse");
-    // The paths were checked by Config::parse to hold no shell characters, and
-    // stay unquoted so `~` expands on the host.
-    let mut script = format!("head -c 300000 {status_path} 2>/dev/null; printf '\\n{PAUSED}\\n'");
+/// The ssh script that reads a local worker in one go. The paths were checked
+/// by Config::parse to hold no shell characters, and stay unquoted so `~`
+/// expands on the host. It runs under the host's login shell (zsh on mac1).
+fn local_script(agent: &Agent) -> String {
+    let mut script = String::from("true");
+    if let Some(s) = &agent.status {
+        script.push_str(&format!("; head -c 300000 {s} 2>/dev/null"));
+    }
+    script.push_str(&format!("; printf '\\n{PAUSED}\\n'"));
     if let Some(p) = &agent.pause {
         script.push_str(&format!("; [ -e {p} ] && echo yes || echo no"));
     }
@@ -185,6 +184,37 @@ async fn local(
             "; printf '{TICK}\\n'; f=$(ls -t {t} 2>/dev/null | head -1); [ -n \"$f\" ] && tail -c 3000 {t}/\"$f\""
         ));
     }
+    if let Some(r) = &agent.reports {
+        script.push_str(&format!(
+            "; printf '{REPORTS}\\n'; for f in $(ls -t {r}/*/*.md 2>/dev/null | grep -v '/latest.md$' | head -10); \
+             do printf '%s %s %s\\n' '{marker}' \"$(date -r \"$f\" +%s)\" \"$f\"; head -12 \"$f\"; done",
+            marker = reports::FILE_MARKER
+        ));
+    }
+    script
+}
+
+/// The script's output cut at its markers: (status, paused, tick, reports).
+fn split_local(out: &str) -> (&str, &str, Option<&str>, Option<&str>) {
+    let (status_text, rest) = out.split_once(PAUSED).unwrap_or((out, ""));
+    let (rest, listing) = match rest.split_once(REPORTS) {
+        Some((a, b)) => (a, Some(b)),
+        None => (rest, None),
+    };
+    let (paused, tick) = match rest.split_once(TICK) {
+        Some((p, t)) => (p, Some(t)),
+        None => (rest, None),
+    };
+    (status_text, paused, tick, listing)
+}
+
+async fn local(
+    agent: &Agent,
+    v: &mut View,
+    run_started: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) {
+    let host = agent.host.as_deref().expect("checked by Config::parse");
     let mut facts = LocalFacts {
         reachable: true,
         paused: false,
@@ -192,13 +222,9 @@ async fn local(
         last_tick_failed: false,
         run_started,
     };
-    match run::output(run::ssh(host, &script), SSH_LIMIT).await {
+    match run::output(run::ssh(host, &local_script(agent)), SSH_LIMIT).await {
         Ok(out) => {
-            let (status_text, rest) = out.split_once(PAUSED).unwrap_or((&out, ""));
-            let (paused, tick) = match rest.split_once(TICK) {
-                Some((p, t)) => (p, Some(t)),
-                None => (rest, None),
-            };
+            let (status_text, paused, tick, listing) = split_local(&out);
             facts.paused = paused.trim() == "yes";
             facts.last_tick_failed =
                 tick.is_some_and(|t| !t.trim().is_empty() && status::tick_failed(t));
@@ -221,6 +247,9 @@ async fn local(
                     report: None,
                 })
                 .collect();
+            if let Some(listing) = listing {
+                read_reports(listing, v, &mut facts);
+            }
         }
         Err(e) => {
             facts.reachable = false;
@@ -231,4 +260,56 @@ async fn local(
     v.waiting = v.waiting_lines.len();
     v.last_run = facts.last_run;
     v.state = state::local(&facts, agent.every, agent.grace, now);
+}
+
+/// A worker that leaves reports: its last run is its newest report, and what
+/// waits on Jon is each repo's confirmed high and medium findings to check.
+fn read_reports(listing: &str, v: &mut View, facts: &mut LocalFacts) {
+    let all = reports::parse_listing(listing);
+    let Some(newest) = all.first() else { return };
+    if facts.last_run.is_none_or(|l| newest.at > l) {
+        facts.last_run = Some(newest.at);
+        v.line = newest.line();
+        v.report = Some(newest.path.clone());
+    }
+    for r in reports::latest_per_repo(&all) {
+        if r.high + r.medium > 0 {
+            v.waiting_lines.push(format!(
+                "{}: {} high, {} medium to check",
+                r.repo, r.high, r.medium
+            ));
+        }
+    }
+    v.entries.extend(all.iter().map(|r| {
+        EntryView {
+            when: r
+                .at
+                .with_timezone(&London)
+                .format("%-d %b %H:%M")
+                .to_string(),
+            text: r.line(),
+            report: Some(r.path.clone()),
+        }
+    }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_the_script_output_at_its_markers() {
+        let out = format!("# STEP x\n{PAUSED}\nno\n{TICK}\nlog tail\n{REPORTS}\nlisting");
+        let (s, p, t, r) = split_local(&out);
+        assert_eq!(s, "# STEP x\n");
+        assert_eq!(p.trim(), "no");
+        assert_eq!(t.map(str::trim), Some("log tail"));
+        assert_eq!(r.map(str::trim), Some("listing"));
+        let out = format!("\n{PAUSED}\n{REPORTS}\nlisting");
+        let (s, p, t, r) = split_local(&out);
+        assert_eq!(
+            (s.trim(), p.trim(), t, r.map(str::trim)),
+            ("", "", None, Some("listing"))
+        );
+    }
 }

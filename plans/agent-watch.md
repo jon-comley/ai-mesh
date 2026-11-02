@@ -9,6 +9,15 @@ Deploy keys `agentwatch on lenovo1` (read-write) are on jon-comley/desk and
 jon-comley/standards. History rows are written when what a tile shows changes, not on
 every fetch. 38 Rust tests, 6 page tests.
 
+**Fourth tile, Reviews** (2 Nov): the nightly code reviews on mac1 are a worker too.
+A local worker may have `reports = "<dir>"` instead of a status file: its last run is
+its newest report, the tile lists the ten newest, each opens on the page, and what waits
+on Jon is each repo's confirmed high and medium findings. No Run now yet (the reviews
+start from the coordinator).
+
+The ai-mesh dashboard has a **Workers** sub-tab under Tools that shows this page in a
+frame; the data still comes straight from lenovo1.
+
 **Not yet:** Run now for the two cloud agents needs `claude` installed and logged in
 on lenovo1 (the button says so until then); Run now, Pause and Resume for the
 orchestrator work now. Next: step 6, chat, then step 7, memory, then step 8, the doc.

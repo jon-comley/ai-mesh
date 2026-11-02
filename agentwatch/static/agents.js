@@ -158,8 +158,9 @@ function renderAgent(main, name) {
     a.line ? el('section', {}, el('h3', {}, 'Last run'), el('p', {}, a.line)) : null,
     waitingSection(a),
     a.report ? reportSection(a) : null,
-    a.entries.length ? el('section', {}, el('h3', {}, a.kind === 'cloud' ? 'Its log' : 'Its steps'),
-      el('ul', { class: 'log' }, a.entries.map((e) => el('li', {}, el('span', { class: 'when' }, e.when), e.text)))) : null,
+    a.entries.length ? el('section', {}, el('h3', {}, a.kind === 'cloud' ? 'Its log' : 'Its steps and reports'),
+      el('ul', { class: 'log' }, a.entries.map((e) => el('li', {}, el('span', { class: 'when' }, e.when),
+        e.report ? el('a', { href: '#', onclick: (ev) => { ev.preventDefault(); showReport(a, e.report); } }, e.text) : e.text)))) : null,
     a.history.length ? el('section', {}, el('h3', {}, 'What this page has seen'),
       el('ul', { class: 'log' }, a.history.map((h) => el('li', {},
         el('span', { class: 'when' }, clock(h.at)), `${stateLabel(h.state)}, ${h.waiting} waiting. ${h.line}`)))) : null,
@@ -202,11 +203,26 @@ function replyRow(a, row) {
 }
 
 function reportSection(a) {
-  const body = el('div', { class: 'report' }, el('p', { class: 'muted' }, 'Loading…'));
-  api('GET', `/api/agents/${encodeURIComponent(a.name)}/report`)
+  const body = el('div', { class: 'report', id: 'report-body' }, el('p', { class: 'muted' }, 'Loading…'));
+  loadReport(a, null, body);
+  return el('section', { id: 'report' }, el('h3', { id: 'report-title' }, 'Latest report'), body);
+}
+
+function loadReport(a, path, body) {
+  const q = path ? `?path=${encodeURIComponent(path)}` : '';
+  api('GET', `/api/agents/${encodeURIComponent(a.name)}/report${q}`)
     .then((r) => { body.innerHTML = r.html; })
     .catch((e) => { body.textContent = e.message; });
-  return el('section', {}, el('h3', {}, 'Latest report'), body);
+}
+
+/** Shows one of the listed reports in the report section and scrolls to it. */
+function showReport(a, path) {
+  const body = document.getElementById('report-body');
+  if (!body) return;
+  document.getElementById('report-title').textContent = path === a.report ? 'Latest report' : `Report: ${path.split('/').pop()}`;
+  body.replaceChildren(el('p', { class: 'muted' }, 'Loading…'));
+  loadReport(a, path, body);
+  document.getElementById('report').scrollIntoView({ behavior: 'smooth' });
 }
 
 async function renderSettings(main) {

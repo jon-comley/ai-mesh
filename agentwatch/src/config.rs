@@ -54,6 +54,11 @@ pub struct Agent {
     /// tick failed.
     #[serde(default)]
     pub ticks: Option<String>,
+    /// Directory of its reports on `host`, one folder per repo
+    /// (`~/.ai-mesh/reviews/reports`), for a worker that leaves reports
+    /// instead of a status file: the code reviews on mac1.
+    #[serde(default)]
+    pub reports: Option<String>,
     /// Its launchd label, for Run now (`launchctl kickstart`).
     #[serde(default)]
     pub kickstart: Option<String>,
@@ -109,7 +114,10 @@ impl Config {
             }
             let missing = match a.kind {
                 Kind::Cloud => [("repo", a.repo.is_none()), ("key", a.key.is_none())],
-                Kind::Local => [("host", a.host.is_none()), ("status", a.status.is_none())],
+                Kind::Local => [
+                    ("host", a.host.is_none()),
+                    ("status", a.status.is_none() && a.reports.is_none()),
+                ],
             };
             if let Some((field, _)) = missing.iter().find(|(_, m)| *m) {
                 return Err(ConfigError(format!("{} has no {field}", a.name)));
@@ -173,7 +181,7 @@ fn check(a: &Agent) -> Result<(), ConfigError> {
                 .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
     }
     type Check<'a> = (&'a str, &'a Option<String>, fn(&str) -> bool);
-    let checks: [Check; 7] = [
+    let checks: [Check; 8] = [
         ("host", &a.host, word_ok),
         ("key", &a.key, word_ok),
         ("kickstart", &a.kickstart, word_ok),
@@ -181,6 +189,7 @@ fn check(a: &Agent) -> Result<(), ConfigError> {
         ("status", &a.status, path_ok),
         ("pause", &a.pause, path_ok),
         ("ticks", &a.ticks, path_ok),
+        ("reports", &a.reports, path_ok),
     ];
     for (field, value, ok) in checks {
         if value.as_deref().is_some_and(|v| !ok(v)) {
