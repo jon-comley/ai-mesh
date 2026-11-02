@@ -63,6 +63,16 @@ pub fn waiting_on_jon(step: &Step) -> Vec<String> {
         .collect()
 }
 
+/// Whether a tick log's tail shows the tick failed: empty, or `claude` gave
+/// up with an error instead of an answer.
+pub fn tick_failed(log_tail: &str) -> bool {
+    let t = log_tail.trim();
+    t.is_empty()
+        || t.starts_with("Error")
+        || t.contains("API Error")
+        || t.contains("Execution error")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +130,17 @@ mod tests {
             utc("2026-11-02T21:00:00Z"),
         );
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn a_tick_failed_when_its_log_is_empty_or_an_error() {
+        assert!(!tick_failed(
+            "No change since the last step, so I added a NO CHANGE entry."
+        ));
+        assert!(tick_failed(""));
+        assert!(tick_failed("  \n"));
+        assert!(tick_failed("Error: Reached max turns (40)"));
+        assert!(tick_failed("API Error: 529 overloaded"));
     }
 
     #[test]

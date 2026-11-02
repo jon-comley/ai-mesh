@@ -10,10 +10,12 @@
 //! - [`hub`] reads the rows an agent is waiting on in `HUB.md`, and writes Jon's
 //!   reply into one.
 //! - [`status`] reads a local worker's status file (the mac1 orchestrator).
+//! - [`markdown`] renders reports for the page, raw HTML shown as text.
 //! - [`state`] decides `ok`, `late`, `broken` and the rest.
 
 pub mod config;
 pub mod hub;
 pub mod log;
+pub mod markdown;
 pub mod state;
 pub mod status;

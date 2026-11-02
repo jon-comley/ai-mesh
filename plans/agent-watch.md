@@ -2,10 +2,13 @@
 
 ## Status (2026-11-02)
 
-**Building.** Step 1 done: the `agentwatch` crate's pure parts (config, log, hub rows
-and replies, status file, state rules), 29 tests. Next: step 2, the server. Workers:
-Standards (`jon-comley/standards`, weekly) and Desk (`jon-comley/desk`, daily) are live
-as cloud routines; the mac1 orchestrator is the third tile.
+**Building.** Steps 1 and 2 done: the `agentwatch` crate (config, log, hub rows and
+replies, status file, state rules, safe Markdown) and the server with its page (tiles,
+detail, replies, Run now, Pause/Resume, settings), 38 Rust tests and 6 page tests, run
+locally against the real repos and mac1. History rows are written when what a tile
+shows changes, not on every fetch. Next: step 3, deploy to lenovo1. Workers: Standards
+(`jon-comley/standards`, weekly) and Desk (`jon-comley/desk`, daily) are live as cloud
+routines; the mac1 orchestrator is the third tile.
 
 ## Goal
 

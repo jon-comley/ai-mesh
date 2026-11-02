@@ -50,6 +50,13 @@ pub struct Agent {
     /// Path of its pause file on `host`.
     #[serde(default)]
     pub pause: Option<String>,
+    /// Directory of its tick logs on `host`; the newest says whether the last
+    /// tick failed.
+    #[serde(default)]
+    pub ticks: Option<String>,
+    /// Its launchd label, for Run now (`launchctl kickstart`).
+    #[serde(default)]
+    pub kickstart: Option<String>,
 
     /// How often it is meant to run: `7d`, `1d`, `20m`.
     #[serde(with = "duration_text")]
@@ -107,6 +114,7 @@ impl Config {
             if let Some((field, _)) = missing.iter().find(|(_, m)| *m) {
                 return Err(ConfigError(format!("{} has no {field}", a.name)));
             }
+            check(a)?;
         }
         Ok(config)
     }
@@ -120,6 +128,79 @@ impl Config {
             .iter()
             .find(|a| a.name.eq_ignore_ascii_case(name))
     }
+}
+
+impl Agent {
+    /// How the agent's own commits start: `Desk:` for Desk.
+    pub fn commit_prefix(&self) -> String {
+        format!("{}:", self.name)
+    }
+
+    /// `https://github.com/<owner>/<repo>` for a `git@github.com:` repo.
+    pub fn web_url(&self) -> Option<String> {
+        let path = self.repo.as_deref()?.strip_prefix("git@github.com:")?;
+        Some(format!(
+            "https://github.com/{}",
+            path.strip_suffix(".git").unwrap_or(path)
+        ))
+    }
+}
+
+/// The values that end up in a command line (ssh, git, launchctl) are checked
+/// here, so a typo in `agents.toml` cannot run anything unexpected.
+fn check(a: &Agent) -> Result<(), ConfigError> {
+    let bad = |field: &str| {
+        Err(ConfigError(format!(
+            "{}: {field} has characters it cannot have",
+            a.name
+        )))
+    };
+    let name_ok = !a.name.is_empty()
+        && a.name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == ' ');
+    if !name_ok {
+        return bad("name");
+    }
+    fn path_ok(p: &str) -> bool {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "~._/-".contains(c))
+    }
+    fn word_ok(w: &str) -> bool {
+        !w.is_empty()
+            && w.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    }
+    type Check<'a> = (&'a str, &'a Option<String>, fn(&str) -> bool);
+    let checks: [Check; 7] = [
+        ("host", &a.host, word_ok),
+        ("key", &a.key, word_ok),
+        ("kickstart", &a.kickstart, word_ok),
+        ("routine", &a.routine, word_ok),
+        ("status", &a.status, path_ok),
+        ("pause", &a.pause, path_ok),
+        ("ticks", &a.ticks, path_ok),
+    ];
+    for (field, value, ok) in checks {
+        if value.as_deref().is_some_and(|v| !ok(v)) {
+            return bad(field);
+        }
+    }
+    if !path_ok(&a.hub) || a.hub.contains("..") {
+        return bad("hub");
+    }
+    if let Some(repo) = &a.repo {
+        let rest = repo.strip_prefix("git@github.com:").unwrap_or("");
+        let ok = rest.split('/').count() == 2 && path_ok(rest) && !rest.contains("..");
+        if !ok {
+            return Err(ConfigError(format!(
+                "{}: repo must be git@github.com:<owner>/<repo>.git",
+                a.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Reads `30m`, `6h`, `7d` (a whole number and one unit).
@@ -235,9 +316,40 @@ grace = "10m"
 
     #[test]
     fn refuses_two_agents_with_one_name() {
-        let one = "[[agent]]\nname = \"Desk\"\npurpose = \"p\"\nrepo = \"r\"\nkey = \"k\"\nevery = \"1d\"\n";
+        let one = "[[agent]]\nname = \"Desk\"\npurpose = \"p\"\nrepo = \"git@github.com:a/b.git\"\nkey = \"k\"\nevery = \"1d\"\n";
         let e = Config::parse(&format!("{one}{}", one.replace("Desk", "desk"))).unwrap_err();
         assert_eq!(e.0, "two agents are called desk");
+    }
+
+    #[test]
+    fn refuses_values_that_would_reach_a_command_line_oddly() {
+        let base = "[[agent]]\nname = \"O\"\npurpose = \"p\"\nkind = \"local\"\nhost = \"mac1\"\nevery = \"20m\"\n";
+        assert!(Config::parse(&format!("{base}status = \"~/s.md\"\n")).is_ok());
+        let e = Config::parse(&format!("{base}status = \"~/s.md; rm -rf ~\"\n")).unwrap_err();
+        assert_eq!(e.0, "O: status has characters it cannot have");
+        let e = Config::parse(&format!("{base}status = \"~/s.md\"\nkickstart = \"a b\"\n"))
+            .unwrap_err();
+        assert_eq!(e.0, "O: kickstart has characters it cannot have");
+        let cloud = "[[agent]]\nname = \"C\"\npurpose = \"p\"\nkey = \"c\"\nevery = \"1d\"\n";
+        let e = Config::parse(&format!("{cloud}repo = \"https://example.com/x\"\n")).unwrap_err();
+        assert_eq!(e.0, "C: repo must be git@github.com:<owner>/<repo>.git");
+        let e = Config::parse(&format!(
+            "{cloud}repo = \"git@github.com:a/b.git\"\nhub = \"../x.md\"\n"
+        ))
+        .unwrap_err();
+        assert_eq!(e.0, "C: hub has characters it cannot have");
+    }
+
+    #[test]
+    fn web_url_and_commit_prefix() {
+        let c = Config::parse(EXAMPLE).unwrap();
+        let d = c.agent("Desk").unwrap();
+        assert_eq!(
+            d.web_url().as_deref(),
+            Some("https://github.com/jon-comley/desk")
+        );
+        assert_eq!(d.commit_prefix(), "Desk:");
+        assert_eq!(c.agent("Orchestrator").unwrap().web_url(), None);
     }
 
     #[test]
@@ -253,7 +365,7 @@ grace = "10m"
         assert_eq!(format_duration(Duration::from_secs(1800)), "30m");
         assert!(
             Config::parse(
-                "[[agent]]\nname=\"a\"\npurpose=\"p\"\nrepo=\"r\"\nkey=\"k\"\nevery=\"soon\"\n"
+                "[[agent]]\nname=\"a\"\npurpose=\"p\"\nrepo=\"git@github.com:a/b.git\"\nkey=\"k\"\nevery=\"soon\"\n"
             )
             .is_err()
         );
