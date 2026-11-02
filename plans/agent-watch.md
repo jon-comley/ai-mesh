@@ -2,8 +2,10 @@
 
 ## Status (2026-11-02)
 
-**Plan.** Nothing built. First agent to watch: Standards (`jon-comley/standards`, repo not yet
-created). Second proposed below: Desk.
+**Building.** Step 1 done: the `agentwatch` crate's pure parts (config, log, hub rows
+and replies, status file, state rules), 29 tests. Next: step 2, the server. Workers:
+Standards (`jon-comley/standards`, weekly) and Desk (`jon-comley/desk`, daily) are live
+as cloud routines; the mac1 orchestrator is the third tile.
 
 ## Goal
 
@@ -63,7 +65,7 @@ key = "standards"
 every = "7d"        # how often it is meant to run (Standards is weekly)
 grace = "6h"        # late after every + grace with no new log line
 hub = "HUB.md"
-routine = "trig_0127dkvNe1icdcbGrV2NT3De"   # the cloud routine, for Run now
+routine = "trig_..."   # the cloud routine id, for Run now
 ```
 
 ## What it works out

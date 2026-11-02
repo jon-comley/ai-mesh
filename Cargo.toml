@@ -15,6 +15,7 @@ members = [
     "ebay",
     "chords",
     "codereview",
+    "agentwatch",
     "llm-rotation",
     "agent",
     "coordinator",

@@ -1,0 +1,137 @@
+//! A local worker's status file: newest first, one heading per step:
+//!
+//! ```text
+//! # STEP 2 Nov 20:23 (check): NO CHANGE. HEAD = origin/main 213993d8, ...
+//! ```
+//!
+//! The date has no year; the worker writes it in UK local time.
+
+use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Utc};
+use chrono_tz::Europe::London;
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Step {
+    pub at: DateTime<Utc>,
+    /// What the step was: `check`, `work`, ...
+    pub kind: String,
+    pub summary: String,
+}
+
+/// Every step heading in the file, in file order (newest first). `now` gives
+/// the year: a date that would be in the future this year is last year's.
+pub fn parse(text: &str, now: DateTime<Utc>) -> Vec<Step> {
+    text.lines().filter_map(|l| step(l, now)).collect()
+}
+
+fn step(line: &str, now: DateTime<Utc>) -> Option<Step> {
+    let rest = line.strip_prefix("# STEP ")?;
+    let (when, rest) = rest.split_once(" (")?;
+    let (kind, summary) = rest.split_once("):")?;
+    let at = when_to_utc(when.trim(), now)?;
+    Some(Step {
+        at,
+        kind: kind.trim().to_string(),
+        summary: summary.trim().to_string(),
+    })
+}
+
+fn when_to_utc(when: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let year = now.with_timezone(&London).year();
+    let at = |y: i32| {
+        NaiveDateTime::parse_from_str(&format!("{when} {y}"), "%d %b %H:%M %Y")
+            .ok()
+            .and_then(|n| London.from_local_datetime(&n).earliest())
+            .map(|t| t.with_timezone(&Utc))
+    };
+    let this_year = at(year)?;
+    // A day's grace for clocks a little apart.
+    if this_year > now + chrono::Duration::days(1) {
+        at(year - 1)
+    } else {
+        Some(this_year)
+    }
+}
+
+/// The lines of the newest step's summary that say what it waits on from Jon.
+pub fn waiting_on_jon(step: &Step) -> Vec<String> {
+    step.summary
+        .split(['.', ';'])
+        .map(str::trim)
+        .filter(|s| s.to_lowercase().contains("waiting on jon"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn reads_the_fixture_newest_first() {
+        let steps = parse(
+            include_str!("../fixtures/status.md"),
+            utc("2026-11-02T21:00:00Z"),
+        );
+        assert_eq!(steps.len(), 3);
+        // November is GMT, so local time is UTC.
+        assert_eq!(steps[0].at, utc("2026-11-02T20:23:00Z"));
+        assert_eq!(steps[0].kind, "check");
+        assert!(
+            steps[0]
+                .summary
+                .starts_with("NO CHANGE. HEAD = origin/main 213993d8")
+        );
+        assert_eq!(steps[2].kind, "work");
+        assert_eq!(steps[2].at, utc("2026-11-01T09:15:00Z"));
+    }
+
+    #[test]
+    fn summer_times_are_bst() {
+        let s = parse(
+            "# STEP 1 Jul 09:00 (check): fine.",
+            utc("2026-07-01T12:00:00Z"),
+        );
+        assert_eq!(s[0].at, utc("2026-07-01T08:00:00Z"));
+    }
+
+    #[test]
+    fn a_date_ahead_of_now_is_last_year() {
+        let s = parse(
+            "# STEP 31 Dec 23:50 (check): fine.",
+            utc("2027-01-01T00:10:00Z"),
+        );
+        assert_eq!(s[0].at, utc("2026-12-31T23:50:00Z"));
+        let s = parse(
+            "# STEP 20 Dec 10:00 (check): fine.",
+            utc("2027-01-05T00:00:00Z"),
+        );
+        assert_eq!(s[0].at, utc("2026-12-20T10:00:00Z"));
+    }
+
+    #[test]
+    fn skips_headings_that_are_not_steps() {
+        let s = parse(
+            "# STEP 2 Nov (check): no time.\n# Notes\n## STEP 2 Nov 10:00 (x): y",
+            utc("2026-11-02T21:00:00Z"),
+        );
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn finds_what_it_is_waiting_on_jon_for() {
+        let steps = parse(
+            include_str!("../fixtures/status.md"),
+            utc("2026-11-02T21:00:00Z"),
+        );
+        assert_eq!(
+            waiting_on_jon(&steps[0]),
+            ["Waiting on Jon to say start the gated run"]
+        );
+        assert!(waiting_on_jon(&steps[1]).is_empty());
+    }
+}
