@@ -213,6 +213,14 @@ hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
+## IT worker on lenovo1, for Cyber Essentials (agreed 2026-11-03, not started)
+
+A local worker like the mac1 orchestrator, with its own tile on the Workers page. First job, the monthly
+patch check due 2026-12-01: SSH over Tailscale to GF-001 (Jack's laptop) and Jon's machines, run the check
+half of `standards/tools/laptop-setup.ps1`, file the report in Drive `Records/IT-PRO-003/`, raise failures
+in the standards hub. Waits on: IT-PRO-001 keeping SSH on (Tailscale only) instead of removing it, and
+IT-PRO-003 patch management, both drafted by the Standards agent for Jon's approval (standards hub idea 3).
+
 ## pi1 is a single point of failure: the whole mesh went down, 2026-10-13
 
 pi1 dropped off the network around 03:30 and Jon had to power-cycle it by hand.
