@@ -39,8 +39,17 @@ clones at `~/.ai-mesh/agents/memory` (lenovo1) and `~/.ai-mesh/memory` (mac1). E
 starts with `INDEX.md` and `jon/` only and opens other files when the subject comes up;
 both cloud routines attach it and both briefs say the same.
 
-**Not yet:** Desk's chat reading the other repos (it sees only its own); the Memory tile;
-the orchestrator's scheduled ticks reading memory; step 8, the doc.
+**Memory tile** (3 Nov): a dashed tile after the workers ("85 facts in 6 folders"). Its page
+lists each folder with its index title and each fact with its description; a fact opens
+rendered, with Edit: the save commits as Jon, keeps the file's `INDEX.md` line in step with
+its `description`, and pushes. Paths are `<folder>/<file>.md` only.
+
+The orchestrator's headings sometimes give only the day (`# STEP 3 Nov (check)`), so its
+last run is the later of its newest heading and its newest tick log's name
+(`20261103-0244.log`).
+
+**Not yet:** Desk's chat reading the other repos (it sees only its own); the orchestrator's
+scheduled ticks reading memory; step 8, the doc.
 
 ## Goal
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -24,6 +24,8 @@ describe('agent watch page helpers', () => {
     expect(parseRoute('#/agent/Desk')).toEqual({ view: 'agent', name: 'Desk' });
     expect(parseRoute('#/agent/Two%20Words')).toEqual({ view: 'agent', name: 'Two Words' });
     expect(parseRoute('#/settings')).toEqual({ view: 'settings' });
+    expect(parseRoute('#/memory')).toEqual({ view: 'memory' });
+    expect(parseRoute('#/memory/jon/be-punchy.md')).toEqual({ view: 'fact', path: 'jon/be-punchy.md' });
   });
 
   it('finds what a hub row is about', () => {
@@ -58,5 +60,10 @@ describe('agent watch page helpers', () => {
       { role: 'tool', text: 'Editing HUB.md' },
       { role: 'error', text: 'claude stopped' },
     ]);
+  });
+
+  it('says on the Memory tile how much every worker knows', () => {
+    expect(memoryTileText(null)).toBe('What every worker knows, by subject');
+    expect(memoryTileText({ count: 85, folders: [1, 2, 3, 4, 5, 6] })).toBe('What every worker knows: 85 facts in 6 folders');
   });
 });

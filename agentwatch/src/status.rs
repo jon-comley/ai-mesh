@@ -12,7 +12,10 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Step {
+    /// When the step ran; midnight of its day when the heading gives no time.
     pub at: DateTime<Utc>,
+    /// The heading gave a time, not just a day.
+    pub timed: bool,
     /// What the step was: `check`, `work`, ...
     pub kind: String,
     pub summary: String,
@@ -28,9 +31,18 @@ fn step(line: &str, now: DateTime<Utc>) -> Option<Step> {
     let rest = line.strip_prefix("# STEP ")?;
     let (when, rest) = rest.split_once(" (")?;
     let (kind, summary) = rest.split_once("):")?;
-    let at = when_to_utc(when.trim(), now)?;
+    let when = when.trim();
+    // Some headings give only the day (`3 Nov`): read those as its midnight.
+    let timed = when.contains(':');
+    let full = if timed {
+        when.to_string()
+    } else {
+        format!("{when} 00:00")
+    };
+    let at = when_to_utc(&full, now)?;
     Some(Step {
         at,
+        timed,
         kind: kind.trim().to_string(),
         summary: summary.trim().to_string(),
     })
@@ -61,6 +73,16 @@ pub fn waiting_on_jon(step: &Step) -> Vec<String> {
         .filter(|s| s.to_lowercase().contains("waiting on jon"))
         .map(str::to_string)
         .collect()
+}
+
+/// When a tick ran, from its log's name (`20261103-0244.log`, UK time).
+pub fn tick_time(file_name: &str) -> Option<DateTime<Utc>> {
+    let stem = file_name.trim().trim_end_matches(".log");
+    let n = NaiveDateTime::parse_from_str(stem, "%Y%m%d-%H%M").ok()?;
+    London
+        .from_local_datetime(&n)
+        .earliest()
+        .map(|t| t.with_timezone(&Utc))
 }
 
 /// Whether a tick log's tail shows the tick failed: empty, or `claude` gave
@@ -126,10 +148,34 @@ mod tests {
     #[test]
     fn skips_headings_that_are_not_steps() {
         let s = parse(
-            "# STEP 2 Nov (check): no time.\n# Notes\n## STEP 2 Nov 10:00 (x): y",
+            "# Notes\n## STEP 2 Nov 10:00 (x): y\n# STEP soon (x): y",
             utc("2026-11-02T21:00:00Z"),
         );
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn a_heading_with_only_the_day_reads_as_its_midnight() {
+        let s = parse(
+            "# STEP 3 Nov (check): NO CHANGE.",
+            utc("2026-11-03T03:00:00Z"),
+        );
+        assert_eq!(s[0].at, utc("2026-11-03T00:00:00Z"));
+        assert!(!s[0].timed);
+        assert!(parse("# STEP 3 Nov 02:08 (check): x", utc("2026-11-03T03:00:00Z"))[0].timed);
+    }
+
+    #[test]
+    fn reads_a_tick_time_from_its_log_name() {
+        assert_eq!(
+            tick_time("20261103-0244.log"),
+            Some(utc("2026-11-03T02:44:00Z"))
+        );
+        assert_eq!(
+            tick_time("20260701-0900.log"),
+            Some(utc("2026-07-01T08:00:00Z"))
+        );
+        assert_eq!(tick_time("latest.log"), None);
     }
 
     #[test]

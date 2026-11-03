@@ -88,8 +88,16 @@ impl Repo {
 
     /// Writes `contents` to `path`, commits as Jon and pushes to `main`.
     pub async fn commit_and_push(&self, path: &str, contents: &str, message: &str) -> Result<()> {
-        std::fs::write(self.dir.join(path), contents).map_err(|e| e.to_string())?;
-        self.git(&["add", "--", path]).await?;
+        self.commit_files(&[(path, contents)], message).await
+    }
+
+    /// Writes each `(path, contents)`, commits them as one commit by Jon and
+    /// pushes to `main`. If the push is refused the clone goes back to GitHub's.
+    pub async fn commit_files(&self, files: &[(&str, &str)], message: &str) -> Result<()> {
+        for (path, contents) in files {
+            std::fs::write(self.dir.join(path), contents).map_err(|e| e.to_string())?;
+            self.git(&["add", "--", path]).await?;
+        }
         self.git(&[
             "-c",
             "user.name=jon",
@@ -101,11 +109,16 @@ impl Repo {
         ])
         .await?;
         if let Err(e) = self.git(&["push", "origin", "HEAD:main"]).await {
-            // Leave the clone as GitHub has it, so the caller can retry from there.
             let _ = self.sync().await;
             return Err(e);
         }
         Ok(())
+    }
+
+    /// When `main` last changed.
+    pub async fn last_commit_time(&self) -> Result<Option<DateTime<Utc>>> {
+        let out = self.git(&["log", "-1", "--format=%cI"]).await?;
+        Ok(parse_time(&out))
     }
 
     async fn git(&self, args: &[&str]) -> Result<String> {

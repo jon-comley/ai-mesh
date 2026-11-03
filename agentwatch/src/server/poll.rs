@@ -183,7 +183,7 @@ fn local_script(agent: &Agent) -> String {
     }
     if let Some(t) = &agent.ticks {
         script.push_str(&format!(
-            "; printf '{TICK}\\n'; f=$(ls -t {t} 2>/dev/null | head -1); [ -n \"$f\" ] && tail -c 3000 {t}/\"$f\""
+            "; printf '{TICK}\\n'; f=$(ls -t {t} 2>/dev/null | head -1); printf '%s\\n' \"$f\"; [ -n \"$f\" ] && tail -c 3000 {t}/\"$f\""
         ));
     }
     if let Some(r) = &agent.reports {
@@ -228,13 +228,27 @@ async fn local(
         Ok(out) => {
             let (status_text, paused, tick, listing) = split_local(&out);
             facts.paused = paused.trim() == "yes";
-            facts.last_tick_failed =
-                tick.is_some_and(|t| !t.trim().is_empty() && status::tick_failed(t));
+            // The tick section starts with the newest log's name, then its tail.
+            let (tick_name, tick_tail) = match tick {
+                Some(t) => {
+                    let t = t.trim_start_matches('\n');
+                    t.split_once('\n').unwrap_or((t, ""))
+                }
+                None => ("", ""),
+            };
+            facts.last_tick_failed = !tick_name.trim().is_empty() && status::tick_failed(tick_tail);
+            let tick_at = status::tick_time(tick_name);
             let steps = status::parse(status_text, now);
             if let Some(top) = steps.first() {
                 facts.last_run = Some(top.at);
                 v.line = top.summary.clone();
                 v.waiting_lines = status::waiting_on_jon(top);
+            }
+            // A heading may give only the day; the tick log's name has the time.
+            if let Some(t) = tick_at
+                && facts.last_run.is_none_or(|l| t > l)
+            {
+                facts.last_run = Some(t);
             }
             v.entries = steps
                 .iter()
@@ -243,7 +257,7 @@ async fn local(
                     when: s
                         .at
                         .with_timezone(&London)
-                        .format("%-d %b %H:%M")
+                        .format(if s.timed { "%-d %b %H:%M" } else { "%-d %b" })
                         .to_string(),
                     text: format!("{}: {}", s.kind, s.summary),
                     report: None,

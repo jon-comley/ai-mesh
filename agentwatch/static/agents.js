@@ -54,6 +54,8 @@ export function parseRoute(hash) {
   const parts = (hash || '').replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   if (parts[0] === 'agent' && parts[1]) return { view: 'agent', name: parts[1] };
   if (parts[0] === 'settings') return { view: 'settings' };
+  if (parts[0] === 'memory' && parts.length === 3) return { view: 'fact', path: `${parts[1]}/${parts[2]}` };
+  if (parts[0] === 'memory') return { view: 'memory' };
   return { view: 'tiles' };
 }
 
@@ -127,7 +129,82 @@ function renderTiles(main) {
     main.append(el('p', { class: 'muted' }, 'No workers yet. Add them in ', el('a', { href: '#/settings' }, 'Settings'), '.'));
     return;
   }
-  main.append(el('div', { class: 'tiles' }, agents.map(tile)));
+  main.append(el('div', { class: 'tiles' }, agents.map(tile), memoryTile()));
+}
+
+// ── Memory ──────────────────────────────────────────────────────────────────
+
+let memory = null; // { folders, count, updated } once loaded
+
+function loadMemory() {
+  return api('GET', '/api/memory').then((m) => { memory = m; return m; });
+}
+
+export function memoryTileText(m) {
+  if (!m) return 'What every worker knows, by subject';
+  return `What every worker knows: ${m.count} facts in ${m.folders.length} folders`;
+}
+
+function memoryTile() {
+  const p = el('p', {}, memoryTileText(memory));
+  if (!memory) loadMemory().then((m) => { p.textContent = memoryTileText(m); }).catch(() => {});
+  return el('a', { class: 'tile memory-tile', href: '#/memory' }, el('h2', {}, 'Memory'), p);
+}
+
+function renderMemory(main) {
+  const body = el('div', {}, el('p', { class: 'muted' }, 'Loading…'));
+  main.append(
+    el('div', { class: 'detail' },
+      el('h1', {}, 'Memory'),
+      el('p', { class: 'purpose' }, 'Shared by every worker. Each starts with the index and jon/, and opens a folder only when the talk is about it. Tell any worker something lasting and it lands here.'),
+      body),
+  );
+  loadMemory().then((m) => {
+    body.replaceChildren(
+      el('p', { class: 'muted' }, `${m.count} facts${m.updated ? `, last changed ${clock(m.updated)}` : ''}.`),
+      ...m.folders.map((f) => el('section', {},
+        el('h3', {}, `${f.name}/`, f.title ? el('span', { class: 'muted' }, `  ${f.title}`) : null),
+        el('ul', { class: 'log' }, f.facts.map((x) => el('li', {},
+          el('a', { href: `#/memory/${x.path.split('/').map(encodeURIComponent).join('/')}` }, x.name),
+          el('p', { class: 'meta' }, x.description)))))),
+    );
+  }).catch((e) => { body.textContent = e.message; });
+}
+
+function renderFact(main, path) {
+  const body = el('div', { class: 'report' }, el('p', { class: 'muted' }, 'Loading…'));
+  const title = el('h1', {}, path);
+  const actions = el('div', { class: 'actions' });
+  main.append(el('div', { class: 'detail' },
+    el('p', {}, el('a', { href: '#/memory' }, '← Memory')), title, actions, el('section', {}, body)));
+  api('GET', `/api/memory/file?path=${encodeURIComponent(path)}`).then((r) => {
+    title.textContent = r.fact.name;
+    const show = () => {
+      body.innerHTML = r.html;
+      actions.replaceChildren(
+        el('p', { class: 'muted' }, `${r.fact.description}${r.fact.updated ? ` (updated ${r.fact.updated})` : ''}`),
+        el('button', { type: 'button', onclick: edit }, 'Edit'));
+    };
+    const edit = () => {
+      const area = el('textarea', { class: 'config' });
+      area.value = r.text;
+      body.replaceChildren(area);
+      actions.replaceChildren(
+        el('button', { type: 'button', class: 'primary', onclick: async () => {
+          try {
+            await api('PUT', '/api/memory/file', { path, text: area.value });
+            toast('Saved and pushed');
+            memory = null;
+            const fresh = await api('GET', `/api/memory/file?path=${encodeURIComponent(path)}`);
+            Object.assign(r, fresh);
+            show();
+          } catch (e) { toast(e.message, true); }
+        } }, 'Save'),
+        el('button', { type: 'button', onclick: show }, 'Cancel'));
+      area.focus();
+    };
+    show();
+  }).catch((e) => { body.textContent = e.message; });
 }
 
 function renderAgent(main, name) {
@@ -349,6 +426,8 @@ function render() {
   const route = parseRoute(location.hash);
   if (route.view === 'agent') { renderAgent(main, route.name); drawChat(); }
   else if (route.view === 'settings') renderSettings(main);
+  else if (route.view === 'memory') renderMemory(main);
+  else if (route.view === 'fact') renderFact(main, route.path);
   else renderTiles(main);
   document.getElementById('checked').textContent = checkedAt ? `checked ${relTime(checkedAt)}` : '';
   document.getElementById('back').hidden = route.view === 'tiles';
@@ -360,7 +439,7 @@ async function load(path = '/api/agents', method = 'GET') {
     agents = r.agents;
     checkedAt = agents.map((a) => a.checked_at).sort().at(-1) || null;
   } catch (e) { toast(e.message, true); }
-  if (parseRoute(location.hash).view !== 'settings') render();
+  if (['tiles', 'agent'].includes(parseRoute(location.hash).view)) render();
 }
 
 if (typeof window !== 'undefined' && document.getElementById('main')) {

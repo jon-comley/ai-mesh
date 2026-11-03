@@ -12,6 +12,7 @@
 //!   reply into one.
 //! - [`status`] reads a local worker's status file (the mac1 orchestrator).
 //! - [`reports`] reads the code reviews' report headers on mac1.
+//! - [`memory`] reads the shared memory for the Memory tile.
 //! - [`markdown`] renders reports for the page, raw HTML shown as text.
 //! - [`state`] decides `ok`, `late`, `broken` and the rest.
 
@@ -20,6 +21,7 @@ pub mod config;
 pub mod hub;
 pub mod log;
 pub mod markdown;
+pub mod memory;
 pub mod reports;
 pub mod state;
 pub mod status;

@@ -201,3 +201,6 @@ textarea.config {
   font: inherit;
   resize: vertical;
 }
+
+/* The Memory tile sits with the workers but is not one: no light, dashed edge. */
+.memory-tile { border-style: dashed; }

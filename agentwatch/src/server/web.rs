@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agentwatch::config::Config;
 use agentwatch::config::Kind;
-use agentwatch::{markdown, reports};
+use agentwatch::{markdown, memory, reports};
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -55,6 +55,8 @@ pub fn router(app: Shared) -> Router {
             get(chat_messages).post(chat_send),
         )
         .route("/api/agents/{name}/chat/new", post(chat_new))
+        .route("/api/memory", get(memory_list))
+        .route("/api/memory/file", get(memory_file).put(memory_save))
         .route("/api/config", get(get_config).put(put_config))
         .with_state(app)
 }
@@ -311,4 +313,126 @@ async fn chat_new(State(app): State<Shared>, Path(name): Path<String>) -> ApiRes
         .clear_chat(&a.name)
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "messages": [] })))
+}
+
+fn memory_repo(app: &App) -> Result<super::repo::Repo, (StatusCode, Json<Value>)> {
+    app.memory_repo()
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no memory repo is set in Settings"))
+}
+
+/// Every fact in the shared memory, by folder.
+async fn memory_list(State(app): State<Shared>) -> ApiResult {
+    let repo = memory_repo(&app)?;
+    let _work = app.work.lock().await;
+    repo.sync_keep()
+        .await
+        .map_err(|e| fail(StatusCode::BAD_GATEWAY, e))?;
+    let index = repo.read("INDEX.md").unwrap_or_default();
+    let mut facts = Vec::new();
+    for dir in std::fs::read_dir(&repo.dir)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .flatten()
+    {
+        let folder = dir.file_name().to_string_lossy().into_owned();
+        if folder.starts_with('.') || !dir.path().is_dir() {
+            continue;
+        }
+        for f in std::fs::read_dir(dir.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = format!("{folder}/{}", f.file_name().to_string_lossy());
+            if memory::safe_path(&path)
+                && let Ok(text) = std::fs::read_to_string(f.path())
+            {
+                facts.push(memory::front_matter(&path, &text));
+            }
+        }
+    }
+    let count = facts.len();
+    let updated = repo.last_commit_time().await.ok().flatten();
+    Ok(Json(
+        json!({ "folders": memory::folders(&index, facts), "count": count, "updated": updated }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct MemoryPath {
+    path: String,
+}
+
+async fn memory_file(State(app): State<Shared>, Query(q): Query<MemoryPath>) -> ApiResult {
+    if !memory::safe_path(&q.path) {
+        return Err(fail(StatusCode::BAD_REQUEST, "not a memory file"));
+    }
+    let repo = memory_repo(&app)?;
+    let text = repo.read(&q.path).ok_or_else(|| {
+        fail(
+            StatusCode::NOT_FOUND,
+            format!("{} is not in the memory", q.path),
+        )
+    })?;
+    let body = text
+        .strip_prefix("---\n")
+        .and_then(|r| r.split_once("\n---").map(|(_, b)| b))
+        .unwrap_or(&text);
+    let fact = memory::front_matter(&q.path, &text);
+    Ok(Json(
+        json!({ "fact": fact, "text": text, "html": markdown::render(body, None) }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct MemorySave {
+    path: String,
+    text: String,
+}
+
+/// Saves Jon's edit to one fact, keeps its index line right, and pushes.
+async fn memory_save(State(app): State<Shared>, Json(m): Json<MemorySave>) -> ApiResult {
+    if !memory::safe_path(&m.path) {
+        return Err(fail(StatusCode::BAD_REQUEST, "not a memory file"));
+    }
+    let repo = memory_repo(&app)?;
+    let _work = app.work.lock().await;
+    repo.sync_keep()
+        .await
+        .map_err(|e| fail(StatusCode::BAD_GATEWAY, e))?;
+    let Some(before) = repo.read(&m.path) else {
+        return Err(fail(
+            StatusCode::NOT_FOUND,
+            format!("{} is not in the memory", m.path),
+        ));
+    };
+    let mut text = m.text.replace("\r\n", "\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    let fact = memory::front_matter(&m.path, &text);
+    if text == before {
+        return Ok(Json(json!({ "fact": fact })));
+    }
+    if fact.description.is_empty() {
+        return Err(fail(
+            StatusCode::BAD_REQUEST,
+            "keep the front matter: a description line between the --- lines",
+        ));
+    }
+    let index = memory::set_index_line(
+        &repo.read("INDEX.md").unwrap_or_default(),
+        &m.path,
+        &fact.description,
+    );
+    let message = format!("Memory: {} edited by Jon", m.path);
+    repo.commit_files(
+        &[
+            (m.path.as_str(), text.as_str()),
+            ("INDEX.md", index.as_str()),
+        ],
+        &message,
+    )
+    .await
+    .map_err(|e| fail(StatusCode::CONFLICT, format!("not saved: {e}")))?;
+    Ok(Json(json!({ "fact": fact })))
 }
