@@ -100,7 +100,12 @@ pub async fn view(app: &App, agent: &Agent) -> View {
         Kind::Cloud => cloud(app, agent, &mut v, run_started, now).await,
         Kind::Local => local(agent, &mut v, run_started, now).await,
     }
-    v.next_due = state::next_due(v.last_run, agent.every);
+    v.next_due = state::next_due(
+        v.last_run,
+        agent.every,
+        agent.due.as_deref().and_then(state::Due::parse),
+        now,
+    );
     v
 }
 
@@ -134,6 +139,7 @@ async fn cloud(
         &agent.commit_prefix(),
         agent.every,
         agent.grace,
+        agent.due.as_deref().and_then(state::Due::parse),
         now,
     );
 }

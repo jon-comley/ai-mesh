@@ -86,6 +86,11 @@ pub struct Agent {
     /// How long past `every` before it counts as late.
     #[serde(with = "duration_text", default = "default_grace")]
     pub grace: Duration,
+    /// A cloud routine's scheduled time, UK time: `07:30` daily or `tue 10:23`
+    /// weekly. With it, a scheduled run that leaves no log line within `grace`
+    /// shows late that day rather than a whole `every` later.
+    #[serde(default)]
+    pub due: Option<String>,
 }
 
 fn default_hub() -> String {
@@ -241,6 +246,15 @@ fn check(a: &Agent) -> Result<(), ConfigError> {
             return bad(field);
         }
     }
+    if a.due
+        .as_deref()
+        .is_some_and(|d| crate::state::Due::parse(d).is_none())
+    {
+        return Err(ConfigError(format!(
+            "{}: due must be like 07:30 or tue 10:23",
+            a.name
+        )));
+    }
     if !path_ok(&a.memory_dir) {
         return bad("memory_dir");
     }
@@ -395,6 +409,15 @@ grace = "10m"
         ))
         .unwrap_err();
         assert_eq!(e.0, "C: hub has characters it cannot have");
+    }
+
+    #[test]
+    fn due_must_be_a_time_or_a_day_and_time() {
+        let base = "[[agent]]\nname = \"D\"\npurpose = \"p\"\nrepo = \"git@github.com:a/b.git\"\nkey = \"k\"\nevery = \"1d\"\n";
+        assert!(Config::parse(&format!("{base}due = \"07:30\"\n")).is_ok());
+        assert!(Config::parse(&format!("{base}due = \"tue 10:23\"\n")).is_ok());
+        let e = Config::parse(&format!("{base}due = \"half seven\"\n")).unwrap_err();
+        assert_eq!(e.0, "D: due must be like 07:30 or tue 10:23");
     }
 
     #[test]

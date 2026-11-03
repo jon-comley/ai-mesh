@@ -2,7 +2,8 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Duration as Span, NaiveTime, TimeZone, Utc, Weekday};
+use chrono_tz::Europe::London;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -50,6 +51,51 @@ pub struct CloudFacts {
     pub run_started: Option<DateTime<Utc>>,
 }
 
+/// A routine's scheduled time in UK time, daily or on one weekday.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Due {
+    pub weekday: Option<Weekday>,
+    pub time: NaiveTime,
+}
+
+impl Due {
+    /// `07:30` or `tue 10:23`.
+    pub fn parse(text: &str) -> Option<Due> {
+        let mut parts = text.split_whitespace();
+        let (day, time) = match (parts.next()?, parts.next(), parts.next()) {
+            (t, None, None) => (None, t),
+            (d, Some(t), None) => (Some(d.parse::<Weekday>().ok()?), t),
+            _ => return None,
+        };
+        Some(Due {
+            weekday: day,
+            time: NaiveTime::parse_from_str(time, "%H:%M").ok()?,
+        })
+    }
+
+    /// The latest scheduled time at or before `now`.
+    pub fn last_before(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        (0..8).find_map(|back| self.on(now, -back).filter(|&at| at <= now))
+    }
+
+    /// The first scheduled time after `now`.
+    pub fn next_after(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        (0..8).find_map(|ahead| self.on(now, ahead).filter(|&at| at > now))
+    }
+
+    /// The scheduled time on the UK day `offset` days from `now`'s, if it runs that day.
+    fn on(&self, now: DateTime<Utc>, offset: i64) -> Option<DateTime<Utc>> {
+        let day = now.with_timezone(&London).date_naive() + Span::days(offset);
+        if self.weekday.is_some_and(|w| day.weekday() != w) {
+            return None;
+        }
+        London
+            .from_local_datetime(&day.and_time(self.time))
+            .earliest()
+            .map(|at| at.with_timezone(&Utc))
+    }
+}
+
 /// What the server found for a local worker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalFacts {
@@ -70,6 +116,7 @@ pub fn cloud(
     prefix: &str,
     every: Duration,
     grace: Duration,
+    due: Option<Due>,
     now: DateTime<Utc>,
 ) -> State {
     if !f.reachable {
@@ -83,6 +130,12 @@ pub fn cloud(
         .any(|c| c.subject.starts_with(prefix))
     {
         return State::Broken;
+    }
+    if let Some(fire) = due.and_then(|d| d.last_before(now)) {
+        let missed = f.last_run.is_none_or(|l| l < fire);
+        if missed && (now - fire).to_std().unwrap_or_default() > grace {
+            return State::Late;
+        }
     }
     on_time(f.last_run, every, grace, now)
 }
@@ -103,8 +156,17 @@ pub fn local(f: &LocalFacts, every: Duration, grace: Duration, now: DateTime<Utc
     on_time(f.last_run, every, grace, now)
 }
 
-/// When the next run is due, if it has run before.
-pub fn next_due(last_run: Option<DateTime<Utc>>, every: Duration) -> Option<DateTime<Utc>> {
+/// When the next run is due: the next scheduled time if it has one, otherwise
+/// `every` after the last run.
+pub fn next_due(
+    last_run: Option<DateTime<Utc>>,
+    every: Duration,
+    due: Option<Due>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    if let Some(d) = due {
+        return d.next_after(now);
+    }
     Some(last_run? + chrono::Duration::from_std(every).ok()?)
 }
 
@@ -173,11 +235,11 @@ mod tests {
     fn ok_until_every_plus_grace_then_late() {
         let f = facts(Some("2026-11-03T07:40:00Z"));
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, t("2026-11-04T13:40:00Z")),
+            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-04T13:40:00Z")),
             State::Ok
         );
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, t("2026-11-04T13:41:00Z")),
+            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-04T13:41:00Z")),
             State::Late
         );
     }
@@ -185,7 +247,14 @@ mod tests {
     #[test]
     fn never_run_is_new() {
         assert_eq!(
-            cloud(&facts(None), "Desk:", DAY, SIX_H, t("2026-11-03T00:00:00Z")),
+            cloud(
+                &facts(None),
+                "Desk:",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-03T00:00:00Z")
+            ),
             State::New
         );
     }
@@ -195,7 +264,7 @@ mod tests {
         let mut f = facts(Some("2026-11-03T07:40:00Z"));
         f.commits_since = vec![commit("2026-11-04T07:35:00Z", "Desk: patches for guv")];
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, t("2026-11-04T08:00:00Z")),
+            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-04T08:00:00Z")),
             State::Broken
         );
     }
@@ -208,7 +277,7 @@ mod tests {
             commit("2026-11-03T10:00:00Z", "Hub: reply from Jon"),
         ];
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, t("2026-11-03T12:00:00Z")),
+            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T12:00:00Z")),
             State::Ok
         );
     }
@@ -218,7 +287,7 @@ mod tests {
         let mut f = facts(Some("2026-11-03T07:40:00Z"));
         f.reachable = false;
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, t("2026-11-03T08:00:00Z")),
+            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T08:00:00Z")),
             State::Unreachable
         );
     }
@@ -228,16 +297,16 @@ mod tests {
         let mut f = facts(Some("2026-11-03T07:40:00Z"));
         f.run_started = Some(t("2026-11-03T12:00:00Z"));
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, t("2026-11-03T12:30:00Z")),
+            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T12:30:00Z")),
             State::Running
         );
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, t("2026-11-03T14:00:01Z")),
+            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T14:00:01Z")),
             State::Broken
         );
         f.last_run = Some(t("2026-11-03T12:20:00Z"));
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, t("2026-11-03T12:30:00Z")),
+            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T12:30:00Z")),
             State::Ok
         );
     }
@@ -277,11 +346,63 @@ mod tests {
     }
 
     #[test]
-    fn next_due_is_last_run_plus_every() {
+    fn a_missed_scheduled_run_is_late_after_grace_that_day() {
+        let three_h = Duration::from_secs(3 * 3600);
+        let due = Due::parse("07:30");
+        // The last run was a manual one the evening before. November is GMT, so 07:30 is 07:30Z.
+        let f = facts(Some("2026-11-02T22:15:00Z"));
         assert_eq!(
-            next_due(Some(t("2026-11-03T10:23:00Z")), 7 * DAY),
+            cloud(&f, "Desk:", DAY, three_h, due, t("2026-11-03T10:30:00Z")),
+            State::Ok
+        );
+        assert_eq!(
+            cloud(&f, "Desk:", DAY, three_h, due, t("2026-11-03T10:31:00Z")),
+            State::Late
+        );
+        let f = facts(Some("2026-11-03T07:40:00Z"));
+        assert_eq!(
+            cloud(&f, "Desk:", DAY, three_h, due, t("2026-11-03T20:00:00Z")),
+            State::Ok
+        );
+    }
+
+    #[test]
+    fn weekly_due_finds_the_last_tuesday_in_uk_time() {
+        let due = Due::parse("tue 10:23").unwrap();
+        assert_eq!(
+            due.last_before(t("2026-11-05T12:00:00Z")),
+            Some(t("2026-11-03T10:23:00Z"))
+        );
+        assert_eq!(
+            due.last_before(t("2026-11-03T10:22:00Z")),
+            Some(t("2026-10-27T10:23:00Z"))
+        );
+        // British Summer Time: 10:23 in London is 09:23Z.
+        assert_eq!(
+            due.last_before(t("2026-07-08T00:00:00Z")),
+            Some(t("2026-07-07T09:23:00Z"))
+        );
+        assert_eq!(Due::parse("07:30").map(|d| d.weekday), Some(None));
+        assert!(Due::parse("tuesday-ish").is_none());
+        assert!(Due::parse("25:00").is_none());
+    }
+
+    #[test]
+    fn next_due_is_last_run_plus_every() {
+        let now = t("2026-11-03T12:00:00Z");
+        assert_eq!(
+            next_due(Some(t("2026-11-03T10:23:00Z")), 7 * DAY, None, now),
             Some(t("2026-11-10T10:23:00Z"))
         );
-        assert_eq!(next_due(None, DAY), None);
+        assert_eq!(next_due(None, DAY, None, now), None);
+        assert_eq!(
+            next_due(None, DAY, Due::parse("07:30"), now),
+            Some(t("2026-11-04T07:30:00Z"))
+        );
+        // Across the March clock change: 07:30 London on 29 March 2026 is 06:30Z.
+        assert_eq!(
+            next_due(None, DAY, Due::parse("07:30"), t("2026-03-28T12:00:00Z")),
+            Some(t("2026-03-29T06:30:00Z"))
+        );
     }
 }
