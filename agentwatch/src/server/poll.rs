@@ -137,6 +137,7 @@ async fn cloud(
     v.state = state::cloud(
         &facts,
         &agent.commit_prefix(),
+        &agent.hub,
         agent.every,
         agent.grace,
         agent.due.as_deref().and_then(state::Due::parse),

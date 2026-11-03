@@ -68,19 +68,31 @@ impl Repo {
             .and_then(|(hash, at)| Some((hash.to_string(), parse_time(at)?))))
     }
 
-    /// Commits after `hash` on `main`, oldest first.
+    /// Commits after `hash` on `main`, oldest first, with the files each changed.
     pub async fn commits_since(&self, hash: &str) -> Result<Vec<Commit>> {
         let range = format!("{hash}..HEAD");
         let out = self
-            .git(&["log", "--reverse", "--format=%cI%x09%s", &range])
+            .git(&[
+                "log",
+                "--reverse",
+                "--name-only",
+                "--format=%x00%cI%x09%s",
+                &range,
+            ])
             .await?;
         Ok(out
-            .lines()
-            .filter_map(|l| {
-                let (at, subject) = l.split_once('\t')?;
+            .split('\0')
+            .filter_map(|block| {
+                let mut lines = block.lines();
+                let (at, subject) = lines.next()?.split_once('\t')?;
                 Some(Commit {
                     at: parse_time(at)?,
                     subject: subject.to_string(),
+                    files: lines
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(String::from)
+                        .collect(),
                 })
             })
             .collect())

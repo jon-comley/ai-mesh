@@ -37,6 +37,20 @@ pub const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
 pub struct Commit {
     pub at: DateTime<Utc>,
     pub subject: String,
+    /// The paths it changed.
+    pub files: Vec<String>,
+}
+
+impl Commit {
+    /// Only the hub or `conversations/`: a chat or a hand edit, which also
+    /// commits under the agent's own prefix. A run always writes more.
+    fn hub_or_chat_only(&self, hub: &str) -> bool {
+        !self.files.is_empty()
+            && self
+                .files
+                .iter()
+                .all(|f| f == hub || f.starts_with("conversations/"))
+    }
 }
 
 /// What the server found for a cloud agent.
@@ -109,11 +123,12 @@ pub struct LocalFacts {
 }
 
 /// A cloud agent's state. `prefix` is how its own commits start (`Desk:`):
-/// one of those after the last log line means a run that never finished.
-/// Jon's edits to the hub use other messages and do not count.
+/// one of those after the last log line means a run that never finished,
+/// unless it only touched the hub (`hub`) or `conversations/`.
 pub fn cloud(
     f: &CloudFacts,
     prefix: &str,
+    hub: &str,
     every: Duration,
     grace: Duration,
     due: Option<Due>,
@@ -127,7 +142,7 @@ pub fn cloud(
     }
     if f.commits_since
         .iter()
-        .any(|c| c.subject.starts_with(prefix))
+        .any(|c| c.subject.starts_with(prefix) && !c.hub_or_chat_only(hub))
     {
         return State::Broken;
     }
@@ -228,6 +243,7 @@ mod tests {
         Commit {
             at: t(at),
             subject: subject.into(),
+            files: vec!["reports/2026-11-04.md".into()],
         }
     }
 
@@ -235,11 +251,27 @@ mod tests {
     fn ok_until_every_plus_grace_then_late() {
         let f = facts(Some("2026-11-03T07:40:00Z"));
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-04T13:40:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-04T13:40:00Z")
+            ),
             State::Ok
         );
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-04T13:41:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-04T13:41:00Z")
+            ),
             State::Late
         );
     }
@@ -250,6 +282,7 @@ mod tests {
             cloud(
                 &facts(None),
                 "Desk:",
+                "HUB.md",
                 DAY,
                 SIX_H,
                 None,
@@ -264,7 +297,15 @@ mod tests {
         let mut f = facts(Some("2026-11-03T07:40:00Z"));
         f.commits_since = vec![commit("2026-11-04T07:35:00Z", "Desk: patches for guv")];
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-04T08:00:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-04T08:00:00Z")
+            ),
             State::Broken
         );
     }
@@ -277,8 +318,51 @@ mod tests {
             commit("2026-11-03T10:00:00Z", "Hub: reply from Jon"),
         ];
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T12:00:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-03T12:00:00Z")
+            ),
             State::Ok
+        );
+    }
+
+    #[test]
+    fn its_own_prefix_on_a_hub_or_chat_edit_is_not_broken() {
+        let mut f = facts(Some("2026-11-03T19:57:00Z"));
+        let mut edit = commit("2026-11-03T20:14:00Z", "Desk: pension letter sent");
+        edit.files = vec!["HUB.md".into(), "conversations/2026-11-03.md".into()];
+        f.commits_since = vec![edit];
+        assert_eq!(
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-03T21:00:00Z")
+            ),
+            State::Ok
+        );
+        let mut doc = commit("2026-11-03T20:30:00Z", "Desk: half a run");
+        doc.files = vec!["HUB.md".into(), "IT-PRO-002.md".into()];
+        f.commits_since.push(doc);
+        assert_eq!(
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-03T21:00:00Z")
+            ),
+            State::Broken
         );
     }
 
@@ -287,7 +371,15 @@ mod tests {
         let mut f = facts(Some("2026-11-03T07:40:00Z"));
         f.reachable = false;
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T08:00:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-03T08:00:00Z")
+            ),
             State::Unreachable
         );
     }
@@ -297,16 +389,40 @@ mod tests {
         let mut f = facts(Some("2026-11-03T07:40:00Z"));
         f.run_started = Some(t("2026-11-03T12:00:00Z"));
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T12:30:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-03T12:30:00Z")
+            ),
             State::Running
         );
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T14:00:01Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-03T14:00:01Z")
+            ),
             State::Broken
         );
         f.last_run = Some(t("2026-11-03T12:20:00Z"));
         assert_eq!(
-            cloud(&f, "Desk:", DAY, SIX_H, None, t("2026-11-03T12:30:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                SIX_H,
+                None,
+                t("2026-11-03T12:30:00Z")
+            ),
             State::Ok
         );
     }
@@ -352,16 +468,40 @@ mod tests {
         // The last run was a manual one the evening before. November is GMT, so 07:30 is 07:30Z.
         let f = facts(Some("2026-11-02T22:15:00Z"));
         assert_eq!(
-            cloud(&f, "Desk:", DAY, three_h, due, t("2026-11-03T10:30:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                three_h,
+                due,
+                t("2026-11-03T10:30:00Z")
+            ),
             State::Ok
         );
         assert_eq!(
-            cloud(&f, "Desk:", DAY, three_h, due, t("2026-11-03T10:31:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                three_h,
+                due,
+                t("2026-11-03T10:31:00Z")
+            ),
             State::Late
         );
         let f = facts(Some("2026-11-03T07:40:00Z"));
         assert_eq!(
-            cloud(&f, "Desk:", DAY, three_h, due, t("2026-11-03T20:00:00Z")),
+            cloud(
+                &f,
+                "Desk:",
+                "HUB.md",
+                DAY,
+                three_h,
+                due,
+                t("2026-11-03T20:00:00Z")
+            ),
             State::Ok
         );
     }

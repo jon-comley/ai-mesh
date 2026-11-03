@@ -50,7 +50,8 @@ last run is the later of its newest heading and its newest tick log's name
 
 **Late on the day, 3 Nov:** cloud agents take a `due` time (`07:30`, `tue 10:23`), so a
 scheduled run that leaves no log line shows late within `grace` of its time, and the next
-due time follows the schedule. 55 Rust tests.
+due time follows the schedule. Hub and `conversations/` edits no longer count as a
+half-finished run (two hand edits to the Standards hub showed it broken). 56 Rust tests.
 
 **Not yet:** Desk's chat reading the other repos (it sees only its own); the orchestrator's
 scheduled ticks reading memory; step 8, the doc.
@@ -130,7 +131,8 @@ Every 15 minutes it runs `git fetch` on each repo. Nothing else talks to GitHub.
     on 3 Nov both routines failed in the morning and the page stayed green all day,
     because the last log line (a manual run the night before) was still inside `every`.
   - `broken`: commits landed after the last log line but no new line. The run started
-    and did not finish.
+    and did not finish. A commit that changes only the hub or `conversations/` does not
+    count: the live chat and hand edits commit under the agent's own prefix too.
   - `unreachable`: the fetch failed (key removed, repo renamed).
 - **Needs you:** the row count under `## Needs you` in the hub, and the change since the
   last run.
