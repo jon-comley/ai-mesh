@@ -112,7 +112,7 @@ export function briefing(a) {
 /** Where an agent runs, for the Schedule tab. */
 export function agentWhere(a) {
   // A cloud tile with no routine is a chat page that writes to its repo (Marketing comms).
-  if (a.kind === 'cloud') return a.can_run ? 'Anthropic cloud' : 'its chat page, on demand';
+  if (a.kind === 'cloud') return a.can_run === false ? 'its chat page, on demand' : 'Anthropic cloud';
   if (a.kind === 'queue') return `lenovo1, for ${a.machine ?? 'its machine'}`;
   return a.machine ?? 'mac1';
 }
@@ -120,7 +120,7 @@ export function agentWhere(a) {
 /** How often, as people say it: "every 20m", "daily 07:30". */
 export function agentWhen(a) {
   if (a.kind === 'queue') return 'when work is queued';
-  if (a.kind === 'cloud' && !a.can_run) return `when used, checked every ${a.every}`;
+  if (a.kind === 'cloud' && a.can_run === false) return `when used, checked every ${a.every}`;
   return `every ${a.every}`;
 }
 
