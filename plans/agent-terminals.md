@@ -10,7 +10,9 @@ agentwatch's tiles open. It replaces the "Talk to <name>" chat box.
 1. **Full screen.** A tile opens its agent full screen: a real `claude` terminal in the
    browser (ttyd and tmux on the node that runs it), the same as a local Claude Code
    session.
-2. **Opens on a summary.** Haiku reads the agent's status file and says where it is up to.
+2. **Opens on a summary, for free.** The terminal prints the `State:` and `NEXT:` lines of
+   the agent's status file (else its first line) before Claude starts: no model call, so
+   opening costs nothing until Jon types.
 3. **Jon types, then leaves.** tmux keeps the session; the agent carries on with the tasks.
 4. **The tile shows the result:** `working`, `done` or `needs you`, written by a Claude
    `Stop` hook. Clicking in gives the summary.

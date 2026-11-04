@@ -292,9 +292,36 @@ line per point, no rationale, then the question if there is one. Never use an em
     )
 }
 
-/// The first message of a new session: where things stand, cheaply.
-pub const FIRST_PROMPT: &str = "Read STATUS.md and HUB.md here, and the newest file in \
-conversations/ if there is one. Then give me two lines: where you are, and NEXT. Nothing else.";
+/// What a new terminal shows before Claude starts, with no model call: the
+/// `State:` and `NEXT:` lines of a status file, else its first line, cut short.
+pub fn summary(status: &str) -> String {
+    let picked: Vec<&str> = status
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("State:") || l.starts_with("NEXT:"))
+        .collect();
+    if !picked.is_empty() {
+        return picked.join("\n");
+    }
+    let first = status
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let short: String = first.chars().take(400).collect();
+    if short.len() < first.len() {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+/// The shell snippet a host runs for [`summary`]: it has no agentterm.
+pub fn summary_sh(file: &str) -> String {
+    format!(
+        "grep -E '^(State|NEXT):' {file} 2>/dev/null || head -n 1 {file} 2>/dev/null | cut -c1-400"
+    )
+}
 
 /// Claude's settings for a terminal session: hooks and the status line, all
 /// calling this binary.
@@ -341,6 +368,11 @@ pub fn attach_command(
         format!("AGENTTERM_AGENT={slug}"),
         s("-e"),
         format!("AGENTTERM_DIR={}", agents_dir.display()),
+        // Show where it stands for free, then start Claude, which costs nothing until Jon types.
+        s("sh"),
+        s("-c"),
+        s("agentterm summary STATUS.md; echo; exec \"$@\""),
+        s("sh"),
         s("claude"),
         s("--model"),
         s("haiku"),
@@ -350,7 +382,6 @@ pub fn attach_command(
         settings_file.display().to_string(),
         s("--append-system-prompt"),
         system_prompt(name),
-        s(FIRST_PROMPT),
     ]
 }
 
@@ -451,6 +482,18 @@ mod tests {
     }
 
     #[test]
+    fn summary_needs_no_model() {
+        assert_eq!(
+            summary("# Desk\n\nChecked: x\nState: 5 waiting\nNEXT: Hiscox\n"),
+            "State: 5 waiting\nNEXT: Hiscox"
+        );
+        assert_eq!(
+            summary("\n# STEP 4 Nov: NO CHANGE.\nmore"),
+            "# STEP 4 Nov: NO CHANGE."
+        );
+    }
+
+    #[test]
     fn status_line_says_over() {
         let l = Limits::default();
         assert_eq!(
@@ -471,6 +514,6 @@ mod tests {
         );
         assert_eq!(&c[..4], ["new-session", "-A", "-s", "agent-desk"]);
         assert!(c.windows(2).any(|w| w == ["--model", "haiku"]));
-        assert_eq!(c.last().map(String::as_str), Some(FIRST_PROMPT));
+        assert!(c.contains(&"agentterm summary STATUS.md; echo; exec \"$@\"".to_string()));
     }
 }

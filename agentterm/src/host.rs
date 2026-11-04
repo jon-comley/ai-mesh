@@ -84,14 +84,13 @@ pub fn settings(slug: &str, w: &Worker) -> Value {
     crate::settings_with(cmd)
 }
 
-/// The first message: the worker's own status, cheaply.
-pub fn first_prompt(w: &Worker) -> String {
-    let what = match (&w.status, &w.reports) {
-        (Some(s), _) => format!("Read {s}"),
-        (None, Some(r)) => format!("Read the newest report under {r}"),
-        _ => "Look at the newest commits here".into(),
-    };
-    format!("{what}. Then give me two lines: where you are, and NEXT. Nothing else.")
+/// The file whose lines open a new session, for free.
+pub fn status_file(w: &Worker) -> String {
+    match (&w.status, &w.reports) {
+        (Some(s), _) => s.clone(),
+        (None, Some(r)) => format!("$(ls -t {r}/*/latest.md 2>/dev/null | head -n 1)"),
+        _ => "STATUS.md".into(),
+    }
 }
 
 /// What a host session is told, on top of the shared terminal prompt.
@@ -124,8 +123,7 @@ fn tag(texts: &[&str]) -> String {
 pub fn script(slug: &str, w: &Worker) -> String {
     let settings = settings(slug, w).to_string();
     let prompt = system_prompt(w);
-    let first = first_prompt(w);
-    let t = tag(&[&settings, &prompt, &first]);
+    let t = tag(&[&settings, &prompt]);
     let dir = w.chat_dir.as_deref().unwrap_or("~");
     let mut s = String::from(
         "#!/bin/bash\n# Written by agentterm on lenovo1 (plans/agent-terminals.md).\n",
@@ -150,7 +148,8 @@ pub fn script(slug: &str, w: &Worker) -> String {
             "prompt=\"$prompt\"$'\\n\\n'\"$(cat {brief} 2>/dev/null)\"\n"
         ));
     }
-    s.push_str(&format!("first=$(cat <<'{t}'\n{first}\n{t}\n)\n"));
+    // Where it stands, for free; Claude costs nothing until Jon types.
+    s.push_str(&format!("{}\necho\n", crate::summary_sh(&status_file(w))));
     let mode = if w.chat_readonly {
         "default"
     } else {
@@ -158,7 +157,7 @@ pub fn script(slug: &str, w: &Worker) -> String {
     };
     s.push_str(&format!(
         "claude --model haiku --permission-mode {mode} --settings \"$settings\" \
-         --append-system-prompt \"$prompt\" \"$first\"\n"
+         --append-system-prompt \"$prompt\"\n"
     ));
     if let Some(pause) = &w.pause {
         // Give the ticks back if this session paused them.
@@ -270,9 +269,7 @@ chat_readonly = true
         let s = script("reviews", &w);
         assert!(!s.contains("launchctl"));
         assert!(s.contains("--permission-mode default"));
-        assert!(
-            first_prompt(&w).starts_with("Read the newest report under ~/.ai-mesh/reviews/reports")
-        );
+        assert!(s.contains("ls -t ~/.ai-mesh/reviews/reports/*/latest.md"));
     }
 
     #[test]

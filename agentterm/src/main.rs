@@ -5,6 +5,7 @@
 //!   `?arg=<agent>`).
 //! - `agentterm hook prompt|stop|notify|tool`: Claude hooks; stdin is the hook's JSON.
 //! - `agentterm statusline`: Claude's status line; stdin is its JSON.
+//! - `agentterm summary <file>`: a status file's State and NEXT lines.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -42,12 +43,20 @@ fn main() -> ExitCode {
             hook(event);
             ExitCode::SUCCESS
         }
+        ["summary", file] => {
+            // Where the worker stands, before Claude starts: no model call.
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            println!("{}", agentterm::summary(&text));
+            ExitCode::SUCCESS
+        }
         ["statusline"] => {
             statusline();
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: agentterm attach <agent> | hook <event> | statusline");
+            eprintln!(
+                "usage: agentterm attach <agent> | hook <event> | statusline | summary <file>"
+            );
             ExitCode::from(2)
         }
     }
