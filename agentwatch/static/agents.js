@@ -558,7 +558,7 @@ async function renderSchedule(main) {
       el('span', { class: 'muted' }, ' (terminals and wl tasks; the cloud routines and the orchestrator bill to the Claude account and are not counted here)'),
       el('br'),
       el('span', {}, `For the books, without wl: ${gbp(books.month)} this month (${gbp(books.today)} today). `),
-      el('span', { class: 'muted' }, 'Usage inside the Claude plan, priced at API rates: it goes on the costs pages and in the ledger with the plan itself on the 1st (ventures/cost-capture-checklist.md).')),
+      el('span', { class: 'muted' }, 'Usage inside the Claude plan, priced at API rates: recorded on the 1st to compare with what the plan costs (ventures/cost-capture-checklist.md). The costs pages show the subscription.')),
     el('h3', {}, 'Agents'),
     el('table', { class: 'schedule' }, head(['Agent', 'Runs on', 'When', 'State', 'Last run', 'Next', 'Spend today / month', '']), el('tbody', {}, agentRows)),
     el('h3', {}, 'Services'),
