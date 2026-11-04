@@ -3,6 +3,7 @@
 
 pub mod actions;
 pub mod chat;
+pub mod dispatch;
 pub mod poll;
 pub mod repo;
 pub mod run;
@@ -33,6 +34,8 @@ pub struct App {
     pub chat_paused: Mutex<HashMap<String, std::time::Instant>>,
     /// The last `/api/live` answer, so many open pages cost one read.
     pub live: tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>,
+    /// Queue workers' machines: reachable at the last dispatch tick.
+    pub machine_on: Mutex<HashMap<String, bool>>,
     http: reqwest::Client,
 }
 
@@ -47,6 +50,7 @@ impl App {
             chatting: Mutex::new(std::collections::HashSet::new()),
             chat_paused: Mutex::new(HashMap::new()),
             live: tokio::sync::Mutex::new(None),
+            machine_on: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
         }
     }

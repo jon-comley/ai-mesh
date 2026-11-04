@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -91,5 +91,14 @@ describe('applyLive', () => {
   });
   it('leaves a worker it has no news of alone', () => {
     expect(applyLive([a], {})[0]).toBe(a);
+  });
+});
+
+describe('machineText', () => {
+  it('says wl on or off, and nothing before the first check', () => {
+    expect(machineText({ machine: 'wl', machine_on: true })).toBe('wl on');
+    expect(machineText({ machine: 'wl', machine_on: false })).toBe('wl off');
+    expect(machineText({ machine: 'wl', machine_on: null })).toBe('');
+    expect(machineText({})).toBe('');
   });
 });

@@ -12,6 +12,7 @@
 
 pub mod host;
 pub mod node;
+pub mod queue;
 
 use std::fs;
 use std::io;
@@ -89,7 +90,8 @@ pub struct TermView {
 /// An agent's name as a directory and tmux session name: `Desk` is `desk`.
 /// Only letters, digits and `-`, so a URL argument can never name a path.
 pub fn slug(name: &str) -> Option<String> {
-    let s = name.trim().to_ascii_lowercase();
+    // "Work laptop" is `work-laptop`.
+    let s = name.trim().to_ascii_lowercase().replace(' ', "-");
     let ok =
         !s.is_empty() && s.len() <= 32 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     ok.then_some(s)
@@ -377,7 +379,9 @@ pub fn attach_command(
         // Show where it stands for free, then start Claude, which costs nothing until Jon types.
         s("sh"),
         s("-c"),
-        s("agentterm summary STATUS.md; echo; exec \"$@\""),
+        s(
+            "agentterm summary STATUS.md; agentterm queue list \"$AGENTTERM_AGENT\" | tail -n 12; echo; exec \"$@\"",
+        ),
         s("sh"),
         s("claude"),
         s("--model"),
@@ -404,7 +408,8 @@ mod tests {
     fn slug_refuses_paths() {
         assert_eq!(slug("Desk").as_deref(), Some("desk"));
         assert_eq!(slug("../etc"), None);
-        assert_eq!(slug("a b"), None);
+        assert_eq!(slug("Work laptop").as_deref(), Some("work-laptop"));
+        assert_eq!(slug("a/b"), None);
         assert_eq!(slug(""), None);
     }
 
@@ -520,6 +525,9 @@ mod tests {
         );
         assert_eq!(&c[..4], ["new-session", "-A", "-s", "agent-desk"]);
         assert!(c.windows(2).any(|w| w == ["--model", "haiku"]));
-        assert!(c.contains(&"agentterm summary STATUS.md; echo; exec \"$@\"".to_string()));
+        assert!(
+            c.iter()
+                .any(|a| a.starts_with("agentterm summary STATUS.md;"))
+        );
     }
 }

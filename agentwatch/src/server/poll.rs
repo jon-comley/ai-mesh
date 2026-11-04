@@ -46,6 +46,12 @@ pub struct View {
     pub paused: bool,
     /// Its terminal on lenovo1 (plans/agent-terminals.md), if it has one.
     pub term: Option<agentterm::TermView>,
+    /// A queue worker's machine: on the network at the last check.
+    pub machine_on: Option<bool>,
+    /// What the tile calls that machine: `wl` for the work laptop.
+    pub machine: Option<String>,
+    /// A queue worker's tasks, newest first.
+    pub tasks: Vec<agentterm::queue::Task>,
     pub checked_at: DateTime<Utc>,
 }
 
@@ -86,10 +92,14 @@ pub fn blank(agent: &Agent, now: DateTime<Utc>) -> View {
         can_run: match agent.kind {
             Kind::Cloud => agent.routine.is_some(),
             Kind::Local => agent.kickstart.is_some(),
+            Kind::Queue => false,
         },
         can_pause: agent.kind == Kind::Local && agent.pause.is_some(),
         paused: false,
         term: None,
+        machine_on: None,
+        machine: None,
+        tasks: Vec::new(),
         checked_at: now,
     }
 }
@@ -102,8 +112,12 @@ pub async fn view(app: &App, agent: &Agent) -> View {
     match agent.kind {
         Kind::Cloud => cloud(app, agent, &mut v, run_started, now).await,
         Kind::Local => local(agent, &mut v, run_started, now).await,
+        Kind::Queue => queue_view(app, agent, &mut v),
     }
     v.term = term(app, agent).await;
+    if agent.kind == Kind::Queue {
+        return v;
+    }
     v.next_due = state::next_due(
         v.last_run,
         agent.every,
@@ -127,6 +141,51 @@ pub async fn term(app: &App, agent: &Agent) -> Option<agentterm::TermView> {
         .is_ok_and(|o| o.status.success());
     let today = chrono::Local::now().date_naive();
     Some(agentterm::read(&app.dir, &slug, open, today))
+}
+
+/// A queue worker's tile: its tasks, what waits on Jon, and its machine's light.
+pub fn queue_view(app: &App, agent: &Agent, v: &mut View) {
+    use agentterm::queue::TaskState;
+    let Some(slug) = agentterm::slug(&agent.name) else {
+        return;
+    };
+    let mut tasks = agentterm::queue::list(&agentterm::term_dir(&app.dir, &slug));
+    tasks.reverse();
+    v.machine_on = app
+        .machine_on
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&agent.name)
+        .copied();
+    v.machine = agent.host.as_deref().map(|h| {
+        if h == "work-laptop" {
+            "wl".to_string()
+        } else {
+            h.to_string()
+        }
+    });
+    let running = tasks.iter().any(|t| t.state == TaskState::Running);
+    v.state = if running { State::Running } else { State::Ok };
+    v.last_run = tasks.iter().filter_map(|t| t.finished).max();
+    v.waiting_lines = tasks
+        .iter()
+        .filter(|t| matches!(t.state, TaskState::NeedsYou | TaskState::Interrupted))
+        .map(|t| format!("{}: {}", first(&t.task), first(&t.result)))
+        .collect();
+    v.waiting = v.waiting_lines.len();
+    v.line = match tasks.first() {
+        Some(t) => format!("{:?}: {}", t.state, first(&t.task)),
+        None => "Nothing queued".into(),
+    };
+    tasks.truncate(20);
+    v.tasks = tasks;
+}
+
+fn first(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
 }
 
 async fn cloud(

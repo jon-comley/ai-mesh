@@ -88,6 +88,7 @@ async fn run_chat(
     }
 
     let child = match agent.kind {
+        Kind::Queue => return Err(format!("{} is talked to in its terminal", agent.name)),
         Kind::Cloud => {
             let repo = chat_repo(app, agent);
             repo.sync_keep().await?;

@@ -5,6 +5,8 @@
 //!   `?arg=<agent>`).
 //! - `agentterm hook prompt|stop|notify|tool`: Claude hooks; stdin is the hook's JSON.
 //! - `agentterm statusline`: Claude's status line; stdin is its JSON.
+//! - `agentterm queue add <agent> <dir> <task>`: queue work for a machine that is
+//!   not always on; `queue list <agent>` shows the queue.
 //! - `agentterm summary <file>`: a status file's State and NEXT lines.
 
 use std::io::Read;
@@ -41,6 +43,25 @@ fn main() -> ExitCode {
         ["attach", name] => attach(name),
         ["hook", event] => {
             hook(event);
+            ExitCode::SUCCESS
+        }
+        ["queue", "add", agent, dir, task] => queue_add(agent, dir, task),
+        ["queue", "list", agent] => {
+            let Some(slug) = agentterm::slug(agent) else {
+                return ExitCode::from(2);
+            };
+            for t in agentterm::queue::list(&agentterm::term_dir(&agents_dir(), &slug)) {
+                println!(
+                    "{} {:?} {}: {}",
+                    t.id,
+                    t.state,
+                    t.dir,
+                    t.task.lines().next().unwrap_or("")
+                );
+                if !t.result.is_empty() {
+                    println!("    {}", t.result.lines().next().unwrap_or(""));
+                }
+            }
             ExitCode::SUCCESS
         }
         ["summary", file] => {
@@ -94,7 +115,7 @@ fn attach(name: &str) -> ExitCode {
         return ExitCode::from(2);
     }
     // A new session starts from what is on main: the clone may be days old.
-    if !session_open(&slug) {
+    if !session_open(&slug) && work.join(".git").exists() {
         let key = agentterm::host::load(&dir, &slug)
             .and_then(|w| w.key)
             .unwrap_or_else(|| slug.clone());
@@ -139,6 +160,31 @@ fn attach(name: &str) -> ExitCode {
         .exec();
     eprintln!("cannot start tmux: {err}");
     ExitCode::FAILURE
+}
+
+fn queue_add(agent: &str, dir: &str, task: &str) -> ExitCode {
+    let Some(slug) = agentterm::slug(agent) else {
+        eprintln!("no agent called {agent}");
+        return ExitCode::from(2);
+    };
+    match agentterm::queue::add(
+        &agentterm::term_dir(&agents_dir(), &slug),
+        task,
+        dir,
+        Utc::now(),
+    ) {
+        Ok(t) => {
+            println!(
+                "Queued {}: it runs on the machine as soon as it is on.",
+                t.id
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Not queued: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn session_open(slug: &str) -> bool {

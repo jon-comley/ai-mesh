@@ -74,6 +74,16 @@ export function termText(t) {
   return parts.join(' · ');
 }
 
+/** A queue worker's machine light: "wl on", "wl off", or nothing before the first check. */
+export function machineText(a) {
+  if (!a.machine || a.machine_on === null || a.machine_on === undefined) return '';
+  return `${a.machine} ${a.machine_on ? 'on' : 'off'}`;
+}
+
+export const TASK_LABELS = {
+  queued: 'Queued', running: 'Running', done: 'Done', needs_you: 'Needs you', interrupted: 'Interrupted', failed: 'Failed',
+};
+
 /** The "What" of a hub row: the cell headed What, else the longest middle cell. */
 export function rowWhat(row) {
   const i = row.headers.findIndex((h) => /^(what|item|idea)$/i.test(h));
@@ -138,6 +148,7 @@ export function tile(a) {
     el('span', { class: `light ${a.state}`, title: stateLabel(a.state) }),
     el('h2', {}, a.name),
     el('p', {}, a.purpose),
+    machineText(a) ? el('span', { class: `machine ${a.machine_on ? 'on' : 'off'}` }, machineText(a)) : null,
     a.term ? el('p', { class: `term-line ${phase ?? ''}` }, termText(a.term)) : null,
     a.term?.state?.line ? el('p', { class: 'term-said' }, a.term.state.line) : null,
     a.waiting > 0 ? el('span', { class: 'badge', title: 'Waiting on you' }, a.waiting) : null,
@@ -252,6 +263,7 @@ function renderAgent(main, name) {
       a.repo_url ? el('a', { class: 'button', href: a.repo_url, target: '_blank', rel: 'noopener' }, 'Repo') : null,
     ),
     a.error ? el('section', {}, el('h3', {}, 'Problem'), el('p', { class: 'error' }, a.error)) : null,
+    a.kind === 'queue' ? tasksSection(a) : null,
     chatSection(a),
     a.line ? el('section', {}, el('h3', {}, 'Last run'), el('p', {}, a.line)) : null,
     waitingSection(a),
@@ -427,6 +439,29 @@ async function newChat(a) {
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
+// ── Queue ───────────────────────────────────────────────────────────────────
+
+function tasksSection(a) {
+  const head = el('h3', {}, 'Tasks', machineText(a) ? el('span', { class: `machine ${a.machine_on ? 'on' : 'off'}` }, machineText(a)) : null);
+  if (!a.tasks?.length) return el('section', {}, head, el('p', { class: 'muted' }, 'Nothing queued. Give it work in its terminal.'));
+  return el('section', {}, head, el('ul', { class: 'tasks' }, a.tasks.map((t) => el('li', { class: `task ${t.state}` },
+    el('span', { class: 'when' }, `${TASK_LABELS[t.state] ?? t.state} · ${relTime(t.created)}`),
+    el('p', {}, t.task),
+    el('p', { class: 'muted' }, t.dir),
+    t.result ? el('p', { class: 'result' }, t.result) : null,
+    ['interrupted', 'failed', 'needs_you'].includes(t.state)
+      ? el('button', { onclick: () => retryTask(a, t) }, 'Retry') : null,
+  ))));
+}
+
+async function retryTask(a, t) {
+  try {
+    await api('POST', `/api/agents/${encodeURIComponent(a.name)}/tasks/${encodeURIComponent(t.id)}/retry`);
+    toast('Queued again');
+    load();
+  } catch (e) { toast(e.message, true); }
+}
+
 // ── Terminal ────────────────────────────────────────────────────────────────
 
 let termTimer = null;
@@ -506,6 +541,8 @@ export function applyLive(list, live) {
     const l = live[a.name];
     if (!l) return a;
     const next = { ...a, term: l.term ?? a.term };
+    if (l.machine_on !== null && l.machine_on !== undefined) next.machine_on = l.machine_on;
+    if (l.queue) Object.assign(next, { tasks: l.queue.tasks, waiting: l.queue.waiting, line: l.queue.line, state: l.queue.state });
     if (l.paused !== null && l.paused !== undefined) {
       next.paused = l.paused;
       if (l.paused && a.state !== 'running') next.state = 'paused';

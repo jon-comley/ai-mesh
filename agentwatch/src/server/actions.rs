@@ -54,6 +54,12 @@ pub async fn run_now(app: &App, agent: &Agent) -> Result<()> {
                 .ok_or_else(|| format!("{} has no routine id", agent.name))?;
             start_routine(id).await?;
         }
+        Kind::Queue => {
+            return Err(format!(
+                "{} runs what is queued, not on a schedule",
+                agent.name
+            ));
+        }
         Kind::Local => {
             let host = agent.host.as_deref().expect("checked by Config::parse");
             let label = agent

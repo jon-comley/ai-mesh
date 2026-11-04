@@ -57,6 +57,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/agents/{name}/chat/new", post(chat_new))
         .route("/api/agents/{name}/term", get(term))
         .route("/api/live", get(live))
+        .route("/api/agents/{name}/tasks/{id}/retry", post(task_retry))
         .route("/api/memory", get(memory_list))
         .route("/api/memory/file", get(memory_file).put(memory_save))
         .route("/api/config", get(get_config).put(put_config))
@@ -129,11 +130,41 @@ async fn live(State(app): State<Shared>) -> Json<Value> {
             }
             _ => None,
         };
-        out.insert(a.name.clone(), json!({ "term": term, "paused": paused }));
+        let machine_on = app
+            .machine_on
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&a.name)
+            .copied();
+        let tasks = if a.kind == agentwatch::config::Kind::Queue {
+            let mut v = super::poll::blank(&a, chrono::Utc::now());
+            super::poll::queue_view(&app, &a, &mut v);
+            Some(
+                json!({ "tasks": v.tasks, "waiting": v.waiting, "line": v.line, "state": v.state }),
+            )
+        } else {
+            None
+        };
+        out.insert(
+            a.name.clone(),
+            json!({ "term": term, "paused": paused, "machine_on": machine_on, "queue": tasks }),
+        );
     }
     let v = Value::Object(out);
     *cache = Some((std::time::Instant::now(), v.clone()));
     Json(v)
+}
+
+async fn task_retry(
+    State(app): State<Shared>,
+    Path((name, id)): Path<(String, String)>,
+) -> ApiResult {
+    let a = agent(&app, &name)?;
+    let slug = agentterm::slug(&a.name).ok_or_else(|| fail(StatusCode::BAD_REQUEST, "bad name"))?;
+    let t = super::dispatch::retry(&agentterm::term_dir(&app.dir, &slug), &id)
+        .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
+    *app.live.lock().await = None;
+    Ok(Json(json!({ "task": t })))
 }
 
 /// ttyd's port on this machine (systemd/agentterm.service).
@@ -178,6 +209,7 @@ async fn report(
             .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no report yet"))?,
     };
     let (md, base) = match a.kind {
+        Kind::Queue => return Err(fail(StatusCode::NOT_FOUND, "no reports")),
         Kind::Cloud => {
             let _work = app.work.lock().await;
             let md = app

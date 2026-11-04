@@ -55,15 +55,22 @@ node. lenovo1 has the Desk and Standards clones, mac1 none yet, and beelink1 not
 Jon adds Claude there (the Windows scripts are written and not yet run). The tiles refresh
 every 10 seconds while the page is in view: no AI, a file read and one ssh.
 
-## Work-laptop agent
+## Work laptop (built 4 Nov)
 
-A worker on the work laptop, run there, because some work (its GitHub account, the
-site PCs) is only reachable from it. Its tile shows `off` when the laptop is off.
-- It may edit, build and commit locally on its own.
-- It never pushes, opens a PR or installs anything without Jon's yes.
-- Installing it on the laptop needs Jon's yes first (his rule one).
-- Nothing about the work goes in this public repo: the laptop's brief and status live
-  on the laptop.
+The work laptop never dials out and is often off, so its tile works differently:
+- **You talk to it on lenovo1.** Its terminal is a lenovo1 session (Haiku) in
+  `chats/work-laptop`, whose brief tells it to queue agreed tasks with
+  `agentterm queue add work-laptop <dir> "<task>"`. It never touches the laptop itself.
+- **The queue** is `term/work-laptop/queue/<id>.json` on lenovo1, never in a repo.
+- **The dispatcher** (`agentwatch/src/server/dispatch.rs`, no AI) checks the laptop every
+  minute, so the tile shows **wl on** or **wl off**. When the laptop is on, it starts the
+  next task detached in tmux there (`claude -p`, Haiku, a Sonnet subagent only if needed),
+  one at a time, collects each result, and marks a task whose tmux session vanished
+  without a result as interrupted, for Retry.
+- **What a task may do** is set in its Claude settings: edits, builds, tests, local commits
+  as JPComley. Push, `gh`, sudo, installs, ssh and scp are denied, and the task ends
+  "NEEDS YOU:" with the command.
+- Nothing about the work goes in a repo: ai-mesh has only the generic entry.
 
 ## Order
 
@@ -72,4 +79,4 @@ site PCs) is only reachable from it. Its tile shows `off` when the laptop is off
 2. mac1's orchestrator and Reviews tiles (claude on mac1, tmux on lenovo1).
 3. Placement: nodes listed with what they can do; the least busy able node takes a new
    session (done, beelink1 waiting on Claude).
-4. The work-laptop worker, on Jon's yes.
+4. The work-laptop worker: queue and dispatcher (done).

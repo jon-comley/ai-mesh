@@ -217,8 +217,9 @@ Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md
 
 Every tile opens its agent full screen as a real `claude` terminal, opening on a Haiku summary;
 the session carries on after Jon leaves and the tile shows done or needs you. Haiku first,
-escalating only when needed, with a cost line per tile and limit notifications. A work-laptop
-worker runs on the laptop when it is on, never pushing or installing without Jon's yes. Plan:
+escalating only when needed, with a cost line per tile and limit notifications. Work-laptop tasks
+are talked through on lenovo1 and queued, then run on the laptop when it is on, never pushing
+or installing without Jon's yes. Built 4 Nov except the first real task on the laptop. Plan:
 [`plans/agent-terminals.md`](plans/agent-terminals.md).
 
 ## IT worker on lenovo1, for Cyber Essentials (agreed 2026-11-03, not started)

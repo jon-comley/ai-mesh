@@ -13,6 +13,9 @@ pub enum Kind {
     Cloud,
     /// A worker on one of our machines, read from its status file over ssh.
     Local,
+    /// Work queued for a machine that is not always on (the work laptop): the
+    /// tile's terminal runs here, the dispatcher runs each task on `host`.
+    Queue,
 }
 
 /// One `[[agent]]` entry.
@@ -76,6 +79,12 @@ pub struct Agent {
     /// The chat may read but not change anything.
     #[serde(default)]
     pub chat_readonly: bool,
+    /// What a node must do to host its terminal, and the node it must use
+    /// (agentterm's pool). Kept here so Settings never drops them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
     /// The memory clone on `host`.
     #[serde(default = "default_memory_dir")]
     pub memory_dir: String,
@@ -122,6 +131,9 @@ pub struct Config {
     /// Its deploy key under `keys/`.
     #[serde(default = "default_memory_key")]
     pub memory_key: String,
+    /// The machine pool for terminals, read by agentterm; kept as written.
+    #[serde(default, rename = "node", skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<toml::Value>,
 }
 
 fn default_memory_key() -> String {
@@ -135,6 +147,7 @@ impl Default for Config {
             ntfy: None,
             memory: None,
             memory_key: default_memory_key(),
+            nodes: Vec::new(),
         }
     }
 }
@@ -165,6 +178,7 @@ impl Config {
                     ("host", a.host.is_none()),
                     ("status", a.status.is_none() && a.reports.is_none()),
                 ],
+                Kind::Queue => [("host", a.host.is_none()), ("host", false)],
             };
             if let Some((field, _)) = missing.iter().find(|(_, m)| *m) {
                 return Err(ConfigError(format!("{} has no {field}", a.name)));
@@ -448,6 +462,32 @@ grace = "10m"
                 "[[agent]]\nname=\"a\"\npurpose=\"p\"\nrepo=\"git@github.com:a/b.git\"\nkey=\"k\"\nevery=\"soon\"\n"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn settings_keep_the_pool_and_queue_workers() {
+        let text = r#"
+[[agent]]
+name = "Work laptop"
+kind = "queue"
+purpose = "x"
+host = "work-laptop"
+needs = ["claude"]
+pin = "lenovo1"
+every = "1d"
+
+[[node]]
+name = "lenovo1"
+can = ["claude"]
+"#;
+        let c = Config::parse(text).unwrap();
+        assert_eq!(c.agents[0].kind, Kind::Queue);
+        let again = Config::parse(&c.to_text()).unwrap();
+        assert_eq!(again.agents[0].pin.as_deref(), Some("lenovo1"));
+        assert_eq!(again.nodes.len(), 1);
+        assert!(
+            Config::parse("[[agent]]\nname = \"Q\"\nkind = \"queue\"\npurpose = \"x\"\nevery = \"1d\"\n").is_err()
         );
     }
 }
