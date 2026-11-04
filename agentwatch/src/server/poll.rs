@@ -48,6 +48,8 @@ pub struct View {
     pub term: Option<agentterm::TermView>,
     /// A queue worker's machine: on the network at the last check.
     pub machine_on: Option<bool>,
+    /// The State and NEXT lines of its own STATUS.md, for the terminal's brief.
+    pub status_lines: Vec<String>,
     /// What the tile calls that machine: `wl` for the work laptop.
     pub machine: Option<String>,
     /// A queue worker's tasks, newest first.
@@ -98,6 +100,7 @@ pub fn blank(agent: &Agent, now: DateTime<Utc>) -> View {
         paused: false,
         term: None,
         machine_on: None,
+        status_lines: Vec::new(),
         machine: None,
         tasks: Vec::new(),
         checked_at: now,
@@ -179,6 +182,19 @@ pub fn queue_view(app: &App, agent: &Agent, v: &mut View) {
     };
     tasks.truncate(20);
     v.tasks = tasks;
+    let status = app.dir.join("chats").join(&slug).join("STATUS.md");
+    v.status_lines = status_lines(&std::fs::read_to_string(status).unwrap_or_default());
+}
+
+/// A STATUS.md's State and NEXT lines (agentterm::summary), nothing if it has none.
+fn status_lines(text: &str) -> Vec<String> {
+    if !text
+        .lines()
+        .any(|l| l.starts_with("State:") || l.starts_with("NEXT:"))
+    {
+        return Vec::new();
+    }
+    agentterm::summary(text).lines().map(String::from).collect()
 }
 
 fn first(text: &str) -> &str {
@@ -244,6 +260,7 @@ async fn read_cloud(repo: &Repo, agent: &Agent, v: &mut View) -> run::Result<Clo
         .collect();
     let hub = repo.read(&agent.hub).unwrap_or_default();
     v.rows = hub::rows(&hub, &agent.needs_heading);
+    v.status_lines = status_lines(&repo.read("STATUS.md").unwrap_or_default());
     v.waiting = v.rows.iter().filter(|r| r.waiting()).count();
     let Some((hash, at)) = repo.last_change("agent-log.md").await? else {
         return Ok((None, Vec::new()));

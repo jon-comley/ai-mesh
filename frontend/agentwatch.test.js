@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -100,5 +100,24 @@ describe('machineText', () => {
     expect(machineText({ machine: 'wl', machine_on: false })).toBe('wl off');
     expect(machineText({ machine: 'wl', machine_on: null })).toBe('');
     expect(machineText({})).toBe('');
+  });
+});
+
+describe('briefing', () => {
+  it('says the last run, what waits on Jon, and what the terminal last said', () => {
+    const lines = briefing({
+      last_run: new Date(Date.now() - 3600_000).toISOString(), line: 'wrote IT-PRO-003',
+      can_reply: false, waiting_lines: ['approve IT-POL-003'], term: { state: { line: 'Done: hub rewritten.' } },
+    });
+    expect(lines.map((l) => l.label)).toEqual(['Last run', 'Needs you', 'Terminal said']);
+    expect(lines[0].text).toMatch(/wrote IT-PRO-003$/);
+  });
+  it("starts with the agent's own State and NEXT", () => {
+    const lines = briefing({ status_lines: ['State: 3 drafts', 'NEXT: needs Jon: approve'], can_reply: false, waiting_lines: [] });
+    expect(lines.slice(0, 2)).toEqual([{ label: 'State', text: '3 drafts' }, { label: 'NEXT', text: 'needs Jon: approve' }]);
+  });
+  it('keeps to five waiting items', () => {
+    const lines = briefing({ can_reply: false, waiting_lines: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] });
+    expect(lines.at(-1).text).toBe('and 2 more');
   });
 });

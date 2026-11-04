@@ -228,3 +228,9 @@ body.fullscreen > main { max-width: none; padding: 0; margin: 0; }
 .task.done { border-color: #2e7d32; }
 .task.needs_you, .task.interrupted, .task.failed { border-color: #c62828; }
 .task .result { white-space: pre-wrap; }
+
+/* What the worker last found, above its terminal. */
+.term-brief { position: relative; padding: 0.5rem 2rem 0.5rem 0.9rem; border-bottom: 1px solid #333; background: #161C24; font-size: 0.9rem; max-height: 30vh; overflow: auto; }
+.term-brief ul { margin: 0; padding: 0; list-style: none; }
+.term-brief li { margin: 0.15rem 0; }
+.term-brief-close { position: absolute; top: 0.3rem; right: 0.4rem; background: none; border: 0; color: inherit; font-size: 1.1rem; cursor: pointer; }

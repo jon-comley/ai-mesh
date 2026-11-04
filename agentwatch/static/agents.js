@@ -84,6 +84,28 @@ export const TASK_LABELS = {
   queued: 'Queued', running: 'Running', done: 'Done', needs_you: 'Needs you', interrupted: 'Interrupted', failed: 'Failed',
 };
 
+/**
+ * What the terminal page shows above Claude: where the worker stands, from what
+ * its tile already knows (no model call). Lines of { label, text }.
+ */
+export function briefing(a) {
+  const out = [];
+  // Its own STATUS.md first: State and NEXT, as the agent wrote them.
+  for (const l of a.status_lines || []) {
+    const [label, ...rest] = l.split(':');
+    out.push({ label, text: rest.join(':').trim() });
+  }
+  if (a.last_run) out.push({ label: 'Last run', text: `${relTime(a.last_run)}${a.line ? `: ${a.line}` : ''}` });
+  else if (a.line) out.push({ label: 'Now', text: a.line });
+  const waiting = a.can_reply
+    ? (a.rows || []).filter((r) => !r.reply).map((r) => `${r.number}. ${plain(rowWhat(r))}`)
+    : (a.waiting_lines || []);
+  waiting.slice(0, 5).forEach((w) => out.push({ label: 'Needs you', text: w }));
+  if (waiting.length > 5) out.push({ label: 'Needs you', text: `and ${waiting.length - 5} more` });
+  if (a.term?.state?.line) out.push({ label: 'Terminal said', text: a.term.state.line });
+  return out;
+}
+
 /** The "What" of a hub row: the cell headed What, else the longest middle cell. */
 export function rowWhat(row) {
   const i = row.headers.findIndex((h) => /^(what|item|idea)$/i.test(h));
@@ -486,6 +508,15 @@ function renderTerm(main, name) {
     // ttyd listens on Tailscale only (systemd/agentterm.service).
     src: `${termBase()}/?arg=${encodeURIComponent(slug)}`,
   });
+  // Where it stands, before Jon types: hidden with × and remembered per worker.
+  const hideKey = `agentwatch-brief-hidden-${slug}`;
+  const lines = briefing(a);
+  const brief = lines.length && localStorage.getItem(hideKey) !== '1'
+    ? el('div', { class: 'term-brief' },
+      el('button', { class: 'term-brief-close', title: 'Hide (Details shows it all)', onclick: () => { localStorage.setItem(hideKey, '1'); brief.remove(); } }, '×'),
+      el('ul', {}, lines.map((l) => el('li', {}, el('strong', {}, `${l.label}: `), l.text))),
+      a.report ? el('a', { href: `#/agent/${encodeURIComponent(a.name)}` }, 'Latest report and everything else in Details') : null)
+    : null;
   main.append(el('div', { class: 'term' },
     el('div', { class: 'term-bar' },
       el('a', { class: 'button', href: '#/' }, '← All workers'),
@@ -498,8 +529,10 @@ function renderTerm(main, name) {
       window.top !== window
         ? el('a', { class: 'button', href: `${location.origin}/#/term/${encodeURIComponent(a.name)}`, target: '_top' }, 'Full screen')
         : (document.fullscreenEnabled ? el('button', { onclick: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) }, 'Full screen') : null),
+      lines.length ? el('button', { title: 'Show where it stands', onclick: () => { localStorage.removeItem(hideKey); render(true); } }, 'Brief') : null,
       el('a', { class: 'button', href: `#/agent/${encodeURIComponent(a.name)}` }, 'Details'),
     ),
+    brief,
     frame,
   ));
   document.body.classList.add('fullscreen');
@@ -526,13 +559,13 @@ async function act(a, action, done) {
 
 // ── Page ────────────────────────────────────────────────────────────────────
 
-function render() {
+function render(force = false) {
   const main = document.getElementById('main');
   // Leave a half-typed reply or config alone.
   if (main.contains(document.activeElement) && document.activeElement.matches('input[type=text], textarea')) return;
   const route = parseRoute(location.hash);
   // The terminal keeps its connection: a background refresh never redraws it.
-  if (route.view === 'term' && main.querySelector('.term-frame')) return;
+  if (route.view === 'term' && main.querySelector('.term-frame') && !force) return;
   main.replaceChildren();
   document.body.classList.remove('fullscreen');
   if (route.view === 'term') renderTerm(main, route.name);
