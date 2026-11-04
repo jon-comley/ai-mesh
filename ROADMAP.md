@@ -236,6 +236,13 @@ IT-PRO-003 patch management, both drafted by the Standards agent for Jon's appro
 
 ## pi1 is a single point of failure: the whole mesh went down, 2026-10-13
 
+**Moved 2026-11-04: the coordinator runs on lenovo1** (`192.168.1.47`, ports 9000 and 9001, its
+state in `lenovo1:/var/lib/ai-mesh`, the sensor push timer with it). Every node points there.
+pi1's coordinator is stopped and disabled with its state left in place, so going back is
+`systemctl enable --now` on pi1 and the old `COORDINATOR_IP`. **Still on pi1:** MQTT and
+Zigbee2MQTT, until the Zigbee antenna is on ethernet; then they move to lenovo1 too.
+The rest of this section is the October story.
+
 pi1 dropped off the network around 03:30 and Jon had to power-cycle it by hand.
 With no other host able to coordinate, everything stopped: the agents, the
 dashboard, the lights' automation and the gated test runs that need pi1's Pixel.

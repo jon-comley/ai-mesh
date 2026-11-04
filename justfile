@@ -3092,8 +3092,13 @@ update-coordinator target_host:
     #!/usr/bin/env bash
     set -e
     source "nodes/{{target_host}}.env"
-    cargo build --target aarch64-unknown-linux-gnu --release -p coordinator 2>&1 | grep -E "^error|Finished"
-    scp {{ssh_opts}} -q target/aarch64-unknown-linux-gnu/release/coordinator ${NODE_USER}@${NODE_HOST}:/tmp/ai-mesh-coordinator.new
+    # lenovo1 (x86_64) is the coordinator since 2026-11-04; pi1 was aarch64.
+    case "$(ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} uname -m)" in
+        x86_64) triple=x86_64-unknown-linux-gnu ;;
+        *) triple=aarch64-unknown-linux-gnu ;;
+    esac
+    cargo build --target $triple --release -p coordinator 2>&1 | grep -E "^error|Finished"
+    scp {{ssh_opts}} -q target/$triple/release/coordinator ${NODE_USER}@${NODE_HOST}:/tmp/ai-mesh-coordinator.new
     ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "set -e
         sudo cp -p /usr/local/bin/ai-mesh-coordinator /usr/local/bin/ai-mesh-coordinator.prev
         sudo install -m 755 /tmp/ai-mesh-coordinator.new /usr/local/bin/ai-mesh-coordinator
