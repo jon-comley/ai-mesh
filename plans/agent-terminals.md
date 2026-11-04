@@ -1,0 +1,38 @@
+# Agent terminals: every worker is a Claude terminal
+
+## Status (2026-11-04)
+
+Agreed with Jon, not started. Core ai-mesh: a new workspace crate, `agentterm`, which
+agentwatch's tiles open. It replaces the "Talk to <name>" chat box.
+
+## What Jon gets
+
+1. **Full screen.** A tile opens its agent full screen: a real `claude` terminal in the
+   browser (ttyd and tmux on the node that runs it), the same as a local Claude Code
+   session.
+2. **Opens on a summary.** Haiku reads the agent's status file and says where it is up to.
+3. **Jon types, then leaves.** tmux keeps the session; the agent carries on with the tasks.
+4. **The tile shows the result:** `working`, `done` or `needs you`, written by a Claude
+   `Stop` hook. Clicking in gives the summary.
+5. **Escalate only when needed.** Sessions start on Haiku and step up to Sonnet or Opus
+   only when the task needs it, saying so in one line with the reason.
+6. **Costs.** Each tile shows today's and this month's spend; each session shows its
+   running cost in the status line; a notification fires when a session or a day passes
+   its limit (defaults GBP 2 a session, GBP 10 a day, set per node).
+
+## Work-laptop agent
+
+A worker on the work laptop, run there, because some work (its GitHub account, the
+site PCs) is only reachable from it. Its tile shows `off` when the laptop is off.
+- It may edit, build and commit locally on its own.
+- It never pushes, opens a PR or installs anything without Jon's yes.
+- Installing it on the laptop needs Jon's yes first (his rule one).
+- Nothing about the work goes in this public repo: the laptop's brief and status live
+  on the laptop.
+
+## Order
+
+1. `agentterm` on lenovo1 with the Desk and Standards tiles (local `claude`, their chat
+   clones), status hook and costs.
+2. mac1's orchestrator and Reviews tiles (tmux on mac1 over ssh).
+3. The work-laptop worker, on Jon's yes.
