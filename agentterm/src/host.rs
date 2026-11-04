@@ -116,8 +116,14 @@ pub fn settings(slug: &str, w: &Worker) -> Value {
         (Some(label), Some(pause)) => format!(" {label} {pause}"),
         _ => String::new(),
     };
+    let status = status_file(w);
     let cmd = |event: &str| {
-        let extra = if event == "prompt" { gate.as_str() } else { "" };
+        let extra = match event {
+            "prompt" => gate.clone(),
+            // Its summary under the prompt, read on the host.
+            "statusline" if !status.contains('$') => format!(" {status}"),
+            _ => String::new(),
+        };
         format!("{HOST_BIN}/agentterm-hook {slug} {event}{extra}")
     };
     crate::settings_with(cmd)
@@ -360,7 +366,7 @@ chat_readonly = true
         );
         assert_eq!(
             v.pointer("/statusLine/command").unwrap(),
-            "~/.ai-mesh/bin/agentterm-hook orchestrator statusline"
+            "~/.ai-mesh/bin/agentterm-hook orchestrator statusline ~/orchestrator-status.md"
         );
     }
 

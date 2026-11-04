@@ -4,6 +4,7 @@
 # which keeps what the tile shows. Installed by `just deploy-agentterm-mac`.
 #
 #   agentterm-hook <agent> <event> [<tick label> <pause file>]
+#   agentterm-hook <agent> statusline [<status file>]
 #
 # With a tick label, a prompt waits for nothing: if the tick is running it is
 # refused (exit 2 shows Claude the reason), else the tick is paused.
@@ -26,4 +27,8 @@ esac
 # A missed update must never block the session.
 printf '%s' "$input" | ssh -o BatchMode=yes -o ConnectTimeout=5 lenovo1 \
     "AGENTTERM_AGENT=$agent /usr/local/bin/agentterm $what" 2>/dev/null
+# Where the worker stands, under the prompt (the third argument is its status file).
+if [ "$event" = statusline ] && [ -n "$label" ] && [ -r "$label" ]; then
+    grep -E '^(State|NEXT):' "$label" 2>/dev/null || head -n 1 "$label" | cut -c1-150
+fi
 exit 0

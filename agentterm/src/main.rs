@@ -375,4 +375,24 @@ fn statusline() {
         None => (usd, usd),
     };
     println!("{}", agentterm::status_line(model, session, today, &limits));
+    // Where the worker stands, under the prompt for the whole session: Claude
+    // clears the screen as it starts, so a summary printed before it is lost.
+    let dir = match s("/workspace/current_dir") {
+        "" => s("/cwd"),
+        d => d,
+    };
+    if let Ok(text) = std::fs::read_to_string(std::path::Path::new(dir).join("STATUS.md")) {
+        for line in agentterm::summary(&text).lines() {
+            println!("{}", short(line, 150));
+        }
+    }
+}
+
+fn short(line: &str, max: usize) -> String {
+    let cut: String = line.chars().take(max).collect();
+    if cut.len() < line.len() {
+        format!("{cut}…")
+    } else {
+        cut
+    }
 }
