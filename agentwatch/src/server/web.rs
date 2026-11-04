@@ -55,6 +55,7 @@ pub fn router(app: Shared) -> Router {
             get(chat_messages).post(chat_send),
         )
         .route("/api/agents/{name}/chat/new", post(chat_new))
+        .route("/api/agents/{name}/term", get(term))
         .route("/api/memory", get(memory_list))
         .route("/api/memory/file", get(memory_file).put(memory_save))
         .route("/api/config", get(get_config).put(put_config))
@@ -90,6 +91,16 @@ async fn list(State(app): State<Shared>) -> Json<Value> {
         .is_some();
     Json(json!({ "agents": app.views(), "ntfy": ntfy }))
 }
+
+/// The terminal's state, read fresh: the full-screen page polls it.
+async fn term(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
+    let a = agent(&app, &name)?;
+    let term = super::poll::term(&app, &a).await;
+    Ok(Json(json!({ "term": term, "port": TERM_PORT })))
+}
+
+/// ttyd's port on this machine (systemd/agentterm.service).
+const TERM_PORT: u16 = 7681;
 
 async fn refresh(State(app): State<Shared>) -> Json<Value> {
     app.refresh_all().await;

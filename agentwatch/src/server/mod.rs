@@ -184,6 +184,20 @@ impl App {
 /// after a restart, which has nothing to compare with.
 fn push_text(before: Option<&View>, after: &View) -> Option<String> {
     let before = before?;
+    if let (Some(b), Some(a)) = (&before.term, &after.term) {
+        if a.over_session && !b.over_session {
+            return Some(format!(
+                "terminal session over its limit: £{:.2}",
+                a.session_gbp
+            ));
+        }
+        if a.over_day && !b.over_day {
+            return Some(format!(
+                "terminal over its day limit: £{:.2} today",
+                a.today_gbp
+            ));
+        }
+    }
     let bad = |s: State| matches!(s, State::Late | State::Broken | State::Unreachable);
     if bad(after.state) && after.state != before.state {
         let why = after.error.as_deref().unwrap_or(&after.line);

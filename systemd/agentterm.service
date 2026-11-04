@@ -1,0 +1,22 @@
+# Agent terminals on lenovo1 (plans/agent-terminals.md): ttyd on port 7681 runs
+# `agentterm attach <agent>` for the page's ?arg=<agent>, which opens or rejoins
+# that agent's tmux session running claude. Installed by `just deploy-agentwatch`.
+# Tailscale only, behind a login: a terminal is a shell on lenovo1. The login is
+# AGENTTERM_LOGIN=user:password in ~/.config/agentterm/login.env (mode 600).
+[Unit]
+Description=Agent terminals (ttyd, port 7681)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=jonno
+Environment=HOME=/home/jonno
+Environment=AGENTTERM_DIR=/home/jonno/.ai-mesh/agents
+Environment=PATH=/home/jonno/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/jonno/.config/agentterm/login.env
+ExecStart=/usr/bin/ttyd --writable --url-arg --interface tailscale0 --port 7681 --credential ${AGENTTERM_LOGIN} -t fontSize=15 -t disableLeaveAlert=true /usr/local/bin/agentterm attach
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

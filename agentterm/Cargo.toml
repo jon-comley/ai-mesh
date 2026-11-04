@@ -1,0 +1,13 @@
+[package]
+name = "agentterm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

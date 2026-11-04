@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -24,6 +24,7 @@ describe('agent watch page helpers', () => {
     expect(parseRoute('#/agent/Desk')).toEqual({ view: 'agent', name: 'Desk' });
     expect(parseRoute('#/agent/Two%20Words')).toEqual({ view: 'agent', name: 'Two Words' });
     expect(parseRoute('#/settings')).toEqual({ view: 'settings' });
+    expect(parseRoute('#/term/Desk')).toEqual({ view: 'term', name: 'Desk' });
     expect(parseRoute('#/memory')).toEqual({ view: 'memory' });
     expect(parseRoute('#/memory/jon/be-punchy.md')).toEqual({ view: 'fact', path: 'jon/be-punchy.md' });
   });
@@ -66,4 +67,16 @@ describe('agent watch page helpers', () => {
     expect(memoryTileText(null)).toBe('What every worker knows, by subject');
     expect(memoryTileText({ count: 85, folders: [1, 2, 3, 4, 5, 6] })).toBe('What every worker knows: 85 facts in 6 folders');
   });
+});
+
+describe('termText', () => {
+  const t = { open: true, today_gbp: 0.4, month_gbp: 3.1, session_gbp: 0.4, over_session: false, over_day: false };
+  it('says the phase and the spend', () => {
+    expect(termText({ ...t, state: { phase: 'done', line: 'x' } })).toBe('Done · £0.40 today · £3.10 this month');
+    expect(termText({ ...t, state: null })).toBe('Open · £0.40 today · £3.10 this month');
+  });
+  it('says when it is over a limit', () => {
+    expect(termText({ ...t, state: { phase: 'working' }, over_session: true })).toMatch(/session over its limit$/);
+  });
+  it('is empty without a terminal', () => expect(termText(null)).toBe(''));
 });

@@ -80,9 +80,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentterm"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "agentwatch"
 version = "0.1.0"
 dependencies = [
+ "agentterm",
  "axum",
  "chrono",
  "chrono-tz",

@@ -44,6 +44,8 @@ pub struct View {
     pub can_run: bool,
     pub can_pause: bool,
     pub paused: bool,
+    /// Its terminal on lenovo1 (plans/agent-terminals.md), if it has one.
+    pub term: Option<agentterm::TermView>,
     pub checked_at: DateTime<Utc>,
 }
 
@@ -87,6 +89,7 @@ pub fn blank(agent: &Agent, now: DateTime<Utc>) -> View {
         },
         can_pause: agent.kind == Kind::Local && agent.pause.is_some(),
         paused: false,
+        term: None,
         checked_at: now,
     }
 }
@@ -100,6 +103,7 @@ pub async fn view(app: &App, agent: &Agent) -> View {
         Kind::Cloud => cloud(app, agent, &mut v, run_started, now).await,
         Kind::Local => local(agent, &mut v, run_started, now).await,
     }
+    v.term = term(app, agent).await;
     v.next_due = state::next_due(
         v.last_run,
         agent.every,
@@ -107,6 +111,21 @@ pub async fn view(app: &App, agent: &Agent) -> View {
         now,
     );
     v
+}
+
+/// The agent's terminal, if it has a clone to work in on this machine.
+pub async fn term(app: &App, agent: &Agent) -> Option<agentterm::TermView> {
+    let slug = agentterm::slug(&agent.name)?;
+    if !app.dir.join("chats").join(&slug).is_dir() {
+        return None;
+    }
+    let open = tokio::process::Command::new("tmux")
+        .args(["has-session", "-t", &agentterm::tmux_session(&slug)])
+        .output()
+        .await
+        .is_ok_and(|o| o.status.success());
+    let today = chrono::Local::now().date_naive();
+    Some(agentterm::read(&app.dir, &slug, open, today))
 }
 
 async fn cloud(

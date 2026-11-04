@@ -53,10 +53,23 @@ export function clock(iso) {
 export function parseRoute(hash) {
   const parts = (hash || '').replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   if (parts[0] === 'agent' && parts[1]) return { view: 'agent', name: parts[1] };
+  if (parts[0] === 'term' && parts[1]) return { view: 'term', name: parts[1] };
   if (parts[0] === 'settings') return { view: 'settings' };
   if (parts[0] === 'memory' && parts.length === 3) return { view: 'fact', path: `${parts[1]}/${parts[2]}` };
   if (parts[0] === 'memory') return { view: 'memory' };
   return { view: 'tiles' };
+}
+
+export const PHASE_LABELS = { working: 'Working', done: 'Done', needs_you: 'Needs you' };
+
+/** One line about a worker's terminal: "Done · £0.40 today · £3.10 this month". */
+export function termText(t) {
+  if (!t) return '';
+  const phase = t.state ? PHASE_LABELS[t.state.phase] ?? t.state.phase : (t.open ? 'Open' : 'Closed');
+  const parts = [phase, `£${t.today_gbp.toFixed(2)} today`, `£${t.month_gbp.toFixed(2)} this month`];
+  if (t.over_session) parts.push('session over its limit');
+  else if (t.over_day) parts.push('over the day limit');
+  return parts.join(' · ');
 }
 
 /** The "What" of a hub row: the cell headed What, else the longest middle cell. */
@@ -116,10 +129,15 @@ function replaceAgent(view) {
 // ── Views ───────────────────────────────────────────────────────────────────
 
 export function tile(a) {
-  return el('a', { class: 'tile', href: `#/agent/${encodeURIComponent(a.name)}` },
+  // A worker with a terminal opens straight into it; its details are a button there.
+  const view = a.term ? 'term' : 'agent';
+  const phase = a.term?.state?.phase;
+  return el('a', { class: 'tile', href: `#/${view}/${encodeURIComponent(a.name)}` },
     el('span', { class: `light ${a.state}`, title: stateLabel(a.state) }),
     el('h2', {}, a.name),
     el('p', {}, a.purpose),
+    a.term ? el('p', { class: `term-line ${phase ?? ''}` }, termText(a.term)) : null,
+    a.term?.state?.line ? el('p', { class: 'term-said' }, a.term.state.line) : null,
     a.waiting > 0 ? el('span', { class: 'badge', title: 'Waiting on you' }, a.waiting) : null,
   );
 }
@@ -407,6 +425,48 @@ async function newChat(a) {
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
+// ── Terminal ────────────────────────────────────────────────────────────────
+
+let termTimer = null;
+const TERM_HOST = 'lenovo1.tail3c4ee3.ts.net';
+
+function renderTerm(main, name) {
+  const a = agents.find((x) => x.name.toLowerCase() === name.toLowerCase());
+  if (!a) {
+    main.append(el('p', {}, `No worker called ${name}. `, el('a', { href: '#/' }, 'Back')));
+    return;
+  }
+  const slug = a.name.toLowerCase();
+  const status = el('span', { class: 'term-status' }, termText(a.term));
+  const frame = el('iframe', {
+    class: 'term-frame',
+    title: `${a.name} terminal`,
+    // ttyd listens on Tailscale only (systemd/agentterm.service).
+    src: `http://${TERM_HOST}:7681/?arg=${encodeURIComponent(slug)}`,
+  });
+  main.append(el('div', { class: 'term' },
+    el('div', { class: 'term-bar' },
+      el('a', { class: 'button', href: '#/' }, '← All workers'),
+      el('strong', {}, a.name),
+      status,
+      el('span', { class: 'spacer' }),
+      el('a', { class: 'button', href: `#/agent/${encodeURIComponent(a.name)}` }, 'Details'),
+    ),
+    frame,
+  ));
+  document.body.classList.add('fullscreen');
+  clearInterval(termTimer);
+  termTimer = setInterval(async () => {
+    if (parseRoute(location.hash).view !== 'term') { clearInterval(termTimer); return; }
+    try {
+      const r = await api('GET', `/api/agents/${encodeURIComponent(a.name)}/term`);
+      a.term = r.term;
+      status.textContent = termText(r.term);
+    } catch { /* the next tick tries again */ }
+  }, 5_000);
+  frame.focus();
+}
+
 async function act(a, action, done) {
   try {
     const r = await api('POST', `/api/agents/${encodeURIComponent(a.name)}/${action}`);
@@ -422,9 +482,13 @@ function render() {
   const main = document.getElementById('main');
   // Leave a half-typed reply or config alone.
   if (main.contains(document.activeElement) && document.activeElement.matches('input[type=text], textarea')) return;
-  main.replaceChildren();
   const route = parseRoute(location.hash);
-  if (route.view === 'agent') { renderAgent(main, route.name); drawChat(); }
+  // The terminal keeps its connection: a background refresh never redraws it.
+  if (route.view === 'term' && main.querySelector('.term-frame')) return;
+  main.replaceChildren();
+  document.body.classList.remove('fullscreen');
+  if (route.view === 'term') renderTerm(main, route.name);
+  else if (route.view === 'agent') { renderAgent(main, route.name); drawChat(); }
   else if (route.view === 'settings') renderSettings(main);
   else if (route.view === 'memory') renderMemory(main);
   else if (route.view === 'fact') renderFact(main, route.path);
@@ -439,7 +503,7 @@ async function load(path = '/api/agents', method = 'GET') {
     agents = r.agents;
     checkedAt = agents.map((a) => a.checked_at).sort().at(-1) || null;
   } catch (e) { toast(e.message, true); }
-  if (['tiles', 'agent'].includes(parseRoute(location.hash).view)) render();
+  if (['tiles', 'agent', 'term'].includes(parseRoute(location.hash).view)) render();
 }
 
 if (typeof window !== 'undefined' && document.getElementById('main')) {

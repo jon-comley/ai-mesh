@@ -16,6 +16,7 @@ members = [
     "chords",
     "codereview",
     "agentwatch",
+    "agentterm",
     "llm-rotation",
     "agent",
     "coordinator",

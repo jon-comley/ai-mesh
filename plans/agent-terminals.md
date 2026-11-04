@@ -20,6 +20,12 @@ agentwatch's tiles open. It replaces the "Talk to <name>" chat box.
    running cost in the status line; a notification fires when a session or a day passes
    its limit (defaults GBP 2 a session, GBP 10 a day, set per node).
 
+## Access
+
+A terminal is a shell on its node, so ttyd listens on Tailscale only, behind a login
+(`~/.config/agentterm/login.env` on lenovo1, never in a repo). From home, open the page
+by its Tailscale name, not the LAN address.
+
 ## Where a session runs
 
 The coordinator already places models and inference by headroom. Agent sessions join it:

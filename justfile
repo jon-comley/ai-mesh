@@ -3104,28 +3104,32 @@ update-coordinator target_host:
     echo ">>> Coordinator on {{target_host}} updated (previous binary kept as ai-mesh-coordinator.prev)."
 
 # Build and install the agent watch page on lenovo1 (plans/agent-watch.md):
-# http://lenovo1/. Keeps the previous binary as agentwatch.prev.
+# http://lenovo1/, and its agent terminals (ttyd on :7681, plans/agent-terminals.md).
+# Keeps the previous binary as agentwatch.prev.
 # Roll back with:  ssh lenovo1 'sudo cp -p /usr/local/bin/agentwatch.prev /usr/local/bin/agentwatch && sudo systemctl restart agentwatch'
 # Usage: just deploy-agentwatch
 deploy-agentwatch:
     #!/usr/bin/env bash
     set -e
     source nodes/lenovo1.env
-    cargo build --release --target x86_64-unknown-linux-gnu -p agentwatch 2>&1 | grep -E "^error|Finished"
+    cargo build --release --target x86_64-unknown-linux-gnu -p agentwatch -p agentterm 2>&1 | grep -E "^error|Finished"
     scp {{ssh_opts}} -q target/x86_64-unknown-linux-gnu/release/agentwatch ${NODE_USER}@${NODE_HOST}:/tmp/agentwatch.new
-    scp {{ssh_opts}} -q systemd/agentwatch.service ${NODE_USER}@${NODE_HOST}:/tmp/agentwatch.service
+    scp {{ssh_opts}} -q target/x86_64-unknown-linux-gnu/release/agentterm ${NODE_USER}@${NODE_HOST}:/tmp/agentterm.new
+    scp {{ssh_opts}} -q systemd/agentwatch.service systemd/agentterm.service ${NODE_USER}@${NODE_HOST}:/tmp/
     ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "set -e
+        command -v ttyd >/dev/null || sudo apt-get install -y -qq ttyd
         [ -e /usr/local/bin/agentwatch ] && sudo cp -p /usr/local/bin/agentwatch /usr/local/bin/agentwatch.prev
         sudo install -m 755 /tmp/agentwatch.new /usr/local/bin/agentwatch
-        sudo install -m 644 /tmp/agentwatch.service /etc/systemd/system/agentwatch.service
-        rm /tmp/agentwatch.new /tmp/agentwatch.service
+        sudo install -m 755 /tmp/agentterm.new /usr/local/bin/agentterm
+        sudo install -m 644 /tmp/agentwatch.service /tmp/agentterm.service /etc/systemd/system/
+        rm /tmp/agentwatch.new /tmp/agentterm.new /tmp/agentwatch.service /tmp/agentterm.service
         mkdir -p ~/.ai-mesh/agents/keys && chmod 700 ~/.ai-mesh/agents/keys
         sudo systemctl daemon-reload
-        sudo systemctl enable -q agentwatch
-        sudo systemctl restart agentwatch
+        sudo systemctl enable -q agentwatch agentterm
+        sudo systemctl restart agentwatch agentterm
         sleep 3
-        systemctl is-active agentwatch"
-    echo ">>> Agent watch on lenovo1 updated: http://lenovo1/"
+        systemctl is-active agentwatch agentterm"
+    echo ">>> Agent watch on lenovo1 updated: http://lenovo1/ (terminals on :7681)"
 
 # Verify coordinator health on the target host (Phase 2 health check).
 # Checks: connectivity, log output, agent connections, Zigbee → MQTT, dashboard access.
