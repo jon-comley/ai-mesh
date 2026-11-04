@@ -42,14 +42,14 @@ pub struct Commit {
 }
 
 impl Commit {
-    /// Only the hub or `conversations/`: a chat or a hand edit, which also
-    /// commits under the agent's own prefix. A run always writes more.
+    /// Only the hub, `conversations/`, the brief or STATUS.md: a chat, a hand
+    /// edit or a check step that found nothing, which also commit under the
+    /// agent's own prefix. A run always writes more.
     fn hub_or_chat_only(&self, hub: &str) -> bool {
         !self.files.is_empty()
-            && self
-                .files
-                .iter()
-                .all(|f| f == hub || f.starts_with("conversations/"))
+            && self.files.iter().all(|f| {
+                f == hub || f == "agent-brief.md" || f == "STATUS.md" || f.starts_with("conversations/")
+            })
     }
 }
 
@@ -544,5 +544,17 @@ mod tests {
             next_due(None, DAY, Due::parse("07:30"), t("2026-03-28T12:00:00Z")),
             Some(t("2026-03-29T06:30:00Z"))
         );
+    }
+
+    #[test]
+    fn a_brief_or_status_edit_is_not_an_unfinished_run() {
+        let c = Commit {
+            at: Utc::now(),
+            subject: "Desk: Haiku check first".into(),
+            files: vec!["agent-brief.md".into(), "STATUS.md".into()],
+        };
+        assert!(c.hub_or_chat_only("HUB.md"));
+        let run = Commit { at: Utc::now(), subject: "Desk: run".into(), files: vec!["STATUS.md".into(), "reports/x.md".into()] };
+        assert!(!run.hub_or_chat_only("HUB.md"));
     }
 }
