@@ -213,6 +213,10 @@ hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
+## AI gatekeeper (idea, Jon 4 Nov: "a fun one... maybe not")
+
+A fun little project, not committed to. What it gates is still to agree.
+
 ## Agent terminals and a work-laptop worker (agreed 2026-11-04, not started)
 
 Every tile opens its agent full screen as a real `claude` terminal, opening on a Haiku summary;
