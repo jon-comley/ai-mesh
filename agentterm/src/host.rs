@@ -191,8 +191,14 @@ pub fn script(slug: &str, w: &Worker) -> String {
              if [ ! -e {pause} ]; then touch {pause} ~/.ai-mesh/term/{slug}.paused; fi\n"
         ));
     }
-    s.push_str(&format!("settings=$(cat <<'{t}'\n{settings}\n{t}\n)\n"));
-    s.push_str(&format!("prompt=$(cat <<'{t}'\n{prompt}\n{t}\n)\n"));
+    // `read -d ''` from a heredoc, not `$(cat <<...)`: mac1's bash 3.2 misreads a
+    // quote inside a heredoc in a command substitution (Reviews broke on "agent's").
+    s.push_str(&format!(
+        "IFS= read -r -d '' settings <<'{t}'\n{settings}\n{t}\n"
+    ));
+    s.push_str(&format!(
+        "IFS= read -r -d '' prompt <<'{t}'\n{prompt}\n{t}\n"
+    ));
     if let Some(brief) = &w.brief {
         s.push_str(&format!(
             "prompt=\"$prompt\"$'\\n\\n'\"$(cat {brief} 2>/dev/null)\"\n"
@@ -423,6 +429,26 @@ chat_readonly = true
         w.brief = None;
         w.chat_env = None;
         w
+    }
+
+    #[test]
+    fn scripts_parse_in_bash_3_2_style() {
+        // No heredoc inside $(...), which bash 3.2 (mac1) misparses with a quote in it.
+        for w in [orchestrator(), reviews_like()] {
+            let s = script("x", &w);
+            assert!(!s.contains("$(cat <<"), "{s}");
+            let d = tempfile::tempdir().unwrap();
+            let f = d.path().join("s.sh");
+            fs::write(&f, &s).unwrap();
+            assert!(
+                std::process::Command::new("bash")
+                    .arg("-n")
+                    .arg(&f)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
     }
 
     #[test]
