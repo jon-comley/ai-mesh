@@ -139,3 +139,11 @@ describe('costTotals', () => {
     expect(t.month).toBeCloseTo(4);
   });
 });
+
+describe('costTotals for the books', () => {
+  it('leaves out the work laptop', () => {
+    const list = [{ kind: 'cloud', term: { today_gbp: 1, month_gbp: 2 } }, { kind: 'queue', term: { today_gbp: 5, month_gbp: 9 } }];
+    expect(costTotals(list, true)).toEqual({ today: 1, month: 2 });
+    expect(costTotals(list).month).toBe(11);
+  });
+});

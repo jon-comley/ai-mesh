@@ -123,9 +123,12 @@ export function agentWhen(a) {
 
 const gbp = (n) => `£${(n ?? 0).toFixed(2)}`;
 
-/** Today's and this month's spend across every agent's terminal and tasks. */
-export function costTotals(list) {
-  return (list || []).reduce((t, a) => ({
+/**
+ * Today's and this month's spend across every agent's terminal and tasks.
+ * `books` leaves out the work laptop: ThingCo work is not a Glebefish cost.
+ */
+export function costTotals(list, books = false) {
+  return (list || []).filter((a) => !books || a.kind !== 'queue').reduce((t, a) => ({
     today: t.today + (a.term?.today_gbp ?? 0),
     month: t.month + (a.term?.month_gbp ?? 0),
   }), { today: 0, month: 0 });
@@ -521,6 +524,7 @@ async function renderSchedule(main) {
   let data;
   try { data = await api('GET', '/api/schedule'); } catch (e) { box.replaceChildren(el('p', { class: 'error' }, e.message)); return; }
   const totals = costTotals(data.agents);
+  const books = costTotals(data.agents, true);
   const agentRows = data.agents.map((a) => el('tr', {},
     el('td', {}, el('a', { href: `#/agent/${encodeURIComponent(a.name)}` }, a.name)),
     el('td', {}, agentWhere(a)),
@@ -551,7 +555,10 @@ async function renderSchedule(main) {
   box.replaceChildren(
     el('div', { class: 'cost-total' },
       el('strong', {}, `${gbp(totals.today)} today`), ` · ${gbp(totals.month)} this month`,
-      el('span', { class: 'muted' }, ' (terminals and wl tasks; the cloud routines and the orchestrator bill to the Claude account and are not counted here)')),
+      el('span', { class: 'muted' }, ' (terminals and wl tasks; the cloud routines and the orchestrator bill to the Claude account and are not counted here)'),
+      el('br'),
+      el('span', {}, `For the books, without wl: ${gbp(books.month)} this month (${gbp(books.today)} today). `),
+      el('span', { class: 'muted' }, 'Usage inside the Claude plan, priced at API rates: it goes on the costs pages and in the ledger with the plan itself on the 1st (ventures/cost-capture-checklist.md).')),
     el('h3', {}, 'Agents'),
     el('table', { class: 'schedule' }, head(['Agent', 'Runs on', 'When', 'State', 'Last run', 'Next', 'Spend today / month', '']), el('tbody', {}, agentRows)),
     el('h3', {}, 'Services'),
