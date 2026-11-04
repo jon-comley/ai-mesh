@@ -4,8 +4,8 @@
 // shown as text.
 
 const REFRESH_MS = 60_000;
-// The tiles' terminal and paused lines, while the page is in view.
-const LIVE_MS = 5_000;
+// The tiles' terminal and paused lines, while the page is in view. No AI: files and one ssh.
+const LIVE_MS = 10_000;
 
 let agents = [];
 let checkedAt = null;
@@ -68,7 +68,7 @@ export const PHASE_LABELS = { working: 'Working', done: 'Done', needs_you: 'Need
 export function termText(t) {
   if (!t) return '';
   const phase = t.state ? PHASE_LABELS[t.state.phase] ?? t.state.phase : (t.open ? 'Open' : 'Closed');
-  const parts = [phase, `£${t.today_gbp.toFixed(2)} today`, `£${t.month_gbp.toFixed(2)} this month`];
+  const parts = [t.node && t.open ? `${phase} on ${t.node}` : phase, `£${t.today_gbp.toFixed(2)} today`, `£${t.month_gbp.toFixed(2)} this month`];
   if (t.over_session) parts.push('session over its limit');
   else if (t.over_day) parts.push('over the day limit');
   return parts.join(' · ');

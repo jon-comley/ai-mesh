@@ -68,8 +68,25 @@ fn attach(name: &str) -> ExitCode {
         return ExitCode::from(2);
     };
     let dir = agents_dir();
-    if let Some(w) = agentterm::host::load(&dir, &slug).filter(|w| w.on_host()) {
-        return attach_host(&slug, &w, &dir);
+    let worker = agentterm::host::load(&dir, &slug);
+    if let Some(w) = worker.as_ref().filter(|w| w.on_host()) {
+        return attach_host(&slug, w, &dir);
+    }
+    // A session already open keeps its node: tmux -A rejoins it.
+    if !session_open(&slug) {
+        if let Some(w) = &worker {
+            match place(&slug, w, &dir) {
+                Ok(node) => {
+                    let _ = std::fs::create_dir_all(agentterm::term_dir(&dir, &slug));
+                    let _ =
+                        std::fs::write(agentterm::term_dir(&dir, &slug).join("node"), &node.name);
+                    if !node.local() {
+                        return attach_pooled(&slug, w, &node, &dir);
+                    }
+                }
+                Err(why) => return wait_and_fail(&format!("Cannot open {}: {why}.", w.name)),
+            }
+        }
     }
     let work = dir.join("chats").join(&slug);
     if !work.is_dir() {
@@ -77,11 +94,7 @@ fn attach(name: &str) -> ExitCode {
         return ExitCode::from(2);
     }
     // A new session starts from what is on main: the clone may be days old.
-    let open = Command::new("tmux")
-        .args(["has-session", "-t", &agentterm::tmux_session(&slug)])
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !open {
+    if !session_open(&slug) {
         let key = agentterm::host::load(&dir, &slug)
             .and_then(|w| w.key)
             .unwrap_or_else(|| slug.clone());
@@ -123,6 +136,102 @@ fn attach(name: &str) -> ExitCode {
         .args(agentterm::attach_command(
             &slug, &display, &work, &dir, &settings,
         ))
+        .exec();
+    eprintln!("cannot start tmux: {err}");
+    ExitCode::FAILURE
+}
+
+fn session_open(slug: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", &agentterm::tmux_session(slug)])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Shows why in the terminal and waits for Enter, so ttyd does not close
+/// before Jon has read it.
+fn wait_and_fail(why: &str) -> ExitCode {
+    println!("{why}\nPress Enter to close.");
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    ExitCode::FAILURE
+}
+
+fn reachable(node: &agentterm::node::Node) -> bool {
+    let Some(host) = &node.host else {
+        return true;
+    };
+    Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=3",
+            host,
+            "exit",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// The pool's choice for a new session of this worker.
+fn place(
+    slug: &str,
+    w: &agentterm::host::Worker,
+    dir: &std::path::Path,
+) -> Result<agentterm::node::Node, String> {
+    let nodes = agentterm::host::nodes(dir);
+    let first = nodes.first().map(|n| n.name.clone()).unwrap_or_default();
+    // Each node's open sessions, from the node each one was placed on.
+    let mut load = std::collections::HashMap::new();
+    for entry in std::fs::read_dir(dir.join("term"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let other = entry.file_name().to_string_lossy().to_string();
+        if other != slug && entry.path().is_dir() && session_open(&other) {
+            let on = std::fs::read_to_string(entry.path().join("node"))
+                .unwrap_or_else(|_| first.clone());
+            *load.entry(on.trim().to_string()).or_insert(0) += 1;
+        }
+    }
+    let needs = agentterm::node::needs(slug, &w.needs);
+    agentterm::node::place(&needs, w.pin.as_deref(), &nodes, reachable, &load).cloned()
+}
+
+/// A pooled worker on another node.
+fn attach_pooled(
+    slug: &str,
+    w: &agentterm::host::Worker,
+    node: &agentterm::node::Node,
+    dir: &std::path::Path,
+) -> ExitCode {
+    let w = agentterm::host::on_node(w, slug, node);
+    if node.os != agentterm::node::Os::Windows {
+        return attach_host(slug, &w, dir);
+    }
+    let host = node.host.as_deref().unwrap_or_default();
+    let local = agentterm::term_dir(dir, slug).join("start.ps1");
+    let copied = std::fs::write(&local, agentterm::host::script_windows(slug, &w)).is_ok()
+        && Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host])
+            .arg("if not exist .ai-mesh\\term mkdir .ai-mesh\\term")
+            .status()
+            .is_ok_and(|s| s.success())
+        && Command::new("scp")
+            .args(["-q", "-o", "BatchMode=yes"])
+            .arg(&local)
+            .arg(format!("{host}:{}", agentterm::host::ps1_path(slug)))
+            .status()
+            .is_ok_and(|s| s.success());
+    if !copied {
+        return wait_and_fail(&format!("Cannot reach {host} to start {}.", w.name));
+    }
+    let err = Command::new("tmux")
+        .args(agentterm::host::attach_command_windows(slug, host, dir))
         .exec();
     eprintln!("cannot start tmux: {err}");
     ExitCode::FAILURE

@@ -48,6 +48,13 @@ The coordinator already places models and inference by headroom. Agent sessions 
    tasks to the work laptop, gated runs to mac1.
 3. The tile shows the node a session is on.
 
+Built 4 Nov in `agentterm/src/node.rs`, without the coordinator: `[[node]]` entries in
+lenovo1's `agents.toml` list each machine's `can` (`claude`, a worker's slug for its clone,
+`phones`, `work`); a worker may set `needs` and `pin`. A session already open keeps its
+node. lenovo1 has the Desk and Standards clones, mac1 none yet, and beelink1 nothing until
+Jon adds Claude there (the Windows scripts are written and not yet run). The tiles refresh
+every 10 seconds while the page is in view: no AI, a file read and one ssh.
+
 ## Work-laptop agent
 
 A worker on the work laptop, run there, because some work (its GitHub account, the
@@ -63,5 +70,6 @@ site PCs) is only reachable from it. Its tile shows `off` when the laptop is off
 1. `agentterm` on lenovo1 with the Desk and Standards tiles (local `claude`, their chat
    clones), status hook and costs.
 2. mac1's orchestrator and Reviews tiles (claude on mac1, tmux on lenovo1).
-3. Placement: nodes advertise what they can host; the coordinator picks the node.
+3. Placement: nodes listed with what they can do; the least busy able node takes a new
+   session (done, beelink1 waiting on Claude).
 4. The work-laptop worker, on Jon's yes.

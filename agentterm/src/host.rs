@@ -38,12 +38,53 @@ pub struct Worker {
     /// Its deploy key under `keys/`, for pulling its clone.
     #[serde(default)]
     pub key: Option<String>,
+    /// What a node must be able to do to run it (crate::node::needs).
+    #[serde(default)]
+    pub needs: Vec<String>,
+    /// The node it must run on.
+    #[serde(default)]
+    pub pin: Option<String>,
+    /// Pull its clone before starting: a pooled worker on another node.
+    #[serde(skip)]
+    pub pull: bool,
 }
 
 #[derive(Deserialize)]
 struct Agents {
     #[serde(default, rename = "agent")]
     agents: Vec<Worker>,
+    #[serde(default, rename = "node")]
+    nodes: Vec<crate::node::Node>,
+}
+
+fn agents_toml(agents_dir: &Path) -> Option<Agents> {
+    toml::from_str(&fs::read_to_string(agents_dir.join("agents.toml")).ok()?).ok()
+}
+
+/// The machine pool, or this machine alone when `agents.toml` lists none.
+pub fn nodes(agents_dir: &Path) -> Vec<crate::node::Node> {
+    let Some(a) = agents_toml(agents_dir) else {
+        return crate::node::or_this_machine(Vec::new(), &[]);
+    };
+    let slugs: Vec<String> = a
+        .agents
+        .iter()
+        .filter_map(|w| crate::slug(&w.name))
+        .collect();
+    crate::node::or_this_machine(a.nodes, &slugs)
+}
+
+/// A pooled worker as it runs on another node: in that node's clone, pulled
+/// first, opening on its STATUS.md.
+pub fn on_node(w: &Worker, slug: &str, node: &crate::node::Node) -> Worker {
+    Worker {
+        kind: Some("local".into()),
+        host: node.host.clone(),
+        chat_dir: Some(format!("{}/{slug}", node.chats)),
+        status: Some("STATUS.md".into()),
+        pull: true,
+        ..w.clone()
+    }
 }
 
 impl Worker {
@@ -55,9 +96,7 @@ impl Worker {
 
 /// The worker whose name slugs to `slug`.
 pub fn load(agents_dir: &Path, slug: &str) -> Option<Worker> {
-    let text = fs::read_to_string(agents_dir.join("agents.toml")).ok()?;
-    let agents: Agents = toml::from_str(&text).ok()?;
-    agents
+    agents_toml(agents_dir)?
         .agents
         .into_iter()
         .find(|w| crate::slug(&w.name).as_deref() == Some(slug))
@@ -133,6 +172,11 @@ pub fn script(slug: &str, w: &Worker) -> String {
         s.push_str(&format!(". {env}\n"));
     }
     s.push_str("export PATH=\"$HOME/.local/bin:$PATH\" TERM=xterm-256color\n");
+    if w.pull {
+        s.push_str(
+            "git pull -q --ff-only || echo 'Could not pull: starting from the clone as it is.'\n",
+        );
+    }
     if let (Some(label), Some(pause)) = (&w.kickstart, &w.pause) {
         // Never two workers in one checkout: wait for a running tick, then pause.
         s.push_str(&format!(
@@ -168,8 +212,71 @@ pub fn script(slug: &str, w: &Worker) -> String {
     s
 }
 
+/// Where the PowerShell start script and settings go on a Windows node.
+pub fn ps1_path(slug: &str) -> String {
+    format!(".ai-mesh/term/{slug}.ps1")
+}
+
+/// The hooks for a Windows node: `agentterm-hook.ps1` (agentterm/windows/).
+pub fn settings_windows(slug: &str) -> Value {
+    crate::settings_with(|event| {
+        format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -File C:/Users/jonno/.ai-mesh/bin/agentterm-hook.ps1 {slug} {event}"
+        )
+    })
+}
+
+/// The PowerShell script that starts a pooled worker's session on a Windows
+/// node (not yet run on one: beelink1 has no Claude). Settings and the prompt
+/// go through files: PowerShell 5.1 mangles quotes in native arguments.
+pub fn script_windows(slug: &str, w: &Worker) -> String {
+    let settings = settings_windows(slug).to_string();
+    let prompt = system_prompt(w);
+    let dir = w
+        .chat_dir
+        .as_deref()
+        .unwrap_or("~")
+        .replace('/', "\\")
+        .replace('~', "$HOME");
+    format!(
+        "# Written by agentterm on lenovo1 (plans/agent-terminals.md).\n\
+         $ErrorActionPreference = 'Continue'\n\
+         Set-Location \"{dir}\"\n\
+         git pull -q --ff-only\n\
+         $t = \"$HOME\\.ai-mesh\\term\"\n\
+         @'\n{settings}\n'@ | Set-Content -Encoding UTF8 \"$t\\{slug}.settings.json\"\n\
+         @'\n{prompt}\n'@ | Set-Content -Encoding UTF8 \"$t\\{slug}.prompt.txt\"\n\
+         Select-String -Path STATUS.md -Pattern '^(State|NEXT):' | ForEach-Object {{ $_.Line }}\n\
+         ''\n\
+         claude --model haiku --permission-mode acceptEdits --settings \"$t\\{slug}.settings.json\" \
+         --append-system-prompt-file \"$t\\{slug}.prompt.txt\"\n"
+    )
+}
+
 /// The tmux arguments that open (or rejoin) a host worker's terminal.
 pub fn attach_command(slug: &str, host: &str, agents_dir: &Path) -> Vec<String> {
+    attach_with(
+        slug,
+        host,
+        agents_dir,
+        format!("bash {}", script_path(slug)),
+    )
+}
+
+/// The same for a Windows node.
+pub fn attach_command_windows(slug: &str, host: &str, agents_dir: &Path) -> Vec<String> {
+    attach_with(
+        slug,
+        host,
+        agents_dir,
+        format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -File {}",
+            ps1_path(slug)
+        ),
+    )
+}
+
+fn attach_with(slug: &str, host: &str, agents_dir: &Path, remote: String) -> Vec<String> {
     let s = |x: &str| x.to_string();
     vec![
         s("new-session"),
@@ -183,7 +290,7 @@ pub fn attach_command(slug: &str, host: &str, agents_dir: &Path) -> Vec<String> 
         s("ssh"),
         s("-t"),
         s(host),
-        format!("bash {}", script_path(slug)),
+        remote,
     ]
 }
 
@@ -270,6 +377,46 @@ chat_readonly = true
         assert!(!s.contains("launchctl"));
         assert!(s.contains("--permission-mode default"));
         assert!(s.contains("ls -t ~/.ai-mesh/reviews/reports/*/latest.md"));
+    }
+
+    #[test]
+    fn a_pooled_worker_on_mac1_pulls_and_opens_on_its_status() {
+        let desk = Worker {
+            name: "Desk".into(),
+            ..reviews_like()
+        };
+        let node = crate::node::Node {
+            name: "mac1".into(),
+            host: Some("mac1".into()),
+            os: crate::node::Os::Unix,
+            can: vec!["claude".into(), "desk".into()],
+            chats: "~/.ai-mesh/agents/chats".into(),
+        };
+        let w = on_node(&desk, "desk", &node);
+        let s = script("desk", &w);
+        assert!(s.contains("cd ~/.ai-mesh/agents/chats/desk || exit 1"));
+        assert!(s.contains("git pull -q --ff-only"));
+        assert!(s.contains("grep -E '^(State|NEXT):' STATUS.md"));
+    }
+
+    #[test]
+    fn windows_script_goes_through_files() {
+        let mut w = reviews_like();
+        w.chat_dir = Some("~/.ai-mesh/agents/chats/desk".into());
+        let s = script_windows("desk", &w);
+        assert!(s.contains("Set-Location \"$HOME\\.ai-mesh\\agents\\chats\\desk\""));
+        assert!(s.contains("--append-system-prompt-file"));
+        let c = attach_command_windows("desk", "beelink1", Path::new("/a"));
+        assert!(c.last().unwrap().ends_with(".ai-mesh/term/desk.ps1"));
+    }
+
+    fn reviews_like() -> Worker {
+        let mut w = orchestrator();
+        w.kickstart = None;
+        w.pause = None;
+        w.brief = None;
+        w.chat_env = None;
+        w
     }
 
     #[test]

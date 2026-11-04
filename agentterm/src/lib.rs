@@ -11,6 +11,7 @@
 //! agentwatch reads it back with [`read`].
 
 pub mod host;
+pub mod node;
 
 use std::fs;
 use std::io;
@@ -73,6 +74,8 @@ impl Limits {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TermView {
     pub state: Option<TermState>,
+    /// The node its session was placed on, when it is not a fixed host.
+    pub node: Option<String>,
     /// The tmux session is running.
     pub open: bool,
     pub today_gbp: f64,
@@ -269,6 +272,9 @@ pub fn read(agents_dir: &Path, slug: &str, open: bool, today: NaiveDate) -> Term
     let g = limits.gbp_per_usd;
     TermView {
         state: read_state(&dir),
+        node: fs::read_to_string(dir.join("node"))
+            .ok()
+            .map(|n| n.trim().to_string()),
         open,
         today_gbp: today_usd * g,
         month_gbp: month_usd * g,

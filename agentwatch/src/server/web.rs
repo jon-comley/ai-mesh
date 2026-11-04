@@ -101,12 +101,12 @@ async fn term(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult 
 }
 
 /// What changes from minute to minute, for an open page: each worker's
-/// terminal and whether its ticks are paused. Read at most every 5 seconds,
+/// terminal and whether its ticks are paused. Read at most every 10 seconds,
 /// however many pages ask.
 async fn live(State(app): State<Shared>) -> Json<Value> {
     let mut cache = app.live.lock().await;
     if let Some((at, v)) = cache.as_ref() {
-        if at.elapsed() < std::time::Duration::from_secs(5) {
+        if at.elapsed() < std::time::Duration::from_secs(10) {
             return Json(v.clone());
         }
     }
