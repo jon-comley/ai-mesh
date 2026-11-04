@@ -23,6 +23,9 @@ pub struct Worker {
     pub status: Option<String>,
     #[serde(default)]
     pub reports: Option<String>,
+    /// Its STATUS.md on the host (State and NEXT), preferred for the summary.
+    #[serde(default)]
+    pub status_md: Option<String>,
     #[serde(default)]
     pub pause: Option<String>,
     #[serde(default)]
@@ -131,6 +134,9 @@ pub fn settings(slug: &str, w: &Worker) -> Value {
 
 /// The file whose lines open a new session, for free.
 pub fn status_file(w: &Worker) -> String {
+    if let Some(md) = &w.status_md {
+        return md.clone();
+    }
     match (&w.status, &w.reports) {
         (Some(s), _) => s.clone(),
         (None, Some(r)) => format!("$(ls -t {r}/*/latest.md 2>/dev/null | head -n 1)"),

@@ -731,6 +731,15 @@ async fn execute_inner(ctx: &Ctx, req: &RunRequest, run_id: i64) -> Result<RunOu
     let report_path = dir.join(format!("{}-run{run_id}.md", (ctx.now)().format("%Y-%m-%d")));
     std::fs::write(&report_path, &markdown).map_err(|e| e.to_string())?;
     let _ = std::fs::write(dir.join("latest.md"), &markdown);
+    // Its STATUS.md, which the Workers page and its terminal open on.
+    let kept = findings
+        .iter()
+        .filter(|f| f.verdict != Some(Verdict::Rejected))
+        .count();
+    let _ = std::fs::write(
+        ctx.home.join("STATUS.md"),
+        status_md(&spec.name, &finished, findings.len(), kept),
+    );
     // The orchestrator works from its inbox: anything left after the checks
     // goes there, named like beelink1's files so the two sort together.
     if let Some(inbox) = ctx.limits.inbox.as_ref().filter(|d| d.is_dir())
@@ -1361,6 +1370,18 @@ async fn dispatch_all(
         p.done = p.total;
         p.running.clear();
     });
+}
+
+/// Reviews' STATUS.md: its last run and what happens to what it found.
+fn status_md(repo: &str, finished: &str, found: usize, kept: usize) -> String {
+    let next = if kept == 0 {
+        "nothing to do: no finding survived the checks".to_string()
+    } else {
+        format!("{kept} finding(s) went to the orchestrator's inbox to verify and fix")
+    };
+    format!(
+        "# Reviews status\n\nState: last review {repo}, {finished}: {found} finding(s), {kept} left after the checks.\nNEXT: {next}\n"
+    )
 }
 
 #[cfg(test)]
@@ -2110,5 +2131,16 @@ mod tests {
         )
         .await
         .expect("run failed")
+    }
+
+    #[test]
+    fn status_md_has_state_and_next() {
+        let s = status_md("guv", "2026-11-04 03:00", 5, 0);
+        assert!(s.contains("State: last review guv, 2026-11-04 03:00: 5 finding(s), 0 left"));
+        assert!(s.contains("NEXT: nothing to do"));
+        assert!(
+            status_md("guv", "x", 3, 2)
+                .contains("NEXT: 2 finding(s) went to the orchestrator's inbox")
+        );
     }
 }

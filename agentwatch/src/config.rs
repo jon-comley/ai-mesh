@@ -62,6 +62,9 @@ pub struct Agent {
     /// instead of a status file: the code reviews on mac1.
     #[serde(default)]
     pub reports: Option<String>,
+    /// Its STATUS.md on `host` (State and NEXT), for the terminal's brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_md: Option<String>,
     /// Its launchd label, for Run now (`launchctl kickstart`).
     #[serde(default)]
     pub kickstart: Option<String>,
@@ -242,12 +245,13 @@ fn check(a: &Agent) -> Result<(), ConfigError> {
                 .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
     }
     type Check<'a> = (&'a str, &'a Option<String>, fn(&str) -> bool);
-    let checks: [Check; 11] = [
+    let checks: [Check; 12] = [
         ("host", &a.host, word_ok),
         ("key", &a.key, word_ok),
         ("kickstart", &a.kickstart, word_ok),
         ("routine", &a.routine, word_ok),
         ("status", &a.status, path_ok),
+        ("status_md", &a.status_md, path_ok),
         ("pause", &a.pause, path_ok),
         ("ticks", &a.ticks, path_ok),
         ("reports", &a.reports, path_ok),

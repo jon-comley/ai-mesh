@@ -342,6 +342,11 @@ async fn local(
             facts.last_tick_failed = !tick_name.trim().is_empty() && status::tick_failed(tick_tail);
             let tick_at = status::tick_time(tick_name);
             let steps = status::parse(status_text, now);
+            if let Some(md) = &agent.status_md
+                && let Ok(text) = run::output(run::ssh(host, &format!("cat {md}")), SSH_LIMIT).await
+            {
+                v.status_lines = status_lines(&text);
+            }
             if let Some(top) = steps.first() {
                 facts.last_run = Some(top.at);
                 v.line = top.summary.clone();
