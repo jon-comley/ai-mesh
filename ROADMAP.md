@@ -213,9 +213,9 @@ hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
-## AI gatekeeper (idea, Jon 4 Nov: "a fun one... maybe not")
+## AI gate and grounds keeper (idea, Jon 4 Nov: "a fun one... maybe not")
 
-A fun little project, not committed to. What it gates is still to agree.
+A fun little project, not committed to: a general gate and grounds keeper. What it looks after is decided as we go.
 
 ## Agent terminals and a work-laptop worker (agreed 2026-11-04, not started)
 
