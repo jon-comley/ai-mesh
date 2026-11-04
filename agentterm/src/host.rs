@@ -35,6 +35,9 @@ pub struct Worker {
     pub brief: Option<String>,
     #[serde(default)]
     pub chat_readonly: bool,
+    /// Its deploy key under `keys/`, for pulling its clone.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 #[derive(Deserialize)]

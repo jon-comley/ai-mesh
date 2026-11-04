@@ -67,6 +67,34 @@ fn attach(name: &str) -> ExitCode {
         eprintln!("no terminal for {name}: {} is missing", work.display());
         return ExitCode::from(2);
     }
+    // A new session starts from what is on main: the clone may be days old.
+    let open = Command::new("tmux")
+        .args(["has-session", "-t", &agentterm::tmux_session(&slug)])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !open {
+        let key = agentterm::host::load(&dir, &slug)
+            .and_then(|w| w.key)
+            .unwrap_or_else(|| slug.clone());
+        let pulled = Command::new("git")
+            .arg("-C")
+            .arg(&work)
+            .args(["pull", "-q", "--ff-only"])
+            .env(
+                "GIT_SSH_COMMAND",
+                format!(
+                    "ssh -i {} -o IdentitiesOnly=yes -o BatchMode=yes",
+                    dir.join("keys").join(key).display()
+                ),
+            )
+            .status();
+        if !pulled.is_ok_and(|s| s.success()) {
+            eprintln!(
+                "Could not pull {}: starting from the clone as it is.",
+                work.display()
+            );
+        }
+    }
     let term = dir.join("term");
     let settings = term.join("settings.json");
     let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agentterm"));
