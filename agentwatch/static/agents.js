@@ -69,7 +69,8 @@ export const PHASE_LABELS = { working: 'Working', done: 'Done', needs_you: 'Need
 export function termText(t) {
   if (!t) return '';
   const phase = t.state ? PHASE_LABELS[t.state.phase] ?? t.state.phase : (t.open ? 'Open' : 'Closed');
-  const parts = [t.node && t.open ? `${phase} on ${t.node}` : phase, `£${t.today_gbp.toFixed(2)} today`, `£${t.month_gbp.toFixed(2)} this month`];
+  // Costs live on the Schedule tab; the tile keeps only a limit warning.
+  const parts = [t.node && t.open ? `${phase} on ${t.node}` : phase];
   if (t.over_session) parts.push('session over its limit');
   else if (t.over_day) parts.push('over the day limit');
   return parts.join(' · ');
@@ -118,6 +119,16 @@ export function agentWhere(a) {
 export function agentWhen(a) {
   if (a.kind === 'queue') return 'when work is queued';
   return `every ${a.every}`;
+}
+
+const gbp = (n) => `£${(n ?? 0).toFixed(2)}`;
+
+/** Today's and this month's spend across every agent's terminal and tasks. */
+export function costTotals(list) {
+  return (list || []).reduce((t, a) => ({
+    today: t.today + (a.term?.today_gbp ?? 0),
+    month: t.month + (a.term?.month_gbp ?? 0),
+  }), { today: 0, month: 0 });
 }
 
 export const SERVICE_LABELS = { running: 'Running', waiting: 'Waiting', stopped: 'Stopped', failed: 'Failed', unreachable: 'Cannot reach it' };
@@ -509,6 +520,7 @@ async function renderSchedule(main) {
   main.append(box);
   let data;
   try { data = await api('GET', '/api/schedule'); } catch (e) { box.replaceChildren(el('p', { class: 'error' }, e.message)); return; }
+  const totals = costTotals(data.agents);
   const agentRows = data.agents.map((a) => el('tr', {},
     el('td', {}, el('a', { href: `#/agent/${encodeURIComponent(a.name)}` }, a.name)),
     el('td', {}, agentWhere(a)),
@@ -516,6 +528,7 @@ async function renderSchedule(main) {
     el('td', {}, el('span', { class: `light ${a.state}` }), ' ', stateLabel(a.state)),
     el('td', {}, a.last_run ? relTime(a.last_run) : 'never'),
     el('td', {}, a.next_due ? clock(a.next_due) : ''),
+    el('td', {}, a.term ? `${gbp(a.term.today_gbp)} / ${gbp(a.term.month_gbp)}` : ''),
     el('td', { class: 'acts' },
       a.can_run ? el('button', { onclick: () => scheduleAgent(a, 'run', 'Started') }, 'Run now') : null,
       a.can_pause && !a.paused ? el('button', { onclick: () => scheduleAgent(a, 'pause', 'Paused') }, 'Pause') : null,
@@ -536,8 +549,11 @@ async function renderSchedule(main) {
   ));
   const head = (cols) => el('thead', {}, el('tr', {}, cols.map((c) => el('th', {}, c))));
   box.replaceChildren(
+    el('div', { class: 'cost-total' },
+      el('strong', {}, `${gbp(totals.today)} today`), ` · ${gbp(totals.month)} this month`,
+      el('span', { class: 'muted' }, ' (terminals and wl tasks; the cloud routines and the orchestrator bill to the Claude account and are not counted here)')),
     el('h3', {}, 'Agents'),
-    el('table', { class: 'schedule' }, head(['Agent', 'Runs on', 'When', 'State', 'Last run', 'Next', '']), el('tbody', {}, agentRows)),
+    el('table', { class: 'schedule' }, head(['Agent', 'Runs on', 'When', 'State', 'Last run', 'Next', 'Spend today / month', '']), el('tbody', {}, agentRows)),
     el('h3', {}, 'Services'),
     el('table', { class: 'schedule' }, head(['Service', 'Machine', 'Kind', 'State', 'Last / since', 'Next', '']), el('tbody', {}, serviceRows)),
     el('pre', { id: 'service-log', class: 'service-log', hidden: true }),
@@ -655,6 +671,12 @@ function render(force = false) {
   else if (route.view === 'fact') renderFact(main, route.path);
   else renderTiles(main);
   document.getElementById('checked').textContent = checkedAt ? `checked ${relTime(checkedAt)}` : '';
+  const spend = document.getElementById('spend');
+  if (spend) {
+    const t = costTotals(agents);
+    spend.textContent = `${gbp(t.today)} today`;
+    spend.title = `${gbp(t.month)} this month: terminals and wl tasks`;
+  }
   document.getElementById('back').hidden = route.view === 'tiles';
 }
 

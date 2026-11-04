@@ -244,3 +244,7 @@ table.schedule td.acts button { margin-left: 0.3rem; }
 .svc.failed, .svc.unreachable { color: #c62828; font-weight: 600; }
 .svc.stopped { color: #888; }
 .service-log { background: #0D1117; color: #EDF1F5; padding: 0.75rem; max-height: 50vh; overflow: auto; font-size: 0.8rem; white-space: pre-wrap; }
+
+/* Spend: the header's quick view and the Schedule total. */
+.spend { font-size: 0.8rem; opacity: 0.8; margin-left: 0.3rem; }
+.cost-total { font-size: 1.05rem; margin: 0.5rem 0 1rem; }

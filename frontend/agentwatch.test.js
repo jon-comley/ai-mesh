@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing, agentWhere, agentWhen } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing, agentWhere, agentWhen, costTotals } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -72,9 +72,9 @@ describe('agent watch page helpers', () => {
 
 describe('termText', () => {
   const t = { open: true, today_gbp: 0.4, month_gbp: 3.1, session_gbp: 0.4, over_session: false, over_day: false };
-  it('says the phase and the spend', () => {
-    expect(termText({ ...t, state: { phase: 'done', line: 'x' } })).toBe('Done · £0.40 today · £3.10 this month');
-    expect(termText({ ...t, state: null })).toBe('Open · £0.40 today · £3.10 this month');
+  it('says the phase, with no spend (that is on the Schedule tab)', () => {
+    expect(termText({ ...t, state: { phase: 'done', line: 'x' } })).toBe('Done');
+    expect(termText({ ...t, state: null })).toBe('Open');
   });
   it('says when it is over a limit', () => {
     expect(termText({ ...t, state: { phase: 'working' }, over_session: true })).toMatch(/session over its limit$/);
@@ -129,5 +129,13 @@ describe('schedule labels', () => {
     expect(agentWhere({ kind: 'queue', machine: 'wl' })).toBe('lenovo1, for wl');
     expect(agentWhen({ kind: 'local', every: '20m' })).toBe('every 20m');
     expect(agentWhen({ kind: 'queue' })).toBe('when work is queued');
+  });
+});
+
+describe('costTotals', () => {
+  it('adds every terminal and skips agents without one', () => {
+    const t = costTotals([{ term: { today_gbp: 0.4, month_gbp: 3 } }, { term: { today_gbp: 0.1, month_gbp: 1 } }, {}]);
+    expect(t.today).toBeCloseTo(0.5);
+    expect(t.month).toBeCloseTo(4);
   });
 });
