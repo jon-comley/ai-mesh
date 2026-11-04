@@ -155,3 +155,12 @@ describe('tickets', () => {
     expect(parseRoute(href)).toEqual({ view: 'ticket', name: 'Work laptop', path: 'thingco/TICKET-musty-v0.2.0.md' });
   });
 });
+
+describe('on-demand chat tiles', () => {
+  it('say where and when a routine-less cloud tile runs', () => {
+    const a = { kind: 'cloud', can_run: false, every: '1d' };
+    expect(agentWhere(a)).toBe('its chat page, on demand');
+    expect(agentWhen(a)).toBe('when used, checked every 1d');
+    expect(agentWhere({ kind: 'cloud', can_run: true })).toBe('Anthropic cloud');
+  });
+});
