@@ -1,0 +1,35 @@
+#!/bin/bash
+# wl: runs one command on the work laptop for a queued task (plans/agent-terminals.md,
+# "Work laptop"). Claude runs on lenovo1 and may use only this to reach the laptop.
+# It runs in the laptop folder matching the current one under the sshfs mount, and
+# refuses pushes, gh, sudo, installs and other machines. Installed by
+# `just deploy-agentwatch` as /usr/local/bin/wl.
+#
+#   wl <command...>
+set -u
+cmd="$*"
+if [ -z "$cmd" ]; then
+    echo "usage: wl <command>" >&2
+    exit 2
+fi
+mount="$HOME/.ai-mesh/wl-repos"
+case "$PWD/" in
+    "$mount"/*) rel="${PWD#"$mount"}" ;;
+    *) rel="" ;;
+esac
+blocked='(^|[;&|(`[:space:]])(git[[:space:]]+push|gh|sudo|su|apt|apt-get|snap|dpkg|npm[[:space:]]+(install|i|ci)|pip3?[[:space:]]+install|uv[[:space:]]+pip[[:space:]]+install|cargo[[:space:]]+install|ssh|scp|rsync|sftp|curl|wget|tailscale)([[:space:]]|$|[;&|)])'
+if printf '%s' "$cmd" | grep -Eq "$blocked"; then
+    echo "NEEDS YOU: $cmd (wl will not push, use gh, sudo, install, or reach another machine)" >&2
+    exit 3
+fi
+# Pushes fail even from a script: every remote URL is rewritten to one that
+# cannot be pushed to. gh has no login. Commits are JPComley's.
+guard='export GIT_AUTHOR_NAME=JPComley GIT_AUTHOR_EMAIL=jonathan.comley@thingco.com'
+guard="$guard GIT_COMMITTER_NAME=JPComley GIT_COMMITTER_EMAIL=jonathan.comley@thingco.com"
+guard="$guard GIT_CONFIG_COUNT=3"
+guard="$guard GIT_CONFIG_KEY_0=url.wl-no-push:///.pushInsteadOf GIT_CONFIG_VALUE_0=git@"
+guard="$guard GIT_CONFIG_KEY_1=url.wl-no-push:///.pushInsteadOf GIT_CONFIG_VALUE_1=https://"
+guard="$guard GIT_CONFIG_KEY_2=url.wl-no-push:///.pushInsteadOf GIT_CONFIG_VALUE_2=ssh://"
+guard="$guard GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN="
+exec ssh -o BatchMode=yes -o ConnectTimeout=10 work-laptop \
+    "cd ~/repos$(printf %q "$rel") && $guard && bash -lc $(printf %q "$cmd")"

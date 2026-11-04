@@ -57,20 +57,15 @@ every 10 seconds while the page is in view: no AI, a file read and one ssh.
 
 ## Work laptop (built 4 Nov)
 
-The work laptop never dials out and is often off, so its tile works differently:
-- **You talk to it on lenovo1.** Its terminal is a lenovo1 session (Haiku) in
-  `chats/work-laptop`, whose brief tells it to queue agreed tasks with
-  `agentterm queue add work-laptop <dir> "<task>"`. It never touches the laptop itself.
-- **The queue** is `term/work-laptop/queue/<id>.json` on lenovo1, never in a repo.
-- **The dispatcher** (`agentwatch/src/server/dispatch.rs`, no AI) checks the laptop every
-  minute, so the tile shows **wl on** or **wl off**. When the laptop is on, it starts the
-  next task detached in tmux there (`claude -p`, Haiku, a Sonnet subagent only if needed),
-  one at a time, collects each result, and marks a task whose tmux session vanished
-  without a result as interrupted, for Retry.
-- **What a task may do** is set in its Claude settings: edits, builds, tests, local commits
-  as JPComley. Push, `gh`, sudo, installs, ssh and scp are denied, and the task ends
-  "NEEDS YOU:" with the command.
-- Nothing about the work goes in a repo: ai-mesh has only the generic entry.
+Nothing of Claude is on the laptop.
+- You talk tasks through in its tile (Haiku, lenovo1); it queues them with
+  `agentterm queue add work-laptop ~/repos/<repo> "<task>"`.
+- The dispatcher (no AI) shows **wl on/off** and, when the laptop is on and its `~/repos`
+  is mounted on lenovo1 (sshfs, `agentterm-wl-repos.service`), runs the next task on
+  lenovo1 in tmux: Claude edits through the mount and runs commands with `wl`.
+- `wl` (`agentterm/lenovo1/wl`) refuses push, gh, sudo, installs and other machines, makes
+  pushes fail even from scripts, and commits as JPComley. Refused work ends NEEDS YOU.
+- Nothing about the work goes in a repo.
 
 ## Order
 

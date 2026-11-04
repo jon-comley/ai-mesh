@@ -1,22 +1,19 @@
-//! Runs queued work on a machine that is not always on (plans/agent-terminals.md,
-//! "Work laptop"). No AI here: every minute it checks the machine is reachable,
-//! collects finished tasks and starts the next one, detached in tmux there so
-//! a dropped link does not stop it. lenovo1 always starts the connection.
+//! Runs queued work for a machine that is not always on (plans/agent-terminals.md,
+//! "Work laptop"). No AI here: every minute it checks the laptop is reachable and
+//! its repos are mounted, collects finished tasks and starts the next one. Each
+//! task runs on lenovo1, detached in tmux: Claude edits through the sshfs mount
+//! and runs commands on the laptop with `wl`. Nothing of Claude is on the laptop.
 
-use std::process::Stdio;
 use std::time::Duration;
 
 use agentterm::queue::{self, Task, TaskState};
 use agentwatch::config::Kind;
 use chrono::Utc;
-use tokio::io::AsyncWriteExt;
 
 use super::App;
 use super::run;
 
 const LIMIT: Duration = Duration::from_secs(20);
-const RUNNING: &str = "AGENTTERM_RUNNING";
-const GONE: &str = "AGENTTERM_GONE";
 
 pub async fn tick(app: &App) {
     let agents = app
@@ -34,21 +31,26 @@ pub async fn tick(app: &App) {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(agent.name.clone(), on);
-        if !on {
-            continue;
-        }
+        // Tasks run here, so they are collected even with the laptop off.
         let dir = agentterm::term_dir(&app.dir, &slug);
         for mut t in queue::list(&dir)
             .into_iter()
             .filter(|t| t.state == TaskState::Running)
         {
-            if let Err(e) = collect(&host, &dir, &mut t).await {
+            if let Err(e) = collect(&dir, &mut t).await {
                 tracing::warn!("{}: could not check task {}: {e}", agent.name, t.id);
             }
         }
+        if !on {
+            continue;
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        if !mounted(&home) {
+            continue;
+        }
         let tasks = queue::list(&dir);
         if let Some(t) = queue::next(&tasks).cloned() {
-            if let Err(e) = start(&host, &dir, t.clone()).await {
+            if let Err(e) = start(&dir, t.clone()).await {
                 tracing::warn!("{}: could not start task {}: {e}", agent.name, t.id);
             }
         }
@@ -56,58 +58,54 @@ pub async fn tick(app: &App) {
 }
 
 /// A running task: still going, finished (its result lands in the queue), or
-/// gone without a result because the machine stopped (interrupted).
-async fn collect(host: &str, dir: &std::path::Path, t: &mut Task) -> run::Result<()> {
-    let out = format!("{}/results/{}.json", queue::MACHINE_DIR, t.id);
-    let script = format!(
-        "cat {out} 2>/dev/null || {{ tmux has-session -t {} 2>/dev/null && echo {RUNNING} || echo {GONE}; }}",
-        queue::task_session(t)
-    );
-    let said = run::output(run::ssh(host, &script), LIMIT).await?;
-    if said.contains(RUNNING) {
-        return Ok(());
-    }
-    if said.trim() == GONE {
-        t.state = TaskState::Interrupted;
-        t.finished = Some(Utc::now());
-        t.result = "The machine stopped before it finished. Retry runs it again.".into();
-    } else {
+/// gone without a result because lenovo1 restarted (interrupted).
+async fn collect(dir: &std::path::Path, t: &mut Task) -> run::Result<()> {
+    let out = dir.join("results").join(format!("{}.json", t.id));
+    if let Ok(said) = std::fs::read_to_string(&out) {
         queue::finish(t, &said, Utc::now());
         let today = chrono::Local::now().date_naive();
         let _ = agentterm::record_cost(dir, &t.id, t.cost_usd, today);
+    } else if tmux_has(&queue::task_session(t)).await {
+        return Ok(());
+    } else {
+        t.state = TaskState::Interrupted;
+        t.finished = Some(Utc::now());
+        t.result = "It stopped before it finished. Retry runs it again.".into();
     }
     queue::save(dir, t).map_err(|e| e.to_string())
 }
 
-async fn start(host: &str, dir: &std::path::Path, mut t: Task) -> run::Result<()> {
-    let path = format!("{}/tasks/{}.sh", queue::MACHINE_DIR, t.id);
-    let mut cmd = run::ssh(
-        host,
-        &format!("mkdir -p {}/tasks && cat > {path}", queue::MACHINE_DIR),
-    );
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("ssh: {e}"))?;
-    let mut stdin = child.stdin.take().expect("piped");
-    stdin
-        .write_all(queue::task_script(&t).as_bytes())
+async fn tmux_has(session: &str) -> bool {
+    tokio::process::Command::new("tmux")
+        .args(["has-session", "-t", session])
+        .output()
         .await
-        .map_err(|e| format!("ssh: {e}"))?;
-    drop(stdin);
-    let done = tokio::time::timeout(LIMIT, child.wait_with_output())
-        .await
-        .map_err(|_| "ssh took too long writing the task".to_string())?
-        .map_err(|e| format!("ssh: {e}"))?;
-    if !done.status.success() {
-        return Err(String::from_utf8_lossy(&done.stderr).trim().to_string());
-    }
+        .is_ok_and(|o| o.status.success())
+}
+
+/// The laptop's repos are mounted here (systemd/agentterm-wl-repos.service).
+fn mounted(home: &std::path::Path) -> bool {
+    let m = home.join(queue::MOUNT.trim_start_matches("~/"));
+    std::fs::read_to_string("/proc/mounts").is_ok_and(|t| {
+        t.lines()
+            .any(|l| l.split(' ').nth(1) == Some(&*m.to_string_lossy()))
+    })
+}
+
+async fn start(dir: &std::path::Path, mut t: Task) -> run::Result<()> {
+    let tasks = dir.join("tasks");
+    std::fs::create_dir_all(&tasks).map_err(|e| e.to_string())?;
+    let path = tasks.join(format!("{}.sh", t.id));
+    std::fs::write(&path, queue::task_script(&t, &dir.join("results")))
+        .map_err(|e| e.to_string())?;
     let session = queue::task_session(&t);
     run::output(
-        run::ssh(
-            host,
-            &format!("tmux new-session -d -s {session} 'bash -l {path}'"),
-        ),
+        {
+            let mut c = tokio::process::Command::new("tmux");
+            c.args(["new-session", "-d", "-s", &session, "bash"])
+                .arg(&path);
+            c
+        },
         LIMIT,
     )
     .await?;

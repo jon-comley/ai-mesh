@@ -47,14 +47,26 @@ pub fn queue_dir(term_dir: &Path) -> PathBuf {
     term_dir.join("queue")
 }
 
-/// A working directory on the machine: a path under its home, nothing a shell
-/// would read.
+/// Where a task works: a repo under `~/repos/` on the machine, nothing a
+/// shell would read. lenovo1 sees that folder through its sshfs mount.
 pub fn dir_ok(dir: &str) -> bool {
-    !dir.is_empty()
+    dir.starts_with(REPOS)
+        && dir.len() > REPOS.len()
         && !dir.contains("..")
         && dir
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "~._/-".contains(c))
+}
+
+/// The machine's repos folder, as tasks name it.
+pub const REPOS: &str = "~/repos/";
+
+/// Where lenovo1 mounts it (systemd/agentterm-wl-repos.service).
+pub const MOUNT: &str = "~/.ai-mesh/wl-repos";
+
+/// A task's directory as lenovo1 sees it, through the mount.
+pub fn local_dir(dir: &str) -> String {
+    format!("{MOUNT}/{}", dir.strip_prefix(REPOS).unwrap_or(dir))
 }
 
 pub fn add(term_dir: &Path, task: &str, dir: &str, now: DateTime<Utc>) -> io::Result<Task> {
@@ -161,66 +173,57 @@ pub fn finish(t: &mut Task, output: &str, now: DateTime<Utc>) {
 /// What the task is told on top of Jon's words.
 pub fn prompt(t: &Task) -> String {
     format!(
-        "{}\n\nYou are working alone: Jon is not here to answer. Do the task, then finish with \
-a short result: what you changed, what you committed, what is left. If it needs something \
-you may not do (git push, gh, sudo, installing anything, ssh or scp to another machine), \
-stop there and start your result with \"NEEDS YOU:\" and the exact command. Commit as \
-JPComley <jonathan.comley@thingco.com>, with no AI attribution anywhere. Never use an em dash.",
-        t.task
+        "{}\n\nYou are working alone: Jon is not here to answer. You run on lenovo1. The work \
+laptop's {} folder is mounted where you are, so read and edit its files directly. Run every \
+command (git, builds, tests) on the laptop with `wl <command>`: it runs in the same folder \
+there. You cannot run anything else. Commits are made as JPComley; never add AI attribution. \
+Finish with a short result: what you changed, what you committed, what is left. If the task \
+needs something wl refuses (a push, gh, sudo, an install, another machine), stop and start \
+your result with \"NEEDS YOU:\" and the exact command. Never use an em dash.",
+        t.task, t.dir
     )
 }
 
-/// What a task may do on the machine, enforced by Claude's settings: edits,
-/// builds, tests, local commits and a Sonnet subagent; never a push, a PR, an
-/// install, sudo or another machine.
+/// What a task may do, enforced by Claude's settings: its files and `wl`.
+/// `wl` itself refuses pushes, gh, sudo, installs and other machines.
 pub fn settings() -> serde_json::Value {
     serde_json::json!({
         "permissions": {
-            "allow": ["Read", "Glob", "Grep", "Edit", "MultiEdit", "Write", "Bash", "Task", "TodoWrite"],
-            "deny": [
-                "Bash(git push:*)", "Bash(gh:*)", "Bash(sudo:*)", "Bash(su:*)",
-                "Bash(apt:*)", "Bash(apt-get:*)", "Bash(snap:*)",
-                "Bash(npm install:*)", "Bash(npm i:*)", "Bash(pip install:*)", "Bash(pip3 install:*)",
-                "Bash(uv pip install:*)", "Bash(cargo install:*)",
-                "Bash(ssh:*)", "Bash(scp:*)", "Bash(rsync:*)", "Bash(curl:*)", "Bash(wget:*)",
-                "WebFetch", "WebSearch"
-            ]
+            "allow": ["Read", "Glob", "Grep", "Edit", "MultiEdit", "Write", "Task", "TodoWrite", "Bash(wl:*)"],
+            "deny": ["WebFetch", "WebSearch"]
         }
     })
 }
 
-/// Where a task's files go on the machine.
-pub const MACHINE_DIR: &str = "~/.ai-mesh/wl";
-
-/// The bash script that runs a task on the machine, started detached in tmux
-/// with `bash -l` (Claude is on the login PATH there). Texts go in through
-/// quoted heredocs; `dir` was checked by [`dir_ok`].
-pub fn task_script(t: &Task) -> String {
+/// The bash script that runs a task on lenovo1, detached in tmux. `results`
+/// is lenovo1's results folder for the agent. Texts go in through quoted
+/// heredocs; `dir` was checked by [`dir_ok`].
+pub fn task_script(t: &Task, results: &Path) -> String {
     let settings = settings().to_string();
     let prompt = prompt(t);
     let tag = (0..)
         .map(|n| format!("AGENTTERM_{n}"))
         .find(|g| !settings.contains(g.as_str()) && !prompt.contains(g.as_str()))
         .expect("some tag is free");
-    let id = &t.id;
-    let out = format!("{MACHINE_DIR}/results/{id}");
+    let out = results.join(&t.id).display().to_string();
+    let local = local_dir(&t.dir);
     format!(
-        "#!/bin/bash\n# Written by agentwatch on lenovo1 (plans/agent-terminals.md, Work laptop).\n\
-         mkdir -p {MACHINE_DIR}/results\n\
-         [ -s \"$HOME/.nvm/nvm.sh\" ] && . \"$HOME/.nvm/nvm.sh\"\n\
-         command -v claude >/dev/null || {{ echo '{{\"result\":\"Claude is not on PATH on this machine.\",\"is_error\":true}}' > {out}.json; exit 1; }}\n\
-         cd {dir} || {{ echo '{{\"result\":\"Cannot open {dir} on this machine.\",\"is_error\":true}}' > {out}.json; exit 1; }}\n\
+        "#!/bin/bash\n# Written by agentwatch (plans/agent-terminals.md, Work laptop).\n\
+         export PATH=\"$HOME/.local/bin:/usr/local/bin:$PATH\"\n\
+         mkdir -p {results}\n\
+         cd {local} || {{ echo '{{\"result\":\"Cannot open {dir}: is the laptop mounted?\",\"is_error\":true}}' > {out}.json; exit 1; }}\n\
          settings=$(cat <<'{tag}'\n{settings}\n{tag}\n)\n\
          prompt=$(cat <<'{tag}'\n{prompt}\n{tag}\n)\n\
          claude -p \"$prompt\" --model haiku --output-format json --settings \"$settings\" \
          --append-system-prompt 'You run on Haiku to keep costs down. When the work needs more (code, careful multi-step work), hand it to one subagent with the Task tool, model sonnet, and wait for it. Never use Opus.' \
          --max-turns 80 > {out}.part 2> {out}.err\n\
          mv {out}.part {out}.json\n",
+        results = results.display(),
         dir = t.dir,
     )
 }
 
-/// The tmux session a task runs in on the machine.
+/// The tmux session a task runs in, on lenovo1.
 pub fn task_session(t: &Task) -> String {
     format!("task-{}", t.id)
 }
@@ -252,42 +255,52 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         assert!(add(d.path(), "x", "~/repos/x; rm -rf ~", now()).is_err());
         assert!(add(d.path(), "x", "../etc", now()).is_err());
+        assert!(add(d.path(), "x", "~/.ssh", now()).is_err());
+        assert!(add(d.path(), "x", "~/repos/", now()).is_err());
         assert!(add(d.path(), "  ", "~/repos/x", now()).is_err());
     }
 
     #[test]
-    fn task_script_never_pushes_and_lands_its_result() {
+    fn task_script_works_on_the_mount_and_only_through_wl() {
         let t = add(
             tempfile::tempdir().unwrap().path(),
             "fix the build",
-            "~/repos/x",
+            "~/repos/efr32-boot",
             now(),
         )
         .unwrap();
-        let s = task_script(&t);
-        assert!(s.contains("cd ~/repos/x ||"));
+        let s = task_script(&t, Path::new("/r"));
+        assert!(s.contains("cd ~/.ai-mesh/wl-repos/efr32-boot ||"));
         assert!(s.contains("--model haiku --output-format json"));
-        assert!(s.contains(&format!(
-            "mv ~/.ai-mesh/wl/results/{0}.part ~/.ai-mesh/wl/results/{0}.json",
-            t.id
-        )));
-        assert!(s.contains("Bash(git push:*)"));
+        assert!(s.contains(&format!("mv /r/{0}.part /r/{0}.json", t.id)));
+        assert!(s.contains("\"Bash(wl:*)\""));
+        assert!(!s.contains("\"Bash\","));
         assert!(s.contains("fix the build"));
     }
 
     #[test]
     fn task_script_is_valid_bash() {
-        let t = add(tempfile::tempdir().unwrap().path(), "it's \"quoted\" $HOME `x`", "~/repos/x", now()).unwrap();
+        let t = add(
+            tempfile::tempdir().unwrap().path(),
+            "it's \"quoted\" $HOME `x`",
+            "~/repos/x",
+            now(),
+        )
+        .unwrap();
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("t.sh");
-        fs::write(&f, task_script(&t)).unwrap();
-        let ok = std::process::Command::new("bash").arg("-n").arg(&f).status().unwrap();
+        fs::write(&f, task_script(&t, d.path())).unwrap();
+        let ok = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(&f)
+            .status()
+            .unwrap();
         assert!(ok.success());
     }
 
     #[test]
     fn finish_reads_claude_json() {
-        let mut t = add(tempfile::tempdir().unwrap().path(), "x", "~", now()).unwrap();
+        let mut t = add(tempfile::tempdir().unwrap().path(), "x", "~/repos/x", now()).unwrap();
         finish(
             &mut t,
             r#"{"result":"Built, 3 tests pass.","is_error":false,"total_cost_usd":0.02}"#,

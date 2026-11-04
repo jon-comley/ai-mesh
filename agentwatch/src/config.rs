@@ -487,7 +487,10 @@ can = ["claude"]
         assert_eq!(again.agents[0].pin.as_deref(), Some("lenovo1"));
         assert_eq!(again.nodes.len(), 1);
         assert!(
-            Config::parse("[[agent]]\nname = \"Q\"\nkind = \"queue\"\npurpose = \"x\"\nevery = \"1d\"\n").is_err()
+            Config::parse(
+                "[[agent]]\nname = \"Q\"\nkind = \"queue\"\npurpose = \"x\"\nevery = \"1d\"\n"
+            )
+            .is_err()
         );
     }
 }

@@ -14,6 +14,8 @@ Environment=RUST_LOG=info
 # claude (Run now, chat) is installed per user in ~/.local/bin.
 Environment=PATH=/home/jonno/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/local/bin/agentwatch
+# Restarting must not end the tmux sessions it starts (queued tasks, terminals).
+KillMode=process
 Restart=on-failure
 RestartSec=10
 AmbientCapabilities=CAP_NET_BIND_SERVICE

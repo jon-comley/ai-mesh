@@ -3115,20 +3115,22 @@ deploy-agentwatch:
     cargo build --release --target x86_64-unknown-linux-gnu -p agentwatch -p agentterm 2>&1 | grep -E "^error|Finished"
     scp {{ssh_opts}} -q target/x86_64-unknown-linux-gnu/release/agentwatch ${NODE_USER}@${NODE_HOST}:/tmp/agentwatch.new
     scp {{ssh_opts}} -q target/x86_64-unknown-linux-gnu/release/agentterm ${NODE_USER}@${NODE_HOST}:/tmp/agentterm.new
-    scp {{ssh_opts}} -q systemd/agentwatch.service systemd/agentterm.service ${NODE_USER}@${NODE_HOST}:/tmp/
+    scp {{ssh_opts}} -q systemd/agentwatch.service systemd/agentterm.service systemd/agentterm-wl-repos.service agentterm/lenovo1/wl ${NODE_USER}@${NODE_HOST}:/tmp/
     ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "set -e
         command -v ttyd >/dev/null || sudo apt-get install -y -qq ttyd
+        command -v sshfs >/dev/null || sudo apt-get install -y -qq sshfs
         # The package starts its own root login terminal on localhost: never wanted.
         sudo systemctl disable -q --now ttyd 2>/dev/null || true
         [ -e /usr/local/bin/agentwatch ] && sudo cp -p /usr/local/bin/agentwatch /usr/local/bin/agentwatch.prev
         sudo install -m 755 /tmp/agentwatch.new /usr/local/bin/agentwatch
         sudo install -m 755 /tmp/agentterm.new /usr/local/bin/agentterm
-        sudo install -m 644 /tmp/agentwatch.service /tmp/agentterm.service /etc/systemd/system/
-        rm /tmp/agentwatch.new /tmp/agentterm.new /tmp/agentwatch.service /tmp/agentterm.service
+        sudo install -m 755 /tmp/wl /usr/local/bin/wl
+        sudo install -m 644 /tmp/agentwatch.service /tmp/agentterm.service /tmp/agentterm-wl-repos.service /etc/systemd/system/
+        rm /tmp/agentwatch.new /tmp/agentterm.new /tmp/agentwatch.service /tmp/agentterm.service /tmp/agentterm-wl-repos.service /tmp/wl
         mkdir -p ~/.ai-mesh/agents/keys && chmod 700 ~/.ai-mesh/agents/keys
         sudo systemctl daemon-reload
-        sudo systemctl enable -q agentwatch agentterm
-        sudo systemctl restart agentwatch agentterm
+        sudo systemctl enable -q agentwatch agentterm agentterm-wl-repos
+        sudo systemctl restart agentwatch agentterm agentterm-wl-repos
         sleep 3
         systemctl is-active agentwatch agentterm"
     # mac1's workers' terminals run claude there; their hooks forward to lenovo1.

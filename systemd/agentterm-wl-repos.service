@@ -1,0 +1,21 @@
+# The work laptop's ~/repos mounted on lenovo1 for queued tasks
+# (plans/agent-terminals.md, "Work laptop"): Claude reads and edits there, and
+# runs commands on the laptop with `wl`. Retries every minute while the laptop
+# is off. Installed by `just deploy-agentwatch`.
+[Unit]
+Description=Work laptop repos over sshfs (~/.ai-mesh/wl-repos)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=jonno
+Environment=HOME=/home/jonno
+ExecStartPre=/bin/mkdir -p /home/jonno/.ai-mesh/wl-repos
+ExecStartPre=-/bin/fusermount3 -uz /home/jonno/.ai-mesh/wl-repos
+ExecStart=/usr/bin/sshfs -f work-laptop:/home/jonno/repos /home/jonno/.ai-mesh/wl-repos -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,BatchMode=yes,ConnectTimeout=10
+ExecStopPost=-/bin/fusermount3 -uz /home/jonno/.ai-mesh/wl-repos
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
