@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_stream::StreamExt;
 
-use super::{App, actions, run};
+use super::{App, actions, poll, run};
 
 const INDEX_HTML: &str = include_str!("../../static/index.html");
 const AGENTS_JS: &str = include_str!("../../static/agents.js");
@@ -40,6 +40,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/agents", get(list))
         .route("/api/agents/refresh", post(refresh))
         .route("/api/agents/{name}/report", get(report))
+        .route("/api/agents/{name}/ticket", get(ticket))
         .route("/api/agents/{name}/run", post(run_now))
         .route("/api/agents/{name}/reply", post(reply))
         .route(
@@ -275,6 +276,25 @@ async fn report(
     Ok(Json(
         json!({ "path": path, "html": markdown::render(&md, base.as_deref()) }),
     ))
+}
+
+/// One of a queue worker's tickets, rendered: read through the laptop's mount.
+async fn ticket(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+    Query(q): Query<ReportQuery>,
+) -> ApiResult {
+    let a = agent(&app, &name)?;
+    let view = app.views().into_iter().find(|v| v.name == a.name);
+    let path = q.path.unwrap_or_default();
+    let listed = view.is_some_and(|v| v.tickets.iter().any(|t| t.path == path));
+    if !listed || !poll::ticket_path_ok(&path) {
+        return Err(fail(StatusCode::NOT_FOUND, "that ticket is not one this tile lists"));
+    }
+    let md = std::fs::read_to_string(poll::ticket_file(&path)).map_err(|_| {
+        fail(StatusCode::NOT_FOUND, "can't read it: the work laptop is off or its repos aren't mounted")
+    })?;
+    Ok(Json(json!({ "path": path, "html": markdown::render(&md, None) })))
 }
 
 async fn run_now(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {

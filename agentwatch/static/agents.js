@@ -1,6 +1,6 @@
 // The agent watch page (plans/agent-watch.md): a tile per worker, click one
 // for its detail. Everything an agent wrote is put in with textContent; the
-// only HTML from the server is the report, which it renders with raw HTML
+// only HTML from the server is a report or ticket, which it renders with raw HTML
 // shown as text.
 
 const REFRESH_MS = 60_000;
@@ -58,6 +58,7 @@ export function parseRoute(hash) {
   if (parts[0] === 'term' && parts[1]) return { view: 'term', name: parts[1] };
   if (parts[0] === 'settings') return { view: 'settings' };
   if (parts[0] === 'schedule') return { view: 'schedule' };
+  if (parts[0] === 'ticket' && parts.length >= 3) return { view: 'ticket', name: parts[1], path: parts.slice(2).join('/') };
   if (parts[0] === 'memory' && parts.length === 3) return { view: 'fact', path: `${parts[1]}/${parts[2]}` };
   if (parts[0] === 'memory') return { view: 'memory' };
   return { view: 'tiles' };
@@ -252,6 +253,23 @@ function renderMemory(main) {
           el('p', { class: 'meta' }, x.description)))))),
     );
   }).catch((e) => { body.textContent = e.message; });
+}
+
+/** `#/ticket/Work laptop/thingco/TICKET-x.md`. */
+export function ticketHref(a, path) {
+  return `#/ticket/${encodeURIComponent(a.name)}/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/** A queue worker's ticket, rendered from the laptop's copy. */
+function renderTicket(main, name, path) {
+  const body = el('div', { class: 'report' }, el('p', { class: 'muted' }, 'Loading…'));
+  main.append(el('div', { class: 'detail' },
+    el('p', {}, el('a', { href: `#/term/${encodeURIComponent(name)}` }, `← ${name}`)),
+    el('p', { class: 'muted' }, path),
+    el('section', {}, body)));
+  api('GET', `/api/agents/${encodeURIComponent(name)}/ticket?path=${encodeURIComponent(path)}`)
+    .then((r) => { body.innerHTML = r.html; })
+    .catch((e) => { body.textContent = e.message; });
 }
 
 function renderFact(main, path) {
@@ -616,7 +634,9 @@ function renderTerm(main, name) {
   const brief = lines.length && localStorage.getItem(hideKey) !== '1'
     ? el('div', { class: 'term-brief' },
       el('button', { class: 'term-brief-close', title: 'Hide (Details shows it all)', onclick: () => { localStorage.setItem(hideKey, '1'); brief.remove(); } }, '×'),
-      el('ul', {}, lines.map((l) => el('li', {}, el('strong', {}, `${l.label}: `), l.text))),
+      el('ul', {}, lines.map((l) => el('li', {}, el('strong', {}, `${l.label}: `), l.text)),
+        (a.tickets || []).map((t) => el('li', {}, el('strong', {}, 'Ticket: '), el('a', { href: ticketHref(a, t.path) }, t.title))),
+        (a.kanban || []).map((u) => el('li', {}, el('strong', {}, 'Kanban: '), el('a', { href: u, target: '_blank', rel: 'noopener' }, u)))),
       a.report ? el('a', { href: `#/agent/${encodeURIComponent(a.name)}` }, 'Latest report and everything else in Details') : null)
     : null;
   main.append(el('div', { class: 'term' },
@@ -676,6 +696,7 @@ function render(force = false) {
   else if (route.view === 'schedule') renderSchedule(main);
   else if (route.view === 'memory') renderMemory(main);
   else if (route.view === 'fact') renderFact(main, route.path);
+  else if (route.view === 'ticket') renderTicket(main, route.name, route.path);
   else renderTiles(main);
   document.getElementById('checked').textContent = checkedAt ? `checked ${relTime(checkedAt)}` : '';
   const spend = document.getElementById('spend');

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing, agentWhere, agentWhen, costTotals } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing, ticketHref, agentWhere, agentWhen, costTotals } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -145,5 +145,13 @@ describe('costTotals for the books', () => {
     const list = [{ kind: 'cloud', term: { today_gbp: 1, month_gbp: 2 } }, { kind: 'queue', term: { today_gbp: 5, month_gbp: 9 } }];
     expect(costTotals(list, true)).toEqual({ today: 1, month: 2 });
     expect(costTotals(list).month).toBe(11);
+  });
+});
+
+describe('tickets', () => {
+  it('routes a ticket path with its folders', () => {
+    const href = ticketHref({ name: 'Work laptop' }, 'thingco/TICKET-musty-v0.2.0.md');
+    expect(href).toBe('#/ticket/Work%20laptop/thingco/TICKET-musty-v0.2.0.md');
+    expect(parseRoute(href)).toEqual({ view: 'ticket', name: 'Work laptop', path: 'thingco/TICKET-musty-v0.2.0.md' });
   });
 });

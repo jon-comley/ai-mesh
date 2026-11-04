@@ -52,9 +52,21 @@ pub struct View {
     pub status_lines: Vec<String>,
     /// What the tile calls that machine: `wl` for the work laptop.
     pub machine: Option<String>,
+    /// A queue worker's tickets: its STATUS.md's `Ticket:` lines, each a .md in
+    /// the laptop's repos, titled by the file's first heading when it can be read.
+    pub tickets: Vec<TicketView>,
+    /// Its STATUS.md's `Kanban:` links, for the ticket on the board.
+    pub kanban: Vec<String>,
     /// A queue worker's tasks, newest first.
     pub tasks: Vec<agentterm::queue::Task>,
     pub checked_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TicketView {
+    /// Under the laptop's `~/repos`: `thingco/TICKET-musty-v0.2.0.md`.
+    pub path: String,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +114,8 @@ pub fn blank(agent: &Agent, now: DateTime<Utc>) -> View {
         machine_on: None,
         status_lines: Vec::new(),
         machine: None,
+        tickets: Vec::new(),
+        kanban: Vec::new(),
         tasks: Vec::new(),
         checked_at: now,
     }
@@ -183,7 +197,49 @@ pub fn queue_view(app: &App, agent: &Agent, v: &mut View) {
     tasks.truncate(20);
     v.tasks = tasks;
     let status = app.dir.join("chats").join(&slug).join("STATUS.md");
-    v.status_lines = status_lines(&std::fs::read_to_string(status).unwrap_or_default());
+    let text = std::fs::read_to_string(status).unwrap_or_default();
+    v.status_lines = status_lines(&text);
+    v.kanban = tagged(&text, "Kanban:")
+        .filter(|u| u.starts_with("https://"))
+        .map(String::from)
+        .collect();
+    v.tickets = tagged(&text, "Ticket:")
+        .filter(|p| ticket_path_ok(p))
+        .map(|p| TicketView {
+            path: p.to_string(),
+            title: ticket_title(&std::fs::read_to_string(ticket_file(p)).unwrap_or_default())
+                .unwrap_or_else(|| p.rsplit('/').next().unwrap_or(p).trim_end_matches(".md").to_string()),
+        })
+        .collect();
+}
+
+/// The values of a STATUS.md's lines that start with `tag`.
+fn tagged<'a>(text: &'a str, tag: &'a str) -> impl Iterator<Item = &'a str> {
+    text.lines()
+        .filter_map(move |l| l.trim().strip_prefix(tag))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+/// A ticket path stays inside the laptop's repos and names a .md file.
+pub fn ticket_path_ok(p: &str) -> bool {
+    p.ends_with(".md")
+        && !p.starts_with('/')
+        && p.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
+/// Where lenovo1 sees a ticket: through the laptop's mount.
+pub fn ticket_file(p: &str) -> std::path::PathBuf {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    home.join(agentterm::queue::MOUNT.trim_start_matches("~/")).join(p)
+}
+
+/// A ticket's first heading, without its hashes.
+fn ticket_title(md: &str) -> Option<String> {
+    md.lines()
+        .find_map(|l| l.strip_prefix('#'))
+        .map(|h| h.trim_start_matches('#').trim().to_string())
+        .filter(|h| !h.is_empty())
 }
 
 /// A STATUS.md's State and NEXT lines (agentterm::summary), nothing if it has none.
@@ -435,5 +491,27 @@ mod tests {
             (s.trim(), p.trim(), t, r.map(str::trim)),
             ("", "", None, Some("listing"))
         );
+    }
+
+    #[test]
+    fn ticket_paths_stay_in_the_repos() {
+        assert!(ticket_path_ok("thingco/TICKET-musty-v0.2.0.md"));
+        assert!(!ticket_path_ok("../secrets.md"));
+        assert!(!ticket_path_ok("/etc/x.md"));
+        assert!(!ticket_path_ok("thingco//x.md"));
+        assert!(!ticket_path_ok("thingco/notes.txt"));
+    }
+
+    #[test]
+    fn a_ticket_is_titled_by_its_first_heading() {
+        assert_eq!(ticket_title("intro\n## Musty v0.2.0: OTA\n# later").as_deref(), Some("Musty v0.2.0: OTA"));
+        assert_eq!(ticket_title("no heading"), None);
+    }
+
+    #[test]
+    fn tagged_lines_are_picked_out() {
+        let text = "State: reviewing\nTicket: thingco/a.md\nTicket:\nKanban: https://x/1";
+        assert_eq!(tagged(text, "Ticket:").collect::<Vec<_>>(), ["thingco/a.md"]);
+        assert_eq!(tagged(text, "Kanban:").collect::<Vec<_>>(), ["https://x/1"]);
     }
 }

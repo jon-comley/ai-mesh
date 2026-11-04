@@ -66,6 +66,8 @@ Nothing of Claude is on the laptop.
 - `wl` (`agentterm/lenovo1/wl`) refuses push, gh, sudo, installs and other machines, makes
   pushes fail even from scripts, and commits as JPComley. Refused work ends NEEDS YOU.
 - Nothing about the work goes in a repo.
+- The brief shows the item in hand: STATUS.md's `Ticket: <repo>/<file>.md` lines link to the
+  ticket rendered from the mount (titled by its first heading), `Kanban: https://...` to the board.
 
 ## Order
 
