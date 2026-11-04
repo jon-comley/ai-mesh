@@ -467,6 +467,10 @@ async function retryTask(a, t) {
 let termTimer = null;
 // lenovo1's Tailscale address: the name needs MagicDNS, which not every browser has.
 const TERM_HOST = '100.82.51.25';
+// Over https (Tailscale serve, 8443) the terminal comes through serve on 7682 too.
+function termBase() {
+  return location.protocol === 'https:' ? 'https://lenovo1.tail3c4ee3.ts.net:7682' : `http://${TERM_HOST}:7681`;
+}
 
 function renderTerm(main, name) {
   const a = agents.find((x) => x.name.toLowerCase() === name.toLowerCase());
@@ -480,7 +484,7 @@ function renderTerm(main, name) {
     class: 'term-frame',
     title: `${a.name} terminal`,
     // ttyd listens on Tailscale only (systemd/agentterm.service).
-    src: `http://${TERM_HOST}:7681/?arg=${encodeURIComponent(slug)}`,
+    src: `${termBase()}/?arg=${encodeURIComponent(slug)}`,
   });
   main.append(el('div', { class: 'term' },
     el('div', { class: 'term-bar' },
@@ -492,7 +496,7 @@ function renderTerm(main, name) {
       el('a', { class: 'button', href: frame.src, target: '_blank', rel: 'noopener', title: 'Opens the terminal on its own page, where the browser asks for the login' }, 'Log in'),
       // Inside the ai-mesh dashboard's frame, Full screen leaves the frame for this page on its own.
       window.top !== window
-        ? el('a', { class: 'button', href: `http://${TERM_HOST}/#/term/${encodeURIComponent(a.name)}`, target: '_top' }, 'Full screen')
+        ? el('a', { class: 'button', href: `${location.origin}/#/term/${encodeURIComponent(a.name)}`, target: '_top' }, 'Full screen')
         : (document.fullscreenEnabled ? el('button', { onclick: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) }, 'Full screen') : null),
       el('a', { class: 'button', href: `#/agent/${encodeURIComponent(a.name)}` }, 'Details'),
     ),
