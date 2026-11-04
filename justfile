@@ -3120,7 +3120,7 @@ deploy-agentwatch:
     cargo build --release --target x86_64-unknown-linux-gnu -p agentwatch -p agentterm 2>&1 | grep -E "^error|Finished"
     scp {{ssh_opts}} -q target/x86_64-unknown-linux-gnu/release/agentwatch ${NODE_USER}@${NODE_HOST}:/tmp/agentwatch.new
     scp {{ssh_opts}} -q target/x86_64-unknown-linux-gnu/release/agentterm ${NODE_USER}@${NODE_HOST}:/tmp/agentterm.new
-    scp {{ssh_opts}} -q systemd/agentwatch.service systemd/agentterm.service systemd/agentterm-wl-repos.service agentterm/lenovo1/wl ${NODE_USER}@${NODE_HOST}:/tmp/
+    scp {{ssh_opts}} -q systemd/agentwatch.service systemd/agentterm.service systemd/agentterm-wl-repos.service agentterm/lenovo1/wl systemd/agentwatch-units.rules ${NODE_USER}@${NODE_HOST}:/tmp/
     ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "set -e
         command -v ttyd >/dev/null || sudo apt-get install -y -qq ttyd
         command -v sshfs >/dev/null || sudo apt-get install -y -qq sshfs
@@ -3130,6 +3130,7 @@ deploy-agentwatch:
         sudo install -m 755 /tmp/agentwatch.new /usr/local/bin/agentwatch
         sudo install -m 755 /tmp/agentterm.new /usr/local/bin/agentterm
         sudo install -m 755 /tmp/wl /usr/local/bin/wl
+        sudo install -m 644 /tmp/agentwatch-units.rules /etc/polkit-1/rules.d/50-agentwatch-units.rules && rm /tmp/agentwatch-units.rules
         sudo install -m 644 /tmp/agentwatch.service /tmp/agentterm.service /tmp/agentterm-wl-repos.service /etc/systemd/system/
         rm /tmp/agentwatch.new /tmp/agentterm.new /tmp/agentwatch.service /tmp/agentterm.service /tmp/agentterm-wl-repos.service /tmp/wl
         mkdir -p ~/.ai-mesh/agents/keys && chmod 700 ~/.ai-mesh/agents/keys

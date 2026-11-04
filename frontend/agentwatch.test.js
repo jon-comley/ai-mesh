@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing, agentWhere, agentWhen } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -25,6 +25,7 @@ describe('agent watch page helpers', () => {
     expect(parseRoute('#/agent/Two%20Words')).toEqual({ view: 'agent', name: 'Two Words' });
     expect(parseRoute('#/settings')).toEqual({ view: 'settings' });
     expect(parseRoute('#/term/Desk')).toEqual({ view: 'term', name: 'Desk' });
+    expect(parseRoute('#/schedule')).toEqual({ view: 'schedule' });
     expect(parseRoute('#/memory')).toEqual({ view: 'memory' });
     expect(parseRoute('#/memory/jon/be-punchy.md')).toEqual({ view: 'fact', path: 'jon/be-punchy.md' });
   });
@@ -119,5 +120,14 @@ describe('briefing', () => {
   it('keeps to five waiting items', () => {
     const lines = briefing({ can_reply: false, waiting_lines: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] });
     expect(lines.at(-1).text).toBe('and 2 more');
+  });
+});
+
+describe('schedule labels', () => {
+  it('says where and when each agent runs', () => {
+    expect(agentWhere({ kind: 'cloud' })).toBe('Anthropic cloud');
+    expect(agentWhere({ kind: 'queue', machine: 'wl' })).toBe('lenovo1, for wl');
+    expect(agentWhen({ kind: 'local', every: '20m' })).toBe('every 20m');
+    expect(agentWhen({ kind: 'queue' })).toBe('when work is queued');
   });
 });

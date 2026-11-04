@@ -57,6 +57,9 @@ pub fn router(app: Shared) -> Router {
         .route("/api/agents/{name}/chat/new", post(chat_new))
         .route("/api/agents/{name}/term", get(term))
         .route("/api/live", get(live))
+        .route("/api/schedule", get(schedule_list))
+        .route("/api/schedule/{name}/log", get(schedule_log))
+        .route("/api/schedule/{name}/{action}", post(schedule_act))
         .route("/api/agents/{name}/tasks/{id}/retry", post(task_retry))
         .route("/api/memory", get(memory_list))
         .route("/api/memory/file", get(memory_file).put(memory_save))
@@ -165,6 +168,45 @@ async fn task_retry(
         .map_err(|e| fail(StatusCode::BAD_REQUEST, e))?;
     *app.live.lock().await = None;
     Ok(Json(json!({ "task": t })))
+}
+
+async fn schedule_list(State(app): State<Shared>) -> Json<Value> {
+    Json(super::schedule::all(&app).await)
+}
+
+fn service(
+    app: &App,
+    name: &str,
+) -> Result<agentwatch::config::Service, (StatusCode, Json<Value>)> {
+    app.config
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .services
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+        .cloned()
+        .ok_or_else(|| fail(StatusCode::NOT_FOUND, format!("no service called {name}")))
+}
+
+async fn schedule_log(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
+    let s = service(&app, &name)?;
+    let text = super::schedule::log(&s)
+        .await
+        .map_err(|e| fail(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({ "log": text })))
+}
+
+async fn schedule_act(
+    State(app): State<Shared>,
+    Path((name, action)): Path<(String, String)>,
+) -> ApiResult {
+    let s = service(&app, &name)?;
+    super::schedule::act(&s, &action)
+        .await
+        .map_err(|e| fail(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(
+        json!({ "service": super::schedule::service(&s).await }),
+    ))
 }
 
 /// ttyd's port on this machine (systemd/agentterm.service).

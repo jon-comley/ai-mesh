@@ -134,6 +134,9 @@ pub struct Config {
     /// Its deploy key under `keys/`.
     #[serde(default = "default_memory_key")]
     pub memory_key: String,
+    /// Background services on the Schedule tab (systemd units, a Windows service).
+    #[serde(default, rename = "service", skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<Service>,
     /// The machine pool for terminals, read by agentterm; kept as written.
     #[serde(default, rename = "node", skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<toml::Value>,
@@ -151,6 +154,7 @@ impl Default for Config {
             memory: None,
             memory_key: default_memory_key(),
             nodes: Vec::new(),
+            services: Vec::new(),
         }
     }
 }
@@ -165,6 +169,42 @@ impl std::fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+/// How a background service is run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceKind {
+    /// A systemd unit: a `.service`, or a `.timer` that starts one.
+    #[default]
+    Systemd,
+    /// A Windows service (nssm on beelink1).
+    Windows,
+}
+
+/// One `[[service]]`: a background job the Schedule tab shows and can restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Service {
+    pub name: String,
+    pub purpose: String,
+    /// ssh name; none for this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    pub unit: String,
+    #[serde(default)]
+    pub kind: ServiceKind,
+}
+
+impl Service {
+    /// Unit and host are safe to put in a command line.
+    pub fn ok(&self) -> bool {
+        let word = |w: &str| {
+            !w.is_empty()
+                && w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
+        };
+        word(&self.unit) && self.host.as_deref().is_none_or(word)
+    }
+}
 
 impl Config {
     /// Parses `agents.toml` and checks each agent has what its kind needs.
@@ -187,6 +227,12 @@ impl Config {
                 return Err(ConfigError(format!("{} has no {field}", a.name)));
             }
             check(a)?;
+        }
+        if let Some(s) = config.services.iter().find(|s| !s.ok()) {
+            return Err(ConfigError(format!(
+                "service {}: unit or host has characters it cannot have",
+                s.name
+            )));
         }
         Ok(config)
     }

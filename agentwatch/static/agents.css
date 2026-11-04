@@ -234,3 +234,13 @@ body.fullscreen > main { max-width: none; padding: 0; margin: 0; }
 .term-brief ul { margin: 0; padding: 0; list-style: none; }
 .term-brief li { margin: 0.15rem 0; }
 .term-brief-close { position: absolute; top: 0.3rem; right: 0.4rem; background: none; border: 0; color: inherit; font-size: 1.1rem; cursor: pointer; }
+
+/* Schedule tab. */
+table.schedule { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-bottom: 1.5rem; }
+table.schedule th, table.schedule td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid #2a2f37; vertical-align: top; }
+table.schedule td.acts { white-space: nowrap; text-align: right; }
+table.schedule td.acts button { margin-left: 0.3rem; }
+.svc.running, .svc.waiting { color: #2e7d32; }
+.svc.failed, .svc.unreachable { color: #c62828; font-weight: 600; }
+.svc.stopped { color: #888; }
+.service-log { background: #0D1117; color: #EDF1F5; padding: 0.75rem; max-height: 50vh; overflow: auto; font-size: 0.8rem; white-space: pre-wrap; }

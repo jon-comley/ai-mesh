@@ -7,6 +7,7 @@ pub mod dispatch;
 pub mod poll;
 pub mod repo;
 pub mod run;
+pub mod schedule;
 pub mod store;
 pub mod web;
 

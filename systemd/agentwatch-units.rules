@@ -1,0 +1,16 @@
+// Lets agentwatch (user jonno, no sudo) restart the background units the
+// Schedule tab lists on lenovo1, and nothing else. Installed by
+// `just deploy-agentwatch` as /etc/polkit-1/rules.d/50-agentwatch-units.rules.
+polkit.addRule(function (action, subject) {
+    if (action.id != "org.freedesktop.systemd1.manage-units" || subject.user != "jonno") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    var units = ["ai-mesh-coordinator.service", "ai-mesh-agent.service", "agentwatch.service",
+        "agentterm.service", "agentterm-wl-repos.service", "glebefish-sensor-push.service"];
+    if (units.indexOf(unit) >= 0 && (verb == "restart" || verb == "start")) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});

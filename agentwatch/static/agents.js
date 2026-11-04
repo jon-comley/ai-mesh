@@ -57,6 +57,7 @@ export function parseRoute(hash) {
   if (parts[0] === 'agent' && parts[1]) return { view: 'agent', name: parts[1] };
   if (parts[0] === 'term' && parts[1]) return { view: 'term', name: parts[1] };
   if (parts[0] === 'settings') return { view: 'settings' };
+  if (parts[0] === 'schedule') return { view: 'schedule' };
   if (parts[0] === 'memory' && parts.length === 3) return { view: 'fact', path: `${parts[1]}/${parts[2]}` };
   if (parts[0] === 'memory') return { view: 'memory' };
   return { view: 'tiles' };
@@ -105,6 +106,21 @@ export function briefing(a) {
   if (a.term?.state?.line) out.push({ label: 'Terminal said', text: a.term.state.line });
   return out;
 }
+
+/** Where an agent runs, for the Schedule tab. */
+export function agentWhere(a) {
+  if (a.kind === 'cloud') return 'Anthropic cloud';
+  if (a.kind === 'queue') return `lenovo1, for ${a.machine ?? 'its machine'}`;
+  return a.machine ?? 'mac1';
+}
+
+/** How often, as people say it: "every 20m", "daily 07:30". */
+export function agentWhen(a) {
+  if (a.kind === 'queue') return 'when work is queued';
+  return `every ${a.every}`;
+}
+
+export const SERVICE_LABELS = { running: 'Running', waiting: 'Waiting', stopped: 'Stopped', failed: 'Failed', unreachable: 'Cannot reach it' };
 
 /** The "What" of a hub row: the cell headed What, else the longest middle cell. */
 export function rowWhat(row) {
@@ -484,6 +500,69 @@ async function retryTask(a, t) {
   } catch (e) { toast(e.message, true); }
 }
 
+// ── Schedule ────────────────────────────────────────────────────────────────
+
+async function renderSchedule(main) {
+  main.append(el('h1', {}, 'Schedule'),
+    el('p', { class: 'purpose' }, 'Every background job, where it runs and when. Read from the schedulers themselves: no AI.'));
+  const box = el('div', {}, el('p', { class: 'muted' }, 'Reading the schedulers…'));
+  main.append(box);
+  let data;
+  try { data = await api('GET', '/api/schedule'); } catch (e) { box.replaceChildren(el('p', { class: 'error' }, e.message)); return; }
+  const agentRows = data.agents.map((a) => el('tr', {},
+    el('td', {}, el('a', { href: `#/agent/${encodeURIComponent(a.name)}` }, a.name)),
+    el('td', {}, agentWhere(a)),
+    el('td', {}, agentWhen(a)),
+    el('td', {}, el('span', { class: `light ${a.state}` }), ' ', stateLabel(a.state)),
+    el('td', {}, a.last_run ? relTime(a.last_run) : 'never'),
+    el('td', {}, a.next_due ? clock(a.next_due) : ''),
+    el('td', { class: 'acts' },
+      a.can_run ? el('button', { onclick: () => scheduleAgent(a, 'run', 'Started') }, 'Run now') : null,
+      a.can_pause && !a.paused ? el('button', { onclick: () => scheduleAgent(a, 'pause', 'Paused') }, 'Pause') : null,
+      a.can_pause && a.paused ? el('button', { onclick: () => scheduleAgent(a, 'resume', 'Resumed') }, 'Resume') : null),
+  ));
+  const serviceRows = data.services.map((s) => el('tr', {},
+    el('td', {}, el('strong', {}, s.name), el('br'), el('span', { class: 'muted' }, s.purpose)),
+    el('td', {}, s.host),
+    el('td', {}, s.unit.endsWith('.timer') ? 'timer' : 'always on'),
+    el('td', {}, el('span', { class: `svc ${s.state}` }, SERVICE_LABELS[s.state] ?? s.state),
+      s.restarts ? el('span', { class: 'muted' }, ` · restarted ${s.restarts}×`) : null),
+    el('td', {}, s.last || s.since || ''),
+    el('td', {}, s.next || ''),
+    el('td', { class: 'acts' },
+      el('button', { onclick: () => serviceLog(s) }, 'Log'),
+      s.can_run ? el('button', { onclick: () => serviceAct(s, 'run', 'Started') }, 'Run now')
+        : el('button', { onclick: () => serviceAct(s, 'restart', 'Restarted') }, 'Restart')),
+  ));
+  const head = (cols) => el('thead', {}, el('tr', {}, cols.map((c) => el('th', {}, c))));
+  box.replaceChildren(
+    el('h3', {}, 'Agents'),
+    el('table', { class: 'schedule' }, head(['Agent', 'Runs on', 'When', 'State', 'Last run', 'Next', '']), el('tbody', {}, agentRows)),
+    el('h3', {}, 'Services'),
+    el('table', { class: 'schedule' }, head(['Service', 'Machine', 'Kind', 'State', 'Last / since', 'Next', '']), el('tbody', {}, serviceRows)),
+    el('pre', { id: 'service-log', class: 'service-log', hidden: true }),
+  );
+}
+
+async function scheduleAgent(a, action, done) {
+  try { await api('POST', `/api/agents/${encodeURIComponent(a.name)}/${action}`); toast(done); } catch (e) { toast(e.message, true); }
+  render();
+}
+
+async function serviceAct(s, action, done) {
+  try { await api('POST', `/api/schedule/${encodeURIComponent(s.name)}/${action}`); toast(done); } catch (e) { toast(e.message, true); }
+  render();
+}
+
+async function serviceLog(s) {
+  const pre = document.getElementById('service-log');
+  pre.hidden = false;
+  pre.textContent = `${s.name}: reading its log…`;
+  try { pre.textContent = `${s.name} (${s.host}, ${s.unit})\n\n${(await api('GET', `/api/schedule/${encodeURIComponent(s.name)}/log`)).log}`; }
+  catch (e) { pre.textContent = e.message; }
+  pre.scrollIntoView({ behavior: 'smooth' });
+}
+
 // ── Terminal ────────────────────────────────────────────────────────────────
 
 let termTimer = null;
@@ -571,6 +650,7 @@ function render(force = false) {
   if (route.view === 'term') renderTerm(main, route.name);
   else if (route.view === 'agent') { renderAgent(main, route.name); drawChat(); }
   else if (route.view === 'settings') renderSettings(main);
+  else if (route.view === 'schedule') renderSchedule(main);
   else if (route.view === 'memory') renderMemory(main);
   else if (route.view === 'fact') renderFact(main, route.path);
   else renderTiles(main);
