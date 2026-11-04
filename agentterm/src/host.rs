@@ -191,8 +191,8 @@ pub fn script(slug: &str, w: &Worker) -> String {
              if [ ! -e {pause} ]; then touch {pause} ~/.ai-mesh/term/{slug}.paused; fi\n"
         ));
     }
-    // `read -d ''` from a heredoc, not `$(cat <<...)`: mac1's bash 3.2 misreads a
-    // quote inside a heredoc in a command substitution (Reviews broke on "agent's").
+    // `read -d ''` from a heredoc, not `$(cat <<...)`: a host with only macOS's
+    // bash 3.2 misreads a quote inside a heredoc in a command substitution.
     s.push_str(&format!(
         "IFS= read -r -d '' settings <<'{t}'\n{settings}\n{t}\n"
     ));
@@ -267,11 +267,15 @@ pub fn script_windows(slug: &str, w: &Worker) -> String {
 
 /// The tmux arguments that open (or rejoin) a host worker's terminal.
 pub fn attach_command(slug: &str, host: &str, agents_dir: &Path) -> Vec<String> {
+    // mac1's GNU bash 5 (buildtools), not macOS's 3.2, when the host has it.
     attach_with(
         slug,
         host,
         agents_dir,
-        format!("bash {}", script_path(slug)),
+        format!(
+            "b=~/buildtools/tools/bin/bash; [ -x $b ] || b=bash; $b {}",
+            script_path(slug)
+        ),
     )
 }
 
@@ -460,9 +464,7 @@ chat_readonly = true
     #[test]
     fn attach_holds_an_ssh_to_the_host() {
         let c = attach_command("reviews", "mac1", Path::new("/a"));
-        assert_eq!(
-            &c[c.len() - 4..],
-            ["ssh", "-t", "mac1", "bash ~/.ai-mesh/term/reviews.sh"]
-        );
+        assert_eq!(&c[c.len() - 4..c.len() - 1], ["ssh", "-t", "mac1"]);
+        assert!(c.last().unwrap().ends_with("$b ~/.ai-mesh/term/reviews.sh"));
     }
 }
