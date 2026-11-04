@@ -10,6 +10,8 @@
 //!
 //! agentwatch reads it back with [`read`].
 
+pub mod host;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -297,14 +299,22 @@ conversations/ if there is one. Then give me two lines: where you are, and NEXT.
 /// Claude's settings for a terminal session: hooks and the status line, all
 /// calling this binary.
 pub fn settings(bin: &Path) -> Value {
-    let cmd = |args: &str| format!("{} {args}", bin.display());
-    let hook = |args: &str| serde_json::json!([{ "hooks": [{ "type": "command", "command": cmd(args) }] }]);
+    settings_with(|event| match event {
+        "statusline" => format!("{} statusline", bin.display()),
+        e => format!("{} hook {e}", bin.display()),
+    })
+}
+
+/// Hooks and status line, each event's command from `cmd`: `prompt`, `stop`,
+/// `notify`, `tool` and `statusline`.
+pub fn settings_with(cmd: impl Fn(&str) -> String) -> Value {
+    let hook = |event: &str| serde_json::json!([{ "hooks": [{ "type": "command", "command": cmd(event) }] }]);
     serde_json::json!({
         "hooks": {
-            "UserPromptSubmit": hook("hook prompt"),
-            "Stop": hook("hook stop"),
-            "Notification": hook("hook notify"),
-            "PostToolUse": hook("hook tool"),
+            "UserPromptSubmit": hook("prompt"),
+            "Stop": hook("stop"),
+            "Notification": hook("notify"),
+            "PostToolUse": hook("tool"),
         },
         "statusLine": { "type": "command", "command": cmd("statusline") },
     })

@@ -28,6 +28,15 @@ A terminal is a shell on its node, so ttyd listens on Tailscale only, behind a l
 WSL's). The browser asks for the login once, on the terminal's own address
 (`:7681/?arg=desk`): it will not ask inside the page's frame.
 
+## Workers on mac1
+
+mac1 has no tmux or Rust, so the tmux session stays on lenovo1 and holds an `ssh -t`
+to mac1, where `claude` runs in the worker's own directory with its env and brief.
+`~/.ai-mesh/bin/agentterm-hook` on mac1 forwards the hooks and status line to lenovo1.
+The orchestrator's ticks pause while its terminal is in use: opening it waits for a
+running tick, a prompt during a tick is refused, and agentwatch gives the ticks back
+after 30 minutes with nothing to do or when the terminal closes. Reviews reads only.
+
 ## Where a session runs
 
 The coordinator already places models and inference by headroom. Agent sessions join it:
@@ -51,6 +60,6 @@ site PCs) is only reachable from it. Its tile shows `off` when the laptop is off
 
 1. `agentterm` on lenovo1 with the Desk and Standards tiles (local `claude`, their chat
    clones), status hook and costs.
-2. mac1's orchestrator and Reviews tiles (tmux on mac1 over ssh).
+2. mac1's orchestrator and Reviews tiles (claude on mac1, tmux on lenovo1).
 3. Placement: nodes advertise what they can host; the coordinator picks the node.
 4. The work-laptop worker, on Jon's yes.

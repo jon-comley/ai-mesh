@@ -414,6 +414,48 @@ pub async fn resume_idle(app: &App) {
     }
 }
 
+/// Gives a local worker its ticks back when its terminal paused them and has
+/// had nothing to do for [`CHAT_IDLE`], or has closed. The terminal's next
+/// prompt pauses them again (agentterm/mac/agentterm-hook).
+pub async fn resume_idle_terms(app: &App) {
+    let agents = app
+        .config
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .agents
+        .clone();
+    for agent in agents {
+        let (Some(host), Some(pause), Some(slug)) =
+            (&agent.host, &agent.pause, agentterm::slug(&agent.name))
+        else {
+            continue;
+        };
+        // A terminal never opened has nothing to give back.
+        let Some(term) = super::poll::term(app, &agent)
+            .await
+            .filter(|t| t.state.is_some())
+        else {
+            continue;
+        };
+        let idle = |s: &agentterm::TermState| {
+            s.phase != agentterm::Phase::Working
+                && (chrono::Utc::now() - s.at).to_std().unwrap_or_default() >= CHAT_IDLE
+        };
+        if term.open && !term.state.as_ref().is_some_and(idle) {
+            continue;
+        }
+        let marker = format!("~/.ai-mesh/term/{slug}.paused");
+        let script = format!("if [ -e {marker} ]; then rm -f {pause} {marker}; echo resumed; fi");
+        match super::run::ssh(host, &script).output().await {
+            Ok(o) if String::from_utf8_lossy(&o.stdout).contains("resumed") => {
+                tracing::info!("{}: terminal idle, its tick is running again", agent.name);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("{}: could not resume after terminal: {e}", agent.name),
+        }
+    }
+}
+
 /// What the tile shows, as plain text for the chat's context.
 pub fn tile_text(v: &View) -> String {
     let mut out = format!(

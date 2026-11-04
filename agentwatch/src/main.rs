@@ -55,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             server::chat::resume_idle(&idle).await;
+            server::chat::resume_idle_terms(&idle).await;
         }
     });
 

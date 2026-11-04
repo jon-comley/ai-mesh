@@ -59,6 +59,9 @@ fn attach(name: &str) -> ExitCode {
         return ExitCode::from(2);
     };
     let dir = agents_dir();
+    if let Some(w) = agentterm::host::load(&dir, &slug).filter(|w| w.on_host()) {
+        return attach_host(&slug, &w, &dir);
+    }
     let work = dir.join("chats").join(&slug);
     if !work.is_dir() {
         eprintln!("no terminal for {name}: {} is missing", work.display());
@@ -83,6 +86,42 @@ fn attach(name: &str) -> ExitCode {
         .args(agentterm::attach_command(
             &slug, &display, &work, &dir, &settings,
         ))
+        .exec();
+    eprintln!("cannot start tmux: {err}");
+    ExitCode::FAILURE
+}
+
+/// A worker on another machine: write its start script there, then hold an
+/// ssh to it in tmux here.
+fn attach_host(slug: &str, w: &agentterm::host::Worker, dir: &std::path::Path) -> ExitCode {
+    use std::io::Write;
+    let host = w.host.as_deref().unwrap_or_default();
+    let path = agentterm::host::script_path(slug);
+    let child = Command::new("ssh")
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host])
+        .arg(format!("mkdir -p ~/.ai-mesh/term && cat > {path}"))
+        .stdin(std::process::Stdio::piped())
+        .spawn();
+    let written = child.and_then(|mut c| {
+        c.stdin
+            .take()
+            .expect("piped")
+            .write_all(agentterm::host::script(slug, w).as_bytes())?;
+        c.wait()
+    });
+    match written {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("cannot reach {host} to start {}: ssh exited {s}", w.name);
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("cannot reach {host} to start {}: {e}", w.name);
+            return ExitCode::FAILURE;
+        }
+    }
+    let err = Command::new("tmux")
+        .args(agentterm::host::attach_command(slug, host, dir))
         .exec();
     eprintln!("cannot start tmux: {err}");
     ExitCode::FAILURE

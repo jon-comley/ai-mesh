@@ -113,10 +113,11 @@ pub async fn view(app: &App, agent: &Agent) -> View {
     v
 }
 
-/// The agent's terminal, if it has a clone to work in on this machine.
+/// The agent's terminal: a clone to work in here, or a worker on its host.
 pub async fn term(app: &App, agent: &Agent) -> Option<agentterm::TermView> {
     let slug = agentterm::slug(&agent.name)?;
-    if !app.dir.join("chats").join(&slug).is_dir() {
+    let on_host = agent.kind == Kind::Local && agent.host.is_some() && agent.chat_dir.is_some();
+    if !on_host && !app.dir.join("chats").join(&slug).is_dir() {
         return None;
     }
     let open = tokio::process::Command::new("tmux")

@@ -3131,7 +3131,10 @@ deploy-agentwatch:
         sudo systemctl restart agentwatch agentterm
         sleep 3
         systemctl is-active agentwatch agentterm"
-    echo ">>> Agent watch on lenovo1 updated: http://lenovo1/ (terminals on :7681)"
+    # mac1's workers' terminals run claude there; their hooks forward to lenovo1.
+    ssh {{ssh_opts}} mac1 'mkdir -p ~/.ai-mesh/bin ~/.ai-mesh/term'
+    scp {{ssh_opts}} -q agentterm/mac/agentterm-hook mac1:.ai-mesh/bin/agentterm-hook
+    echo ">>> Agent watch on lenovo1 updated: http://lenovo1/ (terminals on :7681, mac1 hook installed)"
 
 # Verify coordinator health on the target host (Phase 2 health check).
 # Checks: connectivity, log output, agent connections, Zigbee → MQTT, dashboard access.
