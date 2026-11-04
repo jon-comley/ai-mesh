@@ -4,6 +4,8 @@
 // shown as text.
 
 const REFRESH_MS = 60_000;
+// The tiles' terminal and paused lines, while the page is in view.
+const LIVE_MS = 5_000;
 
 let agents = [];
 let checkedAt = null;
@@ -498,6 +500,29 @@ function render() {
   document.getElementById('back').hidden = route.view === 'tiles';
 }
 
+/** Folds `/api/live` into the tiles: terminal state and paused, fresh. */
+export function applyLive(list, live) {
+  return list.map((a) => {
+    const l = live[a.name];
+    if (!l) return a;
+    const next = { ...a, term: l.term ?? a.term };
+    if (l.paused !== null && l.paused !== undefined) {
+      next.paused = l.paused;
+      if (l.paused && a.state !== 'running') next.state = 'paused';
+      else if (!l.paused && a.state === 'paused') next.state = 'ok';
+    }
+    return next;
+  });
+}
+
+async function live() {
+  if (parseRoute(location.hash).view !== 'tiles') return;
+  try {
+    agents = applyLive(agents, await api('GET', '/api/live'));
+    render();
+  } catch { /* the next tick tries again */ }
+}
+
 async function load(path = '/api/agents', method = 'GET') {
   try {
     const r = await api(method, path);
@@ -511,6 +536,9 @@ if (typeof window !== 'undefined' && document.getElementById('main')) {
   window.addEventListener('hashchange', () => { window.scrollTo(0, 0); render(); });
   document.getElementById('refresh').addEventListener('click', () => load('/api/agents/refresh', 'POST'));
   load();
-  setInterval(load, REFRESH_MS);
+  // Only while someone is looking: nothing is fetched from a hidden tab.
+  setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
+  setInterval(() => { if (!document.hidden) live(); }, LIVE_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { live(); load(); } });
   render();
 }

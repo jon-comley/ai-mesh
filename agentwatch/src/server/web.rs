@@ -56,6 +56,7 @@ pub fn router(app: Shared) -> Router {
         )
         .route("/api/agents/{name}/chat/new", post(chat_new))
         .route("/api/agents/{name}/term", get(term))
+        .route("/api/live", get(live))
         .route("/api/memory", get(memory_list))
         .route("/api/memory/file", get(memory_file).put(memory_save))
         .route("/api/config", get(get_config).put(put_config))
@@ -97,6 +98,42 @@ async fn term(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult 
     let a = agent(&app, &name)?;
     let term = super::poll::term(&app, &a).await;
     Ok(Json(json!({ "term": term, "port": TERM_PORT })))
+}
+
+/// What changes from minute to minute, for an open page: each worker's
+/// terminal and whether its ticks are paused. Read at most every 5 seconds,
+/// however many pages ask.
+async fn live(State(app): State<Shared>) -> Json<Value> {
+    let mut cache = app.live.lock().await;
+    if let Some((at, v)) = cache.as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(5) {
+            return Json(v.clone());
+        }
+    }
+    let agents = app
+        .config
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .agents
+        .clone();
+    let mut out = serde_json::Map::new();
+    for a in agents {
+        let term = super::poll::term(&app, &a).await;
+        let paused = match (&a.host, &a.pause) {
+            (Some(host), Some(pause)) => {
+                let script = format!("[ -e {pause} ] && echo yes || echo no");
+                match super::run::ssh(host, &script).output().await {
+                    Ok(o) => Some(String::from_utf8_lossy(&o.stdout).trim() == "yes"),
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        };
+        out.insert(a.name.clone(), json!({ "term": term, "paused": paused }));
+    }
+    let v = Value::Object(out);
+    *cache = Some((std::time::Instant::now(), v.clone()));
+    Json(v)
 }
 
 /// ttyd's port on this machine (systemd/agentterm.service).

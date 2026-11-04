@@ -31,6 +31,8 @@ pub struct App {
     pub chatting: Mutex<std::collections::HashSet<String>>,
     /// Local workers whose tick a chat paused, and when that chat last spoke.
     pub chat_paused: Mutex<HashMap<String, std::time::Instant>>,
+    /// The last `/api/live` answer, so many open pages cost one read.
+    pub live: tokio::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>>,
     http: reqwest::Client,
 }
 
@@ -44,6 +46,7 @@ impl App {
             work: tokio::sync::Mutex::new(()),
             chatting: Mutex::new(std::collections::HashSet::new()),
             chat_paused: Mutex::new(HashMap::new()),
+            live: tokio::sync::Mutex::new(None),
             http: reqwest::Client::new(),
         }
     }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -79,4 +79,17 @@ describe('termText', () => {
     expect(termText({ ...t, state: { phase: 'working' }, over_session: true })).toMatch(/session over its limit$/);
   });
   it('is empty without a terminal', () => expect(termText(null)).toBe(''));
+});
+
+describe('applyLive', () => {
+  const a = { name: 'Orchestrator', state: 'ok', paused: false, term: null };
+  it('shows a pause as soon as it happens, and its end', () => {
+    const [p] = applyLive([a], { Orchestrator: { term: null, paused: true } });
+    expect(p.state).toBe('paused');
+    const [r] = applyLive([p], { Orchestrator: { term: null, paused: false } });
+    expect(r.state).toBe('ok');
+  });
+  it('leaves a worker it has no news of alone', () => {
+    expect(applyLive([a], {})[0]).toBe(a);
+  });
 });
