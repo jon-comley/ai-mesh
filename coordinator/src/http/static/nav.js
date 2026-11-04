@@ -17,7 +17,8 @@ export const GROUPS = [
   },
 ];
 
-const FIRST_GROUP = 'home';
+// The dashboard opens on the Workers tiles (Jon, 4 Nov).
+const FIRST_PANEL = 'workers';
 
 function load(key) {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -40,13 +41,13 @@ export function currentPanel() {
   return current;
 }
 
-/** Wire up the bottom bar and the sub-tab strip, and open the first category. */
+/** Wire up the bottom bar and the sub-tab strip, and open on the Workers tiles. */
 export function init({ tabs, subtabs }) {
   tabBar = tabs;
   subBar = subtabs;
   tabBar.querySelectorAll('.tab[data-group]').forEach(b =>
     b.addEventListener('click', () => showGroup(b.dataset.group)));
-  showGroup(FIRST_GROUP);
+  showPanel(FIRST_PANEL);
 }
 
 /** Open a category on the sub-tab it was last left on. */

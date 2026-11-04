@@ -21,12 +21,12 @@ beforeEach(() => {
 });
 
 describe('navigation', () => {
-  it('has five categories and opens on Home', () => {
+  it('has five categories and opens on the Workers tiles', () => {
     mount();
     expect(GROUPS.map(g => g.label)).toEqual(['Home', 'Chat', 'Music', 'Tools', 'System']);
-    expect(active()).toEqual(['panel-home']);
-    expect(tab('home').classList.contains('active')).toBe(true);
-    expect(subtabs()).toEqual(['Home', 'Devices']);
+    expect(active()).toEqual(['panel-workers']);
+    expect(tab('tools').classList.contains('active')).toBe(true);
+    expect(subtabs()).toEqual(['Hunts', 'Reviews', 'Workers']);
   });
 
   it('places every panel in exactly one category', () => {
@@ -61,9 +61,9 @@ describe('navigation', () => {
     tab('home').click();
     tab('music').click();
     expect(active()).toEqual(['panel-reaper']);
-    // …and still opens on Home after a reload.
+    // …and still opens on the Workers tiles after a reload.
     mount();
-    expect(active()).toEqual(['panel-home']);
+    expect(active()).toEqual(['panel-workers']);
   });
 
   it('announces the panel it shows', () => {
