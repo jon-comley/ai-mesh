@@ -428,7 +428,8 @@ async function newChat(a) {
 // ── Terminal ────────────────────────────────────────────────────────────────
 
 let termTimer = null;
-const TERM_HOST = 'lenovo1.tail3c4ee3.ts.net';
+// lenovo1's Tailscale address: the name needs MagicDNS, which not every browser has.
+const TERM_HOST = '100.82.51.25';
 
 function renderTerm(main, name) {
   const a = agents.find((x) => x.name.toLowerCase() === name.toLowerCase());

@@ -23,8 +23,10 @@ agentwatch's tiles open. It replaces the "Talk to <name>" chat box.
 ## Access
 
 A terminal is a shell on its node, so ttyd listens on Tailscale only, behind a login
-(`~/.config/agentterm/login.env` on lenovo1, never in a repo). From home, open the page
-by its Tailscale name, not the LAN address.
+(`~/.config/agentterm/login.env` on lenovo1, never in a repo). Open the page at
+`http://100.82.51.25/` from a device on Tailscale (Windows needs its own Tailscale, not
+WSL's). The browser asks for the login once, on the terminal's own address
+(`:7681/?arg=desk`): it will not ask inside the page's frame.
 
 ## Where a session runs
 
