@@ -488,6 +488,12 @@ function renderTerm(main, name) {
       el('strong', {}, a.name),
       status,
       el('span', { class: 'spacer' }),
+      // The browser never asks for the terminal's login inside a frame: log in once on its own page.
+      el('a', { class: 'button', href: frame.src, target: '_blank', rel: 'noopener', title: 'Opens the terminal on its own page, where the browser asks for the login' }, 'Log in'),
+      // Inside the ai-mesh dashboard's frame, Full screen leaves the frame for this page on its own.
+      window.top !== window
+        ? el('a', { class: 'button', href: `http://${TERM_HOST}/#/term/${encodeURIComponent(a.name)}`, target: '_top' }, 'Full screen')
+        : (document.fullscreenEnabled ? el('button', { onclick: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) }, 'Full screen') : null),
       el('a', { class: 'button', href: `#/agent/${encodeURIComponent(a.name)}` }, 'Details'),
     ),
     frame,
