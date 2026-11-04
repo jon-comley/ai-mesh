@@ -3118,6 +3118,8 @@ deploy-agentwatch:
     scp {{ssh_opts}} -q systemd/agentwatch.service systemd/agentterm.service ${NODE_USER}@${NODE_HOST}:/tmp/
     ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "set -e
         command -v ttyd >/dev/null || sudo apt-get install -y -qq ttyd
+        # The package starts its own root login terminal on localhost: never wanted.
+        sudo systemctl disable -q --now ttyd 2>/dev/null || true
         [ -e /usr/local/bin/agentwatch ] && sudo cp -p /usr/local/bin/agentwatch /usr/local/bin/agentwatch.prev
         sudo install -m 755 /tmp/agentwatch.new /usr/local/bin/agentwatch
         sudo install -m 755 /tmp/agentterm.new /usr/local/bin/agentterm
