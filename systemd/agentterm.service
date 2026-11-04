@@ -15,6 +15,8 @@ Environment=AGENTTERM_DIR=/home/jonno/.ai-mesh/agents
 Environment=PATH=/home/jonno/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/home/jonno/.config/agentterm/login.env
 ExecStart=/usr/bin/ttyd --writable --url-arg --interface tailscale0 --port 7681 --credential ${AGENTTERM_LOGIN} -t fontSize=15 -t disableLeaveAlert=true /usr/local/bin/agentterm attach
+# Restarting ttyd must not end the agents' tmux sessions: they carry on.
+KillMode=process
 Restart=on-failure
 RestartSec=10
 
