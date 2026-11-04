@@ -20,6 +20,15 @@ agentwatch's tiles open. It replaces the "Talk to <name>" chat box.
    running cost in the status line; a notification fires when a session or a day passes
    its limit (defaults GBP 2 a session, GBP 10 a day, set per node).
 
+## Where a session runs
+
+The coordinator already places models and inference by headroom. Agent sessions join it:
+1. Each node advertises what it can host: `claude` logged in, which repo clones it has,
+   what it can reach (the work laptop, the site PCs, the phones), and its current load.
+2. A session goes to the least-loaded node that can do its job. Pins override: work
+   tasks to the work laptop, gated runs to mac1.
+3. The tile shows the node a session is on.
+
 ## Work-laptop agent
 
 A worker on the work laptop, run there, because some work (its GitHub account, the
@@ -35,4 +44,5 @@ site PCs) is only reachable from it. Its tile shows `off` when the laptop is off
 1. `agentterm` on lenovo1 with the Desk and Standards tiles (local `claude`, their chat
    clones), status hook and costs.
 2. mac1's orchestrator and Reviews tiles (tmux on mac1 over ssh).
-3. The work-laptop worker, on Jon's yes.
+3. Placement: nodes advertise what they can host; the coordinator picks the node.
+4. The work-laptop worker, on Jon's yes.
