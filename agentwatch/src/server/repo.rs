@@ -29,8 +29,14 @@ impl Repo {
             self.git(&["fetch", "origin", "main"]).await?;
             self.git(&["reset", "--hard", "origin/main"]).await?;
         }
-        // So any git run in the clone (a chat's own commits included) uses this
-        // repo's key and commits as Jon.
+        self.configure().await
+    }
+
+    /// So any git run in the clone (a chat's own commits and pushes included)
+    /// uses this repo's key and commits as Jon. Set on every sync, not only a
+    /// fresh clone: Desk's chat clone predated it and pushed with lenovo1's own
+    /// key, which GitHub refuses (5 Nov).
+    async fn configure(&self) -> Result<()> {
         let ssh = format!(
             "ssh -i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
             self.key.display()
@@ -48,6 +54,7 @@ impl Repo {
         if !self.dir.join(".git").exists() {
             return self.sync().await;
         }
+        self.configure().await?;
         self.git(&["pull", "--ff-only", "origin", "main"])
             .await
             .map(|_| ())
