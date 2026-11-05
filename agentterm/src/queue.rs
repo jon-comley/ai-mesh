@@ -184,13 +184,13 @@ your result with \"NEEDS YOU:\" and the exact command. Never use an em dash.",
     )
 }
 
-/// What a task may do, enforced by Claude's settings: its files and `wl`.
-/// `wl` itself refuses pushes, gh, sudo, installs and other machines.
+/// What a task may do, enforced by Claude's settings: its files, `wl` and the
+/// web (research tickets need it). `wl` itself refuses pushes, gh, sudo,
+/// installs and other machines.
 pub fn settings() -> serde_json::Value {
     serde_json::json!({
         "permissions": {
-            "allow": ["Read", "Glob", "Grep", "Edit", "MultiEdit", "Write", "Task", "TodoWrite", "Bash(wl:*)"],
-            "deny": ["WebFetch", "WebSearch"]
+            "allow": ["Read", "Glob", "Grep", "Edit", "MultiEdit", "Write", "Task", "TodoWrite", "Bash(wl:*)", "WebFetch", "WebSearch"]
         }
     })
 }
