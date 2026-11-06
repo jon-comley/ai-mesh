@@ -616,6 +616,19 @@ function termBase() {
   return location.protocol === 'https:' ? 'https://lenovo1.tail3c4ee3.ts.net:7682' : `http://${TERM_HOST}:7681`;
 }
 
+/** "Clear on next open": unticked, opening rejoins the session and its context. */
+function freshToggle(a) {
+  const box = el('input', { type: 'checkbox', checked: !!a.term?.fresh_next, 'data-testid': 'term-fresh' });
+  box.onchange = async () => {
+    try {
+      const r = await api('POST', `/api/agents/${encodeURIComponent(a.name)}/term/fresh`, { on: box.checked });
+      a.term = r.term;
+      toast(box.checked ? 'Next open starts with a clear context' : 'Next open carries on');
+    } catch (e) { box.checked = !box.checked; toast(e.message, true); }
+  };
+  return el('label', { class: 'term-fresh', title: 'Ticked, the next time this terminal opens it starts a fresh Claude, with no context. Unticked, it carries on.' }, box, ' Clear on next open');
+}
+
 function renderTerm(main, name) {
   const a = agents.find((x) => x.name.toLowerCase() === name.toLowerCase());
   if (!a) {
@@ -654,6 +667,7 @@ function renderTerm(main, name) {
         ? el('a', { class: 'button', href: `${location.origin}/#/term/${encodeURIComponent(a.name)}`, target: '_top' }, 'Full screen')
         : (document.fullscreenEnabled ? el('button', { onclick: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) }, 'Full screen') : null),
       lines.length ? el('button', { title: 'Show where it stands', onclick: () => { localStorage.removeItem(hideKey); render(true); } }, 'Brief') : null,
+      freshToggle(a),
       el('a', { class: 'button', href: `#/agent/${encodeURIComponent(a.name)}` }, 'Details'),
     ),
     brief,

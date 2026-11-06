@@ -57,6 +57,7 @@ pub fn router(app: Shared) -> Router {
         )
         .route("/api/agents/{name}/chat/new", post(chat_new))
         .route("/api/agents/{name}/term", get(term))
+        .route("/api/agents/{name}/term/fresh", post(term_fresh))
         .route("/api/live", get(live))
         .route("/api/schedule", get(schedule_list))
         .route("/api/schedule/{name}/log", get(schedule_log))
@@ -103,6 +104,25 @@ async fn term(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult 
     let a = agent(&app, &name)?;
     let term = super::poll::term(&app, &a).await;
     Ok(Json(json!({ "term": term, "port": TERM_PORT })))
+}
+
+#[derive(Deserialize)]
+struct Fresh {
+    on: bool,
+}
+
+/// Ticks or unticks "Clear on next open" for the agent's terminal.
+async fn term_fresh(
+    State(app): State<Shared>,
+    Path(name): Path<String>,
+    Json(f): Json<Fresh>,
+) -> ApiResult {
+    let a = agent(&app, &name)?;
+    let slug = agentterm::slug(&a.name).ok_or_else(|| fail(StatusCode::BAD_REQUEST, "no such worker"))?;
+    agentterm::set_fresh_next(&app.dir, &slug, f.on)
+        .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let term = super::poll::term(&app, &a).await;
+    Ok(Json(json!({ "term": term })))
 }
 
 /// What changes from minute to minute, for an open page: each worker's

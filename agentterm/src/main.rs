@@ -89,6 +89,12 @@ fn attach(name: &str) -> ExitCode {
         return ExitCode::from(2);
     };
     let dir = agents_dir();
+    // "Clear on next open": end the old session, so this open starts afresh.
+    if agentterm::take_fresh_next(&dir, &slug) {
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &agentterm::tmux_session(&slug)])
+            .status();
+    }
     let worker = agentterm::host::load(&dir, &slug);
     if let Some(w) = worker.as_ref().filter(|w| w.on_host()) {
         return attach_host(&slug, w, &dir);

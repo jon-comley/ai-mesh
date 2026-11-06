@@ -213,6 +213,10 @@ hunt.
 
 Full incident history: [`docs/windows-node-setup.md`](docs/windows-node-setup.md).
 
+## Context usage on each terminal (Jon 6 Nov: "need to keep an eye on context usage, add this at some point")
+
+Show how full each agent terminal's context is, beside its spend, so a long session gets cleared before it costs. Goes with "Clear on next open" (built 6 Nov).
+
 ## A clean dashboard name, one day (Jon 4 Nov)
 
 `mesh.glebefish.com` instead of `https://lenovo1.tail3c4ee3.ts.net/`. Tailnet only, so it

@@ -85,6 +85,8 @@ pub struct TermView {
     pub session_gbp: f64,
     pub over_session: bool,
     pub over_day: bool,
+    /// Jon ticked "Clear on next open": the next open starts a fresh session.
+    pub fresh_next: bool,
 }
 
 /// An agent's name as a directory and tmux session name: `Desk` is `desk`.
@@ -283,7 +285,33 @@ pub fn read(agents_dir: &Path, slug: &str, open: bool, today: NaiveDate) -> Term
         session_gbp: session_usd * g,
         over_session: session_usd * g >= limits.session_gbp,
         over_day: today_usd * g >= limits.day_gbp,
+        fresh_next: dir.join(FRESH_NEXT).exists(),
     }
+}
+
+/// The flag file in an agent's term dir: set, the next open closes the old
+/// session first, so Claude starts with no context (Jon, 6 Nov: "a checkbox to
+/// say clear for next open, default continue context"). Taken by that open.
+pub const FRESH_NEXT: &str = "fresh-next";
+
+/// Sets or clears "Clear on next open" for an agent.
+pub fn set_fresh_next(agents_dir: &Path, slug: &str, on: bool) -> io::Result<()> {
+    let dir = term_dir(agents_dir, slug);
+    let flag = dir.join(FRESH_NEXT);
+    if on {
+        fs::create_dir_all(&dir)?;
+        fs::write(flag, "")
+    } else {
+        match fs::remove_file(flag) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Takes the flag: true once, when it was set.
+pub fn take_fresh_next(agents_dir: &Path, slug: &str) -> bool {
+    fs::remove_file(term_dir(agents_dir, slug).join(FRESH_NEXT)).is_ok()
 }
 
 /// What the terminal session is told about itself, on top of Claude Code's own.
@@ -486,6 +514,15 @@ mod tests {
         fs::write(dir.join("costs/2026-11-03"), "4").unwrap();
         fs::write(dir.join("costs/2026-10-31"), "100").unwrap();
         record_cost(&dir, "s1", 13.0, today).unwrap();
+        // The session counts by its file's time, so that is set to `today`: the
+        // test passed only on 4 Nov 2026 before (6 Nov).
+        let noon = chrono::TimeZone::from_local_datetime(&Local, &today.and_hms_opt(12, 0, 0).unwrap()).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(dir.join("sessions/s1"))
+            .unwrap()
+            .set_modified(noon.into())
+            .unwrap();
         let v = read(agents.path(), "desk", true, today);
         assert!((v.today_gbp - 13.0 * 0.79).abs() < 1e-9);
         assert!((v.month_gbp - 17.0 * 0.79).abs() < 1e-9);
