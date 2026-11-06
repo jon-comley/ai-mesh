@@ -3113,6 +3113,22 @@ update-coordinator target_host:
 # Keeps the previous binary as agentwatch.prev.
 # Roll back with:  ssh lenovo1 'sudo cp -p /usr/local/bin/agentwatch.prev /usr/local/bin/agentwatch && sudo systemctl restart agentwatch'
 # Usage: just deploy-agentwatch
+# Jon's laptop (OmniLink1): Claude Code's status line records each session's
+# cost, and a user timer copies it to lenovo1 for the OmniLink1 meter.
+install-omnilink1-meter:
+    #!/usr/bin/env bash
+    set -e
+    cargo build --release -p agentterm 2>&1 | grep -E "^error|Finished"
+    install -D -m 755 target/release/agentterm ~/.local/bin/agentterm
+    install -m 755 agentterm/omnilink1/statusline ~/.local/bin/omnilink1-statusline
+    install -D -m 644 agentterm/omnilink1/term.toml ~/.cache/agentterm/term.toml
+    mkdir -p ~/.cache/agentterm/term/omnilink1 ~/.config/systemd/user
+    install -m 644 agentterm/omnilink1/meter-sync.service agentterm/omnilink1/meter-sync.timer ~/.config/systemd/user/
+    systemctl --user daemon-reload
+    systemctl --user enable -q --now meter-sync.timer
+    python3 -c 'import json,os; p=os.path.expanduser("~/.claude/settings.json"); d=json.load(open(p)); d["statusLine"]={"type":"command","command":os.path.expanduser("~/.local/bin/omnilink1-statusline")}; json.dump(d,open(p,"w"),indent=2); open(p,"a").write("\n")'
+    echo ">>> OmniLink1 meter installed: costs sync to lenovo1 every 5 minutes"
+
 deploy-agentwatch:
     #!/usr/bin/env bash
     set -e

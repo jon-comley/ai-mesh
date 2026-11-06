@@ -272,7 +272,7 @@ async fn report(
             .ok_or_else(|| fail(StatusCode::NOT_FOUND, "no report yet"))?,
     };
     let (md, base) = match a.kind {
-        Kind::Queue => return Err(fail(StatusCode::NOT_FOUND, "no reports")),
+        Kind::Queue | Kind::Meter => return Err(fail(StatusCode::NOT_FOUND, "no reports")),
         Kind::Cloud => {
             let _work = app.work.lock().await;
             let md = app

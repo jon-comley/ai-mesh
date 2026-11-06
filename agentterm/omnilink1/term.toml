@@ -1,0 +1,4 @@
+# The laptop's sessions are Jon's own work on Opus: no session or day warning.
+session_gbp = 1000.0
+day_gbp = 1000.0
+gbp_per_usd = 0.79

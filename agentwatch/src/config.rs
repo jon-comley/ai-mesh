@@ -16,6 +16,9 @@ pub enum Kind {
     /// Work queued for a machine that is not always on (the work laptop): the
     /// tile's terminal runs here, the dispatcher runs each task on `host`.
     Queue,
+    /// Spend only: Claude Code sessions on `host` (Jon's laptop) that record
+    /// their cost there and copy it to `term/<agent>/` here. No runs, no terminal.
+    Meter,
 }
 
 /// One `[[agent]]` entry.
@@ -221,7 +224,7 @@ impl Config {
                     ("host", a.host.is_none()),
                     ("status", a.status.is_none() && a.reports.is_none()),
                 ],
-                Kind::Queue => [("host", a.host.is_none()), ("host", false)],
+                Kind::Queue | Kind::Meter => [("host", a.host.is_none()), ("host", false)],
             };
             if let Some((field, _)) = missing.iter().find(|(_, m)| *m) {
                 return Err(ConfigError(format!("{} has no {field}", a.name)));
@@ -533,6 +536,11 @@ can = ["claude"]
 "#;
         let c = Config::parse(text).unwrap();
         assert_eq!(c.agents[0].kind, Kind::Queue);
+        let meter = Config::parse(
+            "[[agent]]\nname = \"OmniLink1\"\nkind = \"meter\"\npurpose = \"x\"\nhost = \"omnilink1\"\nevery = \"1d\"\n",
+        )
+        .unwrap();
+        assert_eq!(meter.agents[0].kind, Kind::Meter);
         let again = Config::parse(&c.to_text()).unwrap();
         assert_eq!(again.agents[0].pin.as_deref(), Some("lenovo1"));
         assert_eq!(again.nodes.len(), 1);

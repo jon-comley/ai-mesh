@@ -114,12 +114,14 @@ export function agentWhere(a) {
   // A cloud tile with no routine is a chat page that writes to its repo (Marketing comms).
   if (a.kind === 'cloud') return a.can_run === false ? 'its chat page, on demand' : 'Anthropic cloud';
   if (a.kind === 'queue') return `lenovo1, for ${a.machine ?? 'its machine'}`;
+  if (a.kind === 'meter') return a.machine ?? 'its machine';
   return a.machine ?? 'mac1';
 }
 
 /** How often, as people say it: "every 20m", "daily 07:30". */
 export function agentWhen(a) {
   if (a.kind === 'queue') return 'when work is queued';
+  if (a.kind === 'meter') return 'when Jon works there';
   if (a.kind === 'cloud' && a.can_run === false) return `when used, checked every ${a.every}`;
   return `every ${a.every}`;
 }
@@ -197,7 +199,8 @@ function replaceAgent(view) {
 
 export function tile(a) {
   // A worker with a terminal opens straight into it; its details are a button there.
-  const view = a.term ? 'term' : 'agent';
+  // A meter has no terminal: its spend is all there is.
+  const view = a.term && a.kind !== 'meter' ? 'term' : 'agent';
   const phase = a.term?.state?.phase;
   return el('a', { class: 'tile', href: `#/${view}/${encodeURIComponent(a.name)}` },
     el('span', { class: `light ${a.state}`, title: stateLabel(a.state) }),

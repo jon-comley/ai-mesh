@@ -1,0 +1,7 @@
+# Copies the laptop's Claude Code costs to lenovo1 (LAN first, Tailscale away).
+[Unit]
+Description=Copy OmniLink1's Claude costs to lenovo1
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rsync -a -e "ssh -o BatchMode=yes -o ConnectTimeout=10" %h/.cache/agentterm/term/omnilink1/ lenovo1:.ai-mesh/agents/term/omnilink1/

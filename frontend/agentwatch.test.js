@@ -127,6 +127,8 @@ describe('schedule labels', () => {
   it('says where and when each agent runs', () => {
     expect(agentWhere({ kind: 'cloud' })).toBe('Anthropic cloud');
     expect(agentWhere({ kind: 'queue', machine: 'wl' })).toBe('lenovo1, for wl');
+    expect(agentWhere({ kind: 'meter', machine: 'omnilink1' })).toBe('omnilink1');
+    expect(agentWhen({ kind: 'meter' })).toBe('when Jon works there');
     expect(agentWhen({ kind: 'local', every: '20m' })).toBe('every 20m');
     expect(agentWhen({ kind: 'queue' })).toBe('when work is queued');
   });

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Claude Code's status line on Jon's laptop (OmniLink1): records each session's
+# cost under ~/.cache/agentterm, which meter-sync.timer copies to lenovo1 for
+# the OmniLink1 meter in Agent watch. Installed by `just install-omnilink1-meter`.
+AGENTTERM_DIR="$HOME/.cache/agentterm" AGENTTERM_AGENT=OmniLink1 exec "$HOME/.local/bin/agentterm" statusline

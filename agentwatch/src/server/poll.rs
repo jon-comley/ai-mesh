@@ -106,7 +106,7 @@ pub fn blank(agent: &Agent, now: DateTime<Utc>) -> View {
         can_run: match agent.kind {
             Kind::Cloud => agent.routine.is_some(),
             Kind::Local => agent.kickstart.is_some(),
-            Kind::Queue => false,
+            Kind::Queue | Kind::Meter => false,
         },
         can_pause: agent.kind == Kind::Local && agent.pause.is_some(),
         paused: false,
@@ -130,9 +130,10 @@ pub async fn view(app: &App, agent: &Agent) -> View {
         Kind::Cloud => cloud(app, agent, &mut v, run_started, now).await,
         Kind::Local => local(agent, &mut v, run_started, now).await,
         Kind::Queue => queue_view(app, agent, &mut v),
+        Kind::Meter => meter_view(app, agent, &mut v),
     }
     v.term = term(app, agent).await;
-    if agent.kind == Kind::Queue {
+    if matches!(agent.kind, Kind::Queue | Kind::Meter) {
         return v;
     }
     v.next_due = state::next_due(
@@ -148,7 +149,8 @@ pub async fn view(app: &App, agent: &Agent) -> View {
 pub async fn term(app: &App, agent: &Agent) -> Option<agentterm::TermView> {
     let slug = agentterm::slug(&agent.name)?;
     let on_host = agent.kind == Kind::Local && agent.host.is_some() && agent.chat_dir.is_some();
-    if !on_host && !app.dir.join("chats").join(&slug).is_dir() {
+    let meter = agent.kind == Kind::Meter;
+    if !on_host && !meter && !app.dir.join("chats").join(&slug).is_dir() {
         return None;
     }
     let open = tokio::process::Command::new("tmux")
@@ -158,6 +160,22 @@ pub async fn term(app: &App, agent: &Agent) -> Option<agentterm::TermView> {
         .is_ok_and(|o| o.status.success());
     let today = chrono::Local::now().date_naive();
     Some(agentterm::read(&app.dir, &slug, open, today))
+}
+
+/// A meter's tile: its machine, and when a session last recorded a cost.
+pub fn meter_view(app: &App, agent: &Agent, v: &mut View) {
+    v.machine = agent.host.clone();
+    v.state = State::Ok;
+    let Some(slug) = agentterm::slug(&agent.name) else {
+        return;
+    };
+    v.last_run = std::fs::read_dir(agentterm::term_dir(&app.dir, &slug).join("sessions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .max()
+        .map(DateTime::<Utc>::from);
 }
 
 /// A queue worker's tile: its tasks, what waits on Jon, and its machine's light.

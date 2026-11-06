@@ -1,0 +1,9 @@
+[Unit]
+Description=Copy OmniLink1's Claude costs to lenovo1 every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

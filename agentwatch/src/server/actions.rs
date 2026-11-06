@@ -60,6 +60,7 @@ pub async fn run_now(app: &App, agent: &Agent) -> Result<()> {
                 agent.name
             ));
         }
+        Kind::Meter => return Err(format!("{} only counts spend", agent.name)),
         Kind::Local => {
             let host = agent.host.as_deref().expect("checked by Config::parse");
             let label = agent
