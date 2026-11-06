@@ -150,7 +150,33 @@ pub async fn all(app: &App) -> Value {
             v.term = super::poll::term(app, a).await;
         }
     }
-    json!({ "agents": views, "services": rows })
+    json!({ "agents": views, "services": rows, "days": days(app, &agents) })
+}
+
+/// Each day anything was spent, newest first: the total, the total for the
+/// books (without the work laptop's queue, as `costTotals`), and each agent's
+/// share. Read from the day files, which are kept for good.
+fn days(app: &App, agents: &[agentwatch::config::Agent]) -> Vec<Value> {
+    use std::collections::BTreeMap;
+    let mut by_day: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    let mut books: BTreeMap<String, f64> = BTreeMap::new();
+    for a in agents {
+        let Some(slug) = agentterm::slug(&a.name) else { continue };
+        for (day, gbp) in agentterm::days(&app.dir, &slug) {
+            by_day.entry(day.clone()).or_default().insert(a.name.clone(), gbp);
+            if a.kind != agentwatch::config::Kind::Queue {
+                *books.entry(day).or_default() += gbp;
+            }
+        }
+    }
+    by_day
+        .into_iter()
+        .rev()
+        .map(|(day, agents)| {
+            let total: f64 = agents.values().sum();
+            json!({ "date": day, "total_gbp": total, "books_gbp": books.get(&day).copied().unwrap_or(0.0), "agents": agents })
+        })
+        .collect()
 }
 
 async fn futures_join<F: std::future::Future<Output = ServiceView>>(

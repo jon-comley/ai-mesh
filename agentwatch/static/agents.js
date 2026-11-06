@@ -139,6 +139,18 @@ export function costTotals(list, books = false) {
   }), { today: 0, month: 0 });
 }
 
+/** The daily spend as CSV, one row per day, a column per agent. */
+export function spendCsv(days) {
+  const names = [...new Set((days || []).flatMap((d) => Object.keys(d.agents)))].sort();
+  const n = (v) => (v ?? 0).toFixed(2);
+  const rows = (days || []).map((d) => [d.date, n(d.total_gbp), n(d.books_gbp), ...names.map((k) => n(d.agents[k]))].join(','));
+  return [['date', 'total_gbp', 'books_gbp', ...names].join(','), ...rows].join('\n') + '\n';
+}
+
+function spendCsvUrl(days) {
+  return URL.createObjectURL(new Blob([spendCsv(days)], { type: 'text/csv' }));
+}
+
 export const SERVICE_LABELS = { running: 'Running', waiting: 'Waiting', stopped: 'Stopped', failed: 'Failed', unreachable: 'Cannot reach it' };
 
 /** The "What" of a hub row: the cell headed What, else the longest middle cell. */
@@ -584,6 +596,15 @@ async function renderSchedule(main) {
       el('span', { class: 'muted' }, 'Usage inside the Claude plan, priced at API rates: recorded on the 1st to compare with what the plan costs (ventures/cost-capture-checklist.md). The costs pages show the subscription.')),
     el('h3', {}, 'Agents'),
     el('table', { class: 'schedule' }, head(['Agent', 'Runs on', 'When', 'State', 'Last run', 'Next', 'Spend today / month', '']), el('tbody', {}, agentRows)),
+    el('h3', {}, 'Daily spend'),
+    el('p', { class: 'muted' }, 'Every day kept, priced at API rates; today is so far. ',
+      el('a', { href: spendCsvUrl(data.days), download: 'agent-spend.csv' }, 'Download CSV')),
+    el('table', { class: 'schedule' }, head(['Day', 'Total', 'For the books', 'By agent']), el('tbody', {},
+      (data.days || []).map((d) => el('tr', {},
+        el('td', {}, d.date),
+        el('td', {}, gbp(d.total_gbp)),
+        el('td', {}, gbp(d.books_gbp)),
+        el('td', { class: 'muted' }, Object.entries(d.agents).map(([n, v]) => `${n} ${gbp(v)}`).join(' · ')))))),
     el('h3', {}, 'Services'),
     el('table', { class: 'schedule' }, head(['Service', 'Machine', 'Kind', 'State', 'Last / since', 'Next', '']), el('tbody', {}, serviceRows)),
     el('pre', { id: 'service-log', class: 'service-log', hidden: true }),

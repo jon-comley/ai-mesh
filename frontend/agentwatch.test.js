@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing, ticketHref, agentWhere, agentWhen, costTotals } from '../agentwatch/static/agents.js';
+import { stateLabel, relTime, parseRoute, rowWhat, plain, tile, chatEvent, memoryTileText, termText, applyLive, machineText, briefing, ticketHref, agentWhere, agentWhen, costTotals, spendCsv } from '../agentwatch/static/agents.js';
 
 describe('agent watch page helpers', () => {
   it('labels every state in plain words', () => {
@@ -164,5 +164,15 @@ describe('on-demand chat tiles', () => {
     expect(agentWhere(a)).toBe('its chat page, on demand');
     expect(agentWhen(a)).toBe('when used, checked every 1d');
     expect(agentWhere({ kind: 'cloud', can_run: true })).toBe('Anthropic cloud');
+  });
+});
+
+describe('spendCsv', () => {
+  it('writes a row per day with a column per agent', () => {
+    const csv = spendCsv([
+      { date: '2026-11-06', total_gbp: 1.5, books_gbp: 1, agents: { desk: 1, 'work-laptop': 0.5 } },
+      { date: '2026-11-05', total_gbp: 2, books_gbp: 2, agents: { desk: 2 } },
+    ]);
+    expect(csv).toBe('date,total_gbp,books_gbp,desk,work-laptop\n2026-11-06,1.50,1.00,1.00,0.50\n2026-11-05,2.00,2.00,2.00,0.00\n');
   });
 });

@@ -237,6 +237,24 @@ pub fn status_line(model: &str, session_usd: f64, today_usd: f64, limits: &Limit
     line
 }
 
+/// Every day the agent spent anything, oldest first, in pounds. The day files
+/// are never deleted, so this is the whole history (Schedule's daily table).
+pub fn days(agents_dir: &Path, slug: &str) -> Vec<(String, f64)> {
+    let g = Limits::load(agents_dir).gbp_per_usd;
+    let mut out: Vec<(String, f64)> = fs::read_dir(term_dir(agents_dir, slug).join("costs"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            NaiveDate::parse_from_str(&name, "%Y-%m-%d").ok()?;
+            Some((name, read_num(&e.path()) * g))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// Everything a tile shows about an agent's terminal.
 pub fn read(agents_dir: &Path, slug: &str, open: bool, today: NaiveDate) -> TermView {
     let dir = term_dir(agents_dir, slug);
@@ -503,6 +521,20 @@ mod tests {
         // A resumed session that starts counting again adds nothing until it passes.
         let (_, today) = record_cost(dir.path(), "s1", 0.1, day).unwrap();
         assert!((today - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn days_lists_every_day_oldest_first_in_pounds() {
+        let agents = tempfile::tempdir().unwrap();
+        let dir = term_dir(agents.path(), "desk");
+        fs::create_dir_all(dir.join("costs")).unwrap();
+        fs::write(dir.join("costs/2026-11-03"), "4").unwrap();
+        fs::write(dir.join("costs/2026-10-31"), "100").unwrap();
+        fs::write(dir.join("costs/notes"), "1").unwrap();
+        let d = days(agents.path(), "desk");
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[0].0, "2026-10-31");
+        assert!((d[1].1 - 4.0 * 0.79).abs() < 1e-9);
     }
 
     #[test]
