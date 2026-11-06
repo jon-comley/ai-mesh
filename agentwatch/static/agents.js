@@ -609,11 +609,11 @@ async function serviceLog(s) {
 // ── Terminal ────────────────────────────────────────────────────────────────
 
 let termTimer = null;
-// lenovo1's Tailscale address: the name needs MagicDNS, which not every browser has.
-const TERM_HOST = '100.82.51.25';
 // Over https (Tailscale serve, 8443) the terminal comes through serve on 7682 too.
+// Over http it is the address this page came from: the LAN in the office,
+// Tailscale away from it.
 function termBase() {
-  return location.protocol === 'https:' ? 'https://lenovo1.tail3c4ee3.ts.net:7682' : `http://${TERM_HOST}:7681`;
+  return location.protocol === 'https:' ? 'https://lenovo1.tail3c4ee3.ts.net:7682' : `http://${location.hostname}:7681`;
 }
 
 /** "Clear on next open": unticked, opening rejoins the session and its context. */
