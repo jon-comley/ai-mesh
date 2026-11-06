@@ -2031,3 +2031,9 @@ real spoken reply. The log caught it directly: a genuinely successful,
 seconds after the 5s timeout had already given up and triggered the
 puck fallback, so the late real result was dropped
 (`no capability handles: AudioAnnounceResult`). Widened both to 45s/50s.
+
+## LAN first, and a meter for Jon's laptop (6 Nov)
+
+- **Clear on next open** (`da95029`): a tick per agent terminal, off by default; the next open ends the old tmux session and starts a fresh Claude. Jon: off by default, never left ticked.
+- **LAN first** (`502bce7`): ttyd listens on the LAN as well as Tailscale, and the page opens the terminal on its own address. ssh on Jon's laptop and lenovo1 (for the work laptop) uses `Match ... !exec` probes: the LAN address when port 22 answers, Tailscale otherwise. Jon: "lan ssh is obviously the best way and then if out of the office ... tailscale".
+- **OmniLink1 meter** (`7f8b715`, `5a79ab1`): a `meter` kind of agent, spend only. Claude Code's status line on the laptop runs `agentterm statusline` into `~/.cache/agentterm`; a user timer copies the costs to lenovo1 only when one changed. The Schedule table now reads spend live: it had shown every agent's spend as of the last refresh. Installing the timer and status line was refused by the classifier, so Jon runs `just install-omnilink1-meter`.
