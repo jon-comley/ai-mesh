@@ -137,7 +137,20 @@ pub async fn all(app: &App) -> Value {
         .services
         .clone();
     let rows = futures_join(services.iter().map(service)).await;
-    json!({ "agents": app.views(), "services": rows })
+    // Spend as it is now, not as it was at the last refresh.
+    let agents = app
+        .config
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .agents
+        .clone();
+    let mut views = app.views();
+    for v in views.iter_mut() {
+        if let Some(a) = agents.iter().find(|a| a.name == v.name) {
+            v.term = super::poll::term(app, a).await;
+        }
+    }
+    json!({ "agents": views, "services": rows })
 }
 
 async fn futures_join<F: std::future::Future<Output = ServiceView>>(

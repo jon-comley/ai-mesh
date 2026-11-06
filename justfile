@@ -3121,6 +3121,7 @@ install-omnilink1-meter:
     cargo build --release -p agentterm 2>&1 | grep -E "^error|Finished"
     install -D -m 755 target/release/agentterm ~/.local/bin/agentterm
     install -m 755 agentterm/omnilink1/statusline ~/.local/bin/omnilink1-statusline
+    install -m 755 agentterm/omnilink1/meter-sync ~/.local/bin/omnilink1-meter-sync
     install -D -m 644 agentterm/omnilink1/term.toml ~/.cache/agentterm/term.toml
     mkdir -p ~/.cache/agentterm/term/omnilink1 ~/.config/systemd/user
     install -m 644 agentterm/omnilink1/meter-sync.service agentterm/omnilink1/meter-sync.timer ~/.config/systemd/user/

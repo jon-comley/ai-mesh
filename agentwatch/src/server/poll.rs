@@ -159,7 +159,13 @@ pub async fn term(app: &App, agent: &Agent) -> Option<agentterm::TermView> {
         .await
         .is_ok_and(|o| o.status.success());
     let today = chrono::Local::now().date_naive();
-    Some(agentterm::read(&app.dir, &slug, open, today))
+    let mut view = agentterm::read(&app.dir, &slug, open, today);
+    if meter {
+        // Jon's own sessions on Opus: the terminals' limits are not his.
+        view.over_session = false;
+        view.over_day = false;
+    }
+    Some(view)
 }
 
 /// A meter's tile: its machine, and when a session last recorded a cost.

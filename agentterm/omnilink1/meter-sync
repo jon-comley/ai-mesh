@@ -1,0 +1,13 @@
+#!/bin/sh
+# Copies the laptop's Claude Code costs to lenovo1, only when one has changed
+# since the last copy (Jon, 6 Nov). ssh picks the LAN, or Tailscale away.
+set -e
+dir="$HOME/.cache/agentterm/term/omnilink1"
+stamp="$HOME/.cache/agentterm/synced"
+[ -d "$dir" ] || exit 0
+if [ -e "$stamp" ] && [ -z "$(find "$dir" -newer "$stamp" -print -quit)" ]; then
+    exit 0
+fi
+touch "$stamp.new"
+rsync -a -e "ssh -o BatchMode=yes -o ConnectTimeout=10" "$dir/" lenovo1:.ai-mesh/agents/term/omnilink1/
+mv "$stamp.new" "$stamp"

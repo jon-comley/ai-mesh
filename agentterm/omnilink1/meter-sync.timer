@@ -1,5 +1,5 @@
 [Unit]
-Description=Copy OmniLink1's Claude costs to lenovo1 every 5 minutes
+Description=Check OmniLink1's Claude costs every 5 minutes, copying any change to lenovo1
 
 [Timer]
 OnBootSec=2min
