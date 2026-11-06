@@ -8,7 +8,8 @@ polkit.addRule(function (action, subject) {
     var unit = action.lookup("unit");
     var verb = action.lookup("verb");
     var units = ["ai-mesh-coordinator.service", "ai-mesh-agent.service", "agentwatch.service",
-        "agentterm.service", "agentterm-wl-repos.service", "glebefish-sensor-push.service"];
+        "agentterm.service", "agentterm-wl-repos.service", "glebefish-sensor-push.service",
+        "ai-mesh-nightly.service"];
     if (units.indexOf(unit) >= 0 && (verb == "restart" || verb == "start")) {
         return polkit.Result.YES;
     }

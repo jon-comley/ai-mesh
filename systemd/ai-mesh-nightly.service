@@ -1,0 +1,12 @@
+[Unit]
+Description=lenovo1's nightly jobs (scripts/nightly)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jonno
+Group=jonno
+ExecStart=/home/jonno/.ai-mesh/nightly/nightly.sh
+NoNewPrivileges=true
+PrivateTmp=true

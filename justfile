@@ -3161,6 +3161,26 @@ deploy-agentwatch:
     scp {{ssh_opts}} -q agentterm/mac/agentterm-hook mac1:.ai-mesh/bin/agentterm-hook
     echo ">>> Agent watch on lenovo1 updated: http://lenovo1/ (terminals on :7681, mac1 hook installed)"
 
+# lenovo1's nightly jobs (scripts/nightly): one timer at 00:30 runs every job in
+# jobs/. Add a job by dropping an executable there and running this again.
+# The agent spend job needs the service account key in ~/.ai-mesh/agents/keys/nightly-sa.json.
+# Usage: just deploy-nightly
+deploy-nightly:
+    #!/usr/bin/env bash
+    set -e
+    source nodes/lenovo1.env
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} 'rm -rf ~/.ai-mesh/nightly.new && mkdir -p ~/.ai-mesh/nightly.new'
+    scp {{ssh_opts}} -q -r scripts/nightly/nightly.sh scripts/nightly/jobs ${NODE_USER}@${NODE_HOST}:.ai-mesh/nightly.new/
+    scp {{ssh_opts}} -q systemd/ai-mesh-nightly.service systemd/ai-mesh-nightly.timer ${NODE_USER}@${NODE_HOST}:/tmp/
+    ssh {{ssh_opts}} ${NODE_USER}@${NODE_HOST} "set -e
+        rm -rf ~/.ai-mesh/nightly && mv ~/.ai-mesh/nightly.new ~/.ai-mesh/nightly
+        sudo install -m 644 /tmp/ai-mesh-nightly.service /tmp/ai-mesh-nightly.timer /etc/systemd/system/
+        rm /tmp/ai-mesh-nightly.service /tmp/ai-mesh-nightly.timer
+        sudo systemctl daemon-reload
+        sudo systemctl enable -q --now ai-mesh-nightly.timer
+        systemctl list-timers ai-mesh-nightly.timer --no-pager | head -2"
+    echo ">>> Nightly jobs on lenovo1 updated"
+
 # Verify coordinator health on the target host (Phase 2 health check).
 # Checks: connectivity, log output, agent connections, Zigbee → MQTT, dashboard access.
 # Usage: just verify-coordinator pi1
