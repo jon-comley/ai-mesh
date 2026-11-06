@@ -6,7 +6,7 @@ set -u
 dir="$(cd "$(dirname "$0")" && pwd)/jobs"
 failed=()
 for job in "$dir"/*; do
-    [ -x "$job" ] || continue
+    [ -f "$job" ] && [ -x "$job" ] || continue
     name="$(basename "$job")"
     echo ">>> $name"
     if ! "$job"; then
