@@ -49,13 +49,33 @@ impl Repo {
     }
 
     /// Brings a clone up to date without throwing away local commits: for
-    /// clones a chat writes in.
+    /// clones a chat writes in. Once GitHub's history is rewritten a
+    /// fast-forward can never succeed again: if every
+    /// local commit is already on GitHub by content and nothing is uncommitted,
+    /// the clone takes GitHub's. Desk's chat clone sat 27 commits apart from
+    /// 2 to 7 Nov, reading a stale hub, because this only pulled.
     pub async fn sync_keep(&self) -> Result<()> {
         if !self.dir.join(".git").exists() {
             return self.sync().await;
         }
         self.configure().await?;
-        self.git(&["pull", "--ff-only", "origin", "main"])
+        self.git(&["fetch", "origin", "main"]).await?;
+        if self
+            .git(&["merge", "--ff-only", "origin/main"])
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let unpushed = self.git(&["cherry", "origin/main", "HEAD"]).await?;
+        let dirty = self.git(&["status", "--porcelain"]).await?;
+        if unpushed.lines().any(|l| l.starts_with('+')) || !dirty.trim().is_empty() {
+            return Err(format!(
+                "{} has split from GitHub's main with work of its own: sort it by hand",
+                self.dir.display()
+            ));
+        }
+        self.git(&["reset", "--hard", "origin/main"])
             .await
             .map(|_| ())
     }
@@ -157,4 +177,105 @@ fn parse_time(s: &str) -> Option<DateTime<Utc>> {
 pub fn clone_dir(base: &Path, agent: &str) -> PathBuf {
     base.join("repos")
         .join(agent.to_lowercase().replace(' ', "-"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A bare "GitHub" with two commits, and a clone of it.
+    fn setup(name: &str) -> (PathBuf, PathBuf, Repo) {
+        let base = std::env::temp_dir().join(format!("agentwatch-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let seed = base.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        sh(&seed, &["init", "-q", "-b", "main"]);
+        for n in ["a", "b"] {
+            std::fs::write(seed.join(n), n).unwrap();
+            sh(&seed, &["add", n]);
+            sh(&seed, &["commit", "-qm", n]);
+        }
+        let bare = base.join("origin.git");
+        sh(&base, &["clone", "-q", "--bare", "seed", "origin.git"]);
+        sh(&base, &["clone", "-q", "origin.git", "clone"]);
+        let repo = Repo {
+            dir: base.join("clone"),
+            key: base.join("no-key"),
+            url: bare.display().to_string(),
+        };
+        (base, seed, repo)
+    }
+
+    /// GitHub's history rewritten with the same content, as the trailer strip did.
+    fn rewrite(seed: &Path, base: &Path) {
+        sh(seed, &["commit", "-q", "--amend", "-m", "b, reworded"]);
+        sh(
+            seed,
+            &[
+                "push",
+                "-q",
+                "-f",
+                base.join("origin.git").to_str().unwrap(),
+                "main",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rewritten_github_with_nothing_of_its_own_takes_githubs() {
+        let (base, seed, repo) = setup("rewrite");
+        rewrite(&seed, &base);
+        repo.sync_keep().await.unwrap();
+        assert_eq!(
+            sh(&repo.dir, &["log", "-1", "--format=%s"]).trim(),
+            "b, reworded"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn a_rewritten_github_never_throws_away_work_of_its_own() {
+        let (base, seed, repo) = setup("own-work");
+        rewrite(&seed, &base);
+        std::fs::write(repo.dir.join("c"), "c").unwrap();
+        sh(&repo.dir, &["add", "c"]);
+        sh(&repo.dir, &["commit", "-qm", "c"]);
+        assert!(repo.sync_keep().await.is_err());
+        assert_eq!(sh(&repo.dir, &["log", "-1", "--format=%s"]).trim(), "c");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn work_of_its_own_on_top_of_githubs_is_kept() {
+        let (base, _seed, repo) = setup("ahead");
+        std::fs::write(repo.dir.join("c"), "c").unwrap();
+        sh(&repo.dir, &["add", "c"]);
+        sh(&repo.dir, &["commit", "-qm", "c"]);
+        repo.sync_keep().await.unwrap();
+        assert_eq!(sh(&repo.dir, &["log", "-1", "--format=%s"]).trim(), "c");
+        let _ = std::fs::remove_dir_all(base);
+    }
 }
