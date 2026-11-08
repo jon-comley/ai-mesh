@@ -28,7 +28,16 @@ fn http_client() -> &'static reqwest::Client {
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 fn llama_host() -> String {
-    std::env::var("LLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:8080".into())
+    std::env::var("LLAMA_HOST").unwrap_or_else(|_| format!("http://127.0.0.1:{}", llama_port()))
+}
+
+/// Port llama-server is launched on (see `pull_model`). LLAMA_PORT overrides
+/// 8080: mac1 sets 8089, because the Firebase emulators' Firestore wants 8080.
+fn llama_port() -> u16 {
+    std::env::var("LLAMA_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080)
 }
 
 pub(crate) fn model_dir() -> PathBuf {
@@ -155,8 +164,6 @@ fn child_lock() -> &'static Mutex<Option<Child>> {
     LLAMA_CHILD.get_or_init(|| Mutex::new(None))
 }
 
-/// Fixed port llama-server is launched on (see `pull_model`).
-const LLAMA_PORT: u16 = 8080;
 
 async fn kill_existing() {
     let mut guard = child_lock().lock().await;
@@ -168,7 +175,7 @@ async fn kill_existing() {
     // Belt-and-braces: SIGKILL any *untracked* process still holding the llama
     // port — an orphan from an agent restart that outlived its parent, or a
     // previous run that didn't reap cleanly — so the fresh server can bind it.
-    kill_stray_on_port(LLAMA_PORT);
+    kill_stray_on_port(llama_port());
 }
 
 /// Socket inodes of LISTEN-state sockets bound to `port`, read from
@@ -624,7 +631,7 @@ pub async fn pull_model(model_name: &str, size_mb: u64) -> Result<(), String> {
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
-        .arg(LLAMA_PORT.to_string())
+        .arg(llama_port().to_string())
         .arg("--ctx-size")
         .arg(ctx_size().to_string());
 

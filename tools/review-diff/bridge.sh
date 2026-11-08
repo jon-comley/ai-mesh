@@ -55,9 +55,9 @@ flock -n 9 || { echo "another bridge run is going"; exit 0; }
 KEYS=${REVIEW_KEYS:-$HOME/.config/review-diff/keys.env}
 if [ -f "$KEYS" ]; then set -a; . "$KEYS"; set +a; fi
 
-# mac1's coder listens on its own 127.0.0.1:8080 only: reach it through a
+# mac1's coder listens on its own 127.0.0.1:8089 only: reach it through a
 # tunnel for the length of the run (the config's reviewer uses this port)
-TUNNEL=${REVIEW_CODER_TUNNEL:-18080:127.0.0.1:8080 mac1}
+TUNNEL=${REVIEW_CODER_TUNNEL:-18080:127.0.0.1:8089 mac1}
 if [ -n "$TUNNEL" ]; then
   sock="$MIRRORS/.coder-tunnel"
   read -r fwd host <<< "$TUNNEL"

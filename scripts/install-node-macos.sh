@@ -95,6 +95,8 @@ KEEP="$(grep -E '^(MESH_TLS_FINGERPRINT|MESH_AUTH_TOKEN|MESH_AUTH_TOKEN_NEXT)=' 
     # Apple Silicon memory is unified: all layers on the GPU is the whole point.
     echo "LLAMA_GPU_LAYERS=99"
     echo "LLAMA_CTX_SIZE=${CTX_SIZE}"
+    # Off 8080: guv's tests run on this Mac and the Firestore emulator needs 8080.
+    echo "LLAMA_PORT=8089"
     [ -n "$DEFAULT_MODEL" ] && echo "DEFAULT_MODEL=${DEFAULT_MODEL}"
     [ -n "$KV_CACHE_TYPE" ] && echo "LLAMA_KV_CACHE_TYPE=${KV_CACHE_TYPE}"
     [ -n "$PARALLEL" ] && echo "LLAMA_PARALLEL=${PARALLEL}"
@@ -148,10 +150,11 @@ start() {
 }
 stop() {
     pkill -f "^$BASE/agent\$" 2>/dev/null || true
-    # The agent owns its llama-server (always port 8080, LLAMA_PORT in llama.rs);
+    # The agent owns its llama-server (LLAMA_PORT in agent.env, 8080 if unset);
     # don't leave one holding memory. Match the port so a bench server on
     # another port survives an agent restart.
-    pkill -f "llama-server .*--port 8080" 2>/dev/null || true
+    port="$(sed -n 's/^LLAMA_PORT=//p' "$BASE/agent.env" | head -1)"
+    pkill -f "llama-server .*--port ${port:-8080}" 2>/dev/null || true
     pkill -f "$BASE/mesh-relay.py" 2>/dev/null || true
     for _ in 1 2 3 4 5 6 7 8 9 10; do running || break; sleep 1; done
 }
