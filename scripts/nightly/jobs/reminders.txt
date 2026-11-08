@@ -1,0 +1,2 @@
+# One per line: YYYY-MM-DD text. Pushed once, on or after the date, by jobs/20-reminders.py.
+2026-12-05 Guv credentials item 5: destroy the disabled secret versions on all three projects (guv ROADMAP section 1)
