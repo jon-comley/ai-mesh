@@ -16,6 +16,43 @@ use serde::Serialize;
 /// The marker the server prints before each report's header over ssh.
 pub const FILE_MARKER: &str = "@@AGENTWATCH-FILE@@";
 
+/// Before the open findings: `repo|severity|count` rows from the reviews
+/// database, the reports folder's sibling `reviews.db`.
+pub const OPEN_MARKER: &str = "@@AGENTWATCH-OPEN@@";
+/// After them, printed only when the query ran, so an empty list means none
+/// are open rather than no sqlite3 on the host.
+pub const OPEN_END: &str = "@@AGENTWATCH-OPEN-END@@";
+
+/// The query behind [`OPEN_MARKER`]: confirmed high and medium findings
+/// nobody has marked fixed or dismissed yet.
+pub const OPEN_QUERY: &str = "select repo, severity, count(*) from findings \
+     where status = 'open' and verdict = 'confirmed' and severity in ('high', 'medium') \
+     group by repo, severity order by repo";
+
+/// One repo's open findings: (repo, high, medium), by repo. None when the
+/// query didn't run, so the page falls back to the report headers.
+pub fn parse_open(text: &str) -> Option<Vec<(String, usize, usize)>> {
+    let (rows, _) = text.split_once(OPEN_END)?;
+    let mut out: Vec<(String, usize, usize)> = Vec::new();
+    for line in rows.lines() {
+        let mut parts = line.trim().split('|');
+        let (Some(repo), Some(level), Some(n)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let Ok(n) = n.parse::<usize>() else { continue };
+        if out.last().is_none_or(|(r, _, _)| r != repo) {
+            out.push((repo.to_string(), 0, 0));
+        }
+        let row = out.last_mut().expect("pushed above");
+        match level {
+            "high" => row.1 += n,
+            "medium" => row.2 += n,
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
     /// Full path on the host.
@@ -167,6 +204,17 @@ mod tests {
         let r = parse_listing("@@AGENTWATCH-FILE@@ 1793596440 /a/reports/admin/x.md\nno header\n");
         assert_eq!(r[0].repo, "admin");
         assert_eq!(r[0].line(), "admin: no findings line");
+    }
+
+    #[test]
+    fn reads_open_findings_per_repo() {
+        let text = format!("\nai-mesh|high|1\nai-mesh|medium|4\nguv|medium|2\n{OPEN_END}\n");
+        assert_eq!(
+            parse_open(&text),
+            Some(vec![("ai-mesh".into(), 1, 4), ("guv".into(), 0, 2)])
+        );
+        assert_eq!(parse_open(&format!("\n{OPEN_END}\n")), Some(vec![]), "none open");
+        assert_eq!(parse_open("\n"), None, "the query didn't run");
     }
 
     #[test]

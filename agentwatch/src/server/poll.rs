@@ -372,8 +372,12 @@ fn local_script(agent: &Agent) -> String {
     if let Some(r) = &agent.reports {
         script.push_str(&format!(
             "; printf '{REPORTS}\\n'; for f in $(ls -t {r}/*/*.md 2>/dev/null | grep -v '/latest.md$' | head -10); \
-             do printf '%s %s %s\\n' '{marker}' \"$(date -r \"$f\" +%s)\" \"$f\"; head -12 \"$f\"; done",
-            marker = reports::FILE_MARKER
+             do printf '%s %s %s\\n' '{marker}' \"$(date -r \"$f\" +%s)\" \"$f\"; head -12 \"$f\"; done; \
+             printf '{open}\\n'; sqlite3 -readonly {r}/../reviews.db \"{query}\" 2>/dev/null && printf '{end}\\n'",
+            marker = reports::FILE_MARKER,
+            open = reports::OPEN_MARKER,
+            query = reports::OPEN_QUERY,
+            end = reports::OPEN_END,
         ));
     }
     script
@@ -467,8 +471,14 @@ async fn local(
 }
 
 /// A worker that leaves reports: its last run is its newest report, and what
-/// waits on Jon is each repo's confirmed high and medium findings to check.
+/// waits on Jon is each repo's confirmed high and medium findings to check:
+/// the ones still open in the reviews database, so marking one clears it, or
+/// the newest report's counts when the database can't be read.
 fn read_reports(listing: &str, v: &mut View, facts: &mut LocalFacts) {
+    let (listing, open) = match listing.split_once(reports::OPEN_MARKER) {
+        Some((l, o)) => (l, reports::parse_open(o)),
+        None => (listing, None),
+    };
     let all = reports::parse_listing(listing);
     let Some(newest) = all.first() else { return };
     if facts.last_run.is_none_or(|l| newest.at > l) {
@@ -476,12 +486,15 @@ fn read_reports(listing: &str, v: &mut View, facts: &mut LocalFacts) {
         v.line = newest.line();
         v.report = Some(newest.path.clone());
     }
-    for r in reports::latest_per_repo(&all) {
-        if r.high + r.medium > 0 {
-            v.waiting_lines.push(format!(
-                "{}: {} high, {} medium to check",
-                r.repo, r.high, r.medium
-            ));
+    let counts = open.unwrap_or_else(|| {
+        reports::latest_per_repo(&all)
+            .into_iter()
+            .map(|r| (r.repo.clone(), r.high, r.medium))
+            .collect()
+    });
+    for (repo, high, medium) in counts {
+        if high + medium > 0 {
+            v.waiting_lines.push(format!("{repo}: {high} high, {medium} medium to check"));
         }
     }
     v.entries.extend(all.iter().map(|r| {
@@ -515,6 +528,40 @@ mod tests {
             (s.trim(), p.trim(), t, r.map(str::trim)),
             ("", "", None, Some("listing"))
         );
+    }
+
+    #[test]
+    fn waiting_comes_from_the_open_findings_when_the_database_answers() {
+        let report = format!(
+            "{} 1793596440 /r/reports/dashboard/2026-11-02-run201.md\n# Code review: dashboard\n\
+             - **Confirmed:** 1 high, 1 medium, 0 low.\n",
+            reports::FILE_MARKER
+        );
+        let facts = || LocalFacts {
+            reachable: true,
+            paused: false,
+            last_run: None,
+            last_tick_failed: false,
+            run_started: None,
+        };
+        let config = agentwatch::config::Config::parse(
+            "[[agent]]\nname = \"Reviews\"\nkind = \"local\"\npurpose = \"x\"\nhost = \"mac1\"\n\
+             reports = \"~/r/reports\"\nevery = \"1d\"\ngrace = \"1h\"\n",
+        )
+        .unwrap();
+        let blank = || blank(&config.agents[0], Utc::now());
+        let mut v = blank();
+        let open = format!("{report}{}\nguv|high|2\n{}\n", reports::OPEN_MARKER, reports::OPEN_END);
+        read_reports(&open, &mut v, &mut facts());
+        assert_eq!(v.waiting_lines, vec!["guv: 2 high, 0 medium to check"]);
+        let mut v = blank();
+        let cleared = format!("{report}{}\n{}\n", reports::OPEN_MARKER, reports::OPEN_END);
+        read_reports(&cleared, &mut v, &mut facts());
+        assert!(v.waiting_lines.is_empty(), "all marked");
+        let mut v = blank();
+        let no_db = format!("{report}{}\n", reports::OPEN_MARKER);
+        read_reports(&no_db, &mut v, &mut facts());
+        assert_eq!(v.waiting_lines, vec!["dashboard: 1 high, 1 medium to check"]);
     }
 
     #[test]
