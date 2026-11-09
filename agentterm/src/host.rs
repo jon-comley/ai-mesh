@@ -232,11 +232,12 @@ pub fn script(slug: &str, w: &Worker) -> String {
     if let (Some(status), false) = (&w.status, w.chat_readonly) {
         // Closing hands over: the same session writes what the next tick must
         // know into the file every tick reads, before the ticks come back, and
-        // its one line is what the tile shows.
+        // its one line is what the tile shows. The prompt goes first:
+        // `--allowedTools` takes every word after it, and once took the prompt.
         s.push_str(&format!(
             "echo 'Writing the handover to {status}...'\n\
-             claude -p --model haiku --resume \"$sid\" --settings \"$settings\" \
-             --allowedTools 'Read' 'Edit({status})' \"{}\" >/dev/null 2>&1\n",
+             claude -p \"{}\" --model haiku --resume \"$sid\" --settings \"$settings\" \
+             --allowedTools 'Read,Edit({status})' >~/.ai-mesh/term/{slug}.handover.log 2>&1\n",
             handover(status)
         ));
     }
@@ -393,10 +394,10 @@ chat_readonly = true
         assert!(ask < wait && wait < claude);
         assert!(s.contains("--session-id \"$sid\" \"$q\""));
         // The handover is written before the ticks come back.
-        let handover = s.find("claude -p --model haiku --resume \"$sid\"").unwrap();
+        let handover = s.find("claude -p \"Jon has closed").unwrap();
         let resume = s.find("rm -f ~/orchestrator-paused").unwrap();
         assert!(claude < handover && handover < resume);
-        assert!(s.contains("'Edit(~/orchestrator-status.md)'"));
+        assert!(s.contains("--allowedTools 'Read,Edit(~/orchestrator-status.md)' >"));
         assert!(s.contains("cat ~/guv-orchestrator.md"));
         assert!(s.contains("claude --model haiku --permission-mode acceptEdits"));
         assert!(s.trim_end().ends_with(
