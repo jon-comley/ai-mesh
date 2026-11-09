@@ -251,11 +251,12 @@ pub fn script(slug: &str, w: &Worker) -> String {
     s
 }
 
-/// What a closing terminal session is asked to leave for the next tick.
-fn handover(status: &str) -> String {
+/// What a closing session (the terminal, or the web chat's Done) is asked to leave
+/// for the next tick.
+pub fn handover(status: &str) -> String {
     format!(
-        "Jon has closed this terminal. In {status}, replace the section headed \
-'## From Jon's terminal' (add it at the end if missing) with today's date and time, \
+        "Jon has finished talking to you. In {status}, replace the section headed \
+'## From Jon' (add it at the end if missing) with today's date and time, \
 then one line each for what Jon decided or asked the next tick to do and anything \
 left undone; write 'Nothing for the tick.' if there is none. Change nothing else. \
 Then reply with one line saying what the next tick will act on."
@@ -394,7 +395,7 @@ chat_readonly = true
         assert!(ask < wait && wait < claude);
         assert!(s.contains("--session-id \"$sid\" \"$q\""));
         // The handover is written before the ticks come back.
-        let handover = s.find("claude -p \"Jon has closed").unwrap();
+        let handover = s.find("claude -p \"Jon has finished").unwrap();
         let resume = s.find("rm -f ~/orchestrator-paused").unwrap();
         assert!(claude < handover && handover < resume);
         assert!(s.contains("--allowedTools 'Read,Edit(~/orchestrator-status.md)' >"));

@@ -56,6 +56,7 @@ pub fn router(app: Shared) -> Router {
             get(chat_messages).post(chat_send),
         )
         .route("/api/agents/{name}/chat/new", post(chat_new))
+        .route("/api/agents/{name}/chat/done", post(chat_done))
         .route("/api/agents/{name}/term", get(term))
         .route("/api/agents/{name}/term/fresh", post(term_fresh))
         .route("/api/live", get(live))
@@ -475,6 +476,51 @@ async fn chat_new(State(app): State<Shared>, Path(name): Path<String>) -> ApiRes
         .clear_chat(&a.name)
         .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "messages": [] })))
+}
+
+/// Jon has finished: a worker with a status file writes its handover there (one
+/// last turn, kept in the chat), then the ticks this chat paused come back now
+/// rather than after half an hour.
+async fn chat_done(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
+    let a = agent(&app, &name)?;
+    if !app
+        .chatting
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(a.name.clone())
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            format!("{} is still answering", a.name),
+        ));
+    }
+    if let (Some(status), false, Some(_)) = (&a.status, a.chat_readonly, &a.chat_dir) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let message = agentterm::host::handover(status);
+        let talk = super::chat::talk(&app, &a, &message, tx);
+        let drain = async { while rx.recv().await.is_some() {} };
+        tokio::join!(talk, drain);
+    }
+    app.chatting
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&a.name);
+    let paused_by_chat = app
+        .chat_paused
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&a.name)
+        .is_some();
+    if paused_by_chat {
+        let _work = app.work.lock().await;
+        actions::set_paused(&a, false)
+            .await
+            .map_err(|e| fail(StatusCode::BAD_GATEWAY, e))?;
+        let _ = app
+            .store()
+            .add_message(&a.name, "tool", "Done: its tick is running again");
+    }
+    Ok(Json(json!({ "agent": app.refresh(&a).await })))
 }
 
 fn memory_repo(app: &App) -> Result<super::repo::Repo, (StatusCode, Json<Value>)> {

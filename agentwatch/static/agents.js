@@ -451,6 +451,7 @@ function chatSection(a) {
   });
   return el('section', { class: 'chat' },
     el('div', { class: 'chat-head' }, el('h3', {}, `Talk to ${a.name}`),
+      el('button', { type: 'button', title: 'Finished: it writes its handover for the next run, and a tick this chat paused starts again now', onclick: () => doneChat(a) }, 'Done'),
       el('button', { type: 'button', onclick: () => newChat(a) }, 'New conversation')),
     el('div', { id: 'chat-log', class: 'chat-log' }),
     el('div', { class: 'chat-send' }, box,
@@ -513,6 +514,21 @@ export function chatEvent(event, state = chat) {
   else if (event.kind === 'tool') state.messages.push({ role: 'tool', text: event.text });
   else if (event.kind === 'error') state.messages.push({ role: 'error', text: event.text });
   if (state === chat) drawChat();
+}
+
+async function doneChat(a) {
+  if (chat?.busy) return;
+  const state = chat;
+  state.busy = true;
+  drawChat();
+  try {
+    await api('POST', `/api/agents/${encodeURIComponent(a.name)}/chat/done`);
+    state.messages = (await api('GET', `/api/agents/${encodeURIComponent(a.name)}/chat`)).messages;
+    toast(`${a.name}: handed over`);
+  } catch (e) { toast(e.message, true); }
+  state.busy = false;
+  drawChat();
+  load();
 }
 
 async function newChat(a) {
@@ -691,7 +707,8 @@ function renderTerm(main, name) {
         ? el('a', { class: 'button', href: `${location.origin}/#/term/${encodeURIComponent(a.name)}`, target: '_top' }, 'Full screen')
         : (document.fullscreenEnabled ? el('button', { onclick: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()) }, 'Full screen') : null),
       lines.length ? el('button', { title: 'Show where it stands', onclick: () => { localStorage.removeItem(hideKey); render(true); } }, 'Brief') : null,
-      freshToggle(a),
+      // A worker on its own machine starts a fresh Claude for every question, so there is nothing to clear.
+      a.kind === 'local' && a.machine ? null : freshToggle(a),
       el('a', { class: 'button', href: `#/agent/${encodeURIComponent(a.name)}` }, 'Details'),
     ),
     brief,
