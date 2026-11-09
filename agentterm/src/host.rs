@@ -242,9 +242,14 @@ pub fn script(slug: &str, w: &Worker) -> String {
         ));
     }
     if let Some(pause) = &w.pause {
-        // Give the ticks back if this session paused them.
+        // Give the ticks back if this session paused them, and start one at once.
+        let kick = w
+            .kickstart
+            .as_ref()
+            .map(|label| format!("; launchctl kickstart gui/$(id -u)/{label}"))
+            .unwrap_or_default();
         s.push_str(&format!(
-            "if [ -e ~/.ai-mesh/term/{slug}.paused ]; then rm -f {pause} ~/.ai-mesh/term/{slug}.paused; fi\n"
+            "if [ -e ~/.ai-mesh/term/{slug}.paused ]; then rm -f {pause} ~/.ai-mesh/term/{slug}.paused{kick}; fi\n"
         ));
     }
     s.push_str("done\n");
@@ -402,7 +407,7 @@ chat_readonly = true
         assert!(s.contains("cat ~/guv-orchestrator.md"));
         assert!(s.contains("claude --model haiku --permission-mode acceptEdits"));
         assert!(s.trim_end().ends_with(
-            "rm -f ~/orchestrator-paused ~/.ai-mesh/term/orchestrator.paused; fi\ndone"
+            "rm -f ~/orchestrator-paused ~/.ai-mesh/term/orchestrator.paused; launchctl kickstart gui/$(id -u)/com.jonno.orchestrator-tick; fi\ndone"
         ));
     }
 
