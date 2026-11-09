@@ -480,7 +480,7 @@ async fn chat_new(State(app): State<Shared>, Path(name): Path<String>) -> ApiRes
 
 /// Jon has finished: a worker with a status file writes its handover there (one
 /// last turn, kept in the chat), then the ticks this chat paused come back now
-/// rather than after half an hour.
+/// rather than after half an hour, and one starts at once.
 async fn chat_done(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
     let a = agent(&app, &name)?;
     if !app
@@ -516,9 +516,14 @@ async fn chat_done(State(app): State<Shared>, Path(name): Path<String>) -> ApiRe
         actions::set_paused(&a, false)
             .await
             .map_err(|e| fail(StatusCode::BAD_GATEWAY, e))?;
-        let _ = app
-            .store()
-            .add_message(&a.name, "tool", "Done: its tick is running again");
+        // Straight away, not at the next 20-minute mark: Jon is done and it has work waiting.
+        let started = a.kickstart.is_some() && actions::run_now(&app, &a).await.is_ok();
+        let note = if started {
+            "Done: its ticks are back and one is running now"
+        } else {
+            "Done: its tick is running again"
+        };
+        let _ = app.store().add_message(&a.name, "tool", note);
     }
     Ok(Json(json!({ "agent": app.refresh(&a).await })))
 }
