@@ -30,6 +30,10 @@ const ANSWER_LIMIT: Duration = Duration::from_secs(15 * 60);
 /// How long after its last message a chat keeps the orchestrator's tick paused.
 pub const CHAT_IDLE: Duration = Duration::from_secs(30 * 60);
 
+/// How long a terminal may say it is working with no update before its tick
+/// is given back anyway: every tool call sends one.
+pub const TERM_STALE: Duration = Duration::from_secs(60 * 60);
+
 /// The tools a cloud worker's chat may use without asking: its own repo, the
 /// memory, and git.
 const TOOLS: &str =
@@ -439,9 +443,11 @@ pub async fn resume_idle_terms(app: &App) {
         else {
             continue;
         };
+        // Working with no word for TERM_STALE is a turn that died: an
+        // interrupted answer or a hook lost on the way here.
         let idle = |s: &agentterm::TermState| {
-            s.phase != agentterm::Phase::Working
-                && (chrono::Utc::now() - s.at).to_std().unwrap_or_default() >= CHAT_IDLE
+            let quiet = (chrono::Utc::now() - s.at).to_std().unwrap_or_default();
+            quiet >= TERM_STALE || (s.phase != agentterm::Phase::Working && quiet >= CHAT_IDLE)
         };
         if term.open && !term.state.as_ref().is_some_and(idle) {
             continue;

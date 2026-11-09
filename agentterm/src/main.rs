@@ -100,19 +100,18 @@ fn attach(name: &str) -> ExitCode {
         return attach_host(&slug, w, &dir);
     }
     // A session already open keeps its node: tmux -A rejoins it.
-    if !session_open(&slug) {
-        if let Some(w) = &worker {
-            match place(&slug, w, &dir) {
-                Ok(node) => {
-                    let _ = std::fs::create_dir_all(agentterm::term_dir(&dir, &slug));
-                    let _ =
-                        std::fs::write(agentterm::term_dir(&dir, &slug).join("node"), &node.name);
-                    if !node.local() {
-                        return attach_pooled(&slug, w, &node, &dir);
-                    }
+    if !session_open(&slug)
+        && let Some(w) = &worker
+    {
+        match place(&slug, w, &dir) {
+            Ok(node) => {
+                let _ = std::fs::create_dir_all(agentterm::term_dir(&dir, &slug));
+                let _ = std::fs::write(agentterm::term_dir(&dir, &slug).join("node"), &node.name);
+                if !node.local() {
+                    return attach_pooled(&slug, w, &node, &dir);
                 }
-                Err(why) => return wait_and_fail(&format!("Cannot open {}: {why}.", w.name)),
             }
+            Err(why) => return wait_and_fail(&format!("Cannot open {}: {why}.", w.name)),
         }
     }
     let work = dir.join("chats").join(&slug);
@@ -345,6 +344,13 @@ fn hook(event: &str) {
                 line: "carrying on".into(),
             }),
             _ => None,
+        }
+    } else if event == "start" {
+        // A `/clear` ends one session before starting the next: keep the
+        // update the end wrote, and only settle a session that never ended.
+        match agentterm::read_state(&dir) {
+            Some(s) if s.phase == Phase::Done => None,
+            _ => agentterm::hook_state(event, &input, Utc::now()),
         }
     } else {
         agentterm::hook_state(event, &input, Utc::now())

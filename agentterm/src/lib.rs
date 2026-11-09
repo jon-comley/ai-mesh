@@ -124,7 +124,9 @@ pub fn hook_state(event: &str, input: &Value, now: DateTime<Utc>) -> Option<Term
     let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("");
     let (phase, line) = match event {
         "prompt" => (Phase::Working, first_line(s("prompt"))),
-        "stop" => {
+        // A new session or a `/clear`: nothing is running, whatever came before.
+        "start" => (Phase::Done, "new session".into()),
+        "stop" | "end" => {
             let said = match s("last_assistant_message") {
                 "" => last_assistant_text(Path::new(s("transcript_path"))).unwrap_or_default(),
                 m => m.to_string(),
@@ -387,7 +389,7 @@ pub fn settings(bin: &Path) -> Value {
 }
 
 /// Hooks and status line, each event's command from `cmd`: `prompt`, `stop`,
-/// `notify`, `tool` and `statusline`.
+/// `notify`, `tool`, `start`, `end` and `statusline`.
 pub fn settings_with(cmd: impl Fn(&str) -> String) -> Value {
     let hook = |event: &str| serde_json::json!([{ "hooks": [{ "type": "command", "command": cmd(event) }] }]);
     serde_json::json!({
@@ -396,6 +398,8 @@ pub fn settings_with(cmd: impl Fn(&str) -> String) -> Value {
             "Stop": hook("stop"),
             "Notification": hook("notify"),
             "PostToolUse": hook("tool"),
+            "SessionStart": hook("start"),
+            "SessionEnd": hook("end"),
         },
         "statusLine": { "type": "command", "command": cmd("statusline") },
     })
@@ -548,7 +552,9 @@ mod tests {
         record_cost(&dir, "s1", 13.0, today).unwrap();
         // The session counts by its file's time, so that is set to `today`: the
         // test passed only on 4 Nov 2026 before (6 Nov).
-        let noon = chrono::TimeZone::from_local_datetime(&Local, &today.and_hms_opt(12, 0, 0).unwrap()).unwrap();
+        let noon =
+            chrono::TimeZone::from_local_datetime(&Local, &today.and_hms_opt(12, 0, 0).unwrap())
+                .unwrap();
         fs::File::options()
             .write(true)
             .open(dir.join("sessions/s1"))

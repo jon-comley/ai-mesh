@@ -189,14 +189,6 @@ pub fn script(slug: &str, w: &Worker) -> String {
             "git pull -q --ff-only || echo 'Could not pull: starting from the clone as it is.'\n",
         );
     }
-    if let (Some(label), Some(pause)) = (&w.kickstart, &w.pause) {
-        // Never two workers in one checkout: wait for a running tick, then pause.
-        s.push_str(&format!(
-            "while launchctl list {label} 2>/dev/null | grep -q '\"PID\"'; do\n  \
-             echo 'Waiting for its tick to finish...'; sleep 15\ndone\n\
-             if [ ! -e {pause} ]; then touch {pause} ~/.ai-mesh/term/{slug}.paused; fi\n"
-        ));
-    }
     // `read -d ''` from a heredoc, not `$(cat <<...)`: a host with only macOS's
     // bash 3.2 misreads a quote inside a heredoc in a command substitution.
     s.push_str(&format!(
@@ -210,24 +202,63 @@ pub fn script(slug: &str, w: &Worker) -> String {
             "prompt=\"$prompt\"$'\\n\\n'\"$(cat {brief} 2>/dev/null)\"\n"
         ));
     }
-    // Where it stands, for free; Claude costs nothing until Jon types.
-    s.push_str(&format!("{}\necho\n", crate::summary_sh(&status_file(w))));
+    // Where it stands, for free, and no Claude until Jon asks something: a
+    // look at the details starts nothing and pauses nothing. Enter shows it
+    // again; leaving Claude comes back here, Ctrl-D closes the terminal.
+    let summary = crate::summary_sh(&status_file(w));
+    s.push_str(&format!(
+        "while :; do\nwhile :; do\n  {summary}\n  echo\n  \
+         IFS= read -r -e -p 'Ask (Enter shows this again, Ctrl-D leaves): ' q || exit 0\n  \
+         [ -n \"$q\" ] && break\ndone\n"
+    ));
+    if let Some(label) = &w.kickstart {
+        // Never two workers in one checkout: the first question waits for a
+        // running tick, and its prompt hook pauses the next ones.
+        s.push_str(&format!(
+            "while launchctl list {label} 2>/dev/null | grep -q '\"PID\"'; do\n  \
+             echo 'Waiting for its tick to finish...'; sleep 15\ndone\n"
+        ));
+    }
     let mode = if w.chat_readonly {
         "default"
     } else {
         "acceptEdits"
     };
     s.push_str(&format!(
-        "claude --model haiku --permission-mode {mode} --settings \"$settings\" \
-         --append-system-prompt \"$prompt\"\n"
+        "sid=$(uuidgen | tr A-Z a-z)\n\
+         claude --model haiku --permission-mode {mode} --settings \"$settings\" \
+         --append-system-prompt \"$prompt\" --session-id \"$sid\" \"$q\"\n"
     ));
+    if let (Some(status), false) = (&w.status, w.chat_readonly) {
+        // Closing hands over: the same session writes what the next tick must
+        // know into the file every tick reads, before the ticks come back, and
+        // its one line is what the tile shows.
+        s.push_str(&format!(
+            "echo 'Writing the handover to {status}...'\n\
+             claude -p --model haiku --resume \"$sid\" --settings \"$settings\" \
+             --allowedTools 'Read' 'Edit({status})' \"{}\" >/dev/null 2>&1\n",
+            handover(status)
+        ));
+    }
     if let Some(pause) = &w.pause {
         // Give the ticks back if this session paused them.
         s.push_str(&format!(
             "if [ -e ~/.ai-mesh/term/{slug}.paused ]; then rm -f {pause} ~/.ai-mesh/term/{slug}.paused; fi\n"
         ));
     }
+    s.push_str("done\n");
     s
+}
+
+/// What a closing terminal session is asked to leave for the next tick.
+fn handover(status: &str) -> String {
+    format!(
+        "Jon has closed this terminal. In {status}, replace the section headed \
+'## From Jon's terminal' (add it at the end if missing) with today's date and time, \
+then one line each for what Jon decided or asked the next tick to do and anything \
+left undone; write 'Nothing for the tick.' if there is none. Change nothing else. \
+Then reply with one line saying what the next tick will act on."
+    )
 }
 
 /// Where the PowerShell start script and settings go on a Windows node.
@@ -352,14 +383,25 @@ chat_readonly = true
     fn orchestrator_script_waits_for_its_tick_and_gives_it_back() {
         let s = script("orchestrator", &orchestrator());
         assert!(s.contains("cd ~/guv || exit 1\n. ~/orchestrator-env.sh\n"));
-        assert!(s.contains("while launchctl list com.jonno.orchestrator-tick"));
-        assert!(s.contains("touch ~/orchestrator-paused ~/.ai-mesh/term/orchestrator.paused"));
+        // Nothing pauses on opening: the first question's prompt hook does.
+        assert!(!s.contains("touch ~/orchestrator-paused"));
+        let ask = s.find("read -r -e -p 'Ask").unwrap();
+        let wait = s
+            .find("while launchctl list com.jonno.orchestrator-tick")
+            .unwrap();
+        let claude = s.find("claude --model haiku").unwrap();
+        assert!(ask < wait && wait < claude);
+        assert!(s.contains("--session-id \"$sid\" \"$q\""));
+        // The handover is written before the ticks come back.
+        let handover = s.find("claude -p --model haiku --resume \"$sid\"").unwrap();
+        let resume = s.find("rm -f ~/orchestrator-paused").unwrap();
+        assert!(claude < handover && handover < resume);
+        assert!(s.contains("'Edit(~/orchestrator-status.md)'"));
         assert!(s.contains("cat ~/guv-orchestrator.md"));
         assert!(s.contains("claude --model haiku --permission-mode acceptEdits"));
-        assert!(
-            s.trim_end()
-                .ends_with("rm -f ~/orchestrator-paused ~/.ai-mesh/term/orchestrator.paused; fi")
-        );
+        assert!(s.trim_end().ends_with(
+            "rm -f ~/orchestrator-paused ~/.ai-mesh/term/orchestrator.paused; fi\ndone"
+        ));
     }
 
     #[test]
