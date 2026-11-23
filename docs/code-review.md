@@ -385,9 +385,13 @@ The Reviews tab keeps a record of every reviewer (`model@machine`, or
 | Fixed % | Fixed, of everything marked Fixed or Dismissed |
 
 Fixed and Dismissed come from the tab's buttons, from `just review-mark <id>
-fixed|dismissed`, or, on mac1, from a file: the orchestrator writes
-`echo fixed > ~/reviews/marks/<id>` and mac1 applies it within a minute and
-removes the file. Each item's id is in the report next to its location.
+fixed|dismissed`, or, on mac1, from a file: the orchestrator runs
+`review-mark <id> fixed` (`scripts/review-mark.sh`, installed as
+`~/.local/bin/review-mark`), which refuses an id that is not 16 hex characters
+or not in a report under `~/reviews`, then writes `~/reviews/marks/<id>`; mac1
+applies it within a minute and removes the file. Never write the file by hand:
+on 23 Nov two hand-typed ids lost a character, the agent skipped them, and both
+findings stayed open. Each item's id is in the report next to its location.
 
 **Schedule:** every minute mac1 checks whether a nightly slot (default 02:15)
 or the weekly sweep (default Sunday 03:15) has come round since the last

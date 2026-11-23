@@ -143,8 +143,8 @@ pub fn render(info: &RunInfo, findings: &[Finding]) -> String {
         "Written by models. Treat every item as a lead to check, not a verdict: fix each bug, \
          test, refactor and improvement (the diff is a starting point), or drop it with the \
          reason. Ideas are for Jon to choose from. Record what became of each item for the \
-         reviewers' scorecard: on mac1, `echo fixed > ~/reviews/marks/<id>` (or `dismissed`); \
-         elsewhere, `just review-mark <id> fixed`.\n\n",
+         reviewers' scorecard: on mac1, `review-mark <id> fixed` (or `dismissed`), which checks \
+         the id against the reports; elsewhere, `just review-mark <id> fixed`.\n\n",
     );
     if confirmed.is_empty() && unconfirmed.is_empty() {
         out.push_str("Nothing found in this run.\n");
